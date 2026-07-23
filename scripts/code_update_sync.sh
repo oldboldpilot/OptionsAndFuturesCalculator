@@ -17,6 +17,10 @@ fi
 echo "🔍 Checking Git status and remotes..."
 git status
 
+# Run Adversarial Tri-Agent Code Review Gate
+echo "⚔️ Running Adversarial Code Review (Tri-Agent Consensus)..."
+"${REPO_ROOT}/scripts/code_review_adversarial.sh"
+
 # Stage changes
 echo "📦 Staging changes..."
 git add -A
