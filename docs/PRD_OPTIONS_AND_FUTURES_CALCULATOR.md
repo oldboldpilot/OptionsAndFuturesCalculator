@@ -55,7 +55,7 @@ graph LR
   - *Tracking Mechanism*: Click events generate a unique `lead_id` in Supabase. UTM parameters and strategy hashes are appended to the broker redirect URL. Postbacks via Webhooks from brokers (where supported) confirm funded accounts.
 * **Zero Display Ads Policy**: Display ads are **omitted entirely** in Phase 1. Ad networks introduce third-party cookies, bloat page load times, and distract from the primary conversion funnels (Broker CPA + Pro Subscription).
 * **Pro Consumer Subscription ($19/mo or $190/yr)**:
-  * **Free Users**: Single options, 2-leg vertical spreads, standard 30x30 matrix grid, 15-min delayed quotes (IEX Cloud/Polygon basic).
+  * **Free Users**: Single options, 2-leg vertical spreads, standard 30x30 matrix grid, delayed quotes via Yahoo Finance.
   * **Pro Users**: **Full Pro Options & Futures Probability Calculator Suite**, Unlimited 8-leg Custom Builder, Iron Condors/Butterflies, Futures & FOPs (ES, NQ, CL, GC, ZB), high-density 100x100 grid + 3D WebGL P&L surface, live streaming market data via WebSocket, unlimited saved strategy presets, 1st & 2nd order Greeks (Vanna, Volga, Charm).
 
 ### 2.2 Phase 2 (The Spoke - B2B SaaS & Calculation API)
@@ -281,7 +281,7 @@ Per [`config/update_policy.txt`](file:///home/muyiwa/Development/OptionsAndFutur
 ### Phase 2: Supabase Auth, DB & Broker Lead Router (Weeks 3–4)
 - [ ] Initialize Supabase project (PostgreSQL DB, Auth, strict RLS).
 - [ ] Build Supabase Edge Functions for Stripe subscriptions and CPA Lead Webhooks.
-- [ ] Integrate Tier-1 Market Data APIs (Polygon.io / IEX) mapped to `config.yaml`.
+- [ ] Integrate Market Data APIs (Yahoo Finance for now due to licensing evaluation) mapped to `config.yaml`.
 
 ### Phase 3: Lovable UI & Consumer Hub Launch (Weeks 5–6)
 - [ ] Export Lovable UI components to Next.js Vite/React application.
