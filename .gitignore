@@ -1,0 +1,19 @@
+# Environment & Secrets
+.env
+.env.*
+!.env.example
+config/.env
+config/config.yaml
+
+# Build artifacts & Binaries
+build/
+build-*/
+*.so
+*.pcm
+*.a
+*.o
+*.out
+
+# System & Logs
+*.log
+.DS_Store
