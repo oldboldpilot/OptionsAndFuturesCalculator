@@ -1,0 +1,98 @@
+syntax = "proto3";
+
+package options_calculator;
+
+enum OptionType {
+  OPTION_TYPE_CALL = 0;
+  OPTION_TYPE_PUT = 1;
+}
+
+enum ActionType {
+  ACTION_BUY = 0;
+  ACTION_SELL = 1;
+}
+
+enum InstrumentType {
+  INSTRUMENT_EQUITY_OPTION = 0;
+  INSTRUMENT_FUTURES_OPTION = 1;
+  INSTRUMENT_FUTURES_SPOT = 2;
+  INSTRUMENT_EQUITY_SPOT = 3;
+}
+
+message Leg {
+  string id = 1;
+  InstrumentType instrument_type = 2;
+  OptionType option_type = 3;
+  ActionType action = 4;
+  double strike_price = 5;
+  double premium = 6;
+  uint32 quantity = 7;
+  string expiration_date = 8; // YYYY-MM-DD
+  double implied_volatility = 9;
+  double contract_multiplier = 10; // e.g. 100 for equity, 50 for ES
+}
+
+message CalculationRequest {
+  string symbol = 1;
+  double spot_price = 2;
+  double risk_free_rate = 3;
+  double dividend_yield = 4;
+  repeated Leg legs = 5;
+  
+  // Matrix & Probability Parameters
+  double price_range_percent = 6; // e.g., 0.20 for +/-20%
+  uint32 price_steps = 7;         // e.g., 50 (free) or 100 (pro)
+  uint32 date_steps = 8;          // e.g., 30 (free) or 100 (pro)
+  double iv_shift_percent = 9;    // e.g., +0.05 for +5% IV shift
+  bool compute_pro_probabilities = 10;
+  double target_profit_percent = 11; // e.g. 0.50 for 50% max profit target
+}
+
+message ProbabilityBreakdown {
+  double probability_of_profit = 1;         // POP (P(PnL > 0))
+  double probability_of_target_profit = 2;  // P(PnL >= 50% Max Profit)
+  double probability_of_touch = 3;          // P(Spot touches short strikes)
+  double probability_of_max_loss = 4;       // P(PnL == Max Loss)
+  double expected_value = 5;                // E[PnL] in $
+  double var_95 = 6;                        // Value at Risk 95%
+  double expected_shortfall_95 = 7;         // CVaR 95%
+}
+
+message GreekBreakdown {
+  double delta = 1;
+  double gamma = 2;
+  double theta = 3;
+  double vega = 4;
+  double rho = 5;
+  double vanna = 6;
+  double volga = 7;
+  double charm = 8;
+}
+
+message MatrixCell {
+  double price = 1;
+  uint32 days_to_expiration = 2;
+  string date_str = 3;
+  double pnl_dollars = 4;
+  double return_on_risk_percent = 5;
+  double probability_density = 6;
+}
+
+message CalculationResponse {
+  double max_profit = 1;
+  double max_loss = 2;
+  double risk_reward_ratio = 3;
+  repeated double breakeven_prices = 4;
+  
+  ProbabilityBreakdown pro_probability_metrics = 5;
+  GreekBreakdown aggregate_greeks = 6;
+  map<string, GreekBreakdown> leg_greeks = 7;
+  
+  repeated MatrixCell matrix = 8;
+  uint64 calculation_time_microseconds = 9;
+}
+
+service CalculatorEngineService {
+  rpc ComputeStrategyPnL (CalculationRequest) returns (CalculationResponse);
+  rpc StreamLiveMatrix (stream CalculationRequest) returns (stream CalculationResponse);
+}
