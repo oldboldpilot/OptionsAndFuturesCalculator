@@ -173,7 +173,7 @@ The engine utilizes the **Black-Scholes-Merton (BSM)** framework for rapid basel
 
 ### 5.1 C++23 Engine Implementation Policy (`config/cpp_details.txt`)
 All C++ code for the calculation engine must adhere strictly to [`config/cpp_details.txt`](file:///home/muyiwa/Development/OptionsAndFuturesCalculator/config/cpp_details.txt):
-1. **Language Standard**: Pure C++23 compiled with `clang++-22`.
+1. **Language Standard**: Pure C++23 compiled with `clang++-22`. *(Note: We intend to switch to C++26 as soon as it is available and robustly supported by the compiler ecosystem to leverage its latest performance and standard library features).*
 2. **Modules Architecture**: Code structured as C++23 modules (`.cppm`) using `import std;` and `import sensen.*;`.
 3. **Memory Safety & Pointers**: **NO RAW POINTERS**. Use `std::unique_ptr`, `std::shared_ptr`, and `std::span`. Avoid `malloc`; use custom Arena Allocators for Monte Carlo path generation to prevent memory fragmentation and GC pauses.
 4. **Error Handling**: Railway-Oriented Programming (ROP) using `std::expected<T, std::error_code>`. No untracked exceptions.
