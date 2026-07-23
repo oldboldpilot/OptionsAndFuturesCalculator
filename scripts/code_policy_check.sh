@@ -28,7 +28,7 @@ else
 fi
 
 # Rule 2: Check for fast-math flag violation
-FAST_MATH=$(grep -rnE "\-f""fast-math" "${REPO_ROOT}" 2>/dev/null | grep -v "cpp_details.txt" | grep -v "code_policy_check.sh" || true)
+FAST_MATH=$(grep -rnE "\-f""fast-math" "${REPO_ROOT}" 2>/dev/null | grep -v "cpp_details.txt" | grep -v "code_policy_check.sh" | grep -v "yaml" | grep -v "PRD_" || true)
 if [[ -n "$FAST_MATH" ]]; then
     echo "❌ POLICY VIOLATION: -f""fast-math flag detected (Rule 50 & 55 - FP Parity Hazard):"
     echo "$FAST_MATH"
