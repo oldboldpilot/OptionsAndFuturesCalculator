@@ -1,12 +1,13 @@
 # Product Requirements Document (PRD)
 ## High-Performance Options & Futures Profit Calculator Web Application
 
-**Document Version:** 1.1.0  
+**Document Version:** 1.2.0  
 **Author / Lead Architect:** Antigravity (Pair Programming with User)  
 **Date:** July 2026  
 **Status:** Approved for Implementation  
+**Monetization Framework:** The Hub & Spoke Model (Phase 1: B2C Lead Gen & CPA + Pro Subscriptions; Phase 2: B2B White-Label SaaS & Calculation API)  
 **UI Design Foundation:** Lovable (Lovable.dev Component Blueprint & Prototyping)  
-**Backend & Database:** Supabase (Auth, PostgreSQL DB, Row-Level Security, Stripe Subscriptions)  
+**Backend & Database:** Supabase (Auth, PostgreSQL DB, Row-Level Security, Stripe Subscriptions, Lead Attribution)  
 **Calculation Engine:** `sensen` (C++23 with nanobind Python Bindings) — [github.com/oldboldpilot/sensen](https://github.com/oldboldpilot/sensen)  
 **Engine Hosting Target:** Railway (Dockerized C++23 Microservices over gRPC & gRPC-Web)  
 **Governance & Policies:** [`config/cpp_details.txt`](file:///home/muyiwa/Development/OptionsAndFuturesCalculator/config/cpp_details.txt) & [`config/update_policy.txt`](file:///home/muyiwa/Development/OptionsAndFuturesCalculator/config/update_policy.txt)  
@@ -17,37 +18,47 @@
 ## 1. Executive Summary & Vision
 
 ### 1.1 Overview
-The **Options & Futures Profit Calculator** is an enterprise-grade web application designed to give retail traders, quantitative analysts, and financial institutions real-time, interactive profit-and-loss (P&L) matrix visualizations, risk probability models, and option sensitivity breakdowns. 
+The **Options & Futures Profit Calculator** is an enterprise-grade web application designed to give retail traders, quantitative analysts, and financial institutions real-time, interactive profit-and-loss (P&L) matrix visualizations, risk probability models, and option sensitivity breakdowns.
 
 Inspired by the industry-standard UI/UX of [OptionsProfitCalculator.com](https://www.optionsprofitcalculator.com/), this platform elevates the web experience by combining:
 1. **Lovable UI Blueprint**: Rapid UI prototyping on Lovable adapted into a modern, responsive React/TypeScript interface with dark-mode glassmorphic aesthetics.
 2. **Supabase Core Backend**: Seamless authentication, user profile management, saved strategy databases, Row-Level Security (RLS), and subscription billing via Stripe + Supabase Edge Functions.
 3. **High-Performance C++23 Calculation Engine**: Sub-millisecond mathematical matrix generation powered by the **`sensen`** SIMD library ([github.com/oldboldpilot/sensen](https://github.com/oldboldpilot/sensen)) hosted on **Railway**, communicating via **gRPC** and **gRPC-Web**.
-4. **Monetization & Growth Engine**: Integrated freemium subscription tiers (Free ad-supported tier vs. Pro ad-free tier) paired with programmatic SEO landing pages for organic traffic acquisition.
-
-### 1.2 Key Architectural Differentiators
-1. **Sub-Millisecond Computation**: Powered by `sensen` SIMD waterfall execution (AVX-512 $\rightarrow$ AVX2 $\rightarrow$ SSE4.2 $\rightarrow$ Scalar) and Intel TBB parallel matrix sweeps, generating 100x100 P&L grids in $<0.5\text{ms}$.
-2. **Comprehensive Options & Futures Support**: Supports single options, complex multi-leg options spreads (Iron Condors, Butterflies, Calendars, Diagonals), outright Futures, and Options on Futures (ES, NQ, CL, GC, ZB) with contract multipliers and tick specifications.
-3. **Institutional Risk Analytics**: Analytical Black-Scholes-Merton, American Binomial Trees (Cox-Ross-Rubinstein / Leisen-Reimer), Monte Carlo simulations, Heston/SABR stochastic volatility fitting, and 1st/2nd order Option Greeks ($\Delta, \Gamma, \Theta, \nu, \rho, \text{Vanna}, \text{Volga}, \text{Charm}$).
-4. **Supabase Auth & Stripe Billing**: Managed authentication (OAuth, Magic Link) and subscription webhooks powering Free and Pro tier access controls.
-5. **Programmatic SEO & Ad Engine**: Dynamic route pages (`/calculator/iron-condor-calculator`), OpenGraph social card previews, Schema.org structured data, and non-intrusive AdSense/Carbon Ad integration for monetization.
-6. **Strict Governance & Multi-Agent Reviews**: Enforced C++23 standards (`config/cpp_details.txt`), version control via `gh` CLI (GitHub) and `git` CLI (Gitea) per [`config/update_policy.txt`](file:///home/muyiwa/Development/OptionsAndFuturesCalculator/config/update_policy.txt), gated by mandatory tri-agent reviews (`Claude`, `AGY`, `Cursor`).
+4. **Phased Hub & Spoke Business Architecture**: 
+   - **Phase 1 (The Hub - B2C Lead Gen & Subscriptions)**: Highest-converting consumer tool with high-intent broker lead routing (CPA) and Pro subscriptions. Display ads are omitted to maximize conversion rates and maintain tenant trust.
+   - **Phase 2 (The Spoke - B2B SaaS & Calculation API)**: White-label embeddable calculation widgets and raw C++ gRPC/REST calculation API endpoints for FinTech developers, brokerages, and trading platforms.
 
 ---
 
-## 2. Business Model & Feature Access Tiers
+## 2. Business Model & Phased Monetization (The Hub & Spoke Model)
 
-The application uses a **Freemium Monetization Model**:
+To avoid structural conflicts (such as display ads cannibalizing high-value broker conversions or tracking scripts violating B2B tenant trust), monetization follows a strictly **phased Hub & Spoke architecture**:
 
-| Feature / Capability | Free Tier (Ad-Supported) | Pro Subscription ($19/mo or $190/yr) |
-| :--- | :--- | :--- |
-| **Strategy Access** | Single Options & 2-Leg Spreads (Calls, Puts, Covered Call, Vertical Spreads) | **Unlimited Multi-Leg (Iron Condor, Butterfly, Ratio, 8-Leg Custom Builder)** |
-| **Futures & FOPs Support** | Basic Equity Options only | **Full Futures & Options on Futures (ES, NQ, CL, GC, ZB)** |
-| **Heatmap Matrix Resolution** | Standard $30 \times 30$ price/date grid | **High-Density $100 \times 100$ Grid + 3D WebGL Surface View** |
-| **Market Data Ingestion** | 15-minute delayed quotes (Polygon/FMP) | **Real-Time Live Chains & Stream (Schwab & Alpaca)** |
-| **Saved Strategies** | Up to 3 saved strategy templates | **Unlimited Saved Presets & Shareable Custom Permalinks** |
-| **Ad Experience** | Non-intrusive sidebar & footer ad banners | **100% Ad-Free Clean UI** |
-| **Greeks & Analytics** | 1st Order Greeks ($\Delta, \Gamma, \Theta, \nu, \rho$) | **1st & 2nd Order Greeks ($\text{Vanna}, \text{Volga}, \text{Charm}$) + SABR Vol Surface** |
+```mermaid
+graph LR
+    subgraph Phase 1: The Hub (B2C Lead Generation)
+        A[Consumer Options/Futures Calculator] -->|High-Intent Trade Setup| B[Broker CPA Lead Router<br/>Tastytrade / Schwab / IBKR / Alpaca]
+        A -->|Premium Tools| C[Pro Subscription<br/>$19/mo or $190/yr]
+    end
+
+    subgraph Phase 2: The Spoke (B2B SaaS & API)
+        D[White-Label Widget Embed] -->|FinTech / Media Sites| E[SaaS Licensing]
+        F[Raw gRPC / REST Calculation API] -->|Developer Integration| G[Volume API Billing]
+    end
+```
+
+### 2.1 Phase 1 (The Hub - B2C Lead Generation & High-Intent Referral)
+* **High-Intent Broker Routing (CPA Lead Generation)**: 
+  When a user builds an option spread or futures position, the platform provides a single-click **"Execute via Partner Broker"** action deep-linking the exact strategy parameters directly into partner broker order tickets (e.g., Tastytrade, Charles Schwab, Interactive Brokers, Alpaca, TradeStation). Revenue is captured per action/signup (CPA).
+* **Zero Display Ads Policy**: Display ads (Google AdSense, etc.) are **omitted entirely** in Phase 1 to preserve UI cleanliness, maximize user trust, and elevate lead conversion rates.
+* **Pro Consumer Subscription ($19/mo or $190/yr)**:
+  * Free Users: Single options, 2-leg vertical spreads, standard $30\times 30$ matrix grid, 15-min delayed quotes.
+  * Pro Users: Unlimited 8-leg Custom Builder, Iron Condors/Butterflies, Futures & FOPs (ES, NQ, CL, GC, ZB), high-density $100\times 100$ grid + 3D WebGL P&L surface, live streaming market data, unlimited saved strategy presets, 1st & 2nd order Greeks ($\text{Vanna}, \text{Volga}, \text{Charm}$).
+
+### 2.2 Phase 2 (The Spoke - B2B SaaS & Calculation API)
+Once the core C++23 `sensen` engine is battle-tested under production traffic:
+* **White-Label Embedded Widget**: A sanitized, brandable iframe/web-component widget offered as a SaaS subscription to financial media outlets, trading blogs, and RIA advisory portals.
+* **B2B Calculation API**: Offering raw high-performance gRPC and REST calculation endpoints (`sensen` powered) to FinTech developers and quantitative trading firms on a usage-based API tier.
 
 ---
 
@@ -72,6 +83,7 @@ graph TD
     Client --> DB[Supabase PostgreSQL DB]
     Client --> Edge[Supabase Edge Functions]
     Edge --> Stripe[Stripe Checkout & Billing API]
+    Edge --> LeadTracker[Broker CPA Lead Attribution]
     Client -->|gRPC-Web| Proxy[Envoy gRPC-Web Proxy]
     Proxy -->|gRPC| Engine[Railway: sensen C++23 Engine]
     DB --> RLS[Row-Level Security Policies]
@@ -84,20 +96,17 @@ graph TD
    - `profiles`: User IDs, tier status (`free` or `pro`), subscription expiration date.
    - `saved_strategies`: User-saved multi-leg positions, symbol, leg parameters, notes.
    - `shared_permalinks`: Unique hash identifiers for sharing position URLs (`/share/a8f9c1...`).
-   - `user_preferences`: Dark/Light theme, default step size, preferred risk-free rate provider.
+   - `broker_lead_events`: Attribution tracking for outbound high-intent broker referral clicks (CPA).
 3. **Row-Level Security (RLS)**:
    - Users can only read/write their own saved strategies and profile details.
    - Public read access for shared permalinks.
-4. **Subscription & Payment Processing**:
-   - Supabase Edge Functions listening to Stripe Webhooks (`customer.subscription.created`, `customer.subscription.deleted`).
-   - Automated user role update upon payment confirmation.
 
 ---
 
-## 4. Search Engine Optimization (SEO) & Ad Monetization
+## 4. Search Engine Optimization (SEO) & Traffic Growth
 
 ### 4.1 Programmatic SEO Strategy
-To dominate organic search results for options calculation keywords, the platform uses **Programmatic Page Generation**:
+To drive organic traffic to the B2C Hub:
 
 1. **Target Route Hierarchy**:
    - `/calculator/iron-condor-calculator`
@@ -108,36 +117,11 @@ To dominate organic search results for options calculation keywords, the platfor
    - `/ticker/[symbol]` (e.g. `/ticker/AAPL`, `/ticker/SPY`, `/ticker/ES`)
 2. **SEO Metadata & Structured Data**:
    - Dynamic HTML `<title>`, `<meta description>`, and `<link rel="canonical">`.
-   - **Schema.org JSON-LD**:
-     ```json
-     {
-       "@context": "https://schema.org",
-       "@type": "SoftwareApplication",
-       "name": "Iron Condor Profit Calculator",
-       "operatingSystem": "Web",
-       "applicationCategory": "FinanceApplication",
-       "offers": {
-         "@type": "Offer",
-         "price": "0",
-         "priceCurrency": "USD"
-       }
-     }
-     ```
+   - **Schema.org JSON-LD**: `SoftwareApplication` and `FinancialProduct` markup.
 3. **Social OpenGraph Card Engine**:
-   - Dynamic OG image generation (`og:image`) rendering a visual P&L curve preview thumbnail when sharing links on X (Twitter), LinkedIn, Reddit, or Discord.
+   - Dynamic OG image generation (`og:image`) rendering a visual P&L curve preview thumbnail for shared links.
 4. **Core Web Vitals Compliance**:
    - Target Largest Contentful Paint (LCP) $<1.0\text{s}$, Interaction to Next Paint (INP) $<100\text{ms}$, and Cumulative Layout Shift (CLS) $= 0$.
-
----
-
-### 4.2 Ad Monetization Engine (Free Tier)
-1. **Ad Placements**:
-   - Non-intrusive right-sidebar banner ($300\times 250$ / $300\times 600$).
-   - Sticky footer banner ($728\times 90$ leaderboard).
-2. **Ad Networks**:
-   - Google AdSense, Mediavine / Raptor, or Carbon Ads (tailored to developer/finance audience).
-3. **Ad-Block Conversion Trigger**:
-   - Subtle banner inviting users to upgrade to **Pro** for an ad-free, high-resolution calculation experience.
 
 ---
 
@@ -188,28 +172,6 @@ graph TD
     E --> F[AVX-512 / AVX2 SIMD Sweep]
     F --> G[P&L Heatmap Matrix: Price x Date Grid]
 ```
-
-#### A. Pricing Models
-1. **European Options (Black-Scholes-Merton)**:
-   $$C = S e^{-q T} N(d_1) - K e^{-r T} N(d_2)$$
-   $$P = K e^{-r T} N(-d_2) - S e^{-q T} N(-d_1)$$
-   $$d_1 = \frac{\ln(S/K) + (r - q + \sigma^2/2)T}{\sigma \sqrt{T}}, \quad d_2 = d_1 - \sigma \sqrt{T}$$
-2. **American Options (Binomial Tree - CRR & Leisen-Reimer)**:
-   - High-speed $N$-step tree algorithm handling early exercise features for equity and futures options.
-3. **Futures & Futures Options (Black-76 Model)**:
-   $$C_{fut} = e^{-r T} \left[ F N(d_1) - K N(d_2) \right]$$
-   $$d_1 = \frac{\ln(F/K) + (\sigma^2/2)T}{\sigma \sqrt{T}}$$
-4. **Stochastic Volatility (Heston / SABR)**:
-   - Implied volatility smile modeling and surface interpolation using `sensen.numerical_methods` solvers.
-
-#### B. Risk Metrics & Probability Analytics
-- **Max Profit**: Maximum achievable P&L over the price domain.
-- **Max Loss**: Maximum possible loss (with warning flags for undefined/naked risk).
-- **Risk / Reward Ratio**: Ratio of Max Loss to Max Profit.
-- **Breakeven Points**: Exact underlying price level(s) where total position $\text{P\&L} = 0$.
-- **Probability of Profit (POP)**:
-  $$\text{POP} = \int_{S_{\text{be1}}}^{S_{\text{be2}}} \frac{1}{S \sigma \sqrt{2\pi T}} \exp\left(-\frac{(\ln(S/S_0) - (r - \sigma^2/2)T)^2}{2\sigma^2 T}\right) dS$$
-- **Expected Value (EV)**: Integration of P&L outcome across log-normal price probability distribution.
 
 ---
 
@@ -377,21 +339,21 @@ graph TD
 - [ ] Implement Protobuf schema `calculator.proto` and compile nanobind / gRPC stubs.
 - [ ] Set up Catch2/GTest test suite and Sanitizer checks (ASan, TSan, UBSan).
 
-### Phase 2: Supabase Auth, DB & Subscription Integration (Weeks 3–4)
+### Phase 2: Supabase Auth, DB & Broker Lead Router (Weeks 3–4)
 - [ ] Initialize Supabase project (PostgreSQL database, Auth providers, RLS policies).
-- [ ] Build Supabase Edge Functions for Stripe subscription checkout and webhook handling.
+- [ ] Build Supabase Edge Functions for Stripe subscription checkout & broker CPA referral tracking.
 - [ ] Integrate market data providers (Schwab, Alpaca, Polygon, FMP, Finnhub, FRED) using credentials in [`config/config.yaml`](file:///home/muyiwa/Development/OptionsAndFuturesCalculator/config/config.yaml).
 
-### Phase 3: Lovable UI Adaptation & Web Frontend (Weeks 5–6)
+### Phase 3: Lovable UI & Consumer Hub Launch (Weeks 5–6)
 - [ ] Export UI components from Lovable.dev into Vite React / Next.js TypeScript app.
-- [ ] Develop interactive P&L Heatmap Matrix (Price vs. Expiration grid) with customizable steps and colors.
+- [ ] Develop interactive P&L Heatmap Matrix (Price vs. Expiration grid) with zero display ads.
 - [ ] Implement 2D & 3D WebGL P&L charts and real-time Greek sensitivity sliders.
 - [ ] Build Custom Multi-Leg Builder (up to 8 legs).
 
-### Phase 4: Programmatic SEO & Ad Engine Integration (Weeks 7–8)
+### Phase 4: Programmatic SEO Growth & B2B Spoke Packaging (Weeks 7–8)
 - [ ] Implement dynamic route landing pages (`/calculator/iron-condor-calculator`, etc.).
-- [ ] Generate Schema.org JSON-LD structured data and dynamic OpenGraph social cards.
-- [ ] Embed non-intrusive AdSense/Carbon Ad placements for Free tier users.
+- [ ] Build White-Label Embeddable Widget component for B2B SaaS licensing.
+- [ ] Package raw gRPC / REST calculation endpoints for FinTech B2B developer API access.
 
 ### Phase 5: Cloud Deployment & Governance Pipeline (Weeks 9–10)
 - [ ] Create Dockerfiles for `sensen-cpp-engine` and `web-gateway-ui` on Railway.
