@@ -1,12 +1,14 @@
 # Product Requirements Document (PRD)
 ## High-Performance Options & Futures Profit Calculator Web Application
 
-**Document Version:** 1.0.0  
+**Document Version:** 1.1.0  
 **Author / Lead Architect:** Antigravity (Pair Programming with User)  
 **Date:** July 2026  
 **Status:** Approved for Implementation  
+**UI Design Foundation:** Lovable (Lovable.dev Component Blueprint & Prototyping)  
+**Backend & Database:** Supabase (Auth, PostgreSQL DB, Row-Level Security, Stripe Subscriptions)  
 **Calculation Engine:** `sensen` (C++23 with nanobind Python Bindings) — [github.com/oldboldpilot/sensen](https://github.com/oldboldpilot/sensen)  
-**Hosting Target:** Railway (Dockerized Microservices over gRPC & gRPC-Web)  
+**Engine Hosting Target:** Railway (Dockerized C++23 Microservices over gRPC & gRPC-Web)  
 **Governance & Policies:** [`config/cpp_details.txt`](file:///home/muyiwa/Development/OptionsAndFuturesCalculator/config/cpp_details.txt) & [`config/update_policy.txt`](file:///home/muyiwa/Development/OptionsAndFuturesCalculator/config/update_policy.txt)  
 **Required Code Reviewers:** `Claude Agent`, `AGY (Antigravity) Agent`, `Cursor Agent`  
 
@@ -15,37 +17,131 @@
 ## 1. Executive Summary & Vision
 
 ### 1.1 Overview
-The **Options & Futures Profit Calculator** is a state-of-the-art web application designed to give retail traders, quantitative analysts, and financial institutions real-time, interactive profit-and-loss (P&L) matrix visualizations and option sensitivity breakdowns. 
+The **Options & Futures Profit Calculator** is an enterprise-grade web application designed to give retail traders, quantitative analysts, and financial institutions real-time, interactive profit-and-loss (P&L) matrix visualizations, risk probability models, and option sensitivity breakdowns. 
 
-Inspired by the industry-standard UI/UX of [OptionsProfitCalculator.com](https://www.optionsprofitcalculator.com/), this platform elevates the concept by replacing standard slow backend scripts with a high-performance C++23 engine built on top of the **`sensen`** SIMD library ([github.com/oldboldpilot/sensen](https://github.com/oldboldpilot/sensen)). The frontend communicates with the C++ calculation engine via low-latency **gRPC** and **gRPC-Web**, hosted on **Railway**.
+Inspired by the industry-standard UI/UX of [OptionsProfitCalculator.com](https://www.optionsprofitcalculator.com/), this platform elevates the web experience by combining:
+1. **Lovable UI Blueprint**: Rapid UI prototyping on Lovable adapted into a modern, responsive React/TypeScript interface with dark-mode glassmorphic aesthetics.
+2. **Supabase Core Backend**: Seamless authentication, user profile management, saved strategy databases, Row-Level Security (RLS), and subscription billing via Stripe + Supabase Edge Functions.
+3. **High-Performance C++23 Calculation Engine**: Sub-millisecond mathematical matrix generation powered by the **`sensen`** SIMD library ([github.com/oldboldpilot/sensen](https://github.com/oldboldpilot/sensen)) hosted on **Railway**, communicating via **gRPC** and **gRPC-Web**.
+4. **Monetization & Growth Engine**: Integrated freemium subscription tiers (Free ad-supported tier vs. Pro ad-free tier) paired with programmatic SEO landing pages for organic traffic acquisition.
 
 ### 1.2 Key Architectural Differentiators
 1. **Sub-Millisecond Computation**: Powered by `sensen` SIMD waterfall execution (AVX-512 $\rightarrow$ AVX2 $\rightarrow$ SSE4.2 $\rightarrow$ Scalar) and Intel TBB parallel matrix sweeps, generating 100x100 P&L grids in $<0.5\text{ms}$.
 2. **Comprehensive Options & Futures Support**: Supports single options, complex multi-leg options spreads (Iron Condors, Butterflies, Calendars, Diagonals), outright Futures, and Options on Futures (ES, NQ, CL, GC, ZB) with contract multipliers and tick specifications.
 3. **Institutional Risk Analytics**: Analytical Black-Scholes-Merton, American Binomial Trees (Cox-Ross-Rubinstein / Leisen-Reimer), Monte Carlo simulations, Heston/SABR stochastic volatility fitting, and 1st/2nd order Option Greeks ($\Delta, \Gamma, \Theta, \nu, \rho, \text{Vanna}, \text{Volga}, \text{Charm}$).
-4. **Real-Time Data Sync**: Integration with broker and data APIs (Schwab, Alpaca, Polygon.io, FMP, Finnhub, FRED) as configured in [`config/config.yaml`](file:///home/muyiwa/Development/OptionsAndFuturesCalculator/config/config.yaml).
-5. **Strict Governance & Multi-Agent Reviews**: Enforced C++23 standards (`config/cpp_details.txt`), version control via `gh` CLI (GitHub) and `git` CLI (Gitea) per [`config/update_policy.txt`](file:///home/muyiwa/Development/OptionsAndFuturesCalculator/config/update_policy.txt), gated by mandatory tri-agent reviews (`Claude`, `AGY`, `Cursor`).
+4. **Supabase Auth & Stripe Billing**: Managed authentication (OAuth, Magic Link) and subscription webhooks powering Free and Pro tier access controls.
+5. **Programmatic SEO & Ad Engine**: Dynamic route pages (`/calculator/iron-condor-calculator`), OpenGraph social card previews, Schema.org structured data, and non-intrusive AdSense/Carbon Ad integration for monetization.
+6. **Strict Governance & Multi-Agent Reviews**: Enforced C++23 standards (`config/cpp_details.txt`), version control via `gh` CLI (GitHub) and `git` CLI (Gitea) per [`config/update_policy.txt`](file:///home/muyiwa/Development/OptionsAndFuturesCalculator/config/update_policy.txt), gated by mandatory tri-agent reviews (`Claude`, `AGY`, `Cursor`).
 
 ---
 
-## 2. Product Objectives & Target Audience
+## 2. Business Model & Feature Access Tiers
 
-### 2.1 Primary Objectives
-- Provide an intuitive, ultra-fast, visually stunning web UI for constructing, visualizing, and auditing options and futures positions.
-- Deliver real-time interactive heatmap matrices (Price vs. Date grids) with customizable step sizes, IV shift sliders, and expiration sliders.
-- Support real-time market data ingestion and live option chains to auto-populate leg prices, strike prices, and implied volatilities.
-- Maintain institutional-grade calculation precision with zero-copy C++23 data pipelines.
+The application uses a **Freemium Monetization Model**:
 
-### 2.2 Target Audience
-- **Retail Options Traders**: Seeking visual confirmation of risk/reward, breakeven points, and probability of profit before executing trades.
-- **Futures & Commodities Traders**: Hedging or speculating on index, energy, and metals futures with options overlays.
-- **Quantitative Analysts & Strategy Developers**: Auditing complex multi-leg position Greeks and stochastic volatility skew sensitivity.
+| Feature / Capability | Free Tier (Ad-Supported) | Pro Subscription ($19/mo or $190/yr) |
+| :--- | :--- | :--- |
+| **Strategy Access** | Single Options & 2-Leg Spreads (Calls, Puts, Covered Call, Vertical Spreads) | **Unlimited Multi-Leg (Iron Condor, Butterfly, Ratio, 8-Leg Custom Builder)** |
+| **Futures & FOPs Support** | Basic Equity Options only | **Full Futures & Options on Futures (ES, NQ, CL, GC, ZB)** |
+| **Heatmap Matrix Resolution** | Standard $30 \times 30$ price/date grid | **High-Density $100 \times 100$ Grid + 3D WebGL Surface View** |
+| **Market Data Ingestion** | 15-minute delayed quotes (Polygon/FMP) | **Real-Time Live Chains & Stream (Schwab & Alpaca)** |
+| **Saved Strategies** | Up to 3 saved strategy templates | **Unlimited Saved Presets & Shareable Custom Permalinks** |
+| **Ad Experience** | Non-intrusive sidebar & footer ad banners | **100% Ad-Free Clean UI** |
+| **Greeks & Analytics** | 1st Order Greeks ($\Delta, \Gamma, \Theta, \nu, \rho$) | **1st & 2nd Order Greeks ($\text{Vanna}, \text{Volga}, \text{Charm}$) + SABR Vol Surface** |
 
 ---
 
-## 3. Functional Requirements & Feature Matrix
+## 3. UI Design Workflow & Supabase Backend Architecture
 
-### 3.1 Supported Strategy Suite
+### 3.1 Lovable UI Prototyping & Design System
+- **Lovable Blueprint**: Initial component layouts, color palettes, and strategy setup forms are designed on Lovable.dev.
+- **Frontend Implementation**: Lovable exports are integrated into a Vite / Next.js React TypeScript codebase using Tailwind CSS and Vanilla CSS for glassmorphic dark-mode visuals.
+- **Design Tokens**:
+  - Background: Deep Dark Slate (`#0B0F17`) with glassmorphism panels (`rgba(255, 255, 255, 0.05)`).
+  - Profit Color: Vibrant Emerald Green (`#10B981`) with glow accents.
+  - Loss Color: Crimson Red (`#EF4444`).
+  - Typography: Inter & JetBrains Mono for monetary grid displays.
+
+---
+
+### 3.2 Supabase Backend Ecosystem
+
+```mermaid
+graph TD
+    Client[React Web App - Lovable UI] --> Auth[Supabase Auth: OAuth / Email]
+    Client --> DB[Supabase PostgreSQL DB]
+    Client --> Edge[Supabase Edge Functions]
+    Edge --> Stripe[Stripe Checkout & Billing API]
+    Client -->|gRPC-Web| Proxy[Envoy gRPC-Web Proxy]
+    Proxy -->|gRPC| Engine[Railway: sensen C++23 Engine]
+    DB --> RLS[Row-Level Security Policies]
+```
+
+1. **Authentication (`Supabase Auth`)**:
+   - Social OAuth (Google, GitHub, Apple) + Email / Password + Magic Link.
+   - JWT tokens passed with API calls to validate user tier permissions.
+2. **Database Schema (`Supabase PostgreSQL`)**:
+   - `profiles`: User IDs, tier status (`free` or `pro`), subscription expiration date.
+   - `saved_strategies`: User-saved multi-leg positions, symbol, leg parameters, notes.
+   - `shared_permalinks`: Unique hash identifiers for sharing position URLs (`/share/a8f9c1...`).
+   - `user_preferences`: Dark/Light theme, default step size, preferred risk-free rate provider.
+3. **Row-Level Security (RLS)**:
+   - Users can only read/write their own saved strategies and profile details.
+   - Public read access for shared permalinks.
+4. **Subscription & Payment Processing**:
+   - Supabase Edge Functions listening to Stripe Webhooks (`customer.subscription.created`, `customer.subscription.deleted`).
+   - Automated user role update upon payment confirmation.
+
+---
+
+## 4. Search Engine Optimization (SEO) & Ad Monetization
+
+### 4.1 Programmatic SEO Strategy
+To dominate organic search results for options calculation keywords, the platform uses **Programmatic Page Generation**:
+
+1. **Target Route Hierarchy**:
+   - `/calculator/iron-condor-calculator`
+   - `/calculator/covered-call-calculator`
+   - `/calculator/sp500-futures-options-calculator`
+   - `/calculator/bull-put-spread-calculator`
+   - `/calculator/option-greeks-calculator`
+   - `/ticker/[symbol]` (e.g. `/ticker/AAPL`, `/ticker/SPY`, `/ticker/ES`)
+2. **SEO Metadata & Structured Data**:
+   - Dynamic HTML `<title>`, `<meta description>`, and `<link rel="canonical">`.
+   - **Schema.org JSON-LD**:
+     ```json
+     {
+       "@context": "https://schema.org",
+       "@type": "SoftwareApplication",
+       "name": "Iron Condor Profit Calculator",
+       "operatingSystem": "Web",
+       "applicationCategory": "FinanceApplication",
+       "offers": {
+         "@type": "Offer",
+         "price": "0",
+         "priceCurrency": "USD"
+       }
+     }
+     ```
+3. **Social OpenGraph Card Engine**:
+   - Dynamic OG image generation (`og:image`) rendering a visual P&L curve preview thumbnail when sharing links on X (Twitter), LinkedIn, Reddit, or Discord.
+4. **Core Web Vitals Compliance**:
+   - Target Largest Contentful Paint (LCP) $<1.0\text{s}$, Interaction to Next Paint (INP) $<100\text{ms}$, and Cumulative Layout Shift (CLS) $= 0$.
+
+---
+
+### 4.2 Ad Monetization Engine (Free Tier)
+1. **Ad Placements**:
+   - Non-intrusive right-sidebar banner ($300\times 250$ / $300\times 600$).
+   - Sticky footer banner ($728\times 90$ leaderboard).
+2. **Ad Networks**:
+   - Google AdSense, Mediavine / Raptor, or Carbon Ads (tailored to developer/finance audience).
+3. **Ad-Block Conversion Trigger**:
+   - Subtle banner inviting users to upgrade to **Pro** for an ad-free, high-resolution calculation experience.
+
+---
+
+## 5. Supported Strategy Suite
 
 #### A. Single Instrument Strategies
 - **Long Call / Long Put**: Directional leverage positions.
@@ -64,7 +160,7 @@ Inspired by the industry-standard UI/UX of [OptionsProfitCalculator.com](https:/
 - **Butterfly Spread & Condor Spread**: 3/4-leg low-cost precision targeting.
 - **Ratio Spreads**: Asymmetric leg ratios (e.g., 1x2 Call Ratio Spread).
 - **Collar & Risk Reversal**: Portfolio protection setups.
-- **Custom Multi-Leg Builder**: Drag-and-drop / modular builder allowing up to 8 independent option & futures legs.
+- **Custom Multi-Leg Builder**: Modular builder allowing up to 8 independent option & futures legs.
 
 #### D. Futures & Futures Options Strategies
 - **Outright Futures (Long/Short)**: ES (S&P 500), NQ (Nasdaq 100), CL (Crude Oil), GC (Gold), ZB (30-Yr Bond), etc.
@@ -73,7 +169,7 @@ Inspired by the industry-standard UI/UX of [OptionsProfitCalculator.com](https:/
 
 ---
 
-### 3.2 Analytical Engine & Mathematical Specification
+## 6. Analytical Engine & Mathematical Specification
 
 The core math engine leverages the C++23 **`sensen`** library:
 
@@ -117,70 +213,9 @@ graph TD
 
 ---
 
-### 3.3 Heatmap Matrix & Interactive Visualizations
+## 7. C++23 Engine & Railway Microservice Specifications
 
-Inspired by OptionsProfitCalculator.com, the primary workspace centers around an interactive **P&L Heatmap Matrix**:
-
-1. **2D Price vs. Expiration Grid**:
-   - Vertical axis: Underlying Stock/Futures price points (customizable range e.g., $\pm 20\%$, step size $0.5\%$).
-   - Horizontal axis: Progression of calendar days from today until expiration date.
-   - Cells: Dollar ($) P&L or Percentage (%) Return on Risk, dynamically color-coded:
-     - Deep Green: $> +50\%$ return / High profit.
-     - Light Green: $0\%$ to $+50\%$ return.
-     - Light Red / Pink: $0\%$ to $-50\%$ loss.
-     - Deep Red: $< -50\%$ loss / Max loss.
-2. **Dynamic Real-Time Parameter Sliders**:
-   - **Underlying Price Slider**: Real-time slider shifting spot price $S$.
-   - **Implied Volatility (IV) Adjustment Slider**: Global or per-leg IV offset ($\pm 50\%$).
-   - **Days to Expiration Slider**: Time-decay simulation.
-   - **Interest Rate ($r$) & Dividend Yield ($q$) Sliders**.
-3. **Interactive Visual Charts**:
-   - **2D Expiration P&L Chart**: SVG / WebGL curve showing payoff at expiration vs. payoff on target date.
-   - **Greeks Sensitivity Charts**: Delta curve, Gamma spike chart, Theta decay curve, Vega volatility sensitivity.
-   - **3D P&L Surface View**: Rotatable 3D canvas of Price $\times$ Time $\times$ P&L.
-
----
-
-### 3.4 Market Data Feed Integration
-
-The backend service integrates with data APIs configured in [`config/config.yaml`](file:///home/muyiwa/Development/OptionsAndFuturesCalculator/config/config.yaml):
-
-| Provider | Purpose | Rate Limit / Quota |
-| :--- | :--- | :--- |
-| **Charles Schwab API** | Live Option Chains, Equities & Futures Quotes | 110 requests/min |
-| **Alpaca Markets** | Real-time & Paper Trading Quotes | Unlimited Paper Stream |
-| **Polygon.io** | Options Contract Reference & Tick Data | 600 requests/min |
-| **Financial Modeling Prep (FMP)** | Historical Volatility & Market Fundamentals | 270 requests/min |
-| **Finnhub** | Stock & Futures Symbol Search | 60 requests/min |
-| **FRED (Federal Reserve)** | Risk-free Interest Rates (US Treasury yield curve) | 120 requests/min |
-
----
-
-## 4. System Architecture & Technical Specifications
-
-```mermaid
-graph LR
-    subgraph Frontend Client
-        A[Vite / React Web App<br/>Tailwind CSS & WebGL Canvas]
-    end
-
-    subgraph Proxy & Routing
-        B[Envoy gRPC-Web Proxy / Railway Ingress]
-    end
-
-    subgraph Backend Microservices
-        C[Python FastAPI Gateway<br/>gRPC Stubs & Broker Feed Integrations]
-        D[C++23 sensen Calculation Engine<br/>gRPC Server on Port 50051]
-    end
-
-    A <-->|gRPC-Web / HTTP2| B
-    B <-->|gRPC Protobuf| C
-    C <-->|gRPC / Nanobind C-API| D
-```
-
----
-
-### 4.1 C++23 Engine Implementation Policy (`config/cpp_details.txt`)
+### 7.1 C++23 Engine Implementation Policy (`config/cpp_details.txt`)
 
 All C++ code written for the calculation engine must adhere strictly to [`config/cpp_details.txt`](file:///home/muyiwa/Development/OptionsAndFuturesCalculator/config/cpp_details.txt):
 
@@ -201,9 +236,9 @@ All C++ code written for the calculation engine must adhere strictly to [`config
 
 ---
 
-### 4.2 gRPC Interface Specification (`calculator.proto`)
+### 7.2 gRPC Interface Specification (`calculator.proto`)
 
-Communication between the Web API Gateway and the C++23 `sensen` engine is governed by gRPC:
+Communication between the Web Gateway and the C++23 `sensen` engine hosted on Railway is governed by gRPC:
 
 ```protobuf
 syntax = "proto3";
@@ -249,8 +284,8 @@ message CalculationRequest {
   
   // Matrix Parameters
   double price_range_percent = 6; // e.g., 0.20 for +/-20%
-  uint32 price_steps = 7;         // e.g., 50
-  uint32 date_steps = 8;          // e.g., 30
+  uint32 price_steps = 7;         // e.g., 50 (free) or 100 (pro)
+  uint32 date_steps = 8;          // e.g., 30 (free) or 100 (pro)
   double iv_shift_percent = 9;    // e.g., +0.05 for +5% IV shift
 }
 
@@ -296,16 +331,16 @@ service CalculatorEngineService {
 
 ---
 
-## 5. Development Workflow & Governance Policies (`config/update_policy.txt`)
+## 8. Governance, Repository & Code Review Policies (`config/update_policy.txt`)
 
-### 5.1 Repository Management Rules
+### 8.1 Repository Management Rules
 Per [`config/update_policy.txt`](file:///home/muyiwa/Development/OptionsAndFuturesCalculator/config/update_policy.txt):
 1. **GitHub Operations (`gh` CLI)**:
    - All repository initializations, pull requests, issue tracking, and GitHub releases MUST be managed via `gh` CLI commands (`gh repo create`, `gh pr create`, `gh pr merge`).
 2. **Gitea Operations (`git` CLI)**:
    - All local commits and self-hosted Gitea mirror pushes MUST be executed using standard `git` CLI (`git commit`, `git push gitea master`).
 
-### 5.2 Multi-Agent Code Review Mandate
+### 8.2 Multi-Agent Code Review Mandate
 Before any pull request or code change is merged into `main`/`master`, it MUST undergo automated review and receive explicit approval from **three distinct AI agents**:
 
 ```mermaid
@@ -330,70 +365,42 @@ graph TD
 
 1. **Claude Agent**: Audits deep system architecture, mathematical correctness of option formulas, security posture, and edge case resilience.
 2. **AGY (Antigravity) Agent**: Audits C++23 standard compliance (`config/cpp_details.txt`), SIMD waterfall correctness, memory alignment, RAII, and thread safety.
-3. **Cursor Agent**: Audits gRPC schema compatibility, frontend/backend integration, UI rendering efficiency, and state management.
+3. **Cursor Agent**: Audits gRPC schema compatibility, frontend/backend integration, UI rendering efficiency, Supabase RLS, and state management.
 
 ---
 
-## 6. Railway Deployment & Cloud Architecture
-
-### 6.1 Container Structure on Railway
-The project is containerized into two optimized microservices deployed to **Railway**:
-
-1. **`sensen-cpp-engine` Container**:
-   - Base image: Debian / Ubuntu with LLVM 22 toolchain.
-   - Exposes gRPC server on port `50051`.
-   - Pre-compiled with `sensen` SIMD library, TBB, and libc++.
-2. **`web-gateway-ui` Container**:
-   - Node.js / Python FastAPI server exposing HTTP/gRPC-Web on port `8080` (HTTPS via Railway SSL termination).
-   - Serves Vite React frontend static assets and proxies API calls to `sensen-cpp-engine:50051`.
-
-### 6.2 CI/CD Deployment Pipeline
-```mermaid
-sequenceDiagram
-    participant Dev as Developer / AGY Agent
-    participant Git as Git / GitHub (gh)
-    participant Review as Tri-Agent Reviewers (Claude, AGY, Cursor)
-    participant Railway as Railway Cloud Host
-
-    Dev->>Git: Push feature branch via gh pr create
-    Git->>Review: Trigger Multi-Agent Code Review
-    Review-->>Git: Approvals registered from Claude, AGY, Cursor
-    Dev->>Git: gh pr merge --auto
-    Git->>Railway: Webhook trigger rebuild Docker images
-    Railway->>Railway: Run CTest & ASan/TSan verification
-    Railway->>Railway: Deploy sensen-cpp-engine & web-gateway-ui
-```
-
----
-
-## 7. Implementation Roadmap & Milestones
+## 9. Implementation Roadmap & Milestones
 
 ### Phase 1: Core Engine & Sensen Integration (Weeks 1–2)
 - [x] Configure repository policies [`config/cpp_details.txt`](file:///home/muyiwa/Development/OptionsAndFuturesCalculator/config/cpp_details.txt) and [`config/update_policy.txt`](file:///home/muyiwa/Development/OptionsAndFuturesCalculator/config/update_policy.txt).
-- [ ] Create C++23 gRPC server module using `sensen` Black-Scholes, Binomial Tree, and TBB parallel matrix engines.
+- [ ] Create C++23 gRPC server module using `sensen` Black-Scholes, Binomial Tree, and TBB parallel matrix engines on Railway.
 - [ ] Implement Protobuf schema `calculator.proto` and compile nanobind / gRPC stubs.
 - [ ] Set up Catch2/GTest test suite and Sanitizer checks (ASan, TSan, UBSan).
 
-### Phase 2: Python Web Gateway & Market Data Feeds (Weeks 3–4)
-- [ ] Build Python FastAPI / gRPC-Web gateway binding to `sensen` nanobind extensions.
+### Phase 2: Supabase Auth, DB & Subscription Integration (Weeks 3–4)
+- [ ] Initialize Supabase project (PostgreSQL database, Auth providers, RLS policies).
+- [ ] Build Supabase Edge Functions for Stripe subscription checkout and webhook handling.
 - [ ] Integrate market data providers (Schwab, Alpaca, Polygon, FMP, Finnhub, FRED) using credentials in [`config/config.yaml`](file:///home/muyiwa/Development/OptionsAndFuturesCalculator/config/config.yaml).
-- [ ] Implement real-time option chain parser and IV surface interpolation.
 
-### Phase 3: Modern Web Frontend & Interactive Heatmap (Weeks 5–6)
-- [ ] Build Vite TypeScript Web Application with Tailwind CSS glassmorphic design system.
+### Phase 3: Lovable UI Adaptation & Web Frontend (Weeks 5–6)
+- [ ] Export UI components from Lovable.dev into Vite React / Next.js TypeScript app.
 - [ ] Develop interactive P&L Heatmap Matrix (Price vs. Expiration grid) with customizable steps and colors.
 - [ ] Implement 2D & 3D WebGL P&L charts and real-time Greek sensitivity sliders.
-- [ ] Integrate Custom Multi-Leg Builder (up to 8 legs).
+- [ ] Build Custom Multi-Leg Builder (up to 8 legs).
 
-### Phase 4: Cloud Deployment & Governance Pipeline (Weeks 7–8)
-- [ ] Create Dockerfiles for `sensen-cpp-engine` and `web-gateway-ui`.
-- [ ] Configure Railway hosting environment and HTTPS domain routing.
+### Phase 4: Programmatic SEO & Ad Engine Integration (Weeks 7–8)
+- [ ] Implement dynamic route landing pages (`/calculator/iron-condor-calculator`, etc.).
+- [ ] Generate Schema.org JSON-LD structured data and dynamic OpenGraph social cards.
+- [ ] Embed non-intrusive AdSense/Carbon Ad placements for Free tier users.
+
+### Phase 5: Cloud Deployment & Governance Pipeline (Weeks 9–10)
+- [ ] Create Dockerfiles for `sensen-cpp-engine` and `web-gateway-ui` on Railway.
 - [ ] Wire up GitHub Actions / `gh` CLI pipeline for automated tri-agent code reviews (`Claude`, `AGY`, `Cursor`).
 - [ ] Perform cross-host floating-point parity verification and performance profiling (VTune / Nsight).
 
 ---
 
-## 8. Summary of Document Approvals
+## 10. Summary of Document Approvals
 
 | Persona / Role | Agent Name | Approval Status | Date |
 | :--- | :--- | :--- | :--- |
