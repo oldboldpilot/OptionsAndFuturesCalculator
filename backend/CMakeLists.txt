@@ -42,9 +42,15 @@ add_library(proto_lib STATIC
 target_include_directories(proto_lib PUBLIC ${PROTO_GEN_DIR})
 target_link_libraries(proto_lib PUBLIC gRPC::grpc++ protobuf::libprotobuf)
 
+# Include sensen submodule
+set(BUILD_PYTHON_BINDINGS OFF CACHE BOOL "Disable sensen python bindings" FORCE)
+set(BUILD_TESTS OFF CACHE BOOL "Disable sensen tests" FORCE)
+set(BUILD_EXAMPLES OFF CACHE BOOL "Disable sensen examples" FORCE)
+add_subdirectory(sensen EXCLUDE_FROM_ALL)
+
 # Core engine binary
 add_executable(calculator_engine src/main.cpp src/modules/calculator_service.cppm)
-target_link_libraries(calculator_engine PRIVATE proto_lib)
+target_link_libraries(calculator_engine PRIVATE proto_lib sensen)
 
 # Setup testing
 enable_testing()

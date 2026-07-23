@@ -1,0 +1,3 @@
+[submodule "backend/sensen"]
+	path = backend/sensen
+	url = https://github.com/oldboldpilot/sensen

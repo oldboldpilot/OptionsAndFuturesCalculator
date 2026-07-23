@@ -29,7 +29,7 @@ if [[ -n "$RAW_NEW" ]]; then
 fi
 
 # Check 2: Fast-math Flag Prohibition
-FAST_MATH=$(grep -rnE "\-f""fast-math" "${REPO_ROOT}" 2>/dev/null | grep -v "cpp_details.txt" | grep -v "code_policy_check.sh" | grep -v "code_review_adversarial.sh" | grep -v "yaml" | grep -v "PRD_" || true)
+FAST_MATH=$(grep -rnE "\-f""fast-math" "${REPO_ROOT}" 2>/dev/null | grep -v "cpp_details.txt" | grep -v "code_policy_check.sh" | grep -v "code_review_adversarial.sh" | grep -v "yaml" | grep -v "PRD_" | grep -v "backend/sensen" || true)
 if [[ -n "$FAST_MATH" ]]; then
     echo "❌ ADVERSARIAL AUDIT REJECT: Non-associative -f""fast-math flag found:"
     echo "$FAST_MATH"

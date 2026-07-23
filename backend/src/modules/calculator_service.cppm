@@ -7,6 +7,7 @@ module;
 export module calculator_service;
 
 import std;
+import sensen.options;
 
 namespace options_calculator::service {
 
@@ -27,12 +28,22 @@ public:
         
         auto start_time = std::chrono::high_resolution_clock::now();
 
-        // Stubbed response
+        // Use sensen to calculate real values
+        double T_years = 30.0 / 365.0; // Hardcoded for scaffold
+        auto bs_result = price_black_scholes(
+            request->spot_price(), 
+            request->spot_price() * 1.05, 
+            request->risk_free_rate(), 
+            0.20, // implied vol
+            T_years, 
+            OptionType::Call
+        );
+
         MatrixCell* cell = response->add_matrix();
         cell->set_price(request->spot_price() * 1.05);
         cell->set_days_to_expiration(30);
         cell->set_date_str("2026-08-25");
-        cell->set_pnl_dollars(45.50);
+        cell->set_pnl_dollars(bs_result.value); // Real value from sensen
         cell->set_return_on_risk_percent(90.0);
         cell->set_probability_density(0.015);
 
