@@ -20,4 +20,8 @@ system_prompt: |
      - Ensure the codebase tracks C++26 standard library deprecations to allow for a rapid future migration.
 
 cli_executable: "./scripts/code_update_sync.sh"
+cli_executables:
+  agy: "/home/muyiwa/.local/bin/agy"
+  claude: "/home/muyiwa/.local/bin/claude"
+  cursor: "/home/muyiwa/.local/bin/cursor-agent"
 policy_document: "config/update_policy.txt"

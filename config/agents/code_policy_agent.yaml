@@ -17,4 +17,8 @@ system_prompt: |
   10. C++26 Fast-Follow: Ensure current C++23 architecture remains forward-compatible for a rapid migration to C++26.
 
 cli_executable: "./scripts/code_policy_check.sh"
+cli_executables:
+  agy: "/home/muyiwa/.local/bin/agy"
+  claude: "/home/muyiwa/.local/bin/claude"
+  cursor: "/home/muyiwa/.local/bin/cursor-agent"
 policy_document: "config/cpp_details.txt"
