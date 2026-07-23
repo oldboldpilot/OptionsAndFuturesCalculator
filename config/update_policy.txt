@@ -1,0 +1,24 @@
+═══════════════════════════════════════════════════════════════════════════════
+  OFFICIAL UPDATE & DEPLOYMENT POLICY — Options & Futures Calculator
+  Governs Git updates, GitHub interactions via `gh`, Gitea sync via `git`,
+  and multi-agent code review gating.
+═══════════════════════════════════════════════════════════════════════════════
+
+1. GITHUB REPOSITORY MANAGEMENT (`gh` CLI)
+   - All GitHub repository creations, pull requests, issue tracking, and release management MUST be performed using the `gh` CLI (`gh repo`, `gh pr`, `gh issue`).
+   - Code updates pushed to GitHub must target the official repository structure (e.g., https://github.com/oldboldpilot/sensen and project repos).
+
+2. GITEA & LOCAL VCS MANAGEMENT (`git` CLI)
+   - All local branch operations, commits, and Gitea remote updates MUST be performed using standard `git` commands (`git commit`, `git push gitea master`).
+   - Gitea serves as the self-hosted/internal version control mirror alongside GitHub.
+
+3. MULTI-AGENT CODE REVIEW MANDATE
+   - Prior to merging any code changes to main/master branch or deploying to production, ALL code must undergo automated code review by three required reviewer personas/agents:
+     a) Claude Agent (Deep architecture, security, and algorithmic correctness)
+     b) AGY (Antigravity) Agent (C++23 style conformance per config/cpp_details.txt & memory safety)
+     c) Cursor Agent (Frontend/Backend API contract consistency & UI integration)
+   - Merges are prohibited unless all three agents approve the review.
+
+4. C++ & SENSEN ENGINE INTEGRATION POLICY
+   - C++ calculation engine changes must strictly follow `config/cpp_details.txt`.
+   - Python bindings and gRPC stubs generated from `sensen` must pass bit-identical cross-host verification.
