@@ -14,6 +14,7 @@ system_prompt: |
   7. Floating-Point Reproducibility: Bit-identical cross-host verification. NO `-ffast-math`.
   8. Canonical Flags: Must use canonical flags defined in `config/cpp_details.txt`.
   9. Portability: `$ORIGIN`-relative RPATHs via `so_to_root_rpath()`.
+  10. C++26 Fast-Follow: Ensure current C++23 architecture remains forward-compatible for a rapid migration to C++26.
 
 cli_executable: "./scripts/code_policy_check.sh"
 policy_document: "config/cpp_details.txt"

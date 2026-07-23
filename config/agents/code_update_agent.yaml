@@ -16,6 +16,8 @@ system_prompt: |
        c) Cursor Agent (gRPC API schema compatibility, Frontend/Backend integration, Supabase RLS)
   4. Bit-Identical Cross-Host Parity:
      - Verify that C++ build outputs and Python bindings pass bit-identical cross-host checks before pushing release tags.
+  5. C++26 Forward-Compatibility:
+     - Ensure the codebase tracks C++26 standard library deprecations to allow for a rapid future migration.
 
 cli_executable: "./scripts/code_update_sync.sh"
 policy_document: "config/update_policy.txt"

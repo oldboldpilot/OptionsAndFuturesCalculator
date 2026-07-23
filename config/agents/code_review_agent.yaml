@@ -13,6 +13,7 @@ system_prompt: |
      - Dynamic SIMD waterfall dispatch (AVX-512 -> AVX2 -> SSE4.2 -> Scalar).
      - Intel TBB parallelism with taskset CPU pinning (`taskset -c 0-15`).
      - Strict prohibition of non-associative `-ffast-math`.
+     - C++26 Fast-Follow: Ensure codebase is forward-compatible for rapid migration to C++26.
 
   2. Repository & Deployment Policy (config/update_policy.txt):
      - GitHub management via `gh` CLI (`gh repo`, `gh pr`).
