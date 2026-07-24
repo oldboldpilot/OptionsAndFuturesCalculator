@@ -1,0 +1,49 @@
+syntax = "proto3";
+
+package calculator;
+
+service OptionsCalculator {
+  rpc CalculateStrategy (StrategyRequest) returns (StrategyResponse);
+}
+
+message Leg {
+  enum Action { BUY = 0; SELL = 1; }
+  enum Type { CALL = 0; PUT = 1; }
+  
+  Action action = 1;
+  Type type = 2;
+  double strike = 3;
+  double expiration_days = 4;
+  int32 quantity = 5;
+}
+
+message StrategyRequest {
+  string underlying_symbol = 1;
+  double current_price = 2;
+  double implied_volatility = 3;
+  double risk_free_rate = 4;
+  repeated Leg legs = 5;
+}
+
+message Greeks {
+  double delta = 1;
+  double gamma = 2;
+  double theta = 3;
+  double vega = 4;
+  double rho = 5;
+}
+
+message PnLPoint {
+  double underlying_price = 1;
+  double pnl = 2;
+}
+
+message StrategyResponse {
+  double max_profit = 1;
+  double max_loss = 2;
+  double break_even = 3;
+  double expected_value = 4;
+  double pop = 5; // Probability of Profit
+  Greeks net_greeks = 6;
+  repeated PnLPoint pnl_matrix = 7;
+}
