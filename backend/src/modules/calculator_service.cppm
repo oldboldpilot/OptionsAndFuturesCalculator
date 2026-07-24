@@ -10,6 +10,12 @@ import std;
 import sensen.options;
 import logger;
 
+import sgee.builder.fluent;
+import sgee.runtime.interpreter;
+import sgee.runtime.context;
+import sgee.core.types;
+import sgee.runtime.action_registry;
+
 namespace options_calculator::service {
 
 using grpc::ServerContext;
@@ -48,49 +54,110 @@ public:
         double max_profit = -1e9;
         double max_loss = 1e9;
 
-        // Matrix generation over time and price
+        struct SimulationContext {
+            double sim_price{0.0};
+            double current_dte{0.0};
+            double T_years{0.0};
+            double min_price{0.0};
+            const CalculationRequest* request{nullptr};
+            double current_spot{0.0};
+            double r{0.0};
+            double total_pnl{0.0};
+            uint32_t d_step{0};
+            uint32_t p_step{0};
+        };
+
+        // Graph Definition
+        auto builder = sgee::Builder<SimulationContext>("OptionsPricingGraph");
+        auto graph = builder
+            .Node("Start")
+                .Execute("ComputePnL")
+                .Next("End")
+            .Node("End")
+                .IsTerminal()
+            .Build();
+
+        if (!graph.has_value()) {
+            log.error("Failed to build SGEE graph for options pricing");
+            return Status(grpc::StatusCode::INTERNAL, "SGEE graph build failed");
+        }
+
+        sgee::runtime::ActionRegistry<SimulationContext> actions;
+        actions.RegisterById(graph.value()->GetActionId("ComputePnL").value(), [](SimulationContext& ctx) -> std::expected<void, sgee::ExecutionError> {
+            double total_pnl = 0.0;
+            for (const auto& leg : ctx.request->legs()) {
+                double dir = (leg.action() == ACTION_BUY) ? 1.0 : -1.0;
+                double mult = leg.contract_multiplier() > 0.0 ? leg.contract_multiplier() : 100.0;
+                double qty = leg.quantity() > 0 ? leg.quantity() : 1.0;
+                double entry = leg.premium();
+                
+                if (leg.instrument_type() == INSTRUMENT_EQUITY_SPOT || leg.instrument_type() == INSTRUMENT_FUTURES_SPOT) {
+                    double pnl = (ctx.sim_price - leg.strike_price()) * dir * mult * qty;
+                    total_pnl += pnl;
+                } else {
+                    auto opt_type = (leg.option_type() == OPTION_TYPE_CALL) ? sensen::OptionType::Call : sensen::OptionType::Put;
+                    double iv = leg.implied_volatility() > 0 ? leg.implied_volatility() : 0.20;
+                    auto bs = sensen::price_black_scholes(ctx.sim_price, leg.strike_price(), ctx.r, iv, ctx.T_years, opt_type);
+                    
+                    double pnl = (bs.value - entry) * dir * mult * qty;
+                    total_pnl += pnl;
+                }
+            }
+            ctx.total_pnl = total_pnl;
+            return {};
+        });
+
+        std::vector<SimulationContext> entities;
+        entities.reserve(date_steps * price_steps);
+
         int max_dte = 30; // Scaffold default
-        for (uint32 d_step = 0; d_step < date_steps; ++d_step) {
+        for (uint32_t d_step = 0; d_step < date_steps; ++d_step) {
             double current_dte = max_dte * (1.0 - static_cast<double>(d_step) / (date_steps == 1 ? 1 : date_steps - 1));
             if (current_dte < 0.001) current_dte = 0.001; 
             double T_years = current_dte / 365.0;
             
-            for (uint32 p_step = 0; p_step < price_steps; ++p_step) {
+            for (uint32_t p_step = 0; p_step < price_steps; ++p_step) {
                 double sim_price = min_price + p_step * price_step_size;
-                double total_pnl = 0.0;
-                
-                for (const auto& leg : request->legs()) {
-                    double dir = (leg.action() == ACTION_BUY) ? 1.0 : -1.0;
-                    double mult = leg.contract_multiplier() > 0.0 ? leg.contract_multiplier() : 100.0;
-                    double qty = leg.quantity() > 0 ? leg.quantity() : 1.0;
-                    double entry = leg.premium();
-                    
-                    if (leg.instrument_type() == INSTRUMENT_EQUITY_SPOT || leg.instrument_type() == INSTRUMENT_FUTURES_SPOT) {
-                        double pnl = (sim_price - leg.strike_price()) * dir * mult * qty; // For spot, strike_price acts as entry price
-                        total_pnl += pnl;
-                    } else {
-                        auto opt_type = (leg.option_type() == OPTION_TYPE_CALL) ? sensen::OptionType::Call : sensen::OptionType::Put;
-                        double iv = leg.implied_volatility() > 0 ? leg.implied_volatility() : 0.20;
-                        auto bs = sensen::price_black_scholes(sim_price, leg.strike_price(), r, iv, T_years, opt_type);
-                        
-                        double pnl = (bs.value - entry) * dir * mult * qty;
-                        total_pnl += pnl;
-                        
-                        // Calculate base Greeks on the very first cell only (T=now, Spot=min_price, we actually want it at current spot)
-                        // This is a simple approximation just for the scaffold.
-                    }
-                }
-                
-                if (total_pnl > max_profit) max_profit = total_pnl;
-                if (total_pnl < max_loss) max_loss = total_pnl;
-
-                MatrixCell* cell = response->add_matrix();
-                cell->set_price(sim_price);
-                cell->set_days_to_expiration(static_cast<uint32>(current_dte));
-                cell->set_date_str("sim"); 
-                cell->set_pnl_dollars(total_pnl);
-                cell->set_probability_density(0.015);
+                entities.push_back(SimulationContext{
+                    .sim_price = sim_price,
+                    .current_dte = current_dte,
+                    .T_years = T_years,
+                    .min_price = min_price,
+                    .request = request,
+                    .current_spot = current_spot,
+                    .r = r,
+                    .total_pnl = 0.0,
+                    .d_step = d_step,
+                    .p_step = p_step
+                });
             }
+        }
+
+        sgee::runtime::EngineContext<SimulationContext> engine_ctx;
+        engine_ctx.Load(entities);
+
+        sgee::runtime::Interpreter<SimulationContext> interpreter(graph.value(), sgee::runtime::ParallelismLevel::TBB, &actions);
+        interpreter.Run(engine_ctx);
+
+        std::vector<SimulationContext> out_entities;
+        engine_ctx.Unload(out_entities);
+
+        // Ensure order is maintained based on d_step and p_step, SGEE might process out of order
+        std::ranges::sort(out_entities, [](const auto& a, const auto& b) {
+            if (a.d_step != b.d_step) return a.d_step < b.d_step;
+            return a.p_step < b.p_step;
+        });
+
+        for (const auto& ctx : out_entities) {
+            if (ctx.total_pnl > max_profit) max_profit = ctx.total_pnl;
+            if (ctx.total_pnl < max_loss) max_loss = ctx.total_pnl;
+
+            MatrixCell* cell = response->add_matrix();
+            cell->set_price(ctx.sim_price);
+            cell->set_days_to_expiration(static_cast<uint32>(ctx.current_dte));
+            cell->set_date_str("sim"); 
+            cell->set_pnl_dollars(ctx.total_pnl);
+            cell->set_probability_density(0.015);
         }
         
         // Exact Greek calculation at current spot & DTE
