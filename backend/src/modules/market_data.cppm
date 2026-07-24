@@ -1,17 +1,15 @@
 module;
 
 #include <cpr/cpr.h>
-#include <nlohmann/json.hpp>
 #include <string>
 #include <system_error>
 
 export module market_data;
 
 import std;
+import fastjson;
 
 namespace options_calculator::market_data {
-
-using json = nlohmann::json;
 
 export enum class MarketDataError {
     NetworkError = 1,
@@ -66,30 +64,36 @@ export auto fetch_yahoo_finance_quote(const std::string& symbol) -> std::expecte
     }
 
     try {
-        auto parsed = json::parse(r.text);
-        if (!parsed.contains("quoteResponse") || !parsed["quoteResponse"].contains("result") || parsed["quoteResponse"]["result"].empty()) {
+        // fastjson parsing
+        auto parsed = fastjson::parse(r.text);
+        if (parsed.is_null() || !parsed.has("quoteResponse") || !parsed["quoteResponse"].has("result")) {
             return std::unexpected(make_error_code(MarketDataError::MissingData));
         }
         
-        auto result = parsed["quoteResponse"]["result"][0];
+        auto result_arr = parsed["quoteResponse"]["result"];
+        if (result_arr.size() == 0) {
+            return std::unexpected(make_error_code(MarketDataError::MissingData));
+        }
+
+        auto result = result_arr[0];
         
         YahooFinanceQuote quote;
         quote.symbol = symbol;
         
-        if (result.contains("regularMarketPrice")) {
-            quote.regularMarketPrice = result["regularMarketPrice"].get<double>();
+        if (result.has("regularMarketPrice")) {
+            quote.regularMarketPrice = result["regularMarketPrice"].as_double();
         } else {
             return std::unexpected(make_error_code(MarketDataError::MissingData));
         }
 
-        if (result.contains("regularMarketPreviousClose")) {
-            quote.regularMarketPreviousClose = result["regularMarketPreviousClose"].get<double>();
+        if (result.has("regularMarketPreviousClose")) {
+            quote.regularMarketPreviousClose = result["regularMarketPreviousClose"].as_double();
         } else {
             quote.regularMarketPreviousClose = quote.regularMarketPrice;
         }
 
-        if (result.contains("forwardPE")) {
-            quote.forwardPE = result["forwardPE"].get<double>();
+        if (result.has("forwardPE")) {
+            quote.forwardPE = result["forwardPE"].as_double();
         } else {
             quote.forwardPE = 0.0;
         }
@@ -98,9 +102,8 @@ export auto fetch_yahoo_finance_quote(const std::string& symbol) -> std::expecte
         quote.impliedVolatility = 0.20; 
 
         return quote;
-    } catch (const json::parse_error&) {
-        return std::unexpected(make_error_code(MarketDataError::ParseError));
-    } catch (const json::type_error&) {
+    } catch (...) {
+        // fastjson usually throws std::runtime_error on parse failure
         return std::unexpected(make_error_code(MarketDataError::ParseError));
     }
 }

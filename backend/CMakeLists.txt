@@ -55,13 +55,9 @@ set(CPR_USE_SYSTEM_CURL ON CACHE BOOL "" FORCE)
 set(CPR_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(cpr)
 
-# Add nlohmann_json for JSON parsing
-FetchContent_Declare(json URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz)
-FetchContent_MakeAvailable(json)
-
 # Core engine binary
 add_executable(calculator_engine src/main.cpp src/modules/calculator_service.cppm src/modules/market_data.cppm)
-target_link_libraries(calculator_engine PRIVATE proto_lib sensen cpr::cpr nlohmann_json::nlohmann_json)
+target_link_libraries(calculator_engine PRIVATE proto_lib sensen cpr::cpr fastjson)
 
 # Setup testing
 enable_testing()
