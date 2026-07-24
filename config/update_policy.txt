@@ -1,24 +1,104 @@
-═══════════════════════════════════════════════════════════════════════════════
-  OFFICIAL UPDATE & DEPLOYMENT POLICY — Options & Futures Calculator
-  Governs Git updates, GitHub interactions via `gh`, Gitea sync via `git`,
-  and multi-agent code review gating.
-═══════════════════════════════════════════════════════════════════════════════
+# OptionsAndFuturesCalculator Update & Commit Policy
+# Last Updated: December 22, 2025
+remote repository is both in github and gitea(self-hosted, credentials stored in config/.env file) ,
+create the gitea repo if it does not exist already before pushing to it. Since you have the credentials and the 
+ssh login has been setup already.
 
-1. GITHUB REPOSITORY MANAGEMENT (`gh` CLI)
-   - All GitHub repository creations, pull requests, issue tracking, and release management MUST be performed using the `gh` CLI (`gh repo`, `gh pr`, `gh issue`).
-   - Code updates pushed to GitHub must target the official repository structure (e.g., https://github.com/oldboldpilot/sensen and project repos).
+## Pre-Commit Checklist
+All this applies only to code that is used by the python bot in python_big_brother_analytics_bot folder and any C++ python bindings and supporting code for the python bot. 
+1. **Build Verification**
+   - Compile with clang-tidy and clang-format
+   - Zero warnings, zero errors required
+   - Command: `SKIP_CLANG_TIDY=1 ninja -C build bigbrother`
 
-2. GITEA & LOCAL VCS MANAGEMENT (`git` CLI)
-   - All local branch operations, commits, and Gitea remote updates MUST be performed using standard `git` commands (`git commit`, `git push gitea master`).
-   - Gitea serves as the self-hosted/internal version control mirror alongside GitHub.
+2. **Test Suite**
+   - All tests must pass before pushing
+   - Command: `ctest --test-dir build`
+   - Review code for adherence to coding standards
 
-3. MULTI-AGENT CODE REVIEW MANDATE
-   - Prior to merging any code changes to main/master branch or deploying to production, ALL code must undergo automated code review by three required reviewer personas/agents:
-     a) Claude Agent (Deep architecture, security, and algorithmic correctness)
-     b) AGY (Antigravity) Agent (C++23 style conformance per config/cpp_details.txt & memory safety)
-     c) Cursor Agent (Frontend/Backend API contract consistency & UI integration)
-   - Merges are prohibited unless all three agents approve the review.
+3. **Documentation Updates** (Required for every push)
+   - Move all json files in the root for backtests to a backtests/ folder for better organization
+   - Move all log files in the root to logs/ folder for better organization
+   - Move all .md files in the root to docs/ folder for better organization (later instructions will specify more after the files have been moved how they should be organized inside the docs/ folder)
+   - Update docs/QUICKSTART.md (if changes affect setup/use)
+   - Update ai/CLAUDE.md (technical changes)
+   - Update CLAUDE.md (root quick reference)
+   - Sync .github/copilot-instructions.md with CLAUDE.md
+   - Sync ai/gemini.md with CLAUDE.md
+   - Update docs/INDEX.md (if new/removed docs)
+   - Update docs/PRD.md (status, test counts)
+   - Update docs/ROADMAP.md (progress)
+   - Update README.md (user-facing changes)
+   - move all markdown's in root folder except README.md and QUICKSTART.md to docs/ folder for general documentation
+   - reorganise the root folder moving stray documents,.json,.txt,.log files and reorganize. Check dependencies and adjust to make sure nothign is broken
+   so that when you move the files everything still works as expected
+   - Move all markdown except README and QUICKSTART docs to docs/ folder for python bot documentation
+   - Organise the docs/ folder into subfolders by topic:
+     - docs/api/ for API documentation
+     - docs/guides/ for user guides and tutorials
+     - docs/architecture/ for system architecture and design docs
+     - docs/release_notes/ for changelogs and release notes
+     - docs/technical/ for deep technical dives
+     - docs/meeting_notes/ for meeting minutes and notes
+     - docs/other/ for miscellaneous documentation
+     - Organise and update docs/INDEX.md to reflect this new structure
+     - Ensure all links in docs/INDEX.md are valid and up to date
+     - Ensure all links and reference in the documentation point to the correct locations after reorganization
+     - Other general documentation improvements as needed, and following best practices for technical writing
+     - Follow the same process for the root README.md,QUICKSTART and INDEX if it contains sections that fit into these categories
+     - Arrange the root docs into a docs/ folder if applicable in the same way as above for the python bot documentation
 
-4. C++ & SENSEN ENGINE INTEGRATION POLICY
-   - C++ calculation engine changes must strictly follow `config/cpp_details.txt`.
-   - Python bindings and gRPC stubs generated from `sensen` must pass bit-identical cross-host verification.
+4. **Session State**
+   - Save session state to docs/session_logs/
+
+## Authorship Policy (MANDATORY)
+
+**ALL code and commits MUST be attributed ONLY to: Olumuyiwa Oluwasanmi**
+
+### Prohibited Actions
+- NEVER add "Co-Authored-By:" lines with AI agent names (Claude, Copilot, Anthropic, etc.)
+- NEVER use "@author Claude", "@author AI Assistant", or any AI agent attribution
+- NEVER include AI agent names in git history, branch names, file headers, or comments
+- NEVER mention AI assistants as co-authors in commit messages
+
+### Required Actions
+- ALWAYS use "@author Olumuyiwa Oluwasanmi" in file headers
+- VERIFY existing files follow this policy before modifying
+- All commits attributed solely to: Olumuyiwa Oluwasanmi
+
+### Violation Response
+Any violation of this policy must be fixed immediately by amending the commit
+or rebasing the history to remove AI attributions.
+
+## Commit Message Format
+
+Commit messages must be:
+- Detailed and descriptive of the changes made
+- Follow conventional commits format (feat:, fix:, docs:, refactor:, etc.)
+- Include a summary of what changed and why
+- NO AI co-author attributions
+
+Example:
+```
+feat(module): Brief description of feature
+
+Detailed explanation of what changed:
+- Change 1
+- Change 2
+- Change 3
+
+Files modified:
+- file1.cpp
+- file2.cppm
+```
+
+## Post-Commit Actions
+
+1. **Push to GitHub**
+   - Push to appropriate branch
+   - Verify CI/CD passes
+
+2. **Backup to NAS**
+   - Run: `bash scripts/backup_to_nas.sh`
+   - Verify backup completed successfully
+

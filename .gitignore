@@ -17,3 +17,5 @@ build-*/
 # System & Logs
 *.log
 .DS_Store
+frontend/node_modules/
+frontend/.next/
