@@ -2,8 +2,6 @@ module;
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 #include <httplib.h>
-#include <string>
-#include <system_error>
 
 export module market_data;
 

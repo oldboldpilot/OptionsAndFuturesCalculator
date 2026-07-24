@@ -1,18 +1,8 @@
 module;
 
-#include <string>
-#include <string_view>
-#include <vector>
-#include <functional>
-#include <stdexcept>
-#include <type_traits>
-#include <concepts>
-#include <format>
-
-#include <expected>
-
 export module testing_framework;
 
+import std;
 import logger;
 
 export namespace testing {
