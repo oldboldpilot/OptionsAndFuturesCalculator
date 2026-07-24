@@ -51,16 +51,13 @@ add_subdirectory(sensen EXCLUDE_FROM_ALL)
 # Include StochasticGraphExecutionEngine for distributed execution
 add_subdirectory(StochasticGraphExecutionEngine EXCLUDE_FROM_ALL)
 
-# Add CPR (C++ Requests) for simple HTTP client
-include(FetchContent)
-FetchContent_Declare(cpr GIT_REPOSITORY https://github.com/libcpr/cpr.git GIT_TAG 1.10.5)
-set(CPR_USE_SYSTEM_CURL ON CACHE BOOL "" FORCE)
-set(CPR_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(cpr)
+# Include logging and bindings submodules
+add_subdirectory(cpp23-logger EXCLUDE_FROM_ALL)
+add_subdirectory(nanobind EXCLUDE_FROM_ALL)
 
 # Core engine binary
 add_executable(calculator_engine src/main.cpp src/modules/calculator_service.cppm src/modules/market_data.cppm)
-target_link_libraries(calculator_engine PRIVATE proto_lib sensen cpr::cpr fastjson logger sgee)
+target_link_libraries(calculator_engine PRIVATE proto_lib sensen fastjson logger sgee)
 
 # Setup testing
 enable_testing()

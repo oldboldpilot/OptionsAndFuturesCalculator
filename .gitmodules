@@ -4,3 +4,9 @@
 [submodule "backend/StochasticGraphExecutionEngine"]
 	path = backend/StochasticGraphExecutionEngine
 	url = https://github.com/oldboldpilot/StochasticGraphExecutionEngine
+[submodule "backend/cpp23-logger"]
+	path = backend/cpp23-logger
+	url = https://github.com/oldboldpilot/cpp23-logger
+[submodule "backend/nanobind"]
+	path = backend/nanobind
+	url = https://github.com/wjakob/nanobind
