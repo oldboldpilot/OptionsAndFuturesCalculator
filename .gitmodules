@@ -1,3 +1,6 @@
 [submodule "backend/sensen"]
 	path = backend/sensen
 	url = https://github.com/oldboldpilot/sensen
+[submodule "backend/StochasticGraphExecutionEngine"]
+	path = backend/StochasticGraphExecutionEngine
+	url = https://github.com/oldboldpilot/StochasticGraphExecutionEngine

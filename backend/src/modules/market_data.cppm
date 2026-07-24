@@ -8,6 +8,7 @@ export module market_data;
 
 import std;
 import fastjson;
+import logger;
 
 namespace options_calculator::market_data {
 
@@ -49,6 +50,9 @@ export struct YahooFinanceQuote {
 
 // C++23 std::expected Railway-Oriented Programming (ROP)
 export auto fetch_yahoo_finance_quote(const std::string& symbol) -> std::expected<YahooFinanceQuote, std::error_code> {
+    auto& log = logger::Logger::getInstance();
+    log.info("Fetching market data for symbol: {}", symbol);
+
     std::string url = "https://query1.finance.yahoo.com/v7/finance/quote?symbols=" + symbol;
     
     // Perform synchronous HTTP GET using CPR
@@ -56,10 +60,12 @@ export auto fetch_yahoo_finance_quote(const std::string& symbol) -> std::expecte
                                cpr::Header{{"User-Agent", "OptionsFuturesCalculatorEngine/1.0"}});
 
     if (r.error) {
+        log.error("Network error fetching symbol {}: {}", symbol, r.error.message);
         return std::unexpected(make_error_code(MarketDataError::NetworkError));
     }
     
     if (r.status_code != 200) {
+        log.error("HTTP error fetching symbol {}: status code {}", symbol, r.status_code);
         return std::unexpected(make_error_code(MarketDataError::HttpError));
     }
 
@@ -101,9 +107,13 @@ export auto fetch_yahoo_finance_quote(const std::string& symbol) -> std::expecte
         // Standard quote API doesn't usually expose IV directly, stubbing it to 20% for now
         quote.impliedVolatility = 0.20; 
 
+        log.debug("Successfully parsed quote for {}: price={}, prevClose={}, fwdPE={}", 
+                  symbol, quote.regularMarketPrice, quote.regularMarketPreviousClose, quote.forwardPE);
+
         return quote;
     } catch (...) {
         // fastjson usually throws std::runtime_error on parse failure
+        log.error("Failed to parse JSON response for symbol: {}", symbol);
         return std::unexpected(make_error_code(MarketDataError::ParseError));
     }
 }

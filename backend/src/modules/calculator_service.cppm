@@ -8,6 +8,7 @@ export module calculator_service;
 
 import std;
 import sensen.options;
+import logger;
 
 namespace options_calculator::service {
 
@@ -19,6 +20,14 @@ export class CalculatorServiceImpl final : public CalculatorEngineService::Servi
 public:
     // Core computation endpoint
     auto ComputeStrategyPnL(ServerContext* context, const CalculationRequest* request, CalculationResponse* response) -> Status override {
+        auto& log = logger::Logger::getInstance();
+        log.info("ComputeStrategyPnL invoked with {} legs", request->legs_size());
+
+        if (request->legs().empty()) {
+            log.warn("Invalid request: No strategy legs provided");
+            return Status(grpc::StatusCode::INVALID_ARGUMENT, "No strategy legs provided");
+        }
+
         auto start_time = std::chrono::high_resolution_clock::now();
 
         double current_spot = request->spot_price();
@@ -127,6 +136,7 @@ public:
         auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
         response->set_calculation_time_microseconds(duration.count());
 
+        log.info("ComputeStrategyPnL completed successfully");
         return Status::OK;
     }
 

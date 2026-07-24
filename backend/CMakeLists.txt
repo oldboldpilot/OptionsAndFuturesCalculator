@@ -48,6 +48,9 @@ set(BUILD_TESTS OFF CACHE BOOL "Disable sensen tests" FORCE)
 set(BUILD_EXAMPLES OFF CACHE BOOL "Disable sensen examples" FORCE)
 add_subdirectory(sensen EXCLUDE_FROM_ALL)
 
+# Include StochasticGraphExecutionEngine for distributed execution
+add_subdirectory(StochasticGraphExecutionEngine EXCLUDE_FROM_ALL)
+
 # Add CPR (C++ Requests) for simple HTTP client
 include(FetchContent)
 FetchContent_Declare(cpr GIT_REPOSITORY https://github.com/libcpr/cpr.git GIT_TAG 1.10.5)
@@ -57,7 +60,7 @@ FetchContent_MakeAvailable(cpr)
 
 # Core engine binary
 add_executable(calculator_engine src/main.cpp src/modules/calculator_service.cppm src/modules/market_data.cppm)
-target_link_libraries(calculator_engine PRIVATE proto_lib sensen cpr::cpr fastjson)
+target_link_libraries(calculator_engine PRIVATE proto_lib sensen cpr::cpr fastjson logger sgee)
 
 # Setup testing
 enable_testing()
