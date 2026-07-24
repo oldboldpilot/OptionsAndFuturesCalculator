@@ -48,9 +48,20 @@ set(BUILD_TESTS OFF CACHE BOOL "Disable sensen tests" FORCE)
 set(BUILD_EXAMPLES OFF CACHE BOOL "Disable sensen examples" FORCE)
 add_subdirectory(sensen EXCLUDE_FROM_ALL)
 
+# Add CPR (C++ Requests) for simple HTTP client
+include(FetchContent)
+FetchContent_Declare(cpr GIT_REPOSITORY https://github.com/libcpr/cpr.git GIT_TAG 1.10.5)
+set(CPR_USE_SYSTEM_CURL ON CACHE BOOL "" FORCE)
+set(CPR_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(cpr)
+
+# Add nlohmann_json for JSON parsing
+FetchContent_Declare(json URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz)
+FetchContent_MakeAvailable(json)
+
 # Core engine binary
-add_executable(calculator_engine src/main.cpp src/modules/calculator_service.cppm)
-target_link_libraries(calculator_engine PRIVATE proto_lib sensen)
+add_executable(calculator_engine src/main.cpp src/modules/calculator_service.cppm src/modules/market_data.cppm)
+target_link_libraries(calculator_engine PRIVATE proto_lib sensen cpr::cpr nlohmann_json::nlohmann_json)
 
 # Setup testing
 enable_testing()
