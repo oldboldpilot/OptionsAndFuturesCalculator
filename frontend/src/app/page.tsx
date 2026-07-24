@@ -1,8 +1,11 @@
 'use client';
 
-import { PnLHeatmap } from '../components/PnLHeatmap';
-import { useCalculatorStore } from '../store/useCalculatorStore';
 import { useEffect } from 'react';
+import { PnLHeatmap } from '../components/PnLHeatmap';
+import { DashboardLayout } from '../components/DashboardLayout';
+import { StrategySelector } from '../components/StrategySelector';
+import { OptionChainTable } from '../components/OptionChainTable';
+import { useCalculatorStore } from '../store/useCalculatorStore';
 
 export default function Home() {
   const { result, calculateStrategy, isLoading } = useCalculatorStore();
@@ -13,24 +16,35 @@ export default function Home() {
   }, [calculateStrategy]);
 
   return (
-    <main style={{ padding: '4rem', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '2rem' }}>
-      <div className="glass-panel" style={{ maxWidth: '800px', width: '100%', textAlign: 'center' }}>
-        <h1 className="heading-1">Options & Futures Profit Calculator</h1>
-        <p style={{ color: 'var(--text-secondary)', marginBottom: '2rem', fontSize: '1.2rem' }}>
-          Real-time, interactive profit-and-loss (P&L) matrix visualizations, risk probability models, and option sensitivity breakdowns.
-        </p>
-        
-        <div style={{ display: 'flex', gap: '1rem', justifyContent: 'center' }}>
-          <button className="btn" onClick={() => calculateStrategy()}>
-            {isLoading ? 'Calculating...' : 'Recalculate Model'}
-          </button>
-          <button className="btn" style={{ background: 'transparent', border: '1px solid var(--glass-border)' }}>View Strategies</button>
+    <DashboardLayout>
+      <div style={{ 
+        display: 'grid', 
+        gridTemplateColumns: '1fr 1fr', 
+        gap: '1.5rem', 
+        height: '100%',
+        paddingBottom: '2rem'
+      }}>
+        {/* Left Column: Strategy and Option Chain */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem', overflowY: 'auto', paddingRight: '0.5rem' }}>
+          <StrategySelector />
+          <OptionChainTable />
+        </div>
+
+        {/* Right Column: 3D Visualization */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+          <div className="glass-panel" style={{ flexGrow: 1, minHeight: '600px', display: 'flex', flexDirection: 'column' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+              <h2 style={{ fontSize: '1.25rem', fontWeight: 600, color: 'var(--text-primary)' }}>Risk Profile & P&L Heatmap</h2>
+              <button className="btn" onClick={() => calculateStrategy()}>
+                {isLoading ? 'Calculating...' : 'Recalculate'}
+              </button>
+            </div>
+            <div style={{ flexGrow: 1, borderRadius: '8px', overflow: 'hidden', position: 'relative' }}>
+              <PnLHeatmap data={result?.matrix || []} />
+            </div>
+          </div>
         </div>
       </div>
-
-      <div style={{ maxWidth: '1000px', width: '100%' }}>
-        <PnLHeatmap data={result?.matrix || []} />
-      </div>
-    </main>
+    </DashboardLayout>
   );
 }

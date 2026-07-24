@@ -1,0 +1,151 @@
+.option-chain-container {
+  width: 100%;
+  overflow-x: auto;
+  border-radius: 16px;
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow);
+  padding: 1.5rem;
+}
+
+.option-chain-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1.5rem;
+}
+
+.option-chain-title {
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.option-chain-controls {
+  display: flex;
+  gap: 1rem;
+}
+
+.control-select {
+  background: rgba(0, 0, 0, 0.3);
+  color: var(--text-primary);
+  border: 1px solid var(--glass-border);
+  padding: 0.6rem 1rem;
+  border-radius: 8px;
+  outline: none;
+  font-family: var(--font-sans);
+  font-size: 0.9rem;
+  transition: all 0.2s ease;
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+.control-select:focus {
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 2px rgba(79, 70, 229, 0.2);
+}
+
+.control-select option {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+.option-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  font-family: var(--font-sans);
+}
+
+.option-table th {
+  padding: 12px 10px;
+  text-align: right;
+  font-weight: 600;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--glass-border);
+  white-space: nowrap;
+}
+
+.option-table th.center {
+  text-align: center;
+}
+
+.option-table th.left {
+  text-align: left;
+}
+
+.option-table td {
+  padding: 10px 10px;
+  text-align: right;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+  transition: background-color 0.2s ease;
+  font-variant-numeric: tabular-nums;
+}
+
+.option-table td.center {
+  text-align: center;
+}
+
+.option-table td.left {
+  text-align: left;
+}
+
+.option-table tbody tr:hover td {
+  background-color: rgba(255, 255, 255, 0.08);
+}
+
+.strike-cell {
+  background: rgba(0, 0, 0, 0.2);
+  font-weight: 700;
+  color: var(--text-primary);
+  border-left: 1px solid var(--glass-border);
+  border-right: 1px solid var(--glass-border);
+  font-size: 0.9rem;
+}
+
+.itm-call {
+  background-color: rgba(16, 185, 129, 0.06);
+}
+
+.itm-put {
+  background-color: rgba(16, 185, 129, 0.06);
+}
+
+.value-positive {
+  color: var(--success);
+}
+
+.value-negative {
+  color: var(--danger);
+}
+
+.col-group-calls {
+  border-right: 1px solid var(--glass-border);
+}
+
+.col-group-puts {
+  border-left: 1px solid var(--glass-border);
+}
+
+/* Scrollbar styling for table container */
+.option-chain-container::-webkit-scrollbar {
+  height: 8px;
+}
+
+.option-chain-container::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 4px;
+}
+
+.option-chain-container::-webkit-scrollbar-thumb {
+  background: var(--glass-border);
+  border-radius: 4px;
+}
+
+.option-chain-container::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
