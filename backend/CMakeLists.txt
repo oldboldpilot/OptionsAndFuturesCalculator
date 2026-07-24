@@ -59,6 +59,15 @@ add_subdirectory(nanobind EXCLUDE_FROM_ALL)
 add_executable(calculator_engine src/main.cpp src/modules/calculator_service.cppm src/modules/market_data.cppm)
 target_link_libraries(calculator_engine PRIVATE proto_lib sensen fastjson logger sgee)
 
+# Python Bindings via nanobind
+nanobind_add_module(
+    options_futures_engine
+    src/modules/calculator_service.cppm
+    src/modules/market_data.cppm
+    src/bindings.cpp
+)
+target_link_libraries(options_futures_engine PRIVATE proto_lib sensen fastjson logger sgee)
+
 # Setup testing
 enable_testing()
 include(FetchContent)
