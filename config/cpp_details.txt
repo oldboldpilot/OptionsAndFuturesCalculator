@@ -4,7 +4,7 @@
   ALL code (C++ engines, nanobind bindings, Python bot/eval/training, and tests)
   MUST adhere to it. It governs: C++23 style + safety, threading (TBB, thread-safe,
   no data races), arithmetic (BF16 end-to-end, train==infer, you can use fp32 for adamw,but prefer bf16 with momentum), performance
-  (perf/VTune/Nsight evidence before any speedup claim), and the dual code-review
+  (perf/VTune/Nsight(nsys and ncu) evidence before any speedup claim), and the dual code-review
   requirement (deep-thinking Serena/claude + agy) before merge. New code AND new
   tests are written to this policy; reviews check against it. Referenced by
   configs/update_policy.txt as the official policy. Made-official: 2026-06-13.

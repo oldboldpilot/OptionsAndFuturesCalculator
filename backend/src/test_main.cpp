@@ -13,11 +13,15 @@ auto main() -> int {
             testing::expect(quote.symbol, "quote symbol").toBe(std::string("AAPL"));
             testing::expect(quote.regularMarketPrice, "quote price").toBe(150.0);
         })
-        .it("should fail gracefully when network is disconnected", []() {
+        .it("should fetch real market data for MSFT", []() {
             auto result = options_calculator::market_data::fetch_yahoo_finance_quote("MSFT");
             
-            // Expected to fail with NetworkError since we removed cpr
-            testing::expect(result.has_value(), "has_value").toBe(false);
+            // Expected to succeed with a valid network request
+            testing::expect(result.has_value(), "has_value").toBe(true);
+            testing::expect(result->symbol, "symbol").toBe(std::string("MSFT"));
+            
+            // Price should be reasonably > 0
+            testing::expect(result->regularMarketPrice > 0.0, "price > 0").toBe(true);
         });
 
     bool success = suite.run();

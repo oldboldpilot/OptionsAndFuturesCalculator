@@ -1,5 +1,7 @@
 module;
 
+#define CPPHTTPLIB_OPENSSL_SUPPORT
+#include <httplib.h>
 #include <string>
 #include <system_error>
 
@@ -52,13 +54,70 @@ export auto fetch_yahoo_finance_quote(const std::string& symbol) -> std::expecte
     auto& log = logger::Logger::getInstance();
     log.info("Fetching market data for symbol: {}", symbol);
 
-    // Removed cpr HTTP fetching to minimize external dependencies.
-    // The market data fetching logic will be shifted to the Python layer 
-    // using httpx/yfinance, which will then feed this C++ module via nanobind.
+    httplib::Client cli("https://query1.finance.yahoo.com");
+    cli.set_connection_timeout(0, 500000); // 500ms
+    cli.set_read_timeout(1, 0); // 1s
     
-    // For now, return a simulated network error if called directly from C++
-    // until the Python layer is fully wired up to inject the data.
-    return std::unexpected(make_error_code(MarketDataError::NetworkError));
+    std::string path = "/v7/finance/quote?symbols=" + symbol;
+    
+    auto res = cli.Get(path, {
+        {"User-Agent", "Mozilla/5.0"}
+    });
+
+    if (!res) {
+        log.error("Network error fetching symbol {}: {}", symbol, httplib::to_string(res.error()));
+        return std::unexpected(make_error_code(MarketDataError::NetworkError));
+    }
+    
+    if (res->status != 200) {
+        log.error("HTTP error fetching symbol {}: status code {}", symbol, res->status);
+        return std::unexpected(make_error_code(MarketDataError::HttpError));
+    }
+
+    try {
+        // fastjson parsing
+        auto parsed = fastjson::parse(res->body);
+        if (parsed.is_null() || !parsed.has("quoteResponse") || !parsed["quoteResponse"].has("result")) {
+            return std::unexpected(make_error_code(MarketDataError::MissingData));
+        }
+        
+        auto result_arr = parsed["quoteResponse"]["result"];
+        if (result_arr.size() == 0) {
+            return std::unexpected(make_error_code(MarketDataError::MissingData));
+        }
+
+        auto result = result_arr[0];
+        
+        YahooFinanceQuote quote;
+        quote.symbol = symbol;
+        
+        if (result.has("regularMarketPrice")) {
+            quote.regularMarketPrice = result["regularMarketPrice"].as_double();
+        } else {
+            return std::unexpected(make_error_code(MarketDataError::MissingData));
+        }
+
+        if (result.has("regularMarketPreviousClose")) {
+            quote.regularMarketPreviousClose = result["regularMarketPreviousClose"].as_double();
+        } else {
+            quote.regularMarketPreviousClose = quote.regularMarketPrice;
+        }
+
+        if (result.has("forwardPE")) {
+            quote.forwardPE = result["forwardPE"].as_double();
+        } else {
+            quote.forwardPE = 0.0;
+        }
+
+        quote.impliedVolatility = 0.20; 
+
+        log.debug("Successfully parsed quote for {}: price={}", symbol, quote.regularMarketPrice);
+
+        return quote;
+    } catch (...) {
+        log.error("Failed to parse JSON response for symbol: {}", symbol);
+        return std::unexpected(make_error_code(MarketDataError::ParseError));
+    }
 }
 
 } // namespace options_calculator::market_data

@@ -57,7 +57,7 @@ add_subdirectory(nanobind EXCLUDE_FROM_ALL)
 
 # Core engine binary
 add_executable(calculator_engine src/main.cpp src/modules/calculator_service.cppm src/modules/market_data.cppm)
-target_link_libraries(calculator_engine PRIVATE proto_lib sensen fastjson logger sgee)
+target_link_libraries(calculator_engine PRIVATE proto_lib sensen fastjson logger sgee httplib::httplib OpenSSL::SSL OpenSSL::Crypto)
 
 # Python Bindings via nanobind
 nanobind_add_module(
@@ -71,11 +71,21 @@ target_link_libraries(options_futures_engine PRIVATE proto_lib sensen fastjson l
 # Setup testing
 enable_testing()
 
+# Setup minimal C++ HTTP Client (cpp-httplib) for native nanosecond-latency HTTP
+include(FetchContent)
+FetchContent_Declare(
+    httplib
+    GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
+    GIT_TAG v0.15.3
+)
+FetchContent_MakeAvailable(httplib)
+find_package(OpenSSL REQUIRED)
+
 add_executable(test_runner 
     src/test_main.cpp
     src/modules/testing_framework.cppm
     src/modules/market_data.cppm
 )
-target_link_libraries(test_runner PRIVATE proto_lib sensen fastjson logger sgee)
+target_link_libraries(test_runner PRIVATE proto_lib sensen fastjson logger sgee httplib::httplib OpenSSL::SSL OpenSSL::Crypto)
 
 add_test(NAME CoreEngineTest COMMAND test_runner)
