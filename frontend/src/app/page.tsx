@@ -5,6 +5,7 @@ import { PnLHeatmap } from '../components/PnLHeatmap';
 import { DashboardLayout } from '../components/DashboardLayout';
 import { StrategySelector } from '../components/StrategySelector';
 import { OptionChainTable } from '../components/OptionChainTable';
+import { RiskMetricsPanel } from '../components/RiskMetricsPanel';
 import { useCalculatorStore } from '../store/useCalculatorStore';
 
 export default function Home() {
@@ -43,6 +44,9 @@ export default function Home() {
               <PnLHeatmap data={result?.matrix || []} />
             </div>
           </div>
+          
+          {/* Risk & Probabilities Sub-Panel */}
+          <RiskMetricsPanel />
         </div>
       </div>
     </DashboardLayout>
