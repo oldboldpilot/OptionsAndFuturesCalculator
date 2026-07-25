@@ -1,15 +1,17 @@
 'use client';
 
 import { useEffect } from 'react';
-import { PnLHeatmap } from '../components/PnLHeatmap';
+import OptionsHeatmap from '../components/OptionsHeatmap';
 import { DashboardLayout } from '../components/DashboardLayout';
 import { StrategySelector } from '../components/StrategySelector';
-import { OptionChainTable } from '../components/OptionChainTable';
-import { RiskMetricsPanel } from '../components/RiskMetricsPanel';
+import OptionChain from '../components/OptionChain';
+import { BrokerRouter } from '../components/BrokerRouter';
+import RiskMetrics from '../components/RiskMetrics';
+import ProbabilityDistribution from '../components/ProbabilityDistribution';
 import { useCalculatorStore } from '../store/useCalculatorStore';
 
 export default function Home() {
-  const { result, calculateStrategy, isLoading } = useCalculatorStore();
+  const { calculateStrategy, isLoading } = useCalculatorStore();
 
   useEffect(() => {
     // Scaffold initial render
@@ -28,7 +30,8 @@ export default function Home() {
         {/* Left Column: Strategy and Option Chain */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem', overflowY: 'auto', paddingRight: '0.5rem' }}>
           <StrategySelector />
-          <OptionChainTable />
+          <OptionChain />
+          <BrokerRouter />
         </div>
 
         {/* Right Column: 3D Visualization */}
@@ -41,12 +44,19 @@ export default function Home() {
               </button>
             </div>
             <div style={{ flexGrow: 1, borderRadius: '8px', overflow: 'hidden', position: 'relative' }}>
-              <PnLHeatmap data={result?.matrix || []} />
+              <OptionsHeatmap />
             </div>
           </div>
           
           {/* Risk & Probabilities Sub-Panel */}
-          <RiskMetricsPanel />
+          <div style={{ display: 'flex', gap: '1.5rem' }}>
+             <div style={{ flex: 1 }}>
+               <RiskMetrics />
+             </div>
+             <div style={{ flex: 1 }}>
+               <ProbabilityDistribution mean={100} stdDev={15} />
+             </div>
+          </div>
         </div>
       </div>
     </DashboardLayout>

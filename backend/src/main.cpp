@@ -3,16 +3,15 @@
 #include <string>
 #include <grpcpp/grpcpp.h>
 
-import std;
+
 import calculator_service;
 
 auto RunServer() -> void {
     std::string server_address("0.0.0.0:50051");
-    options_calculator::service::CalculatorServiceImpl service;
-
     grpc::ServerBuilder builder;
     builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
-    builder.RegisterService(&service);
+    
+    options_calculator::service::RegisterCalculatorService(&builder);
 
     std::unique_ptr<grpc::Server> server(builder.BuildAndStart());
     std::cout << "Server listening on " << server_address << std::endl;

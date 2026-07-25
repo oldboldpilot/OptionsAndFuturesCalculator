@@ -14,7 +14,7 @@ const HeatmapMesh: React.FC<{ data: MatrixCell[] }> = ({ data }) => {
   const meshRef = useRef<THREE.Mesh>(null);
 
   // Generate geometry from data
-  const { geometry, colors } = useMemo(() => {
+  const { geometry } = useMemo(() => {
     // In a real scenario, this builds a parametric surface based on price & dte
     const geom = new THREE.PlaneGeometry(10, 10, 50, 50);
     
@@ -43,7 +43,8 @@ const HeatmapMesh: React.FC<{ data: MatrixCell[] }> = ({ data }) => {
     
     geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
     geom.computeVertexNormals();
-    return { geometry: geom, colors };
+    return { geometry: geom };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data]);
 
   useFrame((state) => {

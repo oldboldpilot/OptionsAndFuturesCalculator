@@ -1,5 +1,19 @@
+module;
+#include <string>
+#include <vector>
+#include <memory>
+#include <iostream>
+#include <cmath>
+#include <chrono>
+#include <thread>
+#include <variant>
+#include <map>
+#include <unordered_map>
+#include <functional>
+#include <exception>
+
 export module calculator.testing;
-import std;
+
 import calculator.engine;
 
 export namespace calculator::testing {

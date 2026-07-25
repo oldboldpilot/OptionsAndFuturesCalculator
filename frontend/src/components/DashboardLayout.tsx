@@ -1,5 +1,6 @@
 import React, { ReactNode } from 'react';
 import { Sidebar } from './Sidebar';
+import { AuthUI } from './AuthUI';
 import './DashboardLayout.css';
 
 interface DashboardLayoutProps {
@@ -27,6 +28,7 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = ({ children }) =>
             <button className="btn">
               New Trade
             </button>
+            <AuthUI />
           </div>
         </header>
         <div className="dashboard-content">

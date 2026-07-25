@@ -10,3 +10,6 @@
 [submodule "backend/nanobind"]
 	path = backend/nanobind
 	url = https://github.com/wjakob/nanobind
+[submodule "backend/external/SGEE"]
+	path = backend/external/SGEE
+	url = https://github.com/oldboldpilot/StochasticGraphExecutionEngine.git

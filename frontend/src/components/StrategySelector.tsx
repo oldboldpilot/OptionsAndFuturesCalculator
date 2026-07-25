@@ -1,14 +1,17 @@
+'use client';
+
 import React, { useState } from 'react';
+import { useCalculatorStore } from '../store/useCalculatorStore';
 import './StrategySelector.css';
 
-type StrategyType = 'call_spread' | 'put_spread' | 'straddle' | 'strangle' | 'iron_condor' | 'butterfly';
+type StrategyType = 'call_spread' | 'put_spread' | 'straddle' | 'strangle' | 'iron_condor' | 'butterfly' | 'covered_call' | 'futures_spread';
 
 interface StrategyOption {
   id: StrategyType;
   name: string;
   description: string;
   icon: string;
-  legs: { action: 'Buy' | 'Sell'; type: 'Call' | 'Put'; strikeOffset: string }[];
+  legs: { action: 'Buy' | 'Sell'; type: 'Call' | 'Put' | 'Stock' | 'Future'; strikeOffset: string }[];
 }
 
 const strategies: StrategyOption[] = [
@@ -74,13 +77,62 @@ const strategies: StrategyOption[] = [
       { action: 'Sell', type: 'Call', strikeOffset: 'ATM (x2)' },
       { action: 'Buy', type: 'Call', strikeOffset: 'OTM' }
     ]
+  },
+  {
+    id: 'covered_call',
+    name: 'Covered Call',
+    description: 'Holding long stock and selling a call against it.',
+    icon: '🛡️',
+    legs: [
+      { action: 'Buy', type: 'Stock', strikeOffset: 'Current Price' },
+      { action: 'Sell', type: 'Call', strikeOffset: 'OTM' }
+    ]
+  },
+  {
+    id: 'futures_spread',
+    name: 'Futures Spread',
+    description: 'Multi-leg spread using futures contracts.',
+    icon: '🚀',
+    legs: [
+      { action: 'Buy', type: 'Future', strikeOffset: 'Near Term' },
+      { action: 'Sell', type: 'Future', strikeOffset: 'Far Term' }
+    ]
   }
 ];
 
 export const StrategySelector: React.FC = () => {
   const [selectedStrategy, setSelectedStrategy] = useState<StrategyType | null>(null);
+  const [saveName, setSaveName] = useState('');
+  const { addLeg, clearLegs, calculateStrategy, saveStrategy, legs } = useCalculatorStore();
 
   const selectedData = strategies.find(s => s.id === selectedStrategy);
+
+  const applyStrategy = () => {
+    if (!selectedData) return;
+    
+    clearLegs();
+    
+    // Add new legs based on template
+    selectedData.legs.forEach(legDef => {
+      // mapping 'Stock' to INSTRUMENT_EQUITY_SPOT, 'Future' to INSTRUMENT_FUTURES_SPOT
+      let instrumentType = 'INSTRUMENT_EQUITY_OPTION';
+      if (legDef.type === 'Stock') instrumentType = 'INSTRUMENT_EQUITY_SPOT';
+      if (legDef.type === 'Future') instrumentType = 'INSTRUMENT_FUTURES_SPOT';
+      
+      addLeg({
+        instrument_type: instrumentType,
+        action: legDef.action.toUpperCase(),
+        quantity: 1,
+        strike_price: legDef.strikeOffset === 'ATM' ? 150.0 : legDef.strikeOffset === 'Current Price' ? 150.0 : legDef.strikeOffset.includes('ITM') ? 145.0 : 155.0,
+        option_type: legDef.type.toUpperCase(),
+        premium: legDef.type === 'Stock' ? 150.0 : 5.0,
+        implied_volatility: 0.20
+      });
+    });
+    
+    // Automatically recalculate
+    calculateStrategy();
+  };
 
   return (
     <div className="glass-panel strategy-selector">
@@ -117,6 +169,28 @@ export const StrategySelector: React.FC = () => {
               </div>
             ))}
           </div>
+          <div className="flex gap-2" style={{ marginTop: '1rem', width: '100%' }}>
+            <button className="btn flex-1" onClick={applyStrategy}>
+              Apply Strategy
+            </button>
+            {legs.length > 0 && (
+              <button 
+                className="btn flex-1 bg-purple-600/50 hover:bg-purple-600/80" 
+                onClick={() => saveStrategy(saveName || selectedData.name, 'SPY')}
+              >
+                Save Portfolio
+              </button>
+            )}
+          </div>
+          {legs.length > 0 && (
+             <input
+               type="text"
+               placeholder="Strategy Name (e.g. My SPY Hedge)"
+               className="mt-2 w-full p-2 rounded bg-white/5 border border-white/10 text-sm"
+               value={saveName}
+               onChange={(e) => setSaveName(e.target.value)}
+             />
+          )}
         </div>
       )}
     </div>

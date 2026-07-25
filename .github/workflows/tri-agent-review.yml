@@ -1,0 +1,56 @@
+name: Tri-Agent Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  claude-agent-review:
+    name: Claude Architecture & Security Review
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Claude Agent Review
+        uses: anthropics/claude-code-review-action@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          model: "claude-3-7-sonnet-20250219"
+          instructions_file: "CLAUDE.md"
+
+  agy-agent-review:
+    name: AGY C++23 & Memory Safety Review
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run AGY Code Review
+        uses: google/antigravity-code-review-action@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+          policy_file: "config/cpp_details.txt"
+
+  cursor-agent-review:
+    name: Cursor UI & Integration Review
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Cursor Agent Review
+        uses: getcursor/cursor-review-action@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          frontend_path: "frontend/"
+          require_approval: true
+
+  adversarial-gate:
+    name: Adversarial Consensus Gate (Production)
+    needs: [claude-agent-review, agy-agent-review, cursor-agent-review]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Adversarial Review Gate
+        run: |
+          chmod +x ./scripts/code_review_adversarial.sh
+          ./scripts/code_review_adversarial.sh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,11 +1,27 @@
 module;
+#include <string>
+#include <vector>
+#include <memory>
+#include <iostream>
+#include <cmath>
+#include <chrono>
+#include <thread>
+#include <variant>
+#include <map>
+#include <unordered_map>
+#include <expected>
+#include <system_error>
+#include <string_view>
+#include <sstream>
 
+#ifndef CPPHTTPLIB_OPENSSL_SUPPORT
 #define CPPHTTPLIB_OPENSSL_SUPPORT
+#endif
 #include <httplib.h>
 
 export module market_data;
 
-import std;
+
 import fastjson;
 import logger;
 
@@ -89,9 +105,12 @@ export auto fetch_yahoo_finance_quote(const std::string& symbol) -> std::expecte
     }
 
     try {
-        // fastjson parsing
-        auto parsed = fastjson::parse(res->body);
-        if (parsed.is_null() || !parsed.has("quoteResponse") || !parsed["quoteResponse"].has("result")) {
+        auto parsed_expected = fastjson::parse(res->body);
+        if (!parsed_expected.has_value()) {
+            return std::unexpected(make_error_code(MarketDataError::ParseError));
+        }
+        auto parsed = parsed_expected.value();
+        if (parsed.is_null() || !parsed.contains("quoteResponse") || !parsed["quoteResponse"].contains("result")) {
             return std::unexpected(make_error_code(MarketDataError::MissingData));
         }
         
@@ -105,20 +124,20 @@ export auto fetch_yahoo_finance_quote(const std::string& symbol) -> std::expecte
         YahooFinanceQuote quote;
         quote.symbol = symbol;
         
-        if (result.has("regularMarketPrice")) {
-            quote.regularMarketPrice = result["regularMarketPrice"].as_double();
+        if (result.contains("regularMarketPrice")) {
+            quote.regularMarketPrice = result["regularMarketPrice"].as_float64();
         } else {
             return std::unexpected(make_error_code(MarketDataError::MissingData));
         }
 
-        if (result.has("regularMarketPreviousClose")) {
-            quote.regularMarketPreviousClose = result["regularMarketPreviousClose"].as_double();
+        if (result.contains("regularMarketPreviousClose")) {
+            quote.regularMarketPreviousClose = result["regularMarketPreviousClose"].as_float64();
         } else {
             quote.regularMarketPreviousClose = quote.regularMarketPrice;
         }
 
-        if (result.has("forwardPE")) {
-            quote.forwardPE = result["forwardPE"].as_double();
+        if (result.contains("forwardPE")) {
+            quote.forwardPE = result["forwardPE"].as_float64();
         } else {
             quote.forwardPE = 0.0;
         }

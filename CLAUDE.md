@@ -34,3 +34,4 @@ An enterprise-grade web application giving retail traders and institutions real-
 ## General Instructions
 - **Do not bypass the adversarial CI:** If a commit is rejected, fix the issue described by the Tri-Agent consensus output.
 - **Adhere to Code Policy:** Check `config/cpp_details.txt` and `config/update_policy.txt` if uncertain about architectural rules.
+- **Claude Agent Capability:** The Claude Agent is enabled via `.clauderc` for local CLI execution and via `.github/workflows/tri-agent-review.yml` for CI/CD Pull Request reviews.

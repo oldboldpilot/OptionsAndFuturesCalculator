@@ -1,0 +1,8 @@
+build/
+.git/
+.github/
+.vscode/
+tests/
+scripts/
+*.pyc
+__pycache__/

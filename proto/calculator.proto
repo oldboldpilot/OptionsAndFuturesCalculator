@@ -8,7 +8,7 @@ service OptionsCalculator {
 
 message Leg {
   enum Action { BUY = 0; SELL = 1; }
-  enum Type { CALL = 0; PUT = 1; }
+  enum Type { CALL = 0; PUT = 1; FUTURE = 2; STOCK = 3; }
   
   Action action = 1;
   Type type = 2;
@@ -37,6 +37,12 @@ message PnLPoint {
   double underlying_price = 1;
   double pnl = 2;
 }
+message RiskMetrics {
+  double var_parametric_95 = 1;
+  double var_parametric_99 = 2;
+  double cvar_parametric_95 = 3;
+  double cvar_parametric_99 = 4;
+}
 
 message StrategyResponse {
   double max_profit = 1;
@@ -45,5 +51,6 @@ message StrategyResponse {
   double expected_value = 4;
   double pop = 5; // Probability of Profit
   Greeks net_greeks = 6;
-  repeated PnLPoint pnl_matrix = 7;
+  RiskMetrics risk_metrics = 7;
+  repeated PnLPoint pnl_matrix = 8;
 }
