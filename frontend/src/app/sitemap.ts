@@ -1,6 +1,8 @@
 import { MetadataRoute } from 'next';
 import { branding } from '@/config/branding';
 
+export const dynamic = 'force-static';
+
 export default function sitemap(): MetadataRoute.Sitemap {
   return [
     {

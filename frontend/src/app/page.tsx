@@ -3,6 +3,7 @@
 import { useEffect } from 'react';
 import OptionsHeatmap from '../components/OptionsHeatmap';
 import { DashboardLayout } from '../components/DashboardLayout';
+import { SymbolSelector } from '../components/SymbolSelector';
 import { StrategySelector } from '../components/StrategySelector';
 import OptionChain from '../components/OptionChain';
 import { BrokerRouter } from '../components/BrokerRouter';
@@ -27,8 +28,9 @@ export default function Home() {
         height: '100%',
         paddingBottom: '2rem'
       }}>
-        {/* Left Column: Strategy and Option Chain */}
+        {/* Left Column: Symbol, Strategy and Option Chain */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem', overflowY: 'auto', paddingRight: '0.5rem' }}>
+          <SymbolSelector />
           <StrategySelector />
           <OptionChain />
           <BrokerRouter />

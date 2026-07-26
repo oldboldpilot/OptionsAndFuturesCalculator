@@ -35,6 +35,8 @@ export interface CalculationResult {
 }
 
 interface CalculatorState {
+  symbol: string;
+  assetClass: 'EQUITY' | 'FUTURES' | 'CRYPTO';
   legs: Leg[];
   spotPrice: number;
   riskFreeRate: number;
@@ -42,6 +44,7 @@ interface CalculatorState {
   isLoading: boolean;
   error: string | null;
   
+  setSymbol: (symbol: string, spotPrice?: number, assetClass?: 'EQUITY' | 'FUTURES' | 'CRYPTO') => void;
   addLeg: (leg: Omit<Leg, 'id'>) => void;
   removeLeg: (id: string) => void;
   clearLegs: () => void;
@@ -56,12 +59,20 @@ interface CalculatorState {
 const supabase = createClient();
 
 export const useCalculatorStore = create<CalculatorState>((set, get) => ({
+  symbol: 'SPY',
+  assetClass: 'EQUITY',
   legs: [],
-  spotPrice: 150.0,
+  spotPrice: 580.0,
   riskFreeRate: 0.05,
   result: null,
   isLoading: false,
   error: null,
+
+  setSymbol: (symbol, spotPrice, assetClass) => set((state) => ({
+    symbol: symbol.toUpperCase(),
+    spotPrice: spotPrice !== undefined ? spotPrice : state.spotPrice,
+    assetClass: assetClass || (['ES', 'NQ', 'CL', 'GC', 'ZB', 'NG'].includes(symbol.toUpperCase()) ? 'FUTURES' : ['BTC', 'ETH'].includes(symbol.toUpperCase()) ? 'CRYPTO' : 'EQUITY')
+  })),
 
   addLeg: (leg) => set((state) => ({ 
     legs: [...state.legs, { ...leg, id: Math.random().toString(36).substring(7) }] 

@@ -1,37 +1,52 @@
-# Options & Futures Profit Calculator - Claude Guide
+# Options & Futures Profit Calculator - Master Architecture Guide
 
-This file provides context, build instructions, and strict coding policies for Claude.
+@author Olumuyiwa Oluwasanmi
 
-## Project Overview
-An enterprise-grade web application giving retail traders and institutions real-time, interactive P&L matrix visualizations, risk probability models, and option sensitivity breakdowns.
-- **Backend:** C++23 Native Modular Engine (No Exceptions, ROP only).
-- **Frontend:** Next.js with React Three Fiber (Vanilla CSS + Glassmorphism).
-- **Database/Auth:** Supabase with strict RLS and Edge Functions.
+This document outlines the system architecture, build commands, and deployment infrastructure for the Options & Futures Profit Calculator.
+
+## System Architecture
+
+```
+[ Client Browser ]
+      │
+      ├──> Cloudflare Pages (Frontend Web UI: Static Next.js Export)
+      │      • Domain: https://optionsandfuturescalculator.com
+      │      • WWW Alias: https://www.optionsandfuturescalculator.com
+      │      • Pages Subdomain: https://optionsandfuturescalculator.pages.dev
+      │
+      ├──> Railway Container Ingress (gRPC-Web / HTTP Engine Proxy)
+      │      • Public Custom Domain: https://api.optionsandfuturescalculator.com
+      │      • Railway Service: options-calculator-backend
+      │      • Engine: Native C++23 Options & Futures Engine + Envoy Proxy (Port 8080)
+      │
+      └──> Railway PostgreSQL Database
+             • Internal Host: postgres.railway.internal:5432
+             • Public TCP Proxy: monorail.proxy.rlwy.net:11453
+             • Database: railway (Tables: users, profiles, saved_strategies)
+```
+
+## Features & Capabilities
+
+1. **Futures & Options Strategy Modeler:**
+   - Options Strategies: Bull Call Spread, Bear Put Spread, Straddle, Strangle, Iron Condor, Call Butterfly, Covered Call.
+   - Futures Strategies: Futures Outright Long/Short, Futures Calendar Spread, Inter-Commodity / Crack Spread, Covered Futures Call (FOP), Cash & Carry / Basis Trade.
+
+2. **Interactive Symbol Selector:**
+   - Live ticker search across Equities (`SPY`, `QQQ`, `NVDA`, `AAPL`, `TSLA`), Futures (`ES`, `NQ`, `CL`, `GC`, `ZB`), and Crypto (`BTC`, `ETH`).
+   - Automated asset class classification (`EQUITY`, `FUTURES`, `CRYPTO`).
+   - Fast-select preset pills and custom spot price simulation.
+
+3. **Full Complement Market Chains:**
+   - **Options Chain:** Dynamic ITM/ATM/OTM strikes (15+ strikes), Bids, Asks, Deltas, Volumes, Open Interests, IVs, and Weekly/Monthly/Quarterly expiration date filters.
+   - **Futures Term Structure Chain:** Contract codes (`ESU26`, `ESZ26`, `ESH27`), delivery months, days to expiry, forward prices, basis vs spot, cost of carry yield (% p.a.), volume, and open interest.
+
+## Deployment Details
+
+- **Frontend Deployment:** Cloudflare Pages CLI (`npx wrangler pages deploy frontend/out --project-name=optionsandfuturescalculator`).
+- **Backend Deployment:** Railway CLI (`railway up --detach` linked to project `fearless-amazement` service `options-calculator-backend`).
+- **Database Schema:** Applied `backend/migrations/01_init.sql` to Railway Postgres via `psql`.
 
 ## Build Commands
-- **Backend Build & Test:** `./scripts/build_common.sh`
-- **Frontend Build:** `cd frontend && npm run build`
-- **Frontend Dev:** `cd frontend && npm run dev`
-- **Sync & Adversarial CI:** `./scripts/code_update_sync.sh "Commit message"`
-
-## Strict C++ Backend Policies
-1. **Modules Over Headers:** USE `import std;` instead of `#include <iostream>`, etc.
-2. **Error Handling (ROP):** NO EXCEPTIONS (`throw`, `try/catch`). You MUST use Railway Oriented Programming (ROP) via `std::expected` and monadic `.and_then()`, `.transform()`, `.or_else()`.
-3. **Performance:** Do not use the fast-math compiler flag. Use Intel TBB and the internal SIMD library (`sensen`).
-4. **Testing:** No external libraries (no Google Test, Catch2, etc.). Use the internal functional/fluent API test runner defined in `backend/src/modules/testing_framework.cppm`.
-5. **No `cat` / `ls`:** When scripting, use specific native tooling.
-
-## Strict Frontend Policies (Next.js)
-1. **Vanilla CSS ONLY:** Do NOT use Tailwind CSS or any utility classes. All styling must be written in standard CSS using the established glassmorphic tokens in `frontend/src/app/globals.css`.
-2. **State Management:** Use Zustand (`src/store/useCalculatorStore.ts`).
-3. **Data Fetching/Networking:** Use gRPC-Web interacting with protobuf models.
-4. **WebGL:** Use `@react-three/fiber` for 3D visualizations.
-
-## Supabase & Edge Functions
-- Edge Functions are built in Deno (`supabase/functions/`).
-- Initial schemas are in `supabase/migrations/20260723000000_initial_schema.sql`.
-
-## General Instructions
-- **Do not bypass the adversarial CI:** If a commit is rejected, fix the issue described by the Tri-Agent consensus output.
-- **Adhere to Code Policy:** Check `config/cpp_details.txt` and `config/update_policy.txt` if uncertain about architectural rules.
-- **Claude Agent Capability:** The Claude Agent is enabled via `.clauderc` for local CLI execution and via `.github/workflows/tri-agent-review.yml` for CI/CD Pull Request reviews.
+- **Frontend Production Build:** `cd frontend && npm run build`
+- **Frontend Dev Server:** `cd frontend && npm run dev`
+- **Backend Docker Build:** `docker build -t options-backend backend/`

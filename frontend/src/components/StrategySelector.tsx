@@ -4,11 +4,24 @@ import React, { useState } from 'react';
 import { useCalculatorStore } from '../store/useCalculatorStore';
 import './StrategySelector.css';
 
-type StrategyType = 'call_spread' | 'put_spread' | 'straddle' | 'strangle' | 'iron_condor' | 'butterfly' | 'covered_call' | 'futures_spread';
+type StrategyType = 
+  | 'call_spread' 
+  | 'put_spread' 
+  | 'straddle' 
+  | 'strangle' 
+  | 'iron_condor' 
+  | 'butterfly' 
+  | 'covered_call' 
+  | 'futures_outright'
+  | 'futures_calendar_spread'
+  | 'futures_intercommodity_spread'
+  | 'covered_futures_call'
+  | 'futures_basis_arbitrage';
 
 interface StrategyOption {
   id: StrategyType;
   name: string;
+  category: 'Options' | 'Futures' | 'Hybrid';
   description: string;
   icon: string;
   legs: { action: 'Buy' | 'Sell'; type: 'Call' | 'Put' | 'Stock' | 'Future'; strikeOffset: string }[];
@@ -18,6 +31,7 @@ const strategies: StrategyOption[] = [
   {
     id: 'call_spread',
     name: 'Bull Call Spread',
+    category: 'Options',
     description: 'Bullish strategy with limited risk and reward.',
     icon: '📈',
     legs: [
@@ -28,6 +42,7 @@ const strategies: StrategyOption[] = [
   {
     id: 'put_spread',
     name: 'Bear Put Spread',
+    category: 'Options',
     description: 'Bearish strategy with limited risk and reward.',
     icon: '📉',
     legs: [
@@ -38,6 +53,7 @@ const strategies: StrategyOption[] = [
   {
     id: 'straddle',
     name: 'Long Straddle',
+    category: 'Options',
     description: 'Neutral strategy profiting from high volatility.',
     icon: '⚡',
     legs: [
@@ -48,6 +64,7 @@ const strategies: StrategyOption[] = [
   {
     id: 'strangle',
     name: 'Long Strangle',
+    category: 'Options',
     description: 'Cheaper neutral strategy needing larger moves.',
     icon: '🌊',
     legs: [
@@ -58,6 +75,7 @@ const strategies: StrategyOption[] = [
   {
     id: 'iron_condor',
     name: 'Iron Condor',
+    category: 'Options',
     description: 'Neutral strategy profiting from low volatility.',
     icon: '🦅',
     legs: [
@@ -70,6 +88,7 @@ const strategies: StrategyOption[] = [
   {
     id: 'butterfly',
     name: 'Call Butterfly',
+    category: 'Options',
     description: 'Targeted strategy for a specific price pin.',
     icon: '🦋',
     legs: [
@@ -81,6 +100,7 @@ const strategies: StrategyOption[] = [
   {
     id: 'covered_call',
     name: 'Covered Call',
+    category: 'Options',
     description: 'Holding long stock and selling a call against it.',
     icon: '🛡️',
     legs: [
@@ -89,13 +109,57 @@ const strategies: StrategyOption[] = [
     ]
   },
   {
-    id: 'futures_spread',
-    name: 'Futures Spread',
-    description: 'Multi-leg spread using futures contracts.',
-    icon: '🚀',
+    id: 'futures_outright',
+    name: 'Futures Outright Long',
+    category: 'Futures',
+    description: 'Direct directional position in Futures contracts (ES, NQ, CL, GC).',
+    icon: '⚡',
     legs: [
-      { action: 'Buy', type: 'Future', strikeOffset: 'Near Term' },
-      { action: 'Sell', type: 'Future', strikeOffset: 'Far Term' }
+      { action: 'Buy', type: 'Future', strikeOffset: 'Front Month (Spot)' }
+    ]
+  },
+  {
+    id: 'futures_calendar_spread',
+    name: 'Futures Calendar Spread',
+    category: 'Futures',
+    description: 'Inter-month futures spread exploiting term structure & contango/backwardation.',
+    icon: '📅',
+    legs: [
+      { action: 'Buy', type: 'Future', strikeOffset: 'Near Month' },
+      { action: 'Sell', type: 'Future', strikeOffset: 'Far Month' }
+    ]
+  },
+  {
+    id: 'futures_intercommodity_spread',
+    name: 'Futures Inter-Commodity / Crack Spread',
+    category: 'Futures',
+    description: 'Relative value spread between related futures products (e.g. S&P vs Nasdaq, Oil vs Gas).',
+    icon: '⚖️',
+    legs: [
+      { action: 'Buy', type: 'Future', strikeOffset: 'Contract A (ES/CL)' },
+      { action: 'Sell', type: 'Future', strikeOffset: 'Contract B (NQ/RB)' }
+    ]
+  },
+  {
+    id: 'covered_futures_call',
+    name: 'Covered Futures Call',
+    category: 'Hybrid',
+    description: 'Long futures contract hedged by selling an out-of-the-money Futures Option (FOP).',
+    icon: '🎯',
+    legs: [
+      { action: 'Buy', type: 'Future', strikeOffset: 'Front Month' },
+      { action: 'Sell', type: 'Call', strikeOffset: 'OTM (FOP)' }
+    ]
+  },
+  {
+    id: 'futures_basis_arbitrage',
+    name: 'Cash & Carry / Basis Trade',
+    category: 'Hybrid',
+    description: 'Long physical/spot asset while shorting the corresponding Futures contract.',
+    icon: '🏦',
+    legs: [
+      { action: 'Buy', type: 'Stock', strikeOffset: 'Spot Price' },
+      { action: 'Sell', type: 'Future', strikeOffset: 'Futures Price' }
     ]
   }
 ];

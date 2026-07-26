@@ -1,0 +1,8 @@
+node_modules
+frontend
+.git
+.next
+docs
+*.log
+backend/sensen/external
+backend/external

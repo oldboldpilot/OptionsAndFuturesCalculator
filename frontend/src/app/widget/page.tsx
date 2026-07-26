@@ -1,29 +1,18 @@
-import React from 'react';
-import { Metadata } from 'next';
+'use client';
+
+import React, { Suspense } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { StrategySelector } from '../../components/StrategySelector';
 import OptionChain from '../../components/OptionChain';
 import OptionsHeatmap from '../../components/OptionsHeatmap';
 import RiskMetrics from '../../components/RiskMetrics';
 
-// Widget Metadata
-export const metadata: Metadata = {
-  title: 'Options Calculator Widget',
-  description: 'Embeddable White-Label Options & Futures Calculator',
-  robots: 'noindex, nofollow', // Prevent search engines from indexing the iframe directly
-};
+function WidgetContent() {
+  const searchParams = useSearchParams();
+  const theme = searchParams.get('theme') === 'light' ? 'light' : 'dark';
+  const primaryColorParam = searchParams.get('primaryColor');
+  const primaryColor = typeof primaryColorParam === 'string' ? `#${primaryColorParam}` : '#38bdf8';
 
-export default async function WidgetPage({
-  searchParams,
-}: {
-  searchParams: Promise<{ [key: string]: string | string[] | undefined }>;
-}) {
-  const resolvedSearchParams = await searchParams;
-  // Extract styling or tenant configuration from query params
-  // Examples: ?theme=light, ?primaryColor=006cfa, ?tenant=RIA_123
-  const theme = resolvedSearchParams.theme === 'light' ? 'light' : 'dark';
-  const primaryColor = typeof resolvedSearchParams.primaryColor === 'string' ? `#${resolvedSearchParams.primaryColor}` : '#38bdf8';
-  
-  // A completely stripped-down layout with no headers, sidebars, or broker routing (unless white-labeled)
   return (
     <div 
       style={{
@@ -74,9 +63,17 @@ export default async function WidgetPage({
           </div>
         </div>
 
-        {/* Option Chain (Optional for widget, but keeping for completeness) */}
+        {/* Option Chain */}
         <OptionChain />
       </div>
     </div>
+  );
+}
+
+export default function WidgetPage() {
+  return (
+    <Suspense fallback={<div>Loading Widget...</div>}>
+      <WidgetContent />
+    </Suspense>
   );
 }

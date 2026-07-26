@@ -2,6 +2,7 @@ import React from 'react';
 import { Metadata } from 'next';
 import { DashboardLayout } from '../../../components/DashboardLayout';
 import { StrategySelector } from '../../../components/StrategySelector';
+import { SymbolSelector } from '../../../components/SymbolSelector';
 import OptionChain from '../../../components/OptionChain';
 import OptionsHeatmap from '../../../components/OptionsHeatmap';
 import RiskMetrics from '../../../components/RiskMetrics';
@@ -17,7 +18,12 @@ const STRATEGIES = [
   'iron-condor',
   'butterfly',
   'covered-call',
-  'futures-spread'
+  'futures-spread',
+  'futures-outright',
+  'futures-calendar-spread',
+  'futures-intercommodity-spread',
+  'covered-futures-call',
+  'futures-basis-arbitrage'
 ];
 
 interface Props {
@@ -78,6 +84,7 @@ export default async function StrategyCalculatorPage({ params }: Props) {
       }}>
         {/* Left Column */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem', overflowY: 'auto', paddingRight: '0.5rem' }}>
+          <SymbolSelector />
           <StrategySelector />
           <OptionChain />
           <BrokerRouter />
