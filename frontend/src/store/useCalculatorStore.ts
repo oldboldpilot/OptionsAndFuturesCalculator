@@ -5,13 +5,14 @@ import { StrategyRequest, Leg as ProtoLeg, QuoteRequest } from '../grpc/calculat
 
 export interface Leg {
   id: string;
-  instrument_type: string; // 'EQUITY_OPTION', 'EQUITY_SPOT', etc.
-  action: string; // 'BUY', 'SELL'
-  quantity: number;
+  instrument_type: string;
+  action: string;
+  option_type: string;
   strike_price: number;
-  option_type: string; // 'CALL', 'PUT'
   premium: number;
-  implied_volatility: number;
+  quantity: number;
+  expiration_days?: number;
+  implied_volatility?: number;
 }
 
 export interface MatrixCell {

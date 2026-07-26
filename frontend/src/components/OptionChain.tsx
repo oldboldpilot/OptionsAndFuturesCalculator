@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { useCalculatorStore } from '../store/useCalculatorStore';
 import styles from './OptionChain.module.css';
 import { OptionsCalculatorClient } from '../grpc/CalculatorServiceClientPb';
@@ -37,14 +37,27 @@ interface FuturesContractRow {
   state: 'Contango' | 'Backwardation';
 }
 
+const EXPIRATIONS_LIST = [
+  { days: 0, label: '0 DTE (Same-Day Expiring)' },
+  { days: 7, label: '7 DTE (Weekly - Aug 01)' },
+  { days: 14, label: '14 DTE (Weekly - Aug 08)' },
+  { days: 30, label: '30 DTE (Monthly - Aug 25)' },
+  { days: 45, label: '45 DTE (Monthly - Sep 09)' },
+  { days: 60, label: '60 DTE (Quarterly - Sep 24)' },
+  { days: 90, label: '90 DTE (Quarterly - Oct 24)' },
+  { days: 180, label: '180 DTE (Semi-Annual - Jan 22)' },
+  { days: 365, label: '365 DTE (LEAPs - Jul 26)' }
+];
+
 export default function OptionChain() {
   const { symbol, spotPrice, assetClass, addLeg, calculateStrategy } = useCalculatorStore();
   const [activeTab, setActiveTab] = useState<'options' | 'futures'>(assetClass === 'FUTURES' ? 'futures' : 'options');
   const [expiryDays, setExpiryDays] = useState<number>(30);
+  const [optionSideFilter, setOptionSideFilter] = useState<'all' | 'calls' | 'puts'>('all');
   const [remoteStrikes, setRemoteStrikes] = useState<OptionStrikeRow[]>([]);
   const [remoteFutures, setRemoteFutures] = useState<FuturesContractRow[]>([]);
 
-  React.useEffect(() => {
+  useEffect(() => {
     try {
       const backendUrl = process.env.NEXT_PUBLIC_API_URL || 'https://api.optionsandfuturescalculator.com';
       const client = new OptionsCalculatorClient(backendUrl);
@@ -94,7 +107,7 @@ export default function OptionChain() {
     }
   }, [symbol, expiryDays, assetClass]);
 
-  // 1. Dynamic Options Chain Generator based on spotPrice & Backend gRPC
+  // Dynamic Options Chain Generator
   const optionChainData = useMemo<OptionStrikeRow[]>(() => {
     if (remoteStrikes.length > 0) return remoteStrikes;
 
@@ -118,8 +131,7 @@ export default function OptionChain() {
       const diff = strike - base;
       const distPct = diff / base;
 
-      // Approximate options pricing for visualization
-      const timeFactor = Math.sqrt(expiryDays / 365);
+      const timeFactor = Math.sqrt((expiryDays > 0 ? expiryDays : 1) / 365);
       const iv = 0.22 + Math.abs(distPct) * 0.1;
       const intrinsicCall = Math.max(0, base - strike);
       const intrinsicPut = Math.max(0, strike - base);
@@ -133,7 +145,6 @@ export default function OptionChain() {
       const putBid = Math.max(0.05, parseFloat((putEst * 0.98).toFixed(2)));
       const putAsk = Math.max(0.10, parseFloat((putEst * 1.02).toFixed(2)));
 
-      // Delta approximation
       const callDelta = parseFloat((0.5 - distPct * 3).toFixed(2));
       const clampedCallDelta = Math.min(0.99, Math.max(0.01, callDelta));
       const putDelta = parseFloat((clampedCallDelta - 1).toFixed(2));
@@ -160,9 +171,9 @@ export default function OptionChain() {
         isATM
       };
     });
-  }, [spotPrice, expiryDays]);
+  }, [spotPrice, expiryDays, remoteStrikes]);
 
-  // 2. Dynamic Futures Contract Term Structure Generator
+  // Dynamic Futures Term Structure Generator
   const futuresChainData = useMemo<FuturesContractRow[]>(() => {
     if (remoteFutures.length > 0) return remoteFutures;
 
@@ -176,7 +187,6 @@ export default function OptionChain() {
     ];
 
     return monthCodes.map((m) => {
-      // Cost of carry model: F = S * e^(r * t)
       const t = m.days / 365;
       const forwardPrice = spotPrice * Math.exp(m.r * t);
       const basis = forwardPrice - spotPrice;
@@ -197,7 +207,7 @@ export default function OptionChain() {
         state: basis >= 0 ? 'Contango' : 'Backwardation'
       };
     });
-  }, [symbol, spotPrice]);
+  }, [symbol, spotPrice, remoteFutures]);
 
   const handleAddOptionLeg = (action: 'BUY' | 'SELL', type: 'CALL' | 'PUT', strike: number, premium: number) => {
     addLeg({
@@ -207,6 +217,7 @@ export default function OptionChain() {
       strike_price: strike,
       premium,
       quantity: 1,
+      expiration_days: expiryDays,
       implied_volatility: 0.22
     });
     calculateStrategy();
@@ -227,18 +238,24 @@ export default function OptionChain() {
 
   return (
     <div className={styles.container}>
-      <div className={styles.header}>
+      {/* Top Header & Tab Navigation */}
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-slate-800">
         <div>
-          <h2 className={styles.title}>{symbol} Market Chains</h2>
-          <div className="flex gap-2 mt-1">
+          <h2 className="text-lg font-bold text-slate-100 flex items-center gap-2">
+            <span>{symbol}</span>
+            <span className="text-xs px-2 py-0.5 rounded bg-sky-500/20 text-sky-400 border border-sky-500/30">
+              ${spotPrice.toFixed(2)} Spot
+            </span>
+          </h2>
+          <div className="flex gap-2 mt-2">
             <button 
-              className={`px-3 py-1 text-xs rounded-md font-semibold transition ${activeTab === 'options' ? 'bg-sky-500 text-slate-950 font-bold' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}`}
+              className={`px-3 py-1.5 text-xs rounded-md font-semibold transition ${activeTab === 'options' ? 'bg-sky-500 text-slate-950 font-bold shadow-lg shadow-sky-500/20' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}`}
               onClick={() => setActiveTab('options')}
             >
-              Options Chain (Calls & Puts)
+              Option Chains
             </button>
             <button 
-              className={`px-3 py-1 text-xs rounded-md font-semibold transition ${activeTab === 'futures' ? 'bg-sky-500 text-slate-950 font-bold' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}`}
+              className={`px-3 py-1.5 text-xs rounded-md font-semibold transition ${activeTab === 'futures' ? 'bg-sky-500 text-slate-950 font-bold shadow-lg shadow-sky-500/20' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}`}
               onClick={() => setActiveTab('futures')}
             >
               Futures Term Structure
@@ -246,92 +263,178 @@ export default function OptionChain() {
           </div>
         </div>
 
+        {/* Options Controls: Expiration Selector & Call/Put Filter */}
         {activeTab === 'options' && (
-          <select className={styles.select} value={expiryDays} onChange={(e) => setExpiryDays(Number(e.target.value))}>
-            <option value={7}>7 Days (Weekly)</option>
-            <option value={14}>14 Days</option>
-            <option value={30}>30 Days (Monthly)</option>
-            <option value={60}>60 Days</option>
-            <option value={90}>90 Days (Quarterly)</option>
-            <option value={180}>180 Days</option>
-          </select>
+          <div className="flex flex-wrap items-center gap-3">
+            {/* Call / Put View Filter */}
+            <div className="flex items-center bg-slate-900 border border-slate-800 rounded-md p-0.5">
+              <button
+                className={`px-2.5 py-1 text-xs rounded font-medium transition ${optionSideFilter === 'all' ? 'bg-slate-700 text-white' : 'text-slate-400 hover:text-slate-200'}`}
+                onClick={() => setOptionSideFilter('all')}
+              >
+                All (Calls & Puts)
+              </button>
+              <button
+                className={`px-2.5 py-1 text-xs rounded font-semibold transition ${optionSideFilter === 'calls' ? 'bg-emerald-600 text-white' : 'text-emerald-400 hover:text-emerald-300'}`}
+                onClick={() => setOptionSideFilter('calls')}
+              >
+                Calls Only 🟢
+              </button>
+              <button
+                className={`px-2.5 py-1 text-xs rounded font-semibold transition ${optionSideFilter === 'puts' ? 'bg-rose-600 text-white' : 'text-rose-400 hover:text-rose-300'}`}
+                onClick={() => setOptionSideFilter('puts')}
+              >
+                Puts Only 🔴
+              </button>
+            </div>
+
+            {/* Individual Option Expiration Selection Dropdown */}
+            <div className="flex items-center gap-2">
+              <label className="text-xs font-semibold text-slate-400">Expiration Chain:</label>
+              <select 
+                className="bg-slate-900 border border-slate-700 rounded-md px-3 py-1.5 text-xs text-sky-400 font-semibold focus:outline-none focus:border-sky-500" 
+                value={expiryDays} 
+                onChange={(e) => setExpiryDays(Number(e.target.value))}
+              >
+                {EXPIRATIONS_LIST.map((exp) => (
+                  <option key={exp.days} value={exp.days}>
+                    {exp.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
         )}
       </div>
 
       {/* OPTIONS CHAIN TABLE */}
       {activeTab === 'options' ? (
-        <div className={styles.tableWrapper}>
+        <div className={styles.tableWrapper + " mt-4"}>
           <table className={styles.chainTable}>
             <thead>
               <tr>
-                <th colSpan={5} className={styles.callHeader}>CALLS</th>
-                <th className={styles.strikeHeader}>STRIKE</th>
-                <th colSpan={5} className={styles.putHeader}>PUTS</th>
+                {(optionSideFilter === 'all' || optionSideFilter === 'calls') && (
+                  <th colSpan={6} className={styles.callHeader + " bg-emerald-950/40 text-emerald-400"}>
+                    CALL OPTIONS
+                  </th>
+                )}
+                <th className={styles.strikeHeader + " bg-slate-900"}>STRIKE</th>
+                {(optionSideFilter === 'all' || optionSideFilter === 'puts') && (
+                  <th colSpan={6} className={styles.putHeader + " bg-rose-950/40 text-rose-400"}>
+                    PUT OPTIONS
+                  </th>
+                )}
               </tr>
               <tr className={styles.subHeader}>
-                <th>Delta</th>
-                <th>OI</th>
-                <th>Vol</th>
-                <th>Bid</th>
-                <th>Ask</th>
-                <th></th>
-                <th>Bid</th>
-                <th>Ask</th>
-                <th>Vol</th>
-                <th>OI</th>
-                <th>Delta</th>
+                {(optionSideFilter === 'all' || optionSideFilter === 'calls') && (
+                  <>
+                    <th>Delta</th>
+                    <th>OI</th>
+                    <th>Vol</th>
+                    <th>Bid</th>
+                    <th>Ask</th>
+                    <th>Action</th>
+                  </>
+                )}
+                <th className="bg-slate-950">Strike</th>
+                {(optionSideFilter === 'all' || optionSideFilter === 'puts') && (
+                  <>
+                    <th>Action</th>
+                    <th>Bid</th>
+                    <th>Ask</th>
+                    <th>Vol</th>
+                    <th>OI</th>
+                    <th>Delta</th>
+                  </>
+                )}
               </tr>
             </thead>
             <tbody>
-              {optionChainData.map((row) => (
-                <tr key={row.strike} className={`${styles.row} ${row.isATM ? 'bg-sky-500/10 border-y border-sky-500/30' : ''}`}>
-                  <td className={styles.cell} style={{ color: '#38bdf8' }}>{row.callDelta}</td>
-                  <td className={styles.cell}>{row.callOI.toLocaleString()}</td>
-                  <td className={styles.cell}>{row.callVolume.toLocaleString()}</td>
-                  <td 
-                    className={`${styles.cell} ${styles.bid} cursor-pointer hover:bg-emerald-500/20`}
-                    title="Click to Sell Call"
-                    onClick={() => handleAddOptionLeg('SELL', 'CALL', row.strike, row.callBid)}
-                  >
-                    ${row.callBid.toFixed(2)}
-                  </td>
-                  <td 
-                    className={`${styles.cell} ${styles.ask} cursor-pointer hover:bg-emerald-500/20`}
-                    title="Click to Buy Call"
-                    onClick={() => handleAddOptionLeg('BUY', 'CALL', row.strike, row.callAsk)}
-                  >
-                    ${row.callAsk.toFixed(2)}
-                  </td>
+              {optionChainData.map((row) => {
+                const isITMCall = spotPrice > row.strike;
+                const isITMPut = spotPrice < row.strike;
 
-                  <td className={`${styles.strikeCell} ${row.isATM ? 'text-sky-400 font-extrabold' : ''}`}>
-                    {row.strike} {row.isATM ? ' (ATM)' : ''}
-                  </td>
+                return (
+                  <tr key={row.strike} className={`${styles.row} ${row.isATM ? 'bg-sky-500/10 border-y border-sky-500/30' : ''}`}>
+                    {/* CALLS SIDE */}
+                    {(optionSideFilter === 'all' || optionSideFilter === 'calls') && (
+                      <>
+                        <td className={styles.cell} style={{ color: '#38bdf8' }}>{row.callDelta}</td>
+                        <td className={styles.cell}>{row.callOI.toLocaleString()}</td>
+                        <td className={styles.cell}>{row.callVolume.toLocaleString()}</td>
+                        <td className={`${styles.cell} ${styles.bid} ${isITMCall ? 'bg-emerald-950/20' : ''}`}>
+                          ${row.callBid.toFixed(2)}
+                        </td>
+                        <td className={`${styles.cell} ${styles.ask} ${isITMCall ? 'bg-emerald-950/20' : ''}`}>
+                          ${row.callAsk.toFixed(2)}
+                        </td>
+                        <td className={styles.cell}>
+                          <div className="flex gap-1 justify-center">
+                            <button
+                              className="px-1.5 py-0.5 text-[10px] bg-emerald-600/70 hover:bg-emerald-500 text-white rounded font-bold"
+                              title={`Buy Call @ $${row.callAsk}`}
+                              onClick={() => handleAddOptionLeg('BUY', 'CALL', row.strike, row.callAsk)}
+                            >
+                              +Buy
+                            </button>
+                            <button
+                              className="px-1.5 py-0.5 text-[10px] bg-slate-700 hover:bg-slate-600 text-slate-200 rounded font-bold"
+                              title={`Sell Call @ $${row.callBid}`}
+                              onClick={() => handleAddOptionLeg('SELL', 'CALL', row.strike, row.callBid)}
+                            >
+                              -Sell
+                            </button>
+                          </div>
+                        </td>
+                      </>
+                    )}
 
-                  <td 
-                    className={`${styles.cell} ${styles.bid} cursor-pointer hover:bg-rose-500/20`}
-                    title="Click to Buy Put"
-                    onClick={() => handleAddOptionLeg('BUY', 'PUT', row.strike, row.putAsk)}
-                  >
-                    ${row.putAsk.toFixed(2)}
-                  </td>
-                  <td 
-                    className={`${styles.cell} ${styles.ask} cursor-pointer hover:bg-rose-500/20`}
-                    title="Click to Sell Put"
-                    onClick={() => handleAddOptionLeg('SELL', 'PUT', row.strike, row.putBid)}
-                  >
-                    ${row.putBid.toFixed(2)}
-                  </td>
-                  <td className={styles.cell}>{row.putVolume.toLocaleString()}</td>
-                  <td className={styles.cell}>{row.putOI.toLocaleString()}</td>
-                  <td className={styles.cell} style={{ color: '#f43f5e' }}>{row.putDelta}</td>
-                </tr>
-              ))}
+                    {/* CENTER STRIKE COLUMN */}
+                    <td className={`${styles.strikeCell} ${row.isATM ? 'text-sky-400 font-extrabold bg-sky-950/40' : 'bg-slate-900/60 font-bold'}`}>
+                      ${row.strike} {row.isATM ? ' (ATM)' : ''}
+                    </td>
+
+                    {/* PUTS SIDE */}
+                    {(optionSideFilter === 'all' || optionSideFilter === 'puts') && (
+                      <>
+                        <td className={styles.cell}>
+                          <div className="flex gap-1 justify-center">
+                            <button
+                              className="px-1.5 py-0.5 text-[10px] bg-rose-600/70 hover:bg-rose-500 text-white rounded font-bold"
+                              title={`Buy Put @ $${row.putAsk}`}
+                              onClick={() => handleAddOptionLeg('BUY', 'PUT', row.strike, row.putAsk)}
+                            >
+                              +Buy
+                            </button>
+                            <button
+                              className="px-1.5 py-0.5 text-[10px] bg-slate-700 hover:bg-slate-600 text-slate-200 rounded font-bold"
+                              title={`Sell Put @ $${row.putBid}`}
+                              onClick={() => handleAddOptionLeg('SELL', 'PUT', row.strike, row.putBid)}
+                            >
+                              -Sell
+                            </button>
+                          </div>
+                        </td>
+                        <td className={`${styles.cell} ${styles.bid} ${isITMPut ? 'bg-rose-950/20' : ''}`}>
+                          ${row.putBid.toFixed(2)}
+                        </td>
+                        <td className={`${styles.cell} ${styles.ask} ${isITMPut ? 'bg-rose-950/20' : ''}`}>
+                          ${row.putAsk.toFixed(2)}
+                        </td>
+                        <td className={styles.cell}>{row.putVolume.toLocaleString()}</td>
+                        <td className={styles.cell}>{row.putOI.toLocaleString()}</td>
+                        <td className={styles.cell} style={{ color: '#f43f5e' }}>{row.putDelta}</td>
+                      </>
+                    )}
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
       ) : (
         /* FUTURES TERM STRUCTURE CHAIN TABLE */
-        <div className={styles.tableWrapper}>
+        <div className={styles.tableWrapper + " mt-4"}>
           <table className={styles.chainTable}>
             <thead>
               <tr className={styles.subHeader}>
@@ -375,13 +478,13 @@ export default function OptionChain() {
                         className="px-2 py-0.5 text-xs bg-emerald-600/60 hover:bg-emerald-500 text-white rounded font-bold"
                         onClick={() => handleAddFuturesLeg('BUY', row.futuresPrice)}
                       >
-                        Buy
+                        +Buy
                       </button>
                       <button 
                         className="px-2 py-0.5 text-xs bg-rose-600/60 hover:bg-rose-500 text-white rounded font-bold"
                         onClick={() => handleAddFuturesLeg('SELL', row.futuresPrice)}
                       >
-                        Sell
+                        -Sell
                       </button>
                     </div>
                   </td>
@@ -394,4 +497,3 @@ export default function OptionChain() {
     </div>
   );
 }
-
