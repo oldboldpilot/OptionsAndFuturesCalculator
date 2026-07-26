@@ -408,20 +408,29 @@ public:
         }
 
         // Dynamic Futures Contracts
-        std::vector<std::pair<std::string, int>> months = {
-            {"SEP 2026", 45}, {"DEC 2026", 135}, {"MAR 2027", 225}, {"JUN 2027", 315}
+        std::vector<std::tuple<std::string, std::string, int>> months = {
+            {"SEP 2026", symbol + "U26", 45},
+            {"DEC 2026", symbol + "Z26", 135},
+            {"MAR 2027", symbol + "H27", 225},
+            {"JUN 2027", symbol + "M27", 315},
+            {"SEP 2027", symbol + "U27", 405},
+            {"DEC 2027", symbol + "Z27", 495},
+            {"JAN 2028", symbol + "F28", 540},
+            {"JUN 2028", symbol + "M28", 680},
+            {"DEC 2028", symbol + "Z28", 870},
+            {"JAN 2029", symbol + "F29", 900}
         };
-        for (const auto& m : months) {
+        for (const auto& [m_name, m_code, dte_days] : months) {
             auto* f = response->add_futures_contracts();
-            f->set_code(symbol + m.first.substr(0, 3) + "26");
-            f->set_delivery_month(m.first);
-            f->set_days_to_expiry(m.second);
-            double f_price = spot * std::exp(0.05 * (m.second / 365.0));
+            f->set_code(m_code);
+            f->set_delivery_month(m_name);
+            f->set_days_to_expiry(dte_days);
+            double f_price = spot * std::exp(0.045 * (dte_days / 365.0));
             f->set_futures_price(f_price);
             f->set_bid(f_price - 0.25);
             f->set_ask(f_price + 0.25);
             f->set_basis(f_price - spot);
-            f->set_annualized_yield(5.0);
+            f->set_annualized_yield(4.5);
             f->set_volume(45000);
             f->set_open_interest(120000);
             f->set_state(f_price >= spot ? "Contango" : "Backwardation");

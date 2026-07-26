@@ -39,14 +39,17 @@ interface FuturesContractRow {
 
 const EXPIRATIONS_LIST = [
   { days: 0, label: '0 DTE (Same-Day Expiring)' },
-  { days: 7, label: '7 DTE (Weekly - Aug 01)' },
-  { days: 14, label: '14 DTE (Weekly - Aug 08)' },
-  { days: 30, label: '30 DTE (Monthly - Aug 25)' },
-  { days: 45, label: '45 DTE (Monthly - Sep 09)' },
-  { days: 60, label: '60 DTE (Quarterly - Sep 24)' },
-  { days: 90, label: '90 DTE (Quarterly - Oct 24)' },
-  { days: 180, label: '180 DTE (Semi-Annual - Jan 22)' },
-  { days: 365, label: '365 DTE (LEAPs - Jul 26)' }
+  { days: 7, label: '7 DTE (Weekly - Aug 01, 2026)' },
+  { days: 14, label: '14 DTE (Weekly - Aug 08, 2026)' },
+  { days: 30, label: '30 DTE (Monthly - Aug 25, 2026)' },
+  { days: 45, label: '45 DTE (Monthly - Sep 09, 2026)' },
+  { days: 60, label: '60 DTE (Quarterly - Sep 24, 2026)' },
+  { days: 90, label: '90 DTE (Quarterly - Oct 24, 2026)' },
+  { days: 180, label: '180 DTE (Semi-Annual - Jan 22, 2027)' },
+  { days: 365, label: '365 DTE (1-Year LEAPs - Jul 26, 2027)' },
+  { days: 540, label: '540 DTE (2-Year LEAPs - Jan 21, 2028)' },
+  { days: 730, label: '730 DTE (2.5-Year LEAPs - Jul 26, 2028)' },
+  { days: 900, label: '900 DTE (3-Year LEAPs - Jan 19, 2029)' }
 ];
 
 export default function OptionChain() {
@@ -184,6 +187,10 @@ export default function OptionChain() {
       { name: 'JUN 2027', code: `${symbol}M27`, days: 315, r: 0.046 },
       { name: 'SEP 2027', code: `${symbol}U27`, days: 405, r: 0.045 },
       { name: 'DEC 2027', code: `${symbol}Z27`, days: 495, r: 0.044 },
+      { name: 'JAN 2028', code: `${symbol}F28`, days: 540, r: 0.043 },
+      { name: 'JUN 2028', code: `${symbol}M28`, days: 680, r: 0.042 },
+      { name: 'DEC 2028', code: `${symbol}Z28`, days: 870, r: 0.041 },
+      { name: 'JAN 2029', code: `${symbol}F29`, days: 900, r: 0.040 },
     ];
 
     return monthCodes.map((m) => {
