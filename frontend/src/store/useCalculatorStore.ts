@@ -58,6 +58,45 @@ interface CalculatorState {
 
 const supabase = createClient();
 
+const TICKER_DATABASE: Record<string, { price: number; category: 'EQUITY' | 'FUTURES' | 'CRYPTO' }> = {
+  // Equities & ETFs
+  'SPY': { price: 580.0, category: 'EQUITY' },
+  'QQQ': { price: 490.0, category: 'EQUITY' },
+  'IWM': { price: 220.0, category: 'EQUITY' },
+  'DIA': { price: 410.0, category: 'EQUITY' },
+  'NVDA': { price: 125.0, category: 'EQUITY' },
+  'AAPL': { price: 230.0, category: 'EQUITY' },
+  'MSFT': { price: 440.0, category: 'EQUITY' },
+  'AMZN': { price: 185.0, category: 'EQUITY' },
+  'GOOGL': { price: 175.0, category: 'EQUITY' },
+  'META': { price: 500.0, category: 'EQUITY' },
+  'TSLA': { price: 240.0, category: 'EQUITY' },
+  'AMD': { price: 150.0, category: 'EQUITY' },
+  'PLTR': { price: 28.50, category: 'EQUITY' },
+  'COIN': { price: 220.0, category: 'EQUITY' },
+  'NFLX': { price: 650.0, category: 'EQUITY' },
+  'DIS': { price: 95.0, category: 'EQUITY' },
+  'BA': { price: 180.0, category: 'EQUITY' },
+  'JPM': { price: 210.0, category: 'EQUITY' },
+
+  // Futures Contracts
+  'ES': { price: 5850.0, category: 'FUTURES' },
+  'NQ': { price: 20400.0, category: 'FUTURES' },
+  'RTY': { price: 2220.0, category: 'FUTURES' },
+  'YM': { price: 41200.0, category: 'FUTURES' },
+  'CL': { price: 78.50, category: 'FUTURES' },
+  'NG': { price: 2.45, category: 'FUTURES' },
+  'GC': { price: 2420.0, category: 'FUTURES' },
+  'SI': { price: 31.00, category: 'FUTURES' },
+  'ZB': { price: 118.25, category: 'FUTURES' },
+  'ZN': { price: 110.50, category: 'FUTURES' },
+
+  // Crypto Derivatives
+  'BTC': { price: 67500.0, category: 'CRYPTO' },
+  'ETH': { price: 3500.0, category: 'CRYPTO' },
+  'SOL': { price: 175.0, category: 'CRYPTO' }
+};
+
 export const useCalculatorStore = create<CalculatorState>((set, get) => ({
   symbol: 'SPY',
   assetClass: 'EQUITY',
@@ -68,11 +107,24 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
   isLoading: false,
   error: null,
 
-  setSymbol: (symbol, spotPrice, assetClass) => set((state) => ({
-    symbol: symbol.toUpperCase(),
-    spotPrice: spotPrice !== undefined ? spotPrice : state.spotPrice,
-    assetClass: assetClass || (['ES', 'NQ', 'CL', 'GC', 'ZB', 'NG'].includes(symbol.toUpperCase()) ? 'FUTURES' : ['BTC', 'ETH'].includes(symbol.toUpperCase()) ? 'CRYPTO' : 'EQUITY')
-  })),
+  setSymbol: (symbolInput, customPrice, customAssetClass) => set((state) => {
+    const sym = symbolInput.trim().toUpperCase();
+    const known = TICKER_DATABASE[sym];
+
+    const finalPrice = customPrice !== undefined 
+      ? customPrice 
+      : known 
+        ? known.price 
+        : (state.spotPrice > 0 ? state.spotPrice : 100.0);
+
+    const finalCategory = customAssetClass || (known ? known.category : (['ES', 'NQ', 'CL', 'GC', 'ZB', 'NG', 'RTY', 'YM', 'SI', 'ZN'].includes(sym) ? 'FUTURES' : ['BTC', 'ETH', 'SOL'].includes(sym) ? 'CRYPTO' : 'EQUITY'));
+
+    return {
+      symbol: sym,
+      spotPrice: finalPrice,
+      assetClass: finalCategory
+    };
+  }),
 
   addLeg: (leg) => set((state) => ({ 
     legs: [...state.legs, { ...leg, id: Math.random().toString(36).substring(7) }] 
