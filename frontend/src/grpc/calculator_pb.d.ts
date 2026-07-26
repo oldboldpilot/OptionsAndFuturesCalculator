@@ -259,6 +259,7 @@ export class OptionStrike extends jspb.Message {
   getPutOpenInterest(): number;
   getPutIv(): number;
   getIsAtm(): boolean;
+  getExpirationDate(): string;
   serializeBinary(): Uint8Array;
   static deserializeBinary(bytes: Uint8Array): OptionStrike;
 }
@@ -279,6 +280,14 @@ export class FuturesContract extends jspb.Message {
   static deserializeBinary(bytes: Uint8Array): FuturesContract;
 }
 
+export class ExpirationDate extends jspb.Message {
+  getDateStr(): string;
+  getDaysToExpiry(): number;
+  getLabel(): string;
+  serializeBinary(): Uint8Array;
+  static deserializeBinary(bytes: Uint8Array): ExpirationDate;
+}
+
 export class ChainRequest extends jspb.Message {
   getSymbol(): string;
   setSymbol(value: string): ChainRequest;
@@ -286,6 +295,8 @@ export class ChainRequest extends jspb.Message {
   setExpirationDays(value: number): ChainRequest;
   getAssetClass(): string;
   setAssetClass(value: string): ChainRequest;
+  getExpirationDate(): string;
+  setExpirationDate(value: string): ChainRequest;
   serializeBinary(): Uint8Array;
   static deserializeBinary(bytes: Uint8Array): ChainRequest;
 }
@@ -295,6 +306,8 @@ export class ChainResponse extends jspb.Message {
   getSpotPrice(): number;
   getOptionStrikesList(): Array<OptionStrike>;
   getFuturesContractsList(): Array<FuturesContract>;
+  getSelectedExpirationDate(): string;
+  getAvailableExpirationsList(): Array<ExpirationDate>;
   serializeBinary(): Uint8Array;
   static deserializeBinary(bytes: Uint8Array): ChainResponse;
 }

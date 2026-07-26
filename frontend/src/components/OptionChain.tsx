@@ -21,6 +21,7 @@ interface OptionStrikeRow {
   putOI: number;
   putIV: number;
   isATM?: boolean;
+  expirationDate?: string;
 }
 
 interface FuturesContractRow {
@@ -37,28 +38,34 @@ interface FuturesContractRow {
   state: 'Contango' | 'Backwardation';
 }
 
-const EXPIRATIONS_LIST = [
-  { days: 0, label: '0 DTE (Same-Day Expiring)' },
-  { days: 7, label: '7 DTE (Weekly - Aug 01, 2026)' },
-  { days: 14, label: '14 DTE (Weekly - Aug 08, 2026)' },
-  { days: 30, label: '30 DTE (Monthly - Aug 25, 2026)' },
-  { days: 45, label: '45 DTE (Monthly - Sep 09, 2026)' },
-  { days: 60, label: '60 DTE (Quarterly - Sep 24, 2026)' },
-  { days: 90, label: '90 DTE (Quarterly - Oct 24, 2026)' },
-  { days: 180, label: '180 DTE (Semi-Annual - Jan 22, 2027)' },
-  { days: 365, label: '365 DTE (1-Year LEAPs - Jul 26, 2027)' },
-  { days: 540, label: '540 DTE (2-Year LEAPs - Jan 21, 2028)' },
-  { days: 730, label: '730 DTE (2.5-Year LEAPs - Jul 26, 2028)' },
-  { days: 900, label: '900 DTE (3-Year LEAPs - Jan 19, 2029)' }
+const REAL_EXPIRATION_CHAINS = [
+  { date: '2026-07-31', dte: 5, label: 'Jul 31, 2026 (5 Days)' },
+  { date: '2026-08-07', dte: 12, label: 'Aug 07, 2026 (12 Days)' },
+  { date: '2026-08-21', dte: 26, label: 'Aug 21, 2026 (26 Days)' },
+  { date: '2026-09-18', dte: 54, label: 'Sep 18, 2026 (54 Days)' },
+  { date: '2026-10-16', dte: 82, label: 'Oct 16, 2026 (82 Days)' },
+  { date: '2026-11-20', dte: 117, label: 'Nov 20, 2026 (117 Days)' },
+  { date: '2026-12-18', dte: 145, label: 'Dec 18, 2026 (145 Days)' },
+  { date: '2027-01-15', dte: 173, label: 'Jan 15, 2027 (173 Days - 1Y LEAP)' },
+  { date: '2027-06-18', dte: 327, label: 'Jun 18, 2027 (327 Days - LEAP)' },
+  { date: '2027-12-17', dte: 509, label: 'Dec 17, 2027 (509 Days - LEAP)' },
+  { date: '2028-01-21', dte: 544, label: 'Jan 21, 2028 (544 Days - 2Y LEAP)' },
+  { date: '2028-06-16', dte: 691, label: 'Jun 16, 2028 (691 Days - 2Y LEAP)' },
+  { date: '2028-12-15', dte: 873, label: 'Dec 15, 2028 (873 Days - 2.5Y LEAP)' },
+  { date: '2029-01-19', dte: 908, label: 'Jan 19, 2029 (908 Days - 3Y LEAP)' }
 ];
 
 export default function OptionChain() {
   const { symbol, spotPrice, assetClass, addLeg, calculateStrategy } = useCalculatorStore();
   const [activeTab, setActiveTab] = useState<'options' | 'futures'>(assetClass === 'FUTURES' ? 'futures' : 'options');
-  const [expiryDays, setExpiryDays] = useState<number>(30);
+  const [selectedExpDate, setSelectedExpDate] = useState<string>('2026-08-21');
   const [optionSideFilter, setOptionSideFilter] = useState<'all' | 'calls' | 'puts'>('all');
   const [remoteStrikes, setRemoteStrikes] = useState<OptionStrikeRow[]>([]);
   const [remoteFutures, setRemoteFutures] = useState<FuturesContractRow[]>([]);
+
+  const selectedChainObj = useMemo(() => {
+    return REAL_EXPIRATION_CHAINS.find(c => c.date === selectedExpDate) || REAL_EXPIRATION_CHAINS[2];
+  }, [selectedExpDate]);
 
   useEffect(() => {
     try {
@@ -66,7 +73,8 @@ export default function OptionChain() {
       const client = new OptionsCalculatorClient(backendUrl);
       const req = new ChainRequest();
       req.setSymbol(symbol);
-      req.setExpirationDays(expiryDays);
+      req.setExpirationDays(selectedChainObj.dte);
+      req.setExpirationDate(selectedExpDate);
       req.setAssetClass(assetClass);
 
       client.getMarketChain(req, {}, (err, res) => {
@@ -85,7 +93,8 @@ export default function OptionChain() {
             putVolume: s.getPutVolume(),
             putOI: s.getPutOpenInterest(),
             putIV: s.getPutIv(),
-            isATM: s.getIsAtm()
+            isATM: s.getIsAtm(),
+            expirationDate: s.getExpirationDate() || selectedExpDate
           }));
           if (strikes.length > 0) setRemoteStrikes(strikes);
 
@@ -108,7 +117,7 @@ export default function OptionChain() {
     } catch (e) {
       console.warn('Backend chain lookup fallback:', e);
     }
-  }, [symbol, expiryDays, assetClass]);
+  }, [symbol, selectedExpDate, selectedChainObj.dte, assetClass]);
 
   // Dynamic Options Chain Generator
   const optionChainData = useMemo<OptionStrikeRow[]>(() => {
@@ -134,7 +143,7 @@ export default function OptionChain() {
       const diff = strike - base;
       const distPct = diff / base;
 
-      const timeFactor = Math.sqrt((expiryDays > 0 ? expiryDays : 1) / 365);
+      const timeFactor = Math.sqrt((selectedChainObj.dte > 0 ? selectedChainObj.dte : 1) / 365);
       const iv = 0.22 + Math.abs(distPct) * 0.1;
       const intrinsicCall = Math.max(0, base - strike);
       const intrinsicPut = Math.max(0, strike - base);
@@ -171,10 +180,11 @@ export default function OptionChain() {
         putVolume,
         putOI,
         putIV: parseFloat((iv * 100).toFixed(1)),
-        isATM
+        isATM,
+        expirationDate: selectedExpDate
       };
     });
-  }, [spotPrice, expiryDays, remoteStrikes]);
+  }, [spotPrice, selectedChainObj.dte, selectedExpDate, remoteStrikes]);
 
   // Dynamic Futures Term Structure Generator
   const futuresChainData = useMemo<FuturesContractRow[]>(() => {
@@ -224,7 +234,7 @@ export default function OptionChain() {
       strike_price: strike,
       premium,
       quantity: 1,
-      expiration_days: expiryDays,
+      expiration_days: selectedChainObj.dte,
       implied_volatility: 0.22
     });
     calculateStrategy();
@@ -249,8 +259,8 @@ export default function OptionChain() {
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-slate-800">
         <div>
           <h2 className="text-lg font-bold text-slate-100 flex items-center gap-2">
-            <span>{symbol}</span>
-            <span className="text-xs px-2 py-0.5 rounded bg-sky-500/20 text-sky-400 border border-sky-500/30">
+            <span>{symbol} Real Option & Futures Chains</span>
+            <span className="text-xs px-2 py-0.5 rounded bg-sky-500/20 text-sky-400 border border-sky-500/30 font-mono">
               ${spotPrice.toFixed(2)} Spot
             </span>
           </h2>
@@ -295,17 +305,17 @@ export default function OptionChain() {
               </button>
             </div>
 
-            {/* Individual Option Expiration Selection Dropdown */}
+            {/* Real Option Expiration Date Selection Dropdown */}
             <div className="flex items-center gap-2">
-              <label className="text-xs font-semibold text-slate-400">Expiration Chain:</label>
+              <label className="text-xs font-semibold text-slate-400">Select Expiration Date:</label>
               <select 
-                className="bg-slate-900 border border-slate-700 rounded-md px-3 py-1.5 text-xs text-sky-400 font-semibold focus:outline-none focus:border-sky-500" 
-                value={expiryDays} 
-                onChange={(e) => setExpiryDays(Number(e.target.value))}
+                className="bg-slate-900 border border-slate-700 rounded-md px-3 py-1.5 text-xs text-sky-400 font-bold focus:outline-none focus:border-sky-500 font-mono" 
+                value={selectedExpDate} 
+                onChange={(e) => setSelectedExpDate(e.target.value)}
               >
-                {EXPIRATIONS_LIST.map((exp) => (
-                  <option key={exp.days} value={exp.days}>
-                    {exp.label}
+                {REAL_EXPIRATION_CHAINS.map((chain) => (
+                  <option key={chain.date} value={chain.date}>
+                    {chain.date} ({chain.label})
                   </option>
                 ))}
               </select>
@@ -317,18 +327,22 @@ export default function OptionChain() {
       {/* OPTIONS CHAIN TABLE */}
       {activeTab === 'options' ? (
         <div className={styles.tableWrapper + " mt-4"}>
+          <div className="bg-slate-900/80 px-4 py-2 text-xs font-mono text-slate-300 flex items-center justify-between border-x border-t border-slate-800 rounded-t-lg">
+            <span>Expiring: <strong className="text-sky-400">{selectedExpDate}</strong> ({selectedChainObj.dte} Days to Expiration)</span>
+            <span>Symbol: <strong className="text-slate-100">{symbol}</strong></span>
+          </div>
           <table className={styles.chainTable}>
             <thead>
               <tr>
                 {(optionSideFilter === 'all' || optionSideFilter === 'calls') && (
                   <th colSpan={6} className={styles.callHeader + " bg-emerald-950/40 text-emerald-400"}>
-                    CALL OPTIONS
+                    CALL OPTIONS ({selectedExpDate})
                   </th>
                 )}
                 <th className={styles.strikeHeader + " bg-slate-900"}>STRIKE</th>
                 {(optionSideFilter === 'all' || optionSideFilter === 'puts') && (
                   <th colSpan={6} className={styles.putHeader + " bg-rose-950/40 text-rose-400"}>
-                    PUT OPTIONS
+                    PUT OPTIONS ({selectedExpDate})
                   </th>
                 )}
               </tr>
