@@ -3,6 +3,8 @@
 import React, { useState, useMemo } from 'react';
 import { useCalculatorStore } from '../store/useCalculatorStore';
 import styles from './OptionChain.module.css';
+import { OptionsCalculatorClient } from '../grpc/CalculatorServiceClientPb';
+import { ChainRequest } from '../grpc/calculator_pb';
 
 interface OptionStrikeRow {
   strike: number;
@@ -39,9 +41,63 @@ export default function OptionChain() {
   const { symbol, spotPrice, assetClass, addLeg, calculateStrategy } = useCalculatorStore();
   const [activeTab, setActiveTab] = useState<'options' | 'futures'>(assetClass === 'FUTURES' ? 'futures' : 'options');
   const [expiryDays, setExpiryDays] = useState<number>(30);
+  const [remoteStrikes, setRemoteStrikes] = useState<OptionStrikeRow[]>([]);
+  const [remoteFutures, setRemoteFutures] = useState<FuturesContractRow[]>([]);
 
-  // 1. Dynamic Options Chain Generator based on spotPrice
+  React.useEffect(() => {
+    try {
+      const backendUrl = process.env.NEXT_PUBLIC_API_URL || 'https://api.optionsandfuturescalculator.com';
+      const client = new OptionsCalculatorClient(backendUrl);
+      const req = new ChainRequest();
+      req.setSymbol(symbol);
+      req.setExpirationDays(expiryDays);
+      req.setAssetClass(assetClass);
+
+      client.getMarketChain(req, {}, (err, res) => {
+        if (!err && res) {
+          const strikes = res.getOptionStrikesList().map((s: any) => ({
+            strike: s.getStrike(),
+            callBid: s.getCallBid(),
+            callAsk: s.getCallAsk(),
+            callDelta: s.getCallDelta(),
+            callVolume: s.getCallVolume(),
+            callOI: s.getCallOpenInterest(),
+            callIV: s.getCallIv(),
+            putBid: s.getPutBid(),
+            putAsk: s.getPutAsk(),
+            putDelta: s.getPutDelta(),
+            putVolume: s.getPutVolume(),
+            putOI: s.getPutOpenInterest(),
+            putIV: s.getPutIv(),
+            isATM: s.getIsAtm()
+          }));
+          if (strikes.length > 0) setRemoteStrikes(strikes);
+
+          const futures = res.getFuturesContractsList().map((f: any) => ({
+            code: f.getCode(),
+            month: f.getDeliveryMonth(),
+            daysToExpiry: f.getDaysToExpiry(),
+            futuresPrice: f.getFuturesPrice(),
+            bid: f.getBid(),
+            ask: f.getAsk(),
+            basis: f.getBasis(),
+            annualizedYield: f.getAnnualizedYield(),
+            volume: f.getVolume(),
+            openInterest: f.getOpenInterest(),
+            state: f.getState() as 'Contango' | 'Backwardation'
+          }));
+          if (futures.length > 0) setRemoteFutures(futures);
+        }
+      });
+    } catch (e) {
+      console.warn('Backend chain lookup fallback:', e);
+    }
+  }, [symbol, expiryDays, assetClass]);
+
+  // 1. Dynamic Options Chain Generator based on spotPrice & Backend gRPC
   const optionChainData = useMemo<OptionStrikeRow[]>(() => {
+    if (remoteStrikes.length > 0) return remoteStrikes;
+
     const base = spotPrice;
     let step = 5;
     if (base >= 2000) step = 50;
@@ -108,6 +164,8 @@ export default function OptionChain() {
 
   // 2. Dynamic Futures Contract Term Structure Generator
   const futuresChainData = useMemo<FuturesContractRow[]>(() => {
+    if (remoteFutures.length > 0) return remoteFutures;
+
     const monthCodes = [
       { name: 'SEP 2026', code: `${symbol}U26`, days: 45, r: 0.052 },
       { name: 'DEC 2026', code: `${symbol}Z26`, days: 135, r: 0.050 },

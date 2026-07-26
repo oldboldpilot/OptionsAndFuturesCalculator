@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { createClient } from '../lib/supabase/client';
 import { OptionsCalculatorClient } from '../grpc/CalculatorServiceClientPb';
-import { StrategyRequest, Leg as ProtoLeg } from '../grpc/calculator_pb';
+import { StrategyRequest, Leg as ProtoLeg, QuoteRequest } from '../grpc/calculator_pb';
 
 export interface Leg {
   id: string;
@@ -107,7 +107,7 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
   isLoading: false,
   error: null,
 
-  setSymbol: (symbolInput, customPrice, customAssetClass) => set((state) => {
+  setSymbol: (symbolInput, customPrice, customAssetClass) => {
     const sym = symbolInput.trim().toUpperCase();
     const known = TICKER_DATABASE[sym];
 
@@ -115,16 +115,34 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
       ? customPrice 
       : known 
         ? known.price 
-        : (state.spotPrice > 0 ? state.spotPrice : 100.0);
+        : 100.0;
 
     const finalCategory = customAssetClass || (known ? known.category : (['ES', 'NQ', 'CL', 'GC', 'ZB', 'NG', 'RTY', 'YM', 'SI', 'ZN'].includes(sym) ? 'FUTURES' : ['BTC', 'ETH', 'SOL'].includes(sym) ? 'CRYPTO' : 'EQUITY'));
 
-    return {
+    set({
       symbol: sym,
       spotPrice: finalPrice,
       assetClass: finalCategory
-    };
-  }),
+    });
+
+    // Asynchronously fetch live Yahoo Finance quote from Railway gRPC-Web backend
+    try {
+      const backendUrl = process.env.NEXT_PUBLIC_API_URL || 'https://api.optionsandfuturescalculator.com';
+      const client = new OptionsCalculatorClient(backendUrl);
+      const req = new QuoteRequest();
+      req.setSymbol(sym);
+
+      client.getMarketQuote(req, {}, (err, res) => {
+        if (!err && res && res.getPrice() > 0) {
+          set({
+            spotPrice: res.getPrice()
+          });
+        }
+      });
+    } catch (e) {
+      console.warn('Backend quote lookup fallback to static DB:', e);
+    }
+  },
 
   addLeg: (leg) => set((state) => ({ 
     legs: [...state.legs, { ...leg, id: Math.random().toString(36).substring(7) }] 
@@ -169,7 +187,7 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
       const res = await client.calculateStrategy(req, {});
       
       const points = res.getPnlMatrixList();
-      const mappedMatrix = points.map(p => ({
+      const mappedMatrix = points.map((p: any) => ({
         price: p.getUnderlyingPrice(),
         days_to_expiration: 30, // Mocked from points if not returned
         pnl_dollars: p.getPnl(),

@@ -1,7 +1,5 @@
 import * as jspb from 'google-protobuf'
 
-
-
 export class Leg extends jspb.Message {
   getAction(): Leg.Action;
   setAction(value: Leg.Action): Leg;
@@ -222,3 +220,81 @@ export namespace StrategyResponse {
   }
 }
 
+export class QuoteRequest extends jspb.Message {
+  getSymbol(): string;
+  setSymbol(value: string): QuoteRequest;
+  serializeBinary(): Uint8Array;
+  static deserializeBinary(bytes: Uint8Array): QuoteRequest;
+}
+
+export class QuoteResponse extends jspb.Message {
+  getSymbol(): string;
+  setSymbol(value: string): QuoteResponse;
+  getPrice(): number;
+  setPrice(value: number): QuoteResponse;
+  getPreviousClose(): number;
+  setPreviousClose(value: number): QuoteResponse;
+  getForwardPe(): number;
+  setForwardPe(value: number): QuoteResponse;
+  getImpliedVolatility(): number;
+  setImpliedVolatility(value: number): QuoteResponse;
+  getAssetClass(): string;
+  setAssetClass(value: string): QuoteResponse;
+  serializeBinary(): Uint8Array;
+  static deserializeBinary(bytes: Uint8Array): QuoteResponse;
+}
+
+export class OptionStrike extends jspb.Message {
+  getStrike(): number;
+  getCallBid(): number;
+  getCallAsk(): number;
+  getCallDelta(): number;
+  getCallVolume(): number;
+  getCallOpenInterest(): number;
+  getCallIv(): number;
+  getPutBid(): number;
+  getPutAsk(): number;
+  getPutDelta(): number;
+  getPutVolume(): number;
+  getPutOpenInterest(): number;
+  getPutIv(): number;
+  getIsAtm(): boolean;
+  serializeBinary(): Uint8Array;
+  static deserializeBinary(bytes: Uint8Array): OptionStrike;
+}
+
+export class FuturesContract extends jspb.Message {
+  getCode(): string;
+  getDeliveryMonth(): string;
+  getDaysToExpiry(): number;
+  getFuturesPrice(): number;
+  getBid(): number;
+  getAsk(): number;
+  getBasis(): number;
+  getAnnualizedYield(): number;
+  getVolume(): number;
+  getOpenInterest(): number;
+  getState(): string;
+  serializeBinary(): Uint8Array;
+  static deserializeBinary(bytes: Uint8Array): FuturesContract;
+}
+
+export class ChainRequest extends jspb.Message {
+  getSymbol(): string;
+  setSymbol(value: string): ChainRequest;
+  getExpirationDays(): number;
+  setExpirationDays(value: number): ChainRequest;
+  getAssetClass(): string;
+  setAssetClass(value: string): ChainRequest;
+  serializeBinary(): Uint8Array;
+  static deserializeBinary(bytes: Uint8Array): ChainRequest;
+}
+
+export class ChainResponse extends jspb.Message {
+  getSymbol(): string;
+  getSpotPrice(): number;
+  getOptionStrikesList(): Array<OptionStrike>;
+  getFuturesContractsList(): Array<FuturesContract>;
+  serializeBinary(): Uint8Array;
+  static deserializeBinary(bytes: Uint8Array): ChainResponse;
+}
