@@ -19,7 +19,10 @@
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-PROTO_DIR="${REPO_ROOT}/proto"
+# The canonical proto lives with the backend, which generates its C++ from the
+# same file at build time. The old root-level proto/ copy had a different
+# package and service name and has been deleted.
+PROTO_DIR="${REPO_ROOT}/backend/proto"
 PROTO_FILE="${PROTO_DIR}/calculator.proto"
 OUT_DIR="${REPO_ROOT}/frontend/src/grpc"
 

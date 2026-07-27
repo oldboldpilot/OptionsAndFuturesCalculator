@@ -18,6 +18,15 @@ export class Leg extends jspb.Message {
   getQuantity(): number;
   setQuantity(value: number): Leg;
 
+  getPremium(): number;
+  setPremium(value: number): Leg;
+
+  getImpliedVolatility(): number;
+  setImpliedVolatility(value: number): Leg;
+
+  getContractMultiplier(): number;
+  setContractMultiplier(value: number): Leg;
+
   serializeBinary(): Uint8Array;
   toObject(includeInstance?: boolean): Leg.AsObject;
   static toObject(includeInstance: boolean, msg: Leg): Leg.AsObject;
@@ -33,6 +42,9 @@ export namespace Leg {
     strike: number,
     expirationDays: number,
     quantity: number,
+    premium: number,
+    impliedVolatility: number,
+    contractMultiplier: number,
   }
 
   export enum Action { 
@@ -66,6 +78,18 @@ export class StrategyRequest extends jspb.Message {
   clearLegsList(): StrategyRequest;
   addLegs(value?: Leg, index?: number): Leg;
 
+  getPriceRangePercent(): number;
+  setPriceRangePercent(value: number): StrategyRequest;
+
+  getPriceSteps(): number;
+  setPriceSteps(value: number): StrategyRequest;
+
+  getDateSteps(): number;
+  setDateSteps(value: number): StrategyRequest;
+
+  getDividendYield(): number;
+  setDividendYield(value: number): StrategyRequest;
+
   serializeBinary(): Uint8Array;
   toObject(includeInstance?: boolean): StrategyRequest.AsObject;
   static toObject(includeInstance: boolean, msg: StrategyRequest): StrategyRequest.AsObject;
@@ -81,6 +105,10 @@ export namespace StrategyRequest {
     impliedVolatility: number,
     riskFreeRate: number,
     legsList: Array<Leg.AsObject>,
+    priceRangePercent: number,
+    priceSteps: number,
+    dateSteps: number,
+    dividendYield: number,
   }
 }
 
@@ -100,6 +128,15 @@ export class Greeks extends jspb.Message {
   getRho(): number;
   setRho(value: number): Greeks;
 
+  getVanna(): number;
+  setVanna(value: number): Greeks;
+
+  getVolga(): number;
+  setVolga(value: number): Greeks;
+
+  getCharm(): number;
+  setCharm(value: number): Greeks;
+
   serializeBinary(): Uint8Array;
   toObject(includeInstance?: boolean): Greeks.AsObject;
   static toObject(includeInstance: boolean, msg: Greeks): Greeks.AsObject;
@@ -115,6 +152,9 @@ export namespace Greeks {
     theta: number,
     vega: number,
     rho: number,
+    vanna: number,
+    volga: number,
+    charm: number,
   }
 }
 
@@ -137,6 +177,40 @@ export namespace PnLPoint {
   export type AsObject = {
     underlyingPrice: number,
     pnl: number,
+  }
+}
+
+export class MatrixCell extends jspb.Message {
+  getPrice(): number;
+  setPrice(value: number): MatrixCell;
+
+  getDaysToExpiration(): number;
+  setDaysToExpiration(value: number): MatrixCell;
+
+  getDateStr(): string;
+  setDateStr(value: string): MatrixCell;
+
+  getPnlDollars(): number;
+  setPnlDollars(value: number): MatrixCell;
+
+  getReturnOnRiskPercent(): number;
+  setReturnOnRiskPercent(value: number): MatrixCell;
+
+  serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): MatrixCell.AsObject;
+  static toObject(includeInstance: boolean, msg: MatrixCell): MatrixCell.AsObject;
+  static serializeBinaryToWriter(message: MatrixCell, writer: jspb.BinaryWriter): void;
+  static deserializeBinary(bytes: Uint8Array): MatrixCell;
+  static deserializeBinaryFromReader(message: MatrixCell, reader: jspb.BinaryReader): MatrixCell;
+}
+
+export namespace MatrixCell {
+  export type AsObject = {
+    price: number,
+    daysToExpiration: number,
+    dateStr: string,
+    pnlDollars: number,
+    returnOnRiskPercent: number,
   }
 }
 
@@ -201,6 +275,28 @@ export class StrategyResponse extends jspb.Message {
   clearPnlMatrixList(): StrategyResponse;
   addPnlMatrix(value?: PnLPoint, index?: number): PnLPoint;
 
+  getRiskRewardRatio(): number;
+  setRiskRewardRatio(value: number): StrategyResponse;
+
+  getBreakevenPricesList(): Array<number>;
+  setBreakevenPricesList(value: Array<number>): StrategyResponse;
+  clearBreakevenPricesList(): StrategyResponse;
+  addBreakevenPrices(value: number, index?: number): StrategyResponse;
+
+  getMatrixList(): Array<MatrixCell>;
+  setMatrixList(value: Array<MatrixCell>): StrategyResponse;
+  clearMatrixList(): StrategyResponse;
+  addMatrix(value?: MatrixCell, index?: number): MatrixCell;
+
+  getCalculationTimeMicroseconds(): number;
+  setCalculationTimeMicroseconds(value: number): StrategyResponse;
+
+  getProbabilityOfTouch(): number;
+  setProbabilityOfTouch(value: number): StrategyResponse;
+
+  getProbabilityOfTargetProfit(): number;
+  setProbabilityOfTargetProfit(value: number): StrategyResponse;
+
   serializeBinary(): Uint8Array;
   toObject(includeInstance?: boolean): StrategyResponse.AsObject;
   static toObject(includeInstance: boolean, msg: StrategyResponse): StrategyResponse.AsObject;
@@ -219,6 +315,12 @@ export namespace StrategyResponse {
     netGreeks?: Greeks.AsObject,
     riskMetrics?: RiskMetrics.AsObject,
     pnlMatrixList: Array<PnLPoint.AsObject>,
+    riskRewardRatio: number,
+    breakevenPricesList: Array<number>,
+    matrixList: Array<MatrixCell.AsObject>,
+    calculationTimeMicroseconds: number,
+    probabilityOfTouch: number,
+    probabilityOfTargetProfit: number,
   }
 }
 
@@ -259,6 +361,12 @@ export class QuoteResponse extends jspb.Message {
   getAssetClass(): string;
   setAssetClass(value: string): QuoteResponse;
 
+  getProvider(): string;
+  setProvider(value: string): QuoteResponse;
+
+  getQuoteTimestamp(): string;
+  setQuoteTimestamp(value: string): QuoteResponse;
+
   serializeBinary(): Uint8Array;
   toObject(includeInstance?: boolean): QuoteResponse.AsObject;
   static toObject(includeInstance: boolean, msg: QuoteResponse): QuoteResponse.AsObject;
@@ -275,6 +383,8 @@ export namespace QuoteResponse {
     forwardPe: number,
     impliedVolatility: number,
     assetClass: string,
+    provider: string,
+    quoteTimestamp: string,
   }
 }
 
@@ -324,6 +434,24 @@ export class OptionStrike extends jspb.Message {
   getExpirationDate(): string;
   setExpirationDate(value: string): OptionStrike;
 
+  getCallGamma(): number;
+  setCallGamma(value: number): OptionStrike;
+
+  getCallTheta(): number;
+  setCallTheta(value: number): OptionStrike;
+
+  getCallVega(): number;
+  setCallVega(value: number): OptionStrike;
+
+  getPutGamma(): number;
+  setPutGamma(value: number): OptionStrike;
+
+  getPutTheta(): number;
+  setPutTheta(value: number): OptionStrike;
+
+  getPutVega(): number;
+  setPutVega(value: number): OptionStrike;
+
   serializeBinary(): Uint8Array;
   toObject(includeInstance?: boolean): OptionStrike.AsObject;
   static toObject(includeInstance: boolean, msg: OptionStrike): OptionStrike.AsObject;
@@ -349,6 +477,12 @@ export namespace OptionStrike {
     putIv: number,
     isAtm: boolean,
     expirationDate: string,
+    callGamma: number,
+    callTheta: number,
+    callVega: number,
+    putGamma: number,
+    putTheta: number,
+    putVega: number,
   }
 }
 
@@ -491,6 +625,9 @@ export class ChainResponse extends jspb.Message {
   clearAvailableExpirationsList(): ChainResponse;
   addAvailableExpirations(value?: ExpirationDate, index?: number): ExpirationDate;
 
+  getProvider(): string;
+  setProvider(value: string): ChainResponse;
+
   serializeBinary(): Uint8Array;
   toObject(includeInstance?: boolean): ChainResponse.AsObject;
   static toObject(includeInstance: boolean, msg: ChainResponse): ChainResponse.AsObject;
@@ -507,6 +644,7 @@ export namespace ChainResponse {
     futuresContractsList: Array<FuturesContract.AsObject>,
     selectedExpirationDate: string,
     availableExpirationsList: Array<ExpirationDate.AsObject>,
+    provider: string,
   }
 }
 

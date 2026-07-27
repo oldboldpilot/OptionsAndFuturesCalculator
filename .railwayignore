@@ -1,8 +1,43 @@
-node_modules
-frontend
+# What gets uploaded to Railway for the container build.
+#
+# This used to exclude `backend/external` and `backend/sensen/external`, which
+# CMake requires: external/SGEE is an add_subdirectory target and
+# sensen/external/fastestjsoninthewest provides the `fastjson` module. With
+# them missing the build could not configure, let alone compile.
+#
+# The bulk that made them look expensive is not source: SGEE carries a 1.4 GB
+# web-lsp tree and a 132 MB VS Code extension, neither of which the engine
+# links against. Those are excluded by path instead.
+
 .git
-.next
-docs
 *.log
-backend/sensen/external
-backend/external
+
+# Frontend — deployed separately to Cloudflare Pages.
+frontend
+node_modules
+**/node_modules
+
+# Build outputs
+backend/build
+.next
+out
+
+# Editor / agent tooling
+docs
+.playwright-mcp
+.claude
+config
+
+# Large non-build subtrees inside the vendored engines.
+backend/external/SGEE/web-lsp
+backend/external/SGEE/vscode-extension
+backend/StochasticGraphExecutionEngine
+backend/BigBrotherAnalytics
+backend/sensen/external/CosyVoice
+backend/sensen/eval_samples
+backend/sensen/benchmarks
+backend/sensen/demo_qwen3
+**/*.nsys-rep
+**/*.sqlite
+**/perf.data*
+**/core.*

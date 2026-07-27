@@ -1,23 +1,23 @@
 module;
+#include <algorithm>
+#include <array>
+#include <string_view>
+#include <utility>
+#include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <expected>
+#include <future>
+#include <limits>
+#include <memory>
+#include <numeric>
+#include <sstream>
 #include <string>
 #include <vector>
-#include <memory>
-#include <iostream>
-#include <cmath>
-#include <chrono>
-#include <thread>
-#include <variant>
-#include <map>
-#include <unordered_map>
 
 #include <grpcpp/grpcpp.h>
 #include "calculator.pb.h"
 #include "calculator.grpc.pb.h"
-
-#include <future>
-#include <expected>
-#include <string_view>
-#include <sstream>
 
 module calculator_service;
 
@@ -28,253 +28,562 @@ import market_data;
 import sgee.builder.fluent;
 import sgee.runtime.context;
 import sgee.runtime.interpreter;
+import sgee.runtime.action_registry;
 import sgee.runtime.pipeline;
 import sgee.core.types;
-
 
 namespace options_calculator::service {
 
 using grpc::ServerContext;
 using grpc::Status;
-using grpc::ServerWriter;
+
+namespace md = options_calculator::market_data;
+
+// --------------------------------------------------------------------------
+// Pricing helpers
+// --------------------------------------------------------------------------
+
+/** Contract multiplier, defaulting to the listed-equity-option convention. */
+[[nodiscard]] auto multiplier_of(const calculator::Leg& leg) noexcept -> double {
+    if (leg.contract_multiplier() > 0.0) return leg.contract_multiplier();
+    return (leg.type() == calculator::Leg::CALL || leg.type() == calculator::Leg::PUT) ? 100.0 : 1.0;
+}
+
+[[nodiscard]] auto direction_of(const calculator::Leg& leg) noexcept -> double {
+    return (leg.action() == calculator::Leg::BUY) ? 1.0 : -1.0;
+}
+
+[[nodiscard]] auto quantity_of(const calculator::Leg& leg) noexcept -> double {
+    return (leg.quantity() > 0) ? static_cast<double>(leg.quantity()) : 1.0;
+}
+
+/**
+ * Position P&L at expiration for a given underlying price.
+ *
+ * Options settle to intrinsic value; linear instruments settle to the move
+ * from their entry. Premium is the price actually paid or received, which the
+ * client now sends per leg — before the contract carried no premium field, so
+ * every structure was implicitly free and every payoff was wrong.
+ */
+[[nodiscard]] auto payoff_at_expiry(const calculator::StrategyRequest& req, double price) noexcept -> double {
+    double total = 0.0;
+    for (const auto& leg : req.legs()) {
+        const double dir = direction_of(leg);
+        const double mult = multiplier_of(leg);
+        const double qty = quantity_of(leg);
+
+        switch (leg.type()) {
+            case calculator::Leg::CALL:
+                total += (std::max(0.0, price - leg.strike()) - leg.premium()) * dir * mult * qty;
+                break;
+            case calculator::Leg::PUT:
+                total += (std::max(0.0, leg.strike() - price) - leg.premium()) * dir * mult * qty;
+                break;
+            default: {
+                // Linear legs: entry is the premium when supplied, otherwise
+                // the strike field carries the entry level.
+                const double entry = (leg.premium() > 0.0) ? leg.premium() : leg.strike();
+                total += (price - entry) * dir * mult * qty;
+                break;
+            }
+        }
+    }
+    return total;
+}
+
+/**
+ * Position P&L at an intermediate date, with every option re-priced by
+ * Black-Scholes at the remaining time. This is what makes the price × date
+ * matrix meaningful rather than a repeated expiry column.
+ */
+[[nodiscard]] auto value_at(const calculator::StrategyRequest& req, double price,
+                            double years_remaining, double r) noexcept -> double {
+    if (years_remaining <= 1e-9) return payoff_at_expiry(req, price);
+
+    double total = 0.0;
+    for (const auto& leg : req.legs()) {
+        const double dir = direction_of(leg);
+        const double mult = multiplier_of(leg);
+        const double qty = quantity_of(leg);
+
+        if (leg.type() == calculator::Leg::CALL || leg.type() == calculator::Leg::PUT) {
+            const double iv = (leg.implied_volatility() > 0.0)
+                                  ? leg.implied_volatility()
+                                  : req.implied_volatility();
+            if (iv <= 0.0) return payoff_at_expiry(req, price);
+
+            const auto type = (leg.type() == calculator::Leg::CALL) ? sensen::OptionType::Call
+                                                                   : sensen::OptionType::Put;
+            const auto bs = sensen::price_black_scholes(price, leg.strike(), r, iv, years_remaining, type);
+            total += (bs.value - leg.premium()) * dir * mult * qty;
+        } else {
+            const double entry = (leg.premium() > 0.0) ? leg.premium() : leg.strike();
+            total += (price - entry) * dir * mult * qty;
+        }
+    }
+    return total;
+}
+
+/** Longest-dated leg, in days. The horizon the structure is measured to. */
+[[nodiscard]] auto horizon_days(const calculator::StrategyRequest& req) noexcept -> double {
+    double days = 0.0;
+    for (const auto& leg : req.legs()) {
+        days = std::max(days, leg.expiration_days());
+    }
+    return days;
+}
+
+/** Quantity-weighted position IV, falling back to the request-level figure. */
+[[nodiscard]] auto position_iv(const calculator::StrategyRequest& req) noexcept -> double {
+    double weighted = 0.0;
+    double weight = 0.0;
+    for (const auto& leg : req.legs()) {
+        if (leg.implied_volatility() > 0.0) {
+            const double q = quantity_of(leg);
+            weighted += leg.implied_volatility() * q;
+            weight += q;
+        }
+    }
+    if (weight > 0.0) return weighted / weight;
+    return req.implied_volatility();
+}
+
+// --------------------------------------------------------------------------
+// Probability
+// --------------------------------------------------------------------------
+
+/**
+ * Terminal-price distribution under GBM, sampled on the price grid.
+ *
+ * Mirrors sensen::OptionStrategyBuilder::probability_of_profit: log(S_T) is
+ * normal with mean log(S0) + (r - sigma^2/2)T and standard deviation
+ * sigma*sqrt(T). The frontend draws the same density from the same inputs, so
+ * the shaded region and these figures describe one distribution, not two.
+ */
+struct Distribution {
+    std::vector<double> price;
+    std::vector<double> density;  // Normalised so the weights sum to 1.
+};
+
+[[nodiscard]] auto lognormal_over(const std::vector<double>& grid, double spot, double sigma,
+                                  double years, double r) -> Distribution {
+    Distribution dist;
+    dist.price = grid;
+    dist.density.assign(grid.size(), 0.0);
+    if (grid.size() < 2 || spot <= 0.0 || sigma <= 0.0 || years <= 0.0) return dist;
+
+    const double sd = sigma * std::sqrt(years);
+    const double mu = std::log(spot) + (r - 0.5 * sigma * sigma) * years;
+
+    double total = 0.0;
+    for (std::size_t i = 0; i < grid.size(); ++i) {
+        const double x = grid[i];
+        if (x <= 0.0) continue;
+        const double z = (std::log(x) - mu) / sd;
+        const double pdf = std::exp(-0.5 * z * z) / (x * sd * std::sqrt(2.0 * M_PI));
+        dist.density[i] = pdf;
+        total += pdf;
+    }
+    if (total > 0.0) {
+        for (auto& d : dist.density) d /= total;
+    }
+    return dist;
+}
+
+struct RiskFigures {
+    double pop{0.0};
+    double expected_value{0.0};
+    double var95{0.0};
+    double var99{0.0};
+    double cvar95{0.0};
+    double cvar99{0.0};
+    double probability_of_target{0.0};
+};
+
+/**
+ * Probability-weighted risk figures.
+ *
+ * VaR and CVaR are read off the P&L distribution induced by the terminal
+ * price distribution: sort outcomes by P&L, walk the cumulative probability
+ * to the quantile, and average the tail beyond it for the conditional figure.
+ */
+[[nodiscard]] auto risk_figures(const Distribution& dist, const std::vector<double>& pnl,
+                                double max_profit) -> RiskFigures {
+    RiskFigures out;
+    if (dist.density.empty() || pnl.size() != dist.density.size()) return out;
+
+    const double target = max_profit * 0.5;
+    for (std::size_t i = 0; i < pnl.size(); ++i) {
+        const double w = dist.density[i];
+        out.expected_value += pnl[i] * w;
+        if (pnl[i] > 0.0) out.pop += w;
+        if (max_profit > 0.0 && pnl[i] >= target) out.probability_of_target += w;
+    }
+
+    std::vector<std::size_t> order(pnl.size());
+    std::iota(order.begin(), order.end(), std::size_t{0});
+    std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) { return pnl[a] < pnl[b]; });
+
+    const auto quantile = [&](double alpha, double& var, double& cvar) {
+        double cumulative = 0.0;
+        double tail_pnl = 0.0;
+        double tail_weight = 0.0;
+        bool crossed = false;
+        for (const auto idx : order) {
+            const double w = dist.density[idx];
+            if (!crossed) {
+                tail_pnl += pnl[idx] * w;
+                tail_weight += w;
+            }
+            cumulative += w;
+            if (!crossed && cumulative >= alpha) {
+                var = pnl[idx];
+                crossed = true;
+            }
+        }
+        cvar = (tail_weight > 0.0) ? tail_pnl / tail_weight : var;
+    };
+
+    quantile(0.05, out.var95, out.cvar95);
+    quantile(0.01, out.var99, out.cvar99);
+    return out;
+}
+
+// --------------------------------------------------------------------------
+// SGEE execution context
+// --------------------------------------------------------------------------
 
 struct ComputeContext {
-    CalculationRequest request;
-    CalculationResponse response;
+    calculator::StrategyRequest request;
+    calculator::StrategyResponse response;
     grpc::Status status{grpc::Status::OK};
     std::shared_ptr<std::promise<void>> promise;
 
-    // Intermediate state
-    double current_spot{0.0};
+    double spot{0.0};
     double r{0.0};
-    uint32_t date_steps{0};
-    uint32_t price_steps{0};
-    double price_range{0.0};
-    double min_price{0.0};
-    double max_price{0.0};
-    double price_step_size{0.0};
-    int max_dte{30};
-
-    // Workflow Control
-    int retry_count{0};
-    const int max_retries{3};
+    double sigma{0.0};
+    double horizon{0.0};
+    std::uint32_t date_steps{0};
+    std::uint32_t price_steps{0};
+    std::vector<double> price_grid;
+    std::vector<double> expiry_pnl;
 };
+using Ctx = std::shared_ptr<ComputeContext>;
+using PipelineType = sgee::runtime::TransformedPipeline<Ctx, Ctx>;
+using ActionRegistry = sgee::runtime::ActionRegistry<Ctx>;
 
-using PipelineType = sgee::runtime::TransformedPipeline<std::shared_ptr<ComputeContext>, std::shared_ptr<ComputeContext>>;
+// --------------------------------------------------------------------------
+// Graph actions
+//
+// These are registered by name in an ActionRegistry and invoked by the SGEE
+// interpreter as each entity transitions through the state machine.
+//
+// They are free functions rather than lambdas passed to the builder because
+// `sgee::Builder::Execute(F&&)` *discards the callable* — it only allocates a
+// generated name ("lambda_action_N") for it. Actions run only when an
+// ActionRegistry is handed to the Interpreter and the names match. The
+// previous implementation passed lambdas and constructed the interpreter with
+// no registry, so `action_registry_` was null, the guard in interpreter.cppm
+// skipped every action, and the entire P&L computation was dead code: the
+// graph walked its states and computed nothing.
+//
+// Control flow is linear for the same class of reason. The batch interpreter
+// does not evaluate predicates on deterministic Branch nodes — it takes
+// `node.branches[0]` unconditionally — so an OnTrue/OnFalse pair would always
+// have taken the OnTrue edge regardless of the predicate. Validation therefore
+// happens inside the actions, and each one returns early if an earlier stage
+// already failed.
+// --------------------------------------------------------------------------
 
-class CalculatorServiceImpl final : public CalculatorEngineService::Service {
+using sgee::ExecutionResult;
+
+[[nodiscard]] auto action_initialize(Ctx& ctx) -> ExecutionResult<> {
+    ctx->spot = ctx->request.current_price();
+    ctx->r = ctx->request.risk_free_rate();
+    ctx->sigma = position_iv(ctx->request);
+    ctx->horizon = horizon_days(ctx->request);
+
+    // Refuse rather than answer a question we were not asked. Each of these
+    // was previously defaulted server-side, so the engine always produced a
+    // confident answer to a fabricated question.
+    std::string why;
+    if (ctx->request.legs_size() == 0) why += " no legs;";
+    if (ctx->spot <= 0.0) why += " no spot price;";
+    if (ctx->horizon <= 0.0) why += " no expiration on any leg;";
+    if (!why.empty()) {
+        ctx->status = grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                                   "Cannot price this position:" + why);
+        return std::unexpected(sgee::ExecutionError::ActionFailed);
+    }
+
+    ctx->date_steps = ctx->request.date_steps() > 0 ? ctx->request.date_steps() : 12;
+    ctx->price_steps = ctx->request.price_steps() > 0 ? ctx->request.price_steps() : 81;
+
+    const double range =
+        ctx->request.price_range_percent() > 0.0 ? ctx->request.price_range_percent() : 0.25;
+    const double lo = std::max(0.01, ctx->spot * (1.0 - range));
+    const double hi = ctx->spot * (1.0 + range);
+    const double step =
+        (hi - lo) / static_cast<double>(ctx->price_steps > 1 ? ctx->price_steps - 1 : 1);
+
+    ctx->price_grid.clear();
+    ctx->price_grid.reserve(ctx->price_steps);
+    for (std::uint32_t i = 0; i < ctx->price_steps; ++i) {
+        ctx->price_grid.push_back(lo + step * static_cast<double>(i));
+    }
+    return {};
+}
+
+[[nodiscard]] auto action_expiry_curve(Ctx& ctx) -> ExecutionResult<> {
+    if (!ctx->status.ok()) return {};
+    const auto start = std::chrono::high_resolution_clock::now();
+
+    ctx->expiry_pnl.clear();
+    ctx->expiry_pnl.reserve(ctx->price_grid.size());
+
+    double max_profit = -std::numeric_limits<double>::infinity();
+    double max_loss = std::numeric_limits<double>::infinity();
+
+    for (const double price : ctx->price_grid) {
+        const double pnl = payoff_at_expiry(ctx->request, price);
+        ctx->expiry_pnl.push_back(pnl);
+        max_profit = std::max(max_profit, pnl);
+        max_loss = std::min(max_loss, pnl);
+
+        auto& point = *ctx->response.add_pnl_matrix();
+        point.set_underlying_price(price);
+        point.set_pnl(pnl);
+    }
+
+    ctx->response.set_max_profit(max_profit);
+    ctx->response.set_max_loss(max_loss);
+    if (max_loss < 0.0) {
+        ctx->response.set_risk_reward_ratio(std::abs(max_profit / max_loss));
+    }
+
+    // Every sign change is a break-even. A condor has two; the single
+    // `break_even` field could only ever describe one of them.
+    for (std::size_t i = 1; i < ctx->expiry_pnl.size(); ++i) {
+        const double a = ctx->expiry_pnl[i - 1];
+        const double b = ctx->expiry_pnl[i];
+        if (a == 0.0 || a * b < 0.0) {
+            const double t = std::abs(a) / (std::abs(a) + std::abs(b));
+            ctx->response.add_breakeven_prices(
+                ctx->price_grid[i - 1] + t * (ctx->price_grid[i] - ctx->price_grid[i - 1]));
+        }
+    }
+    if (ctx->response.breakeven_prices_size() > 0) {
+        ctx->response.set_break_even(ctx->response.breakeven_prices(0));
+    }
+
+    const auto end = std::chrono::high_resolution_clock::now();
+    ctx->response.set_calculation_time_microseconds(static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(end - start).count()));
+    return {};
+}
+
+[[nodiscard]] auto action_matrix(Ctx& ctx) -> ExecutionResult<> {
+    if (!ctx->status.ok()) return {};
+
+    const auto now = std::chrono::system_clock::now();
+    const double risk = std::abs(ctx->response.max_loss());
+
+    for (std::uint32_t d = 0; d < ctx->date_steps; ++d) {
+        const double frac = (ctx->date_steps > 1)
+                                ? static_cast<double>(d) / static_cast<double>(ctx->date_steps - 1)
+                                : 1.0;
+        const double dte = ctx->horizon * (1.0 - frac);
+        const double years = std::max(0.0, dte / 365.0);
+
+        const auto day = std::chrono::floor<std::chrono::days>(now) +
+                         std::chrono::days{static_cast<int>(std::llround(dte))};
+        const std::chrono::year_month_day ymd{day};
+        std::ostringstream date_str;
+        date_str << static_cast<int>(ymd.year()) << '-'
+                 << (static_cast<unsigned>(ymd.month()) < 10 ? "0" : "")
+                 << static_cast<unsigned>(ymd.month()) << '-'
+                 << (static_cast<unsigned>(ymd.day()) < 10 ? "0" : "")
+                 << static_cast<unsigned>(ymd.day());
+        const auto date_text = date_str.str();
+
+        for (const double price : ctx->price_grid) {
+            const double pnl = value_at(ctx->request, price, years, ctx->r);
+            auto& cell = *ctx->response.add_matrix();
+            cell.set_price(price);
+            cell.set_days_to_expiration(static_cast<std::uint32_t>(std::llround(dte)));
+            cell.set_date_str(date_text);
+            cell.set_pnl_dollars(pnl);
+            if (risk > 1e-9) {
+                cell.set_return_on_risk_percent(pnl / risk * 100.0);
+            }
+        }
+    }
+    return {};
+}
+
+[[nodiscard]] auto action_greeks(Ctx& ctx) -> ExecutionResult<> {
+    if (!ctx->status.ok()) return {};
+
+    double delta = 0.0, gamma = 0.0, theta = 0.0, vega = 0.0, rho = 0.0;
+    double vanna = 0.0, volga = 0.0, charm = 0.0;
+    const double years = ctx->horizon / 365.0;
+
+    for (const auto& leg : ctx->request.legs()) {
+        const double dir = direction_of(leg);
+        const double mult = multiplier_of(leg);
+        const double qty = quantity_of(leg);
+
+        if (leg.type() == calculator::Leg::CALL || leg.type() == calculator::Leg::PUT) {
+            const double iv = leg.implied_volatility() > 0.0 ? leg.implied_volatility() : ctx->sigma;
+            if (iv <= 0.0) continue;
+            const auto type = (leg.type() == calculator::Leg::CALL) ? sensen::OptionType::Call
+                                                                   : sensen::OptionType::Put;
+            const auto bs =
+                sensen::price_black_scholes(ctx->spot, leg.strike(), ctx->r, iv, years, type);
+            const double scale = dir * mult * qty;
+            delta += bs.delta * scale;
+            gamma += bs.gamma * scale;
+            theta += bs.theta * scale;
+            vega  += bs.vega  * scale;
+            rho   += bs.rho   * scale;
+            vanna += bs.vanna * scale;
+            volga += bs.volga * scale;
+            charm += bs.charm * scale;
+        } else {
+            delta += dir * mult * qty;
+        }
+    }
+
+    auto& g = *ctx->response.mutable_net_greeks();
+    g.set_delta(delta);
+    g.set_gamma(gamma);
+    g.set_theta(theta);
+    g.set_vega(vega);
+    g.set_rho(rho);
+    g.set_vanna(vanna);
+    g.set_volga(volga);
+    g.set_charm(charm);
+    return {};
+}
+
+[[nodiscard]] auto action_probabilities(Ctx& ctx) -> ExecutionResult<> {
+    if (!ctx->status.ok()) return {};
+
+    // Without a volatility there is no distribution. The probability fields
+    // stay at zero rather than being filled from a default vol, which the
+    // caller could not tell apart from a real answer.
+    if (ctx->sigma <= 0.0 || ctx->horizon <= 0.0) {
+        logger::Logger::getInstance().warn(
+            "No implied volatility on the position; probability metrics omitted");
+        return {};
+    }
+
+    const auto dist =
+        lognormal_over(ctx->price_grid, ctx->spot, ctx->sigma, ctx->horizon / 365.0, ctx->r);
+    const auto figures = risk_figures(dist, ctx->expiry_pnl, ctx->response.max_profit());
+
+    ctx->response.set_pop(figures.pop);
+    ctx->response.set_expected_value(figures.expected_value);
+    ctx->response.set_probability_of_target_profit(figures.probability_of_target);
+
+    auto& rm = *ctx->response.mutable_risk_metrics();
+    rm.set_var_parametric_95(figures.var95);
+    rm.set_var_parametric_99(figures.var99);
+    rm.set_cvar_parametric_95(figures.cvar95);
+    rm.set_cvar_parametric_99(figures.cvar99);
+
+    // Probability of touching the nearest break-even at any point before
+    // expiry, via the reflection principle.
+    if (ctx->response.breakeven_prices_size() > 0) {
+        double nearest = ctx->response.breakeven_prices(0);
+        for (const double be : ctx->response.breakeven_prices()) {
+            if (std::abs(be - ctx->spot) < std::abs(nearest - ctx->spot)) nearest = be;
+        }
+        const double sd = ctx->sigma * std::sqrt(ctx->horizon / 365.0);
+        if (sd > 0.0 && nearest > 0.0) {
+            const double z = std::abs(std::log(nearest / ctx->spot)) / sd;
+            const double touch = 2.0 * (1.0 - 0.5 * (1.0 + std::erf(z / std::sqrt(2.0))));
+            ctx->response.set_probability_of_touch(std::min(1.0, touch));
+        }
+    }
+    return {};
+}
+
+class CalculatorServiceImpl final : public calculator::OptionsCalculator::Service {
 private:
+    std::shared_ptr<ActionRegistry> actions_;
     std::unique_ptr<PipelineType> execution_engine_;
 
 public:
-    CalculatorServiceImpl() {
-        auto graph_result = sgee::Builder<std::shared_ptr<ComputeContext>>("OptionsWorkflow")
+    CalculatorServiceImpl() : actions_{std::make_shared<ActionRegistry>()} {
+        auto& log = logger::Logger::getInstance();
+
+        auto graph_result = sgee::Builder<Ctx>("OptionsWorkflow")
             .Node("Initialize")
-                .Execute([](std::shared_ptr<ComputeContext>& ctx) {
-                    ctx->current_spot = ctx->request.spot_price();
-                    ctx->r = ctx->request.risk_free_rate();
-                    ctx->date_steps = ctx->request.date_steps() > 0 ? ctx->request.date_steps() : 30;
-                    ctx->price_steps = ctx->request.price_steps() > 0 ? ctx->request.price_steps() : 50;
-                    ctx->price_range = ctx->request.price_range_percent() > 0.0 ? ctx->request.price_range_percent() : 0.20;
-                    ctx->min_price = ctx->current_spot * (1.0 - ctx->price_range);
-                    ctx->max_price = ctx->current_spot * (1.0 + ctx->price_range);
-                    ctx->price_step_size = (ctx->max_price - ctx->min_price) / (ctx->price_steps == 1 ? 1 : ctx->price_steps - 1);
-                    ctx->status = grpc::Status::OK;
-                })
-                .Branch([](const std::shared_ptr<ComputeContext>& ctx) {
-                    return ctx->request.legs_size() > 0;
-                })
-                    .OnTrue("ComputePnL")
-                    .OnFalse("FailedValidation")
-            
-            .Node("FailedValidation")
-                .Execute([](std::shared_ptr<ComputeContext>& ctx) {
-                    ctx->status = grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "No strategy legs provided");
-                })
-                .Next("Failed")
-
-            .Node("ComputePnL")
-                .Execute([](std::shared_ptr<ComputeContext>& ctx) {
-                    try {
-                        auto start_time = std::chrono::high_resolution_clock::now();
-                        double max_profit = -1e9;
-                        double max_loss = 1e9;
-
-                        struct SimulationContext {
-                            double sim_price{0.0};
-                            double current_dte{0.0};
-                            double T_years{0.0};
-                            double min_price{0.0};
-                            const CalculationRequest* request{nullptr};
-                            double current_spot{0.0};
-                            double r{0.0};
-                            double total_pnl{0.0};
-                            uint32_t d_step{0};
-                            uint32_t p_step{0};
-                        };
-
-                        auto compute_pnl = [&](SimulationContext& sim_ctx) -> std::expected<double, std::string> {
-                            double total_pnl = 0.0;
-                            for (const auto& leg : sim_ctx.request->legs()) {
-                                double dir = (leg.action() == ACTION_BUY) ? 1.0 : -1.0;
-                                double mult = leg.contract_multiplier() > 0.0 ? leg.contract_multiplier() : 100.0;
-                                double qty = leg.quantity() > 0 ? leg.quantity() : 1.0;
-                                double entry = leg.premium();
-                                
-                                if (leg.instrument_type() == INSTRUMENT_EQUITY_SPOT || leg.instrument_type() == INSTRUMENT_FUTURES_SPOT) {
-                                    double pnl = (sim_ctx.sim_price - leg.strike_price()) * dir * mult * qty;
-                                    total_pnl += pnl;
-                                } else {
-                                    auto opt_type = (leg.option_type() == OPTION_TYPE_CALL) ? sensen::OptionType::Call : sensen::OptionType::Put;
-                                    double iv = leg.implied_volatility() > 0 ? leg.implied_volatility() : 0.20;
-                                    
-                                    // Simulated failure to demonstrate retry logic
-                                    if (iv < 0.001) {
-                                        return std::unexpected("Implied volatility too low, numerical instability");
-                                    }
-
-                                    auto bs = sensen::price_black_scholes(sim_ctx.sim_price, leg.strike_price(), sim_ctx.r, iv, sim_ctx.T_years, opt_type);
-                                    double pnl = (bs.value - entry) * dir * mult * qty;
-                                    total_pnl += pnl;
-                                }
-                            }
-                            return total_pnl;
-                        };
-
-                        std::vector<SimulationContext> entities;
-                        entities.reserve(ctx->date_steps * ctx->price_steps);
-
-                        for (uint32_t d_step = 0; d_step < ctx->date_steps; ++d_step) {
-                            double current_dte = ctx->max_dte * (1.0 - static_cast<double>(d_step) / (ctx->date_steps == 1 ? 1 : ctx->date_steps - 1));
-                            if (current_dte < 0.001) current_dte = 0.001; 
-                            double T_years = current_dte / 365.0;
-                            
-                            for (uint32_t p_step = 0; p_step < ctx->price_steps; ++p_step) {
-                                double sim_price = ctx->min_price + p_step * ctx->price_step_size;
-                                entities.push_back(SimulationContext{
-                                    .sim_price = sim_price,
-                                    .current_dte = current_dte,
-                                    .T_years = T_years,
-                                    .min_price = ctx->min_price,
-                                    .request = &ctx->request,
-                                    .current_spot = ctx->current_spot,
-                                    .r = ctx->r,
-                                    .total_pnl = 0.0,
-                                    .d_step = d_step,
-                                    .p_step = p_step
-                                });
-                            }
-                        }
-
-                        for (auto& sim_ctx : entities) {
-                            auto result = compute_pnl(sim_ctx);
-                            if (!result) {
-                                throw std::runtime_error(result.error());
-                            }
-                            sim_ctx.total_pnl = result.value();
-                        }
-
-                        for (const auto& sim_ctx : entities) {
-                            if (sim_ctx.total_pnl > max_profit) max_profit = sim_ctx.total_pnl;
-                            if (sim_ctx.total_pnl < max_loss) max_loss = sim_ctx.total_pnl;
-
-                            MatrixCell* cell = ctx->response.add_matrix();
-                            cell->set_price(sim_ctx.sim_price);
-                            cell->set_days_to_expiration(static_cast<uint32_t>(sim_ctx.current_dte));
-                            cell->set_date_str("sim"); 
-                            cell->set_pnl_dollars(sim_ctx.total_pnl);
-                            cell->set_probability_density(0.015);
-                        }
-
-                        ctx->response.set_max_profit(max_profit);
-                        ctx->response.set_max_loss(max_loss);
-                        if (max_loss < 0.0 && max_profit > 0.0) {
-                            ctx->response.set_risk_reward_ratio(std::abs(max_profit / max_loss));
-                        }
-                        
-                        auto end_time = std::chrono::high_resolution_clock::now();
-                        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
-                        ctx->response.set_calculation_time_microseconds(duration.count());
-
-                        ctx->status = grpc::Status::OK;
-                    } catch (const std::exception& e) {
-                        ctx->status = grpc::Status(grpc::StatusCode::INTERNAL, e.what());
-                    }
-                })
-                .Branch([](const std::shared_ptr<ComputeContext>& ctx) {
-                    return ctx->status.ok();
-                })
-                    .OnTrue("ComputeGreeks")
-                    .OnFalse("RetryStrategy")
-
-            .Node("RetryStrategy")
-                .Execute([](std::shared_ptr<ComputeContext>& ctx) {
-                    ctx->retry_count++;
-                    logger::Logger::getInstance().warn("Retrying computation. Attempt {}/{}", ctx->retry_count, ctx->max_retries);
-                    ctx->response.clear_matrix();
-                })
-                .Branch([](const std::shared_ptr<ComputeContext>& ctx) {
-                    return ctx->retry_count < ctx->max_retries;
-                })
-                    .OnTrue("ComputePnL")
-                    .OnFalse("Failed")
-
+                .Execute("Initialize")
+                .Next("ComputeExpiryCurve")
+            .Node("ComputeExpiryCurve")
+                .Execute("ComputeExpiryCurve")
+                .Next("ComputeMatrix")
+            .Node("ComputeMatrix")
+                .Execute("ComputeMatrix")
+                .Next("ComputeGreeks")
             .Node("ComputeGreeks")
-                .Execute([](std::shared_ptr<ComputeContext>& ctx) {
-                    double total_delta = 0.0;
-                    double total_gamma = 0.0;
-                    double total_theta = 0.0;
-                    double total_vega = 0.0;
-                    
-                    for (const auto& leg : ctx->request.legs()) {
-                        double dir = (leg.action() == ACTION_BUY) ? 1.0 : -1.0;
-                        double mult = leg.contract_multiplier() > 0.0 ? leg.contract_multiplier() : 100.0;
-                        double qty = leg.quantity() > 0 ? leg.quantity() : 1.0;
-                        if (leg.instrument_type() == INSTRUMENT_EQUITY_OPTION || leg.instrument_type() == INSTRUMENT_FUTURES_OPTION) {
-                            auto opt_type = (leg.option_type() == OPTION_TYPE_CALL) ? sensen::OptionType::Call : sensen::OptionType::Put;
-                            double iv = leg.implied_volatility() > 0 ? leg.implied_volatility() : 0.20;
-                            auto bs = sensen::price_black_scholes(ctx->current_spot, leg.strike_price(), ctx->r, iv, ctx->max_dte / 365.0, opt_type);
-                            total_delta += bs.delta * dir * mult * qty;
-                            total_gamma += bs.gamma * dir * mult * qty;
-                            total_theta += bs.theta * dir * mult * qty;
-                            total_vega  += bs.vega  * dir * mult * qty;
-                        } else if (leg.instrument_type() == INSTRUMENT_EQUITY_SPOT || leg.instrument_type() == INSTRUMENT_FUTURES_SPOT) {
-                            total_delta += 1.0 * dir * mult * qty;
-                        }
-                    }
-                    
-                    GreekBreakdown* agg_greeks = ctx->response.mutable_aggregate_greeks();
-                    agg_greeks->set_delta(total_delta);
-                    agg_greeks->set_gamma(total_gamma);
-                    agg_greeks->set_theta(total_theta);
-                    agg_greeks->set_vega(total_vega);
-                })
-                .Next("Success")
-
-            .Node("Success")
+                .Execute("ComputeGreeks")
+                .Next("ComputeProbabilities")
+            .Node("ComputeProbabilities")
+                .Execute("ComputeProbabilities")
+                .Next("Done")
+            .Node("Done")
                 .IsTerminal()
-            
-            .Node("Failed")
-                .IsTerminal()
-            
             .Build();
 
         if (!graph_result) {
-            logger::Logger::getInstance().error("Failed to build SGEE Graph: {}", graph_result.error());
+            log.error("Failed to build SGEE graph: {}", graph_result.error());
             return;
         }
-
         auto graph = graph_result.value();
 
-        // Initialize SGEE Pipeline Queue with Backpressure
+        /*
+         * Bind each action by the ID the builder assigned, not by name.
+         *
+         * ActionRegistry::Register hashes the name (`hash(name) % 10000`)
+         * while Builder::Execute assigns sequential IDs from its own name
+         * table. Those two numbering schemes never agree, so registering by
+         * name compiles and runs but every lookup in the interpreter misses
+         * and the action silently does not execute. GetActionId() is the only
+         * thing that bridges them.
+         */
+        const std::array<std::pair<std::string_view, ActionRegistry::ActionFunction>, 5> bindings{{
+            {"Initialize", action_initialize},
+            {"ComputeExpiryCurve", action_expiry_curve},
+            {"ComputeMatrix", action_matrix},
+            {"ComputeGreeks", action_greeks},
+            {"ComputeProbabilities", action_probabilities},
+        }};
+
+        for (const auto& [name, fn] : bindings) {
+            const auto id = graph->GetActionId(name);
+            if (!id) {
+                log.error("Action '{}' is not present in the graph; refusing to start", name);
+                return;
+            }
+            actions_->RegisterById(*id, fn);
+        }
+
+        auto actions = actions_;
+
         auto builder = PipelineType::create()
-            .withTransform([graph](const std::shared_ptr<ComputeContext>& ctx) -> std::shared_ptr<ComputeContext> {
-                // SGEE Context Engine instantiation per request batch
-                sgee::runtime::EngineContext<std::shared_ptr<ComputeContext>> engine;
-                std::vector<std::shared_ptr<ComputeContext>> entities{ctx};
+            .withTransform([graph, actions](const Ctx& ctx) -> Ctx {
+                sgee::runtime::EngineContext<Ctx> engine;
+                std::vector<Ctx> entities{ctx};
                 engine.Load(entities);
 
-                sgee::runtime::Interpreter<std::shared_ptr<ComputeContext>> interpreter(graph);
+                // Sequential: each request is a single entity, so batch
+                // parallelism buys nothing and the pipeline already runs
+                // requests concurrently across its worker pool.
+                sgee::runtime::Interpreter<Ctx> interpreter(
+                    graph, sgee::runtime::ParallelismLevel::Sequential, actions.get());
                 interpreter.Run(engine);
                 return ctx;
             })
@@ -289,174 +598,195 @@ public:
 
         if (builder) {
             execution_engine_ = std::make_unique<PipelineType>(std::move(*builder));
-            execution_engine_->startWorkers([](std::shared_ptr<ComputeContext>& ctx) {
-                ctx->promise->set_value();
-            });
-            logger::Logger::getInstance().info("SGEE Pipeline Execution Engine initialized with 16 workers and backpressure policy: Block");
+            execution_engine_->startWorkers([](Ctx& ctx) { ctx->promise->set_value(); });
+            log.info("SGEE pipeline initialized: 16 workers, {} registered actions", bindings.size());
         } else {
-            logger::Logger::getInstance().error("Failed to build SGEE Pipeline: {}", builder.error());
+            log.error("Failed to build SGEE pipeline: {}", builder.error());
         }
     }
 
-    ~CalculatorServiceImpl() {
+    ~CalculatorServiceImpl() override {
         if (execution_engine_) {
             execution_engine_->stop();
         }
     }
 
-    // Core computation endpoint
-    auto ComputeStrategyPnL(ServerContext* context, const CalculationRequest* request, CalculationResponse* response) -> Status override {
-        auto& log = logger::Logger::getInstance();
-        log.info("ComputeStrategyPnL invoked with {} legs", request->legs_size());
+    /*
+     * The three RPC signatures below are fixed by the protoc-generated base
+     * class and cannot be changed: the parameters must match the virtual
+     * exactly or the override does not bind. They are non-owning views onto
+     * memory gRPC owns and reuses across calls, so wrapping them in a smart
+     * pointer would introduce a double free rather than satisfy the policy.
+     *
+     * The rule is honoured by not letting them travel: each is null-checked
+     * and bound to a reference on the first line, and no raw pointer appears
+     * anywhere in the bodies. See the deviation register in the spec.
+     */
+    auto CalculateStrategy(ServerContext*, const calculator::StrategyRequest* request,
+                           calculator::StrategyResponse* response) -> Status override {
+        if (request == nullptr || response == nullptr) {
+            return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
+        }
+        const auto& req = *request;
+        auto& res = *response;
 
-        // We no longer validate here, the state machine handles it
-        // The gRPC method only pushes to the engine and blocks
+        auto& log = logger::Logger::getInstance();
+        log.info("CalculateStrategy: {} with {} legs", req.underlying_symbol(), req.legs_size());
 
         if (!execution_engine_) {
             return Status(grpc::StatusCode::INTERNAL, "Execution engine not initialized");
         }
 
         auto ctx = std::make_shared<ComputeContext>();
-        ctx->request = *request;
+        ctx->request = req;
         ctx->promise = std::make_shared<std::promise<void>>();
         auto future = ctx->promise->get_future();
 
-        // Enqueue the request to SGEE pipeline
-        bool queued = execution_engine_->push(ctx);
-        if (!queued) {
-            log.warn("Backpressure applied: Execution Engine Queue Full");
-            return Status(grpc::StatusCode::RESOURCE_EXHAUSTED, "Server is currently overloaded. Backpressure applied.");
+        if (!execution_engine_->push(ctx)) {
+            log.warn("Backpressure applied: execution queue full");
+            return Status(grpc::StatusCode::RESOURCE_EXHAUSTED,
+                          "Server is currently overloaded. Backpressure applied.");
         }
 
-        // Wait for asynchronous processing by SGEE worker pool
         future.wait();
 
-        if (!ctx->status.ok()) {
-            return ctx->status;
-        }
+        if (!ctx->status.ok()) return ctx->status;
 
-        *response = ctx->response;
-        log.info("ComputeStrategyPnL completed via SGEE Engine");
+        res = ctx->response;
         return Status::OK;
     }
 
-    // Live Market Quote via Yahoo Finance
-    auto GetMarketQuote(ServerContext* context, const QuoteRequest* request, QuoteResponse* response) -> Status override {
+    /**
+     * Live underlying quote.
+     *
+     * A failure is reported as a failure. The previous implementation logged
+     * the error and then returned price 100.0 with `Status::OK`, so the client
+     * could not tell a real quote from a fabricated one.
+     */
+    auto GetMarketQuote(ServerContext*, const calculator::QuoteRequest* request,
+                        calculator::QuoteResponse* response) -> Status override {
+        if (request == nullptr || response == nullptr) {
+            return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
+        }
+        const auto& req = *request;
+        auto& res = *response;
+
         auto& log = logger::Logger::getInstance();
-        std::string symbol = request->symbol();
-        log.info("GetMarketQuote requested for symbol: {}", symbol);
+        const auto symbol = req.symbol();
+        log.info("GetMarketQuote: {}", symbol);
 
-        auto quote_res = options_calculator::market_data::fetch_yahoo_finance_quote(symbol);
-        if (!quote_res.has_value()) {
-            log.warn("Yahoo Finance quote fetch failed for {}, returning default fallback", symbol);
-            response->set_symbol(symbol);
-            response->set_price(100.0);
-            response->set_previous_close(100.0);
-            response->set_forward_pe(15.0);
-            response->set_implied_volatility(0.20);
-            return Status::OK;
+        const auto quote = md::fetch_quote(symbol);
+        if (!quote) {
+            log.error("Quote unavailable for {}: {}", symbol, quote.error().message());
+            return Status(grpc::StatusCode::UNAVAILABLE,
+                          "No quote for " + symbol + ": " + quote.error().message());
         }
 
-        auto quote = quote_res.value();
-        response->set_symbol(quote.symbol);
-        response->set_price(quote.regularMarketPrice);
-        response->set_previous_close(quote.regularMarketPreviousClose);
-        response->set_forward_pe(quote.forwardPE);
-        response->set_implied_volatility(quote.impliedVolatility);
+        res.set_symbol(quote->symbol);
+        res.set_price(quote->price);
+        res.set_previous_close(quote->previous_close);
+        res.set_provider("alpaca");
+        res.set_quote_timestamp(quote->timestamp);
+        // Forward P/E and a single underlying IV are not on this feed. They
+        // stay at zero, which the client renders as "unknown".
         return Status::OK;
     }
 
-    // Live Market Options & Futures Chain Generation
-    auto GetMarketChain(ServerContext* context, const ChainRequest* request, ChainResponse* response) -> Status override {
+    /**
+     * Live option chain.
+     *
+     * Everything here is provider data joined across two Alpaca endpoints. The
+     * previous implementation generated strikes from a step function around a
+     * spot that defaulted to 100.0, filled volume/OI/IV with the constants
+     * 1200/3400/0.22, computed "delta" from a linear moneyness expression, and
+     * emitted nine hardcoded futures months priced off a fixed 4.5% carry.
+     * None of that was market data.
+     */
+    auto GetMarketChain(ServerContext*, const calculator::ChainRequest* request,
+                        calculator::ChainResponse* response) -> Status override {
+        if (request == nullptr || response == nullptr) {
+            return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
+        }
+        const auto& req = *request;
+        auto& res = *response;
+
         auto& log = logger::Logger::getInstance();
-        std::string symbol = request->symbol();
-        int dte = request->expiration_days() > 0 ? request->expiration_days() : 30;
+        const auto symbol = req.symbol();
+        log.info("GetMarketChain: {} expiration='{}'", symbol, req.expiration_date());
 
-        log.info("GetMarketChain requested for symbol: {}, DTE: {}", symbol, dte);
-
-        double spot = 100.0;
-        auto quote_res = options_calculator::market_data::fetch_yahoo_finance_quote(symbol);
-        if (quote_res.has_value()) {
-            spot = quote_res.value().regularMarketPrice;
+        if (req.asset_class() == "FUTURES" || req.asset_class() == "CRYPTO") {
+            return Status(grpc::StatusCode::UNIMPLEMENTED,
+                          "No listed option chain is available for " + req.asset_class() +
+                              " from the configured provider");
         }
 
-        response->set_symbol(symbol);
-        response->set_spot_price(spot);
-
-        // Dynamic Option Strikes
-        double step = spot >= 1000 ? 50.0 : spot >= 100 ? 5.0 : 1.0;
-        double atm = std::round(spot / step) * step;
-
-        for (int i = -7; i <= 7; i++) {
-            double strike = atm + i * step;
-            auto* s = response->add_option_strikes();
-            s->set_strike(strike);
-            s->set_call_bid(std::max(0.05, (spot - strike > 0 ? spot - strike : 0) + 2.5));
-            s->set_call_ask(s->call_bid() + 0.20);
-            s->set_call_delta(std::min(0.99, std::max(0.01, 0.5 - (strike - spot)/spot * 3.0)));
-            s->set_call_volume(1200);
-            s->set_call_open_interest(3400);
-            s->set_call_iv(0.22);
-
-            s->set_put_bid(std::max(0.05, (strike - spot > 0 ? strike - spot : 0) + 2.5));
-            s->set_put_ask(s->put_bid() + 0.20);
-            s->set_put_delta(s->call_delta() - 1.0);
-            s->set_put_volume(1100);
-            s->set_put_open_interest(2900);
-            s->set_put_iv(0.22);
-            s->set_is_atm(strike == atm);
+        const auto chain = md::fetch_chain(symbol, req.expiration_date());
+        if (!chain) {
+            log.error("Chain unavailable for {}: {}", symbol, chain.error().message());
+            return Status(grpc::StatusCode::UNAVAILABLE,
+                          "No chain for " + symbol + ": " + chain.error().message());
         }
 
-        // Dynamic Futures Contracts
-        std::vector<std::tuple<std::string, std::string, int>> months = {
-            {"SEP 2026", symbol + "U26", 45},
-            {"DEC 2026", symbol + "Z26", 135},
-            {"MAR 2027", symbol + "H27", 225},
-            {"JUN 2027", symbol + "M27", 315},
-            {"SEP 2027", symbol + "U27", 405},
-            {"DEC 2027", symbol + "Z27", 495},
-            {"JAN 2028", symbol + "F28", 540},
-            {"JUN 2028", symbol + "M28", 680},
-            {"DEC 2028", symbol + "Z28", 870},
-            {"JAN 2029", symbol + "F29", 900}
-        };
-        for (const auto& [m_name, m_code, dte_days] : months) {
-            auto* f = response->add_futures_contracts();
-            f->set_code(m_code);
-            f->set_delivery_month(m_name);
-            f->set_days_to_expiry(dte_days);
-            double f_price = spot * std::exp(0.045 * (dte_days / 365.0));
-            f->set_futures_price(f_price);
-            f->set_bid(f_price - 0.25);
-            f->set_ask(f_price + 0.25);
-            f->set_basis(f_price - spot);
-            f->set_annualized_yield(4.5);
-            f->set_volume(45000);
-            f->set_open_interest(120000);
-            f->set_state(f_price >= spot ? "Contango" : "Backwardation");
+        res.set_symbol(chain->symbol);
+        res.set_spot_price(chain->spot);
+        res.set_selected_expiration_date(chain->selected_expiration);
+        res.set_provider("alpaca");
+
+        for (const auto& e : chain->expirations) {
+            auto& exp = *res.add_available_expirations();
+            exp.set_date_str(e.date);
+            exp.set_days_to_expiry(e.days);
+            exp.set_label(e.label);
         }
 
-        return Status::OK;
-    }
-
-    // Streaming endpoint
-    auto StreamLiveMatrix(ServerContext* context, grpc::ServerReaderWriter<CalculationResponse, CalculationRequest>* stream) -> Status override {
-        CalculationRequest request;
-        while (stream->Read(&request)) {
-            CalculationResponse response;
-            // Stub compute
-            response.set_max_profit(100.0);
-            stream->Write(response);
+        // The at-the-money row is the listed strike closest to spot, not a
+        // rounded guess at where it ought to be.
+        double atm = 0.0;
+        double best = std::numeric_limits<double>::max();
+        for (const auto& row : chain->strikes) {
+            const double d = std::abs(row.strike - chain->spot);
+            if (d < best) { best = d; atm = row.strike; }
         }
+
+        for (const auto& row : chain->strikes) {
+            auto& s = *res.add_option_strikes();
+            s.set_strike(row.strike);
+            s.set_is_atm(row.strike == atm);
+            s.set_expiration_date(chain->selected_expiration);
+
+            s.set_call_bid(row.call.bid);
+            s.set_call_ask(row.call.ask);
+            s.set_call_delta(row.call.delta);
+            s.set_call_gamma(row.call.gamma);
+            s.set_call_theta(row.call.theta);
+            s.set_call_vega(row.call.vega);
+            s.set_call_iv(row.call.iv);
+            s.set_call_volume(static_cast<std::int32_t>(row.call.volume));
+            s.set_call_open_interest(static_cast<std::int32_t>(row.call.open_interest));
+
+            s.set_put_bid(row.put.bid);
+            s.set_put_ask(row.put.ask);
+            s.set_put_delta(row.put.delta);
+            s.set_put_gamma(row.put.gamma);
+            s.set_put_theta(row.put.theta);
+            s.set_put_vega(row.put.vega);
+            s.set_put_iv(row.put.iv);
+            s.set_put_volume(static_cast<std::int32_t>(row.put.volume));
+            s.set_put_open_interest(static_cast<std::int32_t>(row.put.open_interest));
+        }
+
+        log.info("GetMarketChain: {} returned {} strikes, {} expirations", symbol,
+                 res.option_strikes_size(), res.available_expirations_size());
         return Status::OK;
     }
 };
 
-void RegisterCalculatorService(void* builder_ptr) {
-    auto builder = static_cast<grpc::ServerBuilder*>(builder_ptr);
-    // Allocate the service statically so it lives for the lifetime of the server
+auto RegisterCalculatorService(grpc::ServerBuilder& builder) -> void {
+    // Static storage duration so the service outlives the builder and the
+    // server without either owning it. RegisterService takes the address by
+    // gRPC's own contract; ownership stays here.
     static CalculatorServiceImpl service;
-    builder->RegisterService(&service);
+    builder.RegisterService(&service);
 }
 
-} // namespace options_calculator::service
+}  // namespace options_calculator::service

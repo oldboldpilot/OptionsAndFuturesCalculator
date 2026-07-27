@@ -367,12 +367,18 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
 
       req.setLegsList(
         legs.map((l) => {
+          const isOption = l.option_type === 'CALL' || l.option_type === 'PUT';
           const pLeg = new ProtoLeg();
           pLeg.setAction(l.action === 'BUY' ? ProtoLeg.Action.BUY : ProtoLeg.Action.SELL);
           pLeg.setType(legType(l));
           pLeg.setStrike(l.strike_price);
           pLeg.setExpirationDays(l.expiration_days ?? days);
           pLeg.setQuantity(l.quantity);
+          // The entry price and per-leg IV had no field on the old proto, so
+          // every leg reached the engine priced at zero with no volatility.
+          pLeg.setPremium(l.premium);
+          pLeg.setImpliedVolatility(l.implied_volatility ?? 0);
+          pLeg.setContractMultiplier(isOption ? 100 : 1);
           return pLeg;
         }),
       );

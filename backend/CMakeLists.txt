@@ -22,8 +22,39 @@ set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS}")
 set(gRPC_INSTALL OFF CACHE BOOL "" FORCE)
 set(protobuf_INSTALL OFF CACHE BOOL "" FORCE)
 set(ABSL_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
-set(gRPC_SSL_PROVIDER "module" CACHE STRING "" FORCE)
 set(ENABLE_PARALLEL_STL OFF CACHE BOOL "" FORCE)
+
+# TLS provider: system OpenSSL for every target in the build.
+#
+# This was "module", which makes gRPC compile and statically link its vendored
+# BoringSSL. cpp-httplib links system OpenSSL. Both export SSL_CTX_new and the
+# other libssl symbols, so httplib's calls resolved into BoringSSL's
+# implementation, whose structures have a different layout — every outbound
+# HTTPS request segfaulted inside SSL_CTX_new. One TLS library per binary.
+find_package(OpenSSL REQUIRED)
+set(gRPC_SSL_PROVIDER "package" CACHE STRING "" FORCE)
+
+# OpenSSL 3.5 removed the long-deprecated ENGINE API along with its header.
+# gRPC includes <openssl/engine.h> unconditionally even though every use of the
+# API sits behind `#if !defined(OPENSSL_IS_BORINGSSL) && !defined(OPENSSL_NO_ENGINE)`,
+# so on such a system the include is the only thing that fails. Defining
+# OPENSSL_NO_ENGINE compiles the whole path out, and an empty shim header
+# satisfies the include. Ubuntu 24.04 (the deploy image) still ships engine.h,
+# so this only engages on newer hosts and keeps local and CI builds identical.
+include(CheckIncludeFileCXX)
+set(CMAKE_REQUIRED_INCLUDES "${OPENSSL_INCLUDE_DIR}")
+check_include_file_cxx("openssl/engine.h" HAVE_OPENSSL_ENGINE_H)
+unset(CMAKE_REQUIRED_INCLUDES)
+if(NOT HAVE_OPENSSL_ENGINE_H)
+    message(STATUS "openssl/engine.h absent (OpenSSL >= 3.5); shimming and defining OPENSSL_NO_ENGINE")
+    set(OPENSSL_COMPAT_DIR "${CMAKE_CURRENT_BINARY_DIR}/openssl-compat")
+    file(WRITE "${OPENSSL_COMPAT_DIR}/openssl/engine.h"
+         "#pragma once\n"
+         "/* Generated shim. The ENGINE API was removed in OpenSSL 3.5; every\n"
+         "   consumer of it in this build is compiled out by OPENSSL_NO_ENGINE. */\n")
+    add_compile_definitions(OPENSSL_NO_ENGINE)
+    include_directories(SYSTEM "${OPENSSL_COMPAT_DIR}")
+endif()
 
 include(FetchContent)
 FetchContent_Declare(
@@ -97,7 +128,6 @@ FetchContent_Declare(
     GIT_TAG v0.15.3
 )
 FetchContent_MakeAvailable(httplib)
-find_package(OpenSSL REQUIRED)
 
 add_executable(test_runner 
     src/test_main.cpp
@@ -112,3 +142,8 @@ target_sources(test_runner
 target_link_libraries(test_runner PRIVATE proto_lib sensen fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto)
 
 add_test(NAME CoreEngineTest COMMAND test_runner)
+
+# End-to-end smoke client. Verifies a running engine returns live data on all
+# three RPCs; used as the deploy gate.
+add_executable(smoke_client src/smoke_client.cpp)
+target_link_libraries(smoke_client PRIVATE proto_lib)

@@ -1,0 +1,33 @@
+# Build context is the repository root (railway.json points at
+# backend/Dockerfile, which leaves the context here). Keep the context to what
+# the image actually needs: the backend tree, minus its build output and the
+# large non-build subtrees vendored inside SGEE and sensen.
+
+.git
+*.log
+
+frontend
+node_modules
+**/node_modules
+
+backend/build
+.next
+out
+
+docs
+.playwright-mcp
+.claude
+config
+
+backend/external/SGEE/web-lsp
+backend/external/SGEE/vscode-extension
+backend/StochasticGraphExecutionEngine
+backend/BigBrotherAnalytics
+backend/sensen/external/CosyVoice
+backend/sensen/eval_samples
+backend/sensen/benchmarks
+backend/sensen/demo_qwen3
+**/*.nsys-rep
+**/*.sqlite
+**/perf.data*
+**/core.*
