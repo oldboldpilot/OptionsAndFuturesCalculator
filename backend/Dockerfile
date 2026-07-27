@@ -17,12 +17,23 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates wget gnupg lsb-release software-properties-common \
-        cmake ninja-build git pkg-config make \
+        ninja-build git pkg-config make \
         libssl-dev libtbb-dev liburing-dev libjemalloc-dev libpq-dev \
         libevent-dev libunwind-dev libbrotli-dev zlib1g-dev \
         libkrb5-dev libldap2-dev libsasl2-dev libsystemd-dev libcap-dev \
         libpcre2-dev libatomic1 \
     && rm -rf /var/lib/apt/lists/*
+
+# CMake from Kitware, not the archive: sensen/CMakeLists.txt requires 4.1+ and
+# Ubuntu 24.04 ships 3.28.3, so the distro package cannot configure the build.
+ARG CMAKE_VERSION=4.2.7
+RUN wget -qO /tmp/cmake.tar.gz \
+        "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.tar.gz" \
+    && tar -xzf /tmp/cmake.tar.gz -C /opt \
+    && ln -sf /opt/cmake-${CMAKE_VERSION}-linux-x86_64/bin/cmake /usr/local/bin/cmake \
+    && ln -sf /opt/cmake-${CMAKE_VERSION}-linux-x86_64/bin/ctest /usr/local/bin/ctest \
+    && rm /tmp/cmake.tar.gz \
+    && cmake --version
 
 # Pinned Clang. The previous `./llvm.sh all` pulled every LLVM package —
 # several gigabytes and many minutes — when the build needs one toolchain.
