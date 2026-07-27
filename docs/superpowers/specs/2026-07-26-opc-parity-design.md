@@ -1,0 +1,336 @@
+# Options & Futures Calculator — OPC Parity, Contract Unification & Live Market Data
+
+**Date:** 2026-07-26
+**Author:** Olumuyiwa Oluwasanmi (design by Claude)
+**Status:** Approved for planning
+
+---
+
+## 1. Problem
+
+The deployed product is broken in four independent, compounding ways. The UI is not
+"partly connected" to the backend — it has never been connected at all.
+
+| # | Failure | Evidence |
+|---|---|---|
+| 1 | Railway build has never succeeded | `Build Failed: "/start.sh": not found`; API host returns 404 "Application not found" |
+| 2 | Frontend and backend speak incompatible protos | Frontend calls `/calculator.OptionsCalculator/*`; backend serves `/options_calculator.CalculatorEngineService/*` |
+| 3 | `calculator_service.cpp` cannot compile | Declares `GetMarketQuote`/`GetMarketChain` as `override` with no matching base virtual |
+| 4 | `.railwayignore` excludes a required directory | Excludes `backend/external`, which `backend/CMakeLists.txt:76` needs for SGEE |
+
+Beyond the outage, the data layer is fabricated. `calculator_service.cpp` synthesises
+strikes from `spot`, invents `call_delta = 0.5 - (strike-spot)/spot*3.0`, and hardcodes
+`volume=1200, open_interest=3400, iv=0.22`. `market_data.cppm:88` hardcodes
+`impliedVolatility = 0.20`. Most seriously, quote-fetch failure is swallowed and returns
+`price = 100.0` as success — so even a working deploy would have displayed fake prices
+with no error surfaced.
+
+## 2. Scope
+
+Full parity with optionsprofitcalculator.com, plus this engine's differentiators:
+
+- **OPC core** — ~12 named strategies, strike/expiry-driven leg builder, the signature
+  colored P&L table (price rows × date columns), breakevens, max profit/loss, editable
+  IV/entry/quantity
+- **Engine extras** — aggregate and per-leg Greeks (Δ Γ Θ V ρ + vanna/volga/charm), POP,
+  P(50% max profit), P(touch), expected value, VaR 95/99, CVaR, probability distribution overlay
+- **Futures** — outright long/short, calendar spread, crack spread, cash & carry,
+  covered futures call (FOP), term structure (basis, cost of carry, contango/backwardation)
+- **3D WebGL P&L surface** — `react-three-fiber` is already a dependency
+
+**Accepted limitation:** no vendor offers a real futures *option* chain here. Futures
+term structure and FOP legs remain modelled, not live. This was explicitly accepted.
+
+## 3. Market Data — Alpaca
+
+### 3.1 Provider selection (empirically determined)
+
+All candidates were probed live with the account's own credentials on 2026-07-26:
+
+| Provider | Result |
+|---|---|
+| Polygon | **403** `NOT_AUTHORIZED` — no options entitlement |
+| Finnhub | **403** — no access to `/stock/option-chain` |
+| FMP | **404 / `[]`** — no entitlement |
+| Yahoo Finance | **429 Too Many Requests** on every path, including the cookie+crumb auth flow |
+| AlphaVantage | 200 — full chain with Greeks (viable alternate) |
+| **Alpaca** | **200 — selected** |
+
+Yahoo, the original premise, is demoted out of the critical path: it 429s from this
+network (and datacenter IPs such as Railway's are more likely blocked, not less), and it
+returns neither implied volatility nor Greeks.
+
+### 3.2 Verified Alpaca surface
+
+Two hosts, joined on the OCC symbol (e.g. `SPY260918C00300000`). **Key/host pairing is
+strict** — live keys authenticate only against `api.alpaca.markets`, paper keys only
+against `paper-api.alpaca.markets`; cross-pairing returns `401 code 40110000`. This was
+initially misdiagnosed as a missing entitlement.
+
+**Chain quotes, Greeks, IV** — `data.alpaca.markets`:
+```
+GET /v1beta1/options/snapshots/{underlying}
+    ?feed=opra&expiration_date=YYYY-MM-DD
+    &strike_price_gte=&strike_price_lte=&limit=200
+```
+Per contract: `greeks{delta,gamma,theta,vega,rho}`, `impliedVolatility`,
+`latestQuote{ap,as,bp,bs}`, `latestTrade`, `dailyBar{v}`, `minuteBar`, `prevDailyBar`.
+
+**Open interest and contract metadata** — `api.alpaca.markets`:
+```
+GET /v2/options/contracts?underlying_symbols=&expiration_date_gte=&expiration_date_lte=
+```
+Returns `open_interest`, `open_interest_date`, `size` (contract multiplier, e.g. 100),
+`style` (american), `expiration_date`, `strike_price`, `type`.
+
+**Underlying spot** — `GET data.alpaca.markets/v2/stocks/{symbol}/snapshot`
+(verified SPY = 738.93; the frontend's hardcoded `TICKER_DATABASE` claims 580.0).
+
+Together these supply every column the OPC chain grid needs — strike, bid/ask, sizes, IV,
+delta, volume, open interest — with Γ Θ V ρ available at no extra cost.
+
+### 3.3 Design consequences
+
+- **Server-side filtering is mandatory.** Unfiltered SPY is ~14,000 contracts at 100/page.
+  The `expiration_date` + `strike_price_gte/lte` parameters keep responses to a single
+  unpaginated page. A full chain must never reach the browser.
+- **Absent fields are normal.** Illiquid strikes omit `greeks` entirely and carry stale
+  `latestTrade` values (one sample: trade from 07-22 with `dailyBar.v = 2`). These map to
+  `std::optional` (policy rule 9), not to defaulted zeros.
+- **Cache key is `(symbol, expiration)`**, not per-contract, because the two-host join is
+  performed per expiration.
+- **Credentials come from Railway environment variables** (`ALPACA_API_KEY`,
+  `ALPACA_API_SECRET`, `ALPACA_DATA_URL`, `ALPACA_TRADING_URL`). Never in source, never
+  baked into the image. `config/config.yaml` is gitignored and stays out of the container.
+
+## 4. Architecture
+
+```
+Browser (Cloudflare Pages, static Next.js export)
+   │  gRPC-Web
+   ▼
+Envoy :8080  (Railway container — grpc_web, cors, local_ratelimit filters)
+   │  HTTP/2 gRPC
+   ▼
+calculator_engine :50051  (C++23)
+   ├── market_data.cppm    → Alpaca (snapshots + contracts + stock snapshot)
+   ├── pricing_engine.cppm → sensen SIMD pricing, TBB matrix
+   └── calculator_service.cppm → SGEE graph pipeline
+   │
+   ▼
+Railway PostgreSQL / Supabase (saved strategies, auth, RLS)
+```
+
+### 4.1 Contract unification
+
+`backend/proto/calculator.proto` becomes the single source of truth. The root
+`proto/calculator.proto` is **deleted**.
+
+This is not arbitrary. The root proto's `PnLPoint {underlying_price, pnl}` has no date
+axis and therefore *structurally cannot express* the OPC price×date grid. The backend
+proto's `MatrixCell {price, days_to_expiration, date_str, pnl_dollars,
+return_on_risk_percent, probability_density}` can, and it already defines
+`ProbabilityBreakdown`, `GreekBreakdown` (with vanna/volga/charm) and a `leg_greeks` map —
+exactly the selected feature set.
+
+Additions to the canonical proto:
+
+- `rpc GetMarketQuote (QuoteRequest) returns (QuoteResponse)`
+- `rpc GetMarketChain (ChainRequest) returns (ChainResponse)`
+
+These give the two orphaned `override` declarations in `calculator_service.cpp:344` and
+`:370` real base virtuals, resolving failure #3.
+
+- `QuoteRequest/QuoteResponse`, `ChainRequest/ChainResponse`, `ExpirationDate`,
+  `FuturesContract` merged in from the root proto.
+- `OptionStrike` extended to carry Alpaca's real payload per side:
+  `bid, ask, bid_size, ask_size, last, volume, open_interest, iv, delta, gamma, theta,
+  vega, rho`, plus `contract_multiplier`, `is_atm`, and a `has_greeks` presence flag.
+
+`scripts/gen_proto.sh` generates both targets from the one file: C++ at build time via the
+existing CMake `custom_command`, and grpc-web TypeScript into `frontend/src/grpc/`. The
+generated TS is committed, because Cloudflare Pages has no `protoc` at build time. Drift
+between the two sides becomes structurally impossible.
+
+### 4.2 Market data module
+
+`backend/src/modules/market_data.cppm` is rewritten around a `MarketDataProvider`
+**concept** rather than a virtual base — compile-time dispatch, no vtable, no owning
+pointers (rules 3, 19).
+
+- `AlpacaProvider` implements: `fetch_quote`, `fetch_chain`, `fetch_expirations`.
+- Every operation returns `std::expected<T, std::error_code>` (rule 32, ROP). The existing
+  `MarketDataError` category is retained and extended.
+- **The `price = 100.0` silent fallback is deleted.** Failures propagate as a gRPC status
+  and the UI renders an explicit degraded state. Silent failure is precisely what the
+  adversarial review gate exists to catch.
+- Cache guarded by `std::shared_mutex` (rule 14, thread-safety), keyed `(symbol, expiration)`.
+  TTL: 15 s for chains and quotes during market hours, 15 min outside them (open interest
+  updates only once daily, per `open_interest_date`, so it is cached for 12 h regardless).
+- `thread_local httplib::Client` per host, keep-alive, as today.
+- JSON via `fastjson` — confirmed to be `fastestjsoninthewest`, vendored at
+  `backend/sensen/external/fastestjsoninthewest`, satisfying rule 37.
+
+### 4.3 Engine
+
+`pricing_engine.cppm` is currently linked only into `test_runner`, not into
+`calculator_engine` (`backend/CMakeLists.txt:78` vs `:112`). It gets linked into the
+service binary.
+
+- **Per-leg IV** sourced from the chain, replacing the single global `implied_volatility`.
+  This matters mathematically, not just cosmetically: OPC prices each leg at its own IV,
+  and a single global figure systematically misprices skewed strategies such as iron
+  condors, where short wings sit at materially higher IV than the body.
+- Matrix computed over price × date via `tbb::parallel_for` (rule 18) with the SIMD
+  waterfall AVX-512 → AVX2 → SSE4.2 → scalar under dynamic dispatch (rule 29).
+- Aggregate and per-leg Greeks including vanna, volga, charm.
+- Probability: POP, P(target profit), P(touch), expected value, VaR 95/99, CVaR.
+- Futures term structure computed from cost-of-carry; modelled, clearly labelled as such
+  in the UI.
+
+### 4.4 Frontend
+
+- `TICKER_DATABASE`'s stale static prices removed in favour of live quotes.
+- Chain-driven leg builder: click a strike in the chain to add a leg, rather than typing
+  numbers blind.
+- The signature OPC matrix — price rows × date columns, green→red heat, $/% toggle.
+- Strategy presets for the ~12 named options strategies and the futures strategies.
+- Greeks panel, probability panel, futures term-structure table, 3D WebGL surface.
+- `frontend/AGENTS.md` mandates reading `node_modules/next/dist/docs/` before writing Next
+  code — this Next 16 differs from training data. That is binding on implementation.
+
+### 4.5 Deployment
+
+- `railway.json` sets `dockerfilePath: backend/Dockerfile`, making the build context the
+  repo root, while `backend/Dockerfile` is written for a `backend/` context. `COPY start.sh`
+  and `COPY envoy.yaml` are corrected to `COPY backend/…`, and the CMake source dir to
+  `/app/backend`.
+- `.railwayignore` drops the `backend/external` exclusion.
+
+## 5. Code Policy Compliance
+
+The authoritative policy is `config/cpp_details.txt` (60 rules). Enforcement level for this
+repo, as decided:
+
+### 5.1 Enforced strictly (rules 1–49)
+
+Applied to all code written under this spec: C++23; no raw pointers, `new`, or `delete`;
+RAII; smart pointers where pointers are needed; `std::optional` for absent values;
+mandatory trailing return types (`auto f() -> T`, rules 31/46); `[[nodiscard]]` and
+attribute-based hints; namespaces; thread-safety with no data races; ranges and range-based
+algorithms; STL and parallel algorithms; TBB for parallelism including lock-free structures;
+concepts and constraints; structured bindings; move semantics and perfect forwarding;
+`string_view`, `span`, `array`, `variant`; `std::filesystem`; `std::chrono`; SIMD
+multi-register with dynamic dispatch and correct alignment; `std::expected`/`std::unexpected`
+ROP; `nullptr` never `NULL`; coroutines for async; `std::size_t` / sized integer types;
+no C-style arrays; `fastestjsoninthewest` for JSON; CMake + Ninja out-of-source builds;
+**internal test framework only — rule 39 forbids Google Test and Catch2**.
+
+Note on an internal contradiction in the policy document: rule 33 suggests "Google Test or
+Catch2" while rule 39 forbids external testing libraries outright. Rule 39 is later and
+more specific, and the repo already ships `testing_framework.cppm`. **Rule 39 governs.**
+
+### 5.2 Build-side changes adopted now
+
+- Adopt the canonical flags from `backend/external/SGEE/scripts/build_common.sh` (the
+  canonical script the policy references — it exists, vendored inside SGEE).
+- Add `-stdlib=libc++` to `CANONICAL_FLAGS`.
+- Remove the seven `-Wno-error=` suppressions in `backend/CMakeLists.txt:17`, which are not
+  sanctioned by the policy and undercut rule 34's zero-warnings requirement.
+- Add `.clang-tidy` and `.clang-format` (neither exists today).
+- Retain the already-compliant `-march=x86-64-v3 -mtune=generic` and the absence of
+  `-ffast-math` (rules 50, 55).
+
+### 5.3 Fixing the policy gate — it is currently a no-op
+
+`scripts/code_policy_check.sh` audits `${REPO_ROOT}/src`. **That directory does not exist**;
+the source lives in `backend/src`. Its raw-pointer and trailing-return-type checks have
+therefore been passing against an empty set. Simultaneously, its `-ffast-math` check greps
+documentation prose and fails on SGEE files that state "NO `-ffast-math`" — a false positive
+and a false negative at the same time.
+
+Remediation:
+- Repoint the audit at `backend/src`.
+- Exclude vendored trees (`backend/external`, `backend/sensen`) and `.md` prose from flag greps.
+- Extend coverage to every mechanically-checkable rule: raw `new`/`delete`, trailing return
+  types, `NULL`/`0` pointer literals, C-style arrays, forbidden test frameworks, `-ffast-math`,
+  `-march=native`, hardcoded secrets, canonical-flag divergence.
+- Rewrite `config/agents/code_policy_agent.yaml` to enumerate the full rule set; it currently
+  encodes 10 of 60 and omits rules 5, 19, 22–25, 36, 37, 38, 39, 42, 44, 48, 56.
+
+### 5.4 Deviation register (rules 50–55, deferred not forgotten)
+
+These rules reference infrastructure absent from this repository. Each is recorded with its
+gap so the deferral is explicit rather than silent:
+
+| Rule | Mandate | Current state |
+|---|---|---|
+| 12, 41 | `import std;` / precompiled std module | `SENSEN_NO_IMPORT_STD` is defined; zero `import std;` in `backend/src` |
+| 50 | `clang++-22` only, `-nostdinc++ -isystem external/libcxx-v1/include` | Dockerfile installs whatever clang `llvm.sh` provides; flags absent |
+| 51 | Vendored `modules/std.cppm` + `external/libcxx-v1/include` | Both missing from this repo |
+| 50–54 | Build scripts source `scripts/build_common.sh` | Absent at repo root (exists only inside SGEE) |
+| 53 | TBB sweeps pinned via `taskset -c 0-15` | Not applicable — this is a request-serving container, not a sweep host |
+| 55 | Bit-identical cross-host FP parity verification | No second production host for this project |
+
+Rule 18 (parallelism exclusively oneTBB) is **not** deferred. TBB is currently not linked
+into `calculator_engine` at all, and `_GLIBCXX_USE_TBB_PAR_BACKEND=0` is defined; §4.3
+closes that gap by linking TBB and using `tbb::parallel_for` for the matrix.
+
+### 5.5 Review gate
+
+Per `config/agents/code_review_agent.yaml` and `code_update_agent.yaml`: adversarial
+red-team review with tri-agent consensus (≥2 of 3 from Claude / AGY / Cursor) before merge,
+via `scripts/code_review_adversarial.sh`; zero hardcoded secrets; Supabase RLS validation;
+gRPC contract alignment. GitHub operations via `gh` CLI.
+
+## 6. Testing
+
+| Layer | Approach |
+|---|---|
+| C++ unit | Internal `testing_framework.cppm` (rule 39). Pricing, matrix, Greeks, probability metrics. |
+| Provider parsing | Against recorded Alpaca JSON fixtures captured 2026-07-26, including the illiquid-strike case with absent `greeks` and a stale `latestTrade`. |
+| Error paths | 401 key/host mismatch, 429, malformed JSON, missing fields — each asserted to produce a typed `std::error_code`, **never a defaulted price**. |
+| Memory / UB | AddressSanitizer, UBSan, LeakSanitizer (rules 36, 56). |
+| Frontend unit | Vitest — no frontend test infrastructure exists today; it must be added. |
+| End-to-end | Real browser gRPC-web call through Envoy to the engine, asserting `grpc-status: 0`. This exact hop is what has been broken, so it is the gate that matters. |
+
+## 7. Sequencing and gates
+
+Ordered so that the highest-risk unknown is resolved first, not last. Each numbered phase is
+a self-contained unit of work with its own gate, and is intended to be planned and
+implemented separately rather than as one monolithic plan.
+
+1. **Backend restored.** Docker context, `.railwayignore`, proto unification, compile fix.
+   **Gate: a real `grpc-status: 0` from a browser.** No UI work begins until this passes.
+2. **Live Alpaca data.** Provider rewrite, silent-fallback removal, caching.
+   Gate: real strikes, real IV, real open interest served over the wire.
+3. **Engine wiring.** `pricing_engine` linked in, per-leg IV, TBB matrix, full Greeks and
+   probability metrics.
+4. **UI revamp.** Full parity bar including futures and the 3D surface.
+5. **Policy and review.** Gate repaired, agent config completed, tri-agent review, deploy.
+
+## 8. Risks
+
+- **Docker build size/time.** `backend/Dockerfile:19` runs `./llvm.sh all` (every LLVM
+  package) and CMake builds gRPC v1.62.0 from source via FetchContent, alongside C++23
+  modules across sensen and SGEE. The project owner assesses this as acceptable — the
+  dependency set is TBB, CMake, Ninja, sensen, fastjson and SGEE, none of which are large.
+  Recorded as the owner's decision; validated empirically at first deploy rather than
+  pre-optimised. If the build does exceed Railway's ceiling, mitigation is to pin
+  `llvm.sh` to a single LLVM version and consider a prebuilt base image.
+- **`-stdlib=libc++` and BMI compatibility.** Adding it may surface
+  `module-file-config-mismatch` errors against the vendored sensen/SGEE module tree, since
+  BMI validation requires exactly matching flags (rule 50). If this occurs it will be
+  reported, not silently reverted.
+- **Alpaca data staleness on weekends.** Probes on Sunday 2026-07-26 returned Friday
+  07-24 closing data. Expected and correct; the UI must label quote freshness rather than
+  imply live streaming.
+- **No futures option chain.** Accepted. Futures term structure stays modelled and is
+  labelled as such.
+
+## 9. Out of scope
+
+- Real futures option chains (no vendor provides them here).
+- Migration to C++26 (rule 60 — forward-compatibility maintained, migration not attempted).
+- Vendoring libc++ and converting the codebase to `import std;` (see §5.4).
+- Streaming `StreamLiveMatrix`; the RPC stays declared but unimplemented this cycle.
