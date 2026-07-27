@@ -3,66 +3,128 @@
 /* ============================================================================
    Options & Futures Calculator — design tokens
 
-   Aesthetic target: a professional trading terminal, not a consumer SaaS app.
-   Flat surfaces, hairline borders, high contrast, tight vertical rhythm.
-   No glassmorphism, no glow, no gradient text — density and legibility first.
+   Aesthetic target: a professional trading desk that is pleasant to sit in
+   front of for hours. Dense and information-first, but not a black void —
+   surfaces are a lifted blue-slate with real elevation, and state changes are
+   animated so the eye can follow them.
 
    P&L semantics use the TradingView convention (teal profit / coral loss),
-   which traders read pre-attentively.
+   brightened slightly to hold contrast against the lighter surfaces.
+
+   Two themes ship: `slate` (default) and `light`. Every surface, border and
+   text colour is a variable, so the toggle is a single attribute on <html>.
    ========================================================================== */
 
 @theme {
-  /* --- Surfaces: near-black, layered by elevation, never pure #000 --- */
-  --color-base-900: #0b0d10;   /* app background            */
-  --color-base-800: #10131a;   /* panel background          */
-  --color-base-700: #161a22;   /* raised / header row       */
-  --color-base-600: #1d222c;   /* hover, input background   */
-  --color-base-500: #272d39;   /* active / pressed          */
+  /* --- Surfaces: lifted blue-slate, layered by elevation --- */
+  --color-base-900: #1a1f2c;   /* app background            */
+  --color-base-800: #222839;   /* panel background          */
+  --color-base-700: #2b3244;   /* raised / header row       */
+  --color-base-600: #353d52;   /* hover, input background   */
+  --color-base-500: #414a61;   /* active / pressed          */
 
-  /* --- Hairline borders: low-alpha white reads correctly on any surface --- */
-  --color-line-strong: rgba(255, 255, 255, 0.14);
-  --color-line: rgba(255, 255, 255, 0.08);
-  --color-line-soft: rgba(255, 255, 255, 0.045);
+  /* --- Borders: low-alpha white reads correctly on any surface --- */
+  --color-line-strong: rgba(255, 255, 255, 0.18);
+  --color-line: rgba(255, 255, 255, 0.10);
+  --color-line-soft: rgba(255, 255, 255, 0.055);
 
-  /* --- Text: a real hierarchy, not two greys --- */
-  --color-ink-100: #e8eaed;    /* primary values, headings  */
-  --color-ink-200: #b4bac4;    /* body                      */
-  --color-ink-300: #848c99;    /* labels, column headers    */
-  --color-ink-400: #5a6270;    /* disabled, hints           */
+  /* --- Text hierarchy --- */
+  --color-ink-100: #f2f5fa;    /* primary values, headings  */
+  --color-ink-200: #c3cbdb;    /* body                      */
+  --color-ink-300: #909aaf;    /* labels, column headers    */
+  --color-ink-400: #69738a;    /* disabled, hints           */
 
-  /* --- Semantic P&L (TradingView convention) --- */
-  --color-profit: #26a69a;
-  --color-profit-dim: #1b7168;
-  --color-loss: #ef5350;
-  --color-loss-dim: #a33734;
-  --color-flat: #6b7280;
+  /* --- Semantic P&L --- */
+  --color-profit: #2ec4b6;
+  --color-profit-dim: #1d8377;
+  --color-loss: #f4645f;
+  --color-loss-dim: #b03e3a;
+  --color-flat: #78829a;
 
-  /* --- Accent: restrained. Meaning is carried by P&L color, not chrome. --- */
-  --color-accent: #58a6ff;
-  --color-accent-dim: #1f6feb;
-  --color-warn: #d29922;
+  /* Raw channels, for building rgba() ramps in the P&L grid */
+  --rgb-profit: 46, 196, 182;
+  --rgb-loss: 244, 100, 95;
 
-  /* --- Option-side tints: calls and puts must be distinguishable at a glance --- */
-  --color-call-tint: rgba(38, 166, 154, 0.07);
-  --color-put-tint: rgba(239, 83, 80, 0.07);
-  --color-atm-tint: rgba(88, 166, 255, 0.10);
+  /* --- Accents --- */
+  --color-accent: #7aa2ff;
+  --color-accent-dim: #4c7dff;
+  --color-violet: #a78bfa;
+  --color-cyan: #38bdf8;
+  --color-warn: #f0b429;
 
-  /* --- Type: system stack for UI, true monospace for every number --- */
+  /* --- Option-side tints --- */
+  --color-call-tint: rgba(46, 196, 182, 0.08);
+  --color-put-tint: rgba(244, 100, 95, 0.08);
+  --color-atm-tint: rgba(122, 162, 255, 0.13);
+
+  /* --- Elevation --- */
+  --shadow-panel: 0 1px 2px rgba(0, 0, 0, 0.22), 0 6px 18px -8px rgba(0, 0, 0, 0.5);
+  --shadow-pop: 0 8px 28px -6px rgba(0, 0, 0, 0.55);
+  --sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0) 42%);
+
+  /* --- Type --- */
   --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
                "Helvetica Neue", Arial, sans-serif;
   --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono",
                Menlo, Consolas, monospace;
 
-  /* Dense scale — a trading grid lives between 10px and 13px */
+  /* Dense scale — a trading grid lives between 11px and 13px */
   --text-2xs: 0.6875rem;  /* 11px — table cells, dense labels */
   --text-xs: 0.75rem;     /* 12px — body, inputs              */
   --text-sm: 0.8125rem;   /* 13px — panel titles              */
   --text-base: 0.875rem;  /* 14px — section headings          */
   --text-lg: 1.0625rem;   /* 17px — the spot price            */
 
-  --radius-sm: 3px;
-  --radius: 5px;
-  --radius-lg: 7px;
+  --radius-sm: 4px;
+  --radius: 7px;
+  --radius-lg: 10px;
+
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* ---------------------------------------------------------------------------
+   Light theme. Same token names, different values — no component knows which
+   theme is active.
+   ------------------------------------------------------------------------- */
+
+:root[data-theme="light"] {
+  --color-base-900: #eaeef5;
+  --color-base-800: #ffffff;
+  --color-base-700: #f4f6fa;
+  --color-base-600: #e8ecf3;
+  --color-base-500: #d7dde8;
+
+  --color-line-strong: rgba(15, 23, 42, 0.20);
+  --color-line: rgba(15, 23, 42, 0.11);
+  --color-line-soft: rgba(15, 23, 42, 0.06);
+
+  --color-ink-100: #0f172a;
+  --color-ink-200: #33415a;
+  --color-ink-300: #64748b;
+  --color-ink-400: #94a3b8;
+
+  --color-profit: #0d9488;
+  --color-profit-dim: #0f766e;
+  --color-loss: #dc2626;
+  --color-loss-dim: #b91c1c;
+  --color-flat: #94a3b8;
+
+  --rgb-profit: 13, 148, 136;
+  --rgb-loss: 220, 38, 38;
+
+  --color-accent: #2563eb;
+  --color-accent-dim: #1d4ed8;
+  --color-violet: #7c3aed;
+  --color-cyan: #0284c7;
+  --color-warn: #b45309;
+
+  --color-call-tint: rgba(13, 148, 136, 0.07);
+  --color-put-tint: rgba(220, 38, 38, 0.06);
+  --color-atm-tint: rgba(37, 99, 235, 0.10);
+
+  --shadow-panel: 0 1px 2px rgba(15, 23, 42, 0.06), 0 6px 16px -10px rgba(15, 23, 42, 0.22);
+  --shadow-pop: 0 8px 28px -6px rgba(15, 23, 42, 0.20);
+  --sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(255, 255, 255, 0) 42%);
 }
 
 /* ---------------------------------------------------------------------------
@@ -81,39 +143,137 @@ body {
 }
 
 body {
-  background: var(--color-base-900);
+  /* A flat fill would read as a void at this size. Two very wide, very low
+     opacity radials give the background depth without becoming decoration. */
+  background:
+    radial-gradient(1100px 620px at 12% -12%, rgba(122, 162, 255, 0.10), transparent 62%),
+    radial-gradient(900px 520px at 92% 4%, rgba(167, 139, 250, 0.09), transparent 60%),
+    var(--color-base-900);
+  background-attachment: fixed;
   color: var(--color-ink-200);
   font-family: var(--font-sans);
   font-size: var(--text-xs);
   line-height: 1.4;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  /* Numbers must never shift width as they change — this is the single most
-     important typographic decision in a live-updating trading UI. */
+  /* Numbers must never shift width as they change — the single most important
+     typographic decision in a live-updating trading UI. */
   font-variant-numeric: tabular-nums;
   font-feature-settings: "tnum" 1, "cv05" 1;
+  transition: background-color 0.25s var(--ease-out), color 0.25s var(--ease-out);
 }
 
-/* Scrollbars: present but recessive */
 ::-webkit-scrollbar {
-  width: 9px;
-  height: 9px;
+  width: 10px;
+  height: 10px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
   background: var(--color-base-500);
-  border-radius: 5px;
-  border: 2px solid var(--color-base-900);
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  transition: background 0.15s var(--ease-out);
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #333b49;
+  background: var(--color-ink-400);
+  background-clip: padding-box;
 }
 
 :focus-visible {
-  outline: 1px solid var(--color-accent);
+  outline: 2px solid var(--color-accent);
   outline-offset: 1px;
+  border-radius: var(--radius-sm);
+}
+
+/* ---------------------------------------------------------------------------
+   Motion
+
+   Every animation here is either an entrance (orients the eye when layout
+   changes) or a state change (confirms an action). Nothing loops purely for
+   decoration except the live-data pulse, which encodes "this is streaming".
+   ------------------------------------------------------------------------- */
+
+@keyframes rise {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}
+
+@keyframes fade {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1;   transform: scale(1); }
+  50%      { opacity: 0.35; transform: scale(0.78); }
+}
+
+@keyframes shimmer {
+  from { background-position: -420px 0; }
+  to   { background-position: 420px 0; }
+}
+
+@keyframes flash-profit {
+  from { background-color: color-mix(in srgb, var(--color-profit) 32%, transparent); }
+  to   { background-color: transparent; }
+}
+
+@keyframes flash-loss {
+  from { background-color: color-mix(in srgb, var(--color-loss) 32%, transparent); }
+  to   { background-color: transparent; }
+}
+
+@keyframes draw {
+  from { stroke-dashoffset: var(--dash, 2000); }
+  to   { stroke-dashoffset: 0; }
+}
+
+@keyframes sweep {
+  from { transform: scaleX(0); }
+  to   { transform: scaleX(1); }
+}
+
+.animate-rise { animation: rise 0.32s var(--ease-out) both; }
+.animate-fade { animation: fade 0.3s var(--ease-out) both; }
+.flash-profit { animation: flash-profit 0.7s var(--ease-out); }
+.flash-loss   { animation: flash-loss 0.7s var(--ease-out); }
+
+/* Stagger panels so a re-layout reads as a sequence rather than a jump. */
+.stagger > * { animation: rise 0.34s var(--ease-out) both; }
+.stagger > *:nth-child(1) { animation-delay: 0.02s; }
+.stagger > *:nth-child(2) { animation-delay: 0.07s; }
+.stagger > *:nth-child(3) { animation-delay: 0.12s; }
+.stagger > *:nth-child(4) { animation-delay: 0.17s; }
+
+/* Path-drawing for chart lines: set --dash to the path length. */
+.draw-path {
+  stroke-dasharray: var(--dash, 2000);
+  animation: draw 0.85s var(--ease-out) both;
+}
+
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--color-base-700) 0%,
+    var(--color-base-600) 50%,
+    var(--color-base-700) 100%
+  );
+  background-size: 420px 100%;
+  animation: shimmer 1.25s linear infinite;
+  border-radius: var(--radius-sm);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
 }
 
 /* ---------------------------------------------------------------------------
@@ -121,15 +281,34 @@ body {
    ------------------------------------------------------------------------- */
 
 .panel {
+  position: relative;
   background: var(--color-base-800);
   border: 1px solid var(--color-line);
   border-radius: var(--radius);
+  box-shadow: var(--shadow-panel);
   display: flex;
   flex-direction: column;
   min-height: 0; /* lets children scroll inside a grid track */
+  overflow: hidden;
+  transition: border-color 0.18s var(--ease-out), box-shadow 0.18s var(--ease-out);
+}
+.panel:hover {
+  border-color: var(--color-line-strong);
+}
+
+/* A one-pixel top highlight is what separates a "card" from a "rectangle". */
+.panel::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 40px;
+  background: var(--sheen);
+  pointer-events: none;
+  border-radius: var(--radius) var(--radius) 0 0;
 }
 
 .panel-head {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -137,14 +316,13 @@ body {
   padding: 0.4375rem 0.625rem;
   border-bottom: 1px solid var(--color-line);
   background: var(--color-base-700);
-  border-radius: var(--radius) var(--radius) 0 0;
   flex: none;
 }
 
 .panel-title {
   font-size: var(--text-2xs);
   font-weight: 600;
-  letter-spacing: 0.055em;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--color-ink-300);
 }
@@ -208,11 +386,18 @@ body {
   font-weight: 500;
   cursor: pointer;
   white-space: nowrap;
-  transition: background 0.1s ease, border-color 0.1s ease;
+  transition: background 0.15s var(--ease-out), border-color 0.15s var(--ease-out),
+              transform 0.12s var(--ease-out), box-shadow 0.15s var(--ease-out);
 }
 .btn:hover:not(:disabled) {
   background: var(--color-base-500);
   border-color: var(--color-line-strong);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px -3px rgba(0, 0, 0, 0.45);
+}
+.btn:active:not(:disabled) {
+  transform: translateY(0);
+  box-shadow: none;
 }
 .btn:disabled {
   opacity: 0.45;
@@ -220,13 +405,14 @@ body {
 }
 
 .btn-primary {
-  background: var(--color-accent-dim);
+  background: linear-gradient(180deg, var(--color-accent), var(--color-accent-dim));
   border-color: var(--color-accent-dim);
   color: #fff;
 }
 .btn-primary:hover:not(:disabled) {
-  background: var(--color-accent);
+  background: linear-gradient(180deg, var(--color-accent), var(--color-accent));
   border-color: var(--color-accent);
+  box-shadow: 0 3px 14px -4px var(--color-accent-dim);
 }
 
 .btn-buy {
@@ -235,7 +421,8 @@ body {
   color: var(--color-profit);
 }
 .btn-buy:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--color-profit) 26%, transparent);
+  background: color-mix(in srgb, var(--color-profit) 30%, transparent);
+  border-color: var(--color-profit);
 }
 
 .btn-sell {
@@ -244,16 +431,24 @@ body {
   color: var(--color-loss);
 }
 .btn-sell:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--color-loss) 26%, transparent);
+  background: color-mix(in srgb, var(--color-loss) 30%, transparent);
+  border-color: var(--color-loss);
 }
 
-/* Segmented control — replaces scattered one-off toggle buttons */
+.btn-icon {
+  padding: 0.25rem;
+  width: 1.625rem;
+  height: 1.625rem;
+}
+
+/* Segmented control */
 .segment {
   display: inline-flex;
+  position: relative;
   background: var(--color-base-900);
   border: 1px solid var(--color-line);
   border-radius: var(--radius-sm);
-  padding: 1px;
+  padding: 2px;
 }
 .segment-item {
   padding: 0.1875rem 0.5rem;
@@ -262,14 +457,15 @@ body {
   color: var(--color-ink-300);
   background: transparent;
   border: 0;
-  border-radius: 2px;
+  border-radius: 3px;
   cursor: pointer;
-  transition: background 0.1s ease, color 0.1s ease;
+  transition: background 0.16s var(--ease-out), color 0.16s var(--ease-out);
 }
 .segment-item:hover { color: var(--color-ink-100); }
 .segment-item[data-active="true"] {
   background: var(--color-base-600);
   color: var(--color-ink-100);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.28);
 }
 
 .input,
@@ -282,10 +478,12 @@ body {
   font-size: var(--text-2xs);
   padding: 0.25rem 0.4375rem;
   width: 100%;
+  transition: border-color 0.15s var(--ease-out), box-shadow 0.15s var(--ease-out);
 }
 .input:focus,
 .select:focus {
   border-color: var(--color-accent-dim);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent) 20%, transparent);
   outline: none;
 }
 .select { font-family: var(--font-sans); cursor: pointer; }
@@ -318,6 +516,10 @@ body {
   border-bottom: 1px solid var(--color-line-soft);
   white-space: nowrap;
   color: var(--color-ink-200);
+  transition: background 0.12s var(--ease-out);
+}
+.grid-table tbody tr {
+  transition: background 0.12s var(--ease-out);
 }
 .grid-table tbody tr:hover td {
   background: var(--color-base-600);
@@ -331,7 +533,7 @@ body {
   font-size: var(--text-2xs);
   font-weight: 500;
   padding: 0.0625rem 0.375rem;
-  border-radius: 2px;
+  border-radius: 3px;
   border: 1px solid var(--color-line);
   color: var(--color-ink-300);
   background: var(--color-base-900);
@@ -340,13 +542,21 @@ body {
 .chip-live {
   color: var(--color-profit);
   border-color: color-mix(in srgb, var(--color-profit) 40%, transparent);
+  background: color-mix(in srgb, var(--color-profit) 10%, transparent);
 }
+.chip-live .dot { animation: pulse-dot 1.9s var(--ease-out) infinite; }
 .chip-modelled {
   color: var(--color-warn);
   border-color: color-mix(in srgb, var(--color-warn) 40%, transparent);
+  background: color-mix(in srgb, var(--color-warn) 10%, transparent);
 }
 .chip-stale {
   color: var(--color-ink-300);
+}
+.chip-accent {
+  color: var(--color-accent);
+  border-color: color-mix(in srgb, var(--color-accent) 40%, transparent);
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
 }
 
 .dot {
@@ -355,6 +565,22 @@ body {
   border-radius: 50%;
   background: currentColor;
   flex: none;
+}
+
+/* A horizontal magnitude bar, used for probability and risk readouts. */
+.meter {
+  position: relative;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--color-base-600);
+  overflow: hidden;
+}
+.meter-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 2px;
+  transform-origin: left center;
+  animation: sweep 0.55s var(--ease-out) both;
 }
 
 /* Empty / error states. Required by spec §3.4: when data is unavailable we say
@@ -370,6 +596,7 @@ body {
   color: var(--color-ink-400);
   font-size: var(--text-2xs);
   min-height: 100px;
+  animation: fade 0.3s var(--ease-out) both;
 }
 .empty-state-title {
   color: var(--color-ink-300);

@@ -71,6 +71,19 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className={`${geistSans.variable} ${geistMono.variable}`}>
+      <head>
+        {/*
+          Applies the saved theme before first paint. Without this the page
+          renders in the default theme and then swaps, which on a full-bleed
+          dark/light change is a jarring flash rather than a subtle one.
+        */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html:
+              "try{document.documentElement.dataset.theme=localStorage.getItem('ofc-theme')||'slate'}catch(e){document.documentElement.dataset.theme='slate'}",
+          }}
+        />
+      </head>
       <body>
         <div id="root-container">
           {children}

@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { createClient } from '../lib/supabase/client';
 import { OptionsCalculatorClient } from '../grpc/CalculatorServiceClientPb';
-import { StrategyRequest, Leg as ProtoLeg, QuoteRequest } from '../grpc/calculator_pb';
+import { StrategyRequest, Leg as ProtoLeg, QuoteRequest, ChainRequest } from '../grpc/calculator_pb';
 
 export interface Leg {
   id: string;
@@ -15,25 +15,88 @@ export interface Leg {
   implied_volatility?: number;
 }
 
-export interface MatrixCell {
+/** A point on the at-expiry payoff curve, exactly as the engine returns it. */
+export interface CurvePoint {
   price: number;
-  days_to_expiration: number;
-  pnl_dollars: number;
-  probability_density: number;
+  pnl: number;
 }
 
+/**
+ * The engine's answer.
+ *
+ * Every field here maps 1:1 onto a field of `StrategyResponse`. The previous
+ * shape carried a `probability_density: 0.5` and a `days_to_expiration: 30`
+ * that no RPC ever produced — they were invented during mapping, which is
+ * precisely the failure mode spec §3.4 exists to prevent.
+ */
 export interface CalculationResult {
-  matrix: MatrixCell[];
+  /** At-expiry P&L across the price axis. `StrategyResponse.pnl_matrix`. */
+  expiryCurve: CurvePoint[];
   max_profit: number;
   max_loss: number;
+  break_even: number;
+  expected_value: number;
+  /** Probability of profit — sensen integrates a lognormal over profitable regions. */
+  pop: number;
   risk_reward_ratio: number;
   aggregate_greeks: {
     delta: number;
     gamma: number;
     theta: number;
     vega: number;
+    rho: number;
+  };
+  risk: {
+    var95: number;
+    var99: number;
+    cvar95: number;
+    cvar99: number;
+  };
+  /**
+   * The inputs this result was computed from, echoed back so downstream panels
+   * (the probability distribution in particular) model the terminal price
+   * using the same numbers the engine used, rather than a second guess.
+   */
+  inputs: {
+    spot: number;
+    impliedVolatility: number;
+    days: number;
+    riskFreeRate: number;
   };
 }
+
+/* ---------------------------------------------------------------------------
+   Option chain.
+
+   The chain lives in the store rather than inside the chain component, because
+   two other surfaces need it: the strategy templates price their legs from it,
+   and the probability curve depends on the IV those legs carry. Keeping it
+   local to the table forced the templates to invent premiums.
+   ------------------------------------------------------------------------- */
+
+export interface ChainQuote {
+  bid: number;
+  ask: number;
+  delta: number;
+  iv: number;
+  volume: number;
+  openInterest: number;
+}
+
+export interface ChainStrike {
+  strike: number;
+  isAtm: boolean;
+  call: ChainQuote;
+  put: ChainQuote;
+}
+
+export interface ChainExpiration {
+  date: string;
+  dte: number;
+  label: string;
+}
+
+export type ChainStatus = 'idle' | 'loading' | 'ready' | 'error';
 
 interface CalculatorState {
   symbol: string;
@@ -44,14 +107,23 @@ interface CalculatorState {
   result: CalculationResult | null;
   isLoading: boolean;
   error: string | null;
-  
+
+  chainStrikes: ChainStrike[];
+  chainExpirations: ChainExpiration[];
+  selectedExpiration: string;
+  chainStatus: ChainStatus;
+  chainError: string | null;
+
   setSymbol: (symbol: string, spotPrice?: number, assetClass?: 'EQUITY' | 'FUTURES' | 'CRYPTO') => void;
   addLeg: (leg: Omit<Leg, 'id'>) => void;
   removeLeg: (id: string) => void;
   clearLegs: () => void;
   updateLeg: (id: string, updates: Partial<Leg>) => void;
   setSpotPrice: (price: number) => void;
-  
+  setRiskFreeRate: (rate: number) => void;
+  loadChain: (expiration?: string) => void;
+  setSelectedExpiration: (date: string) => void;
+
   saveStrategy: (name: string, symbol: string) => Promise<void>;
   loadStrategies: () => Promise<void>;
   calculateStrategy: () => Promise<void>;
@@ -77,6 +149,30 @@ function classify(symbol: string): 'EQUITY' | 'FUTURES' | 'CRYPTO' {
   return 'EQUITY';
 }
 
+/**
+ * Position-level implied volatility.
+ *
+ * Taken as the quantity-weighted mean of the per-leg IVs that came off the
+ * option chain. Returns null when no leg carries a chain IV — the caller must
+ * then refuse to calculate rather than substitute a plausible 0.20, which is
+ * what the previous build did on every single request.
+ */
+function positionIv(legs: Leg[]): number | null {
+  const priced = legs.filter((l) => (l.implied_volatility ?? 0) > 0);
+  if (priced.length === 0) return null;
+  const totalQty = priced.reduce((s, l) => s + Math.abs(l.quantity), 0);
+  if (totalQty === 0) return null;
+  return (
+    priced.reduce((s, l) => s + (l.implied_volatility as number) * Math.abs(l.quantity), 0) /
+    totalQty
+  );
+}
+
+/** Longest-dated leg — the horizon the whole structure is measured to. */
+function horizonDays(legs: Leg[]): number {
+  return legs.reduce((m, l) => Math.max(m, l.expiration_days ?? 0), 0);
+}
+
 export const useCalculatorStore = create<CalculatorState>((set, get) => ({
   symbol: 'SPY',
   assetClass: 'EQUITY',
@@ -87,6 +183,12 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
   result: null,
   isLoading: false,
   error: null,
+
+  chainStrikes: [],
+  chainExpirations: [],
+  selectedExpiration: '',
+  chainStatus: 'idle',
+  chainError: null,
 
   setSymbol: (symbolInput, customPrice, customAssetClass) => {
     const sym = symbolInput.trim().toUpperCase();
@@ -99,7 +201,17 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
       spotPrice: customPrice !== undefined ? customPrice : 0,
       assetClass: customAssetClass || classify(sym),
       error: null,
+      // The old chain belongs to the old symbol. Showing it against the new one
+      // would be the most convincing kind of wrong data.
+      chainStrikes: [],
+      chainExpirations: [],
+      selectedExpiration: '',
+      chainStatus: 'idle',
+      chainError: null,
+      result: null,
     });
+
+    get().loadChain();
 
     if (customPrice !== undefined) return;
 
@@ -122,15 +234,15 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
     });
   },
 
-  addLeg: (leg) => set((state) => ({ 
-    legs: [...state.legs, { ...leg, id: Math.random().toString(36).substring(7) }] 
+  addLeg: (leg) => set((state) => ({
+    legs: [...state.legs, { ...leg, id: Math.random().toString(36).substring(7) }]
   })),
 
   removeLeg: (id) => set((state) => ({
     legs: state.legs.filter(l => l.id !== id)
   })),
 
-  clearLegs: () => set({ legs: [] }),
+  clearLegs: () => set({ legs: [], result: null }),
 
   updateLeg: (id, updates) => set((state) => ({
     legs: state.legs.map(l => l.id === id ? { ...l, ...updates } : l)
@@ -138,58 +250,178 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
 
   setSpotPrice: (price) => set({ spotPrice: price }),
 
+  setRiskFreeRate: (rate) => set({ riskFreeRate: rate }),
+
+  setSelectedExpiration: (date) => {
+    set({ selectedExpiration: date });
+    get().loadChain(date);
+  },
+
+  loadChain: (expiration) => {
+    const { symbol, assetClass, selectedExpiration } = get();
+    const wanted = expiration ?? selectedExpiration;
+
+    set({ chainStatus: 'loading', chainError: null });
+
+    const backendUrl =
+      process.env.NEXT_PUBLIC_API_URL || 'https://api.optionsandfuturescalculator.com';
+    const client = new OptionsCalculatorClient(backendUrl);
+    const req = new ChainRequest();
+    req.setSymbol(symbol);
+    req.setAssetClass(assetClass);
+    if (wanted) req.setExpirationDate(wanted);
+
+    client.getMarketChain(req, {}, (err, res) => {
+      // A response for a symbol the user has since navigated away from must be
+      // discarded, not rendered.
+      if (get().symbol !== symbol) return;
+
+      if (err || !res) {
+        set({
+          chainStrikes: [],
+          chainExpirations: [],
+          chainStatus: 'error',
+          chainError: err?.message || 'Chain service unreachable',
+        });
+        return;
+      }
+
+      const expirations: ChainExpiration[] = res.getAvailableExpirationsList().map((e) => ({
+        date: e.getDateStr(),
+        dte: e.getDaysToExpiry(),
+        label: e.getLabel(),
+      }));
+
+      const strikes: ChainStrike[] = res.getOptionStrikesList().map((s) => ({
+        strike: s.getStrike(),
+        isAtm: s.getIsAtm(),
+        call: {
+          bid: s.getCallBid(), ask: s.getCallAsk(), delta: s.getCallDelta(),
+          iv: s.getCallIv(), volume: s.getCallVolume(), openInterest: s.getCallOpenInterest(),
+        },
+        put: {
+          bid: s.getPutBid(), ask: s.getPutAsk(), delta: s.getPutDelta(),
+          iv: s.getPutIv(), volume: s.getPutVolume(), openInterest: s.getPutOpenInterest(),
+        },
+      }));
+
+      set({
+        chainExpirations: expirations,
+        chainStrikes: strikes,
+        selectedExpiration: wanted || res.getSelectedExpirationDate() || '',
+        chainStatus: strikes.length > 0 ? 'ready' : 'error',
+        chainError:
+          strikes.length > 0 ? null : `No listed contracts returned for ${symbol}`,
+      });
+    });
+  },
+
   calculateStrategy: async () => {
+    const { legs, spotPrice, riskFreeRate, symbol } = get();
+
+    if (legs.length === 0) {
+      set({ result: null, error: null });
+      return;
+    }
+
+    // Refuse to compute on inputs we do not actually have. Each of these was
+    // previously hardcoded into the request ('SPY', 0.20, 30 days), so the
+    // engine returned a real answer to a fabricated question.
+    if (spotPrice <= 0) {
+      set({ result: null, error: `No spot price for ${symbol} — cannot price the position.` });
+      return;
+    }
+    const iv = positionIv(legs);
+    if (iv === null) {
+      set({
+        result: null,
+        error:
+          'No implied volatility on any leg. Add legs from the option chain so IV and premium come from live quotes.',
+      });
+      return;
+    }
+    const days = horizonDays(legs);
+    if (days <= 0) {
+      set({ result: null, error: 'No expiration on any leg — pick an expiry from the chain.' });
+      return;
+    }
+
     set({ isLoading: true, error: null });
     try {
-      const { legs, spotPrice, riskFreeRate } = get();
-      
-      const backendUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
+      const backendUrl = process.env.NEXT_PUBLIC_API_URL || 'https://api.optionsandfuturescalculator.com';
       const client = new OptionsCalculatorClient(backendUrl);
       const req = new StrategyRequest();
-      req.setUnderlyingSymbol('SPY'); // Hardcoded or from state
+      req.setUnderlyingSymbol(symbol);
       req.setCurrentPrice(spotPrice);
-      req.setImpliedVolatility(0.20); // Hardcoded or from state
+      req.setImpliedVolatility(iv);
       req.setRiskFreeRate(riskFreeRate);
-      
-      const protoLegs = legs.map(l => {
-        const pLeg = new ProtoLeg();
-        pLeg.setAction(l.action === 'BUY' ? ProtoLeg.Action.BUY : ProtoLeg.Action.SELL);
-        pLeg.setType(l.option_type === 'CALL' ? ProtoLeg.Type.CALL : ProtoLeg.Type.PUT);
-        pLeg.setStrike(l.strike_price);
-        pLeg.setExpirationDays(30); // Hardcoded or from state
-        pLeg.setQuantity(l.quantity);
-        return pLeg;
-      });
-      req.setLegsList(protoLegs);
-      
+
+      const legType = (l: Leg) => {
+        switch (l.option_type) {
+          case 'CALL': return ProtoLeg.Type.CALL;
+          case 'PUT': return ProtoLeg.Type.PUT;
+          case 'FUTURE': return ProtoLeg.Type.FUTURE;
+          default: return ProtoLeg.Type.STOCK;
+        }
+      };
+
+      req.setLegsList(
+        legs.map((l) => {
+          const pLeg = new ProtoLeg();
+          pLeg.setAction(l.action === 'BUY' ? ProtoLeg.Action.BUY : ProtoLeg.Action.SELL);
+          pLeg.setType(legType(l));
+          pLeg.setStrike(l.strike_price);
+          pLeg.setExpirationDays(l.expiration_days ?? days);
+          pLeg.setQuantity(l.quantity);
+          return pLeg;
+        }),
+      );
+
       const res = await client.calculateStrategy(req, {});
-      
-      const points = res.getPnlMatrixList();
-      const mappedMatrix = points.map((p: any) => ({
+
+      const expiryCurve: CurvePoint[] = res.getPnlMatrixList().map((p) => ({
         price: p.getUnderlyingPrice(),
-        days_to_expiration: 30, // Mocked from points if not returned
-        pnl_dollars: p.getPnl(),
-        probability_density: 0.5 // getProbability does not exist on PnLPoint
+        pnl: p.getPnl(),
       }));
-      
+
+      const g = res.getNetGreeks();
+      const rm = res.getRiskMetrics();
+      const maxLoss = res.getMaxLoss();
+
       set({
         isLoading: false,
+        error: null,
         result: {
-          matrix: mappedMatrix,
+          expiryCurve,
           max_profit: res.getMaxProfit(),
-          max_loss: res.getMaxLoss(),
-          risk_reward_ratio: res.getMaxLoss() !== 0 ? Math.abs(res.getMaxProfit() / res.getMaxLoss()) : 0,
-          aggregate_greeks: { 
-            delta: res.getNetGreeks()?.getDelta() || 0, 
-            gamma: res.getNetGreeks()?.getGamma() || 0, 
-            theta: res.getNetGreeks()?.getTheta() || 0, 
-            vega: res.getNetGreeks()?.getVega() || 0 
-          }
-        }
+          max_loss: maxLoss,
+          break_even: res.getBreakEven(),
+          expected_value: res.getExpectedValue(),
+          pop: res.getPop(),
+          risk_reward_ratio: maxLoss !== 0 ? Math.abs(res.getMaxProfit() / maxLoss) : 0,
+          aggregate_greeks: {
+            delta: g?.getDelta() ?? 0,
+            gamma: g?.getGamma() ?? 0,
+            theta: g?.getTheta() ?? 0,
+            vega: g?.getVega() ?? 0,
+            rho: g?.getRho() ?? 0,
+          },
+          risk: {
+            var95: rm?.getVarParametric95() ?? 0,
+            var99: rm?.getVarParametric99() ?? 0,
+            cvar95: rm?.getCvarParametric95() ?? 0,
+            cvar99: rm?.getCvarParametric99() ?? 0,
+          },
+          inputs: {
+            spot: spotPrice,
+            impliedVolatility: iv,
+            days,
+            riskFreeRate,
+          },
+        },
       });
-      
     } catch (err: unknown) {
-      set({ isLoading: false, error: (err as Error).message || 'Calculation failed' });
+      set({ isLoading: false, result: null, error: (err as Error).message || 'Calculation failed' });
     }
   },
 
@@ -215,8 +447,6 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
   },
 
   loadStrategies: async () => {
-    // This could populate another state variable `savedStrategies` if we had one
-    // But for now, just to show how it's done:
     set({ isLoading: true, error: null });
     try {
       const { data, error } = await supabase.from('saved_strategies').select('*');

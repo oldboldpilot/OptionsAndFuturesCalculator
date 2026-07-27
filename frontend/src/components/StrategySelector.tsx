@@ -1,9 +1,9 @@
 'use client';
 
-import React, { useState } from 'react';
-import { useCalculatorStore } from '../store/useCalculatorStore';
+import React, { useMemo, useState } from 'react';
+import { useCalculatorStore, type ChainStrike } from '../store/useCalculatorStore';
 
-type Category = 'Options' | 'Futures' | 'Hybrid';
+type Category = 'Bullish' | 'Bearish' | 'Neutral' | 'Volatility' | 'Income & Hedge' | 'Futures';
 
 interface LegTemplate {
   action: 'BUY' | 'SELL';
@@ -13,170 +13,431 @@ interface LegTemplate {
   quantity?: number;
 }
 
-interface StrategyOption {
+interface StrategyDef {
   id: string;
   name: string;
   category: Category;
   description: string;
   legs: LegTemplate[];
+  /**
+   * The `sensen::OptionStrategyBuilder` preset (or `sensen::financial` free
+   * function) that backs this structure, where one exists. Entries without a
+   * preset are assembled through the generic `add_leg` path — both are real,
+   * but it is worth knowing which is which.
+   */
+  sensen?: string;
+  /** Needs legs at two different expiries; the single-chain builder can't apply it. */
+  multiExpiry?: boolean;
 }
 
-const STRATEGIES: StrategyOption[] = [
-  { id: 'call_spread', name: 'Bull Call Spread', category: 'Options', description: 'Bullish, limited risk and reward.',
+/**
+ * Strategy catalogue.
+ *
+ * The previous list carried twelve entries, which badly undersold the engine:
+ * `backend/sensen/src/financial.cppm` ships thirteen named presets on
+ * `OptionStrategyBuilder` alone (covered_call, bull/bear call and put spreads,
+ * straddle, strangle, butterfly_spread, condor, iron_condor, iron_butterfly,
+ * collar, protective_put), an arbitrary `add_leg` path that expresses any
+ * combination on top of that, and a separate family of futures spreads
+ * (calendar, 3-2-1 crack, spark, crush, minimum-variance hedge).
+ */
+const STRATEGIES: StrategyDef[] = [
+  /* ---------------------------------- Bullish --------------------------- */
+  { id: 'long_call', name: 'Long Call', category: 'Bullish',
+    description: 'Unlimited upside, premium at risk.',
+    legs: [{ action: 'BUY', type: 'CALL', moneyness: 1.0 }] },
+  { id: 'bull_call_spread', name: 'Bull Call Spread', category: 'Bullish',
+    description: 'Debit spread. Capped risk and reward.', sensen: 'bull_call_spread',
     legs: [{ action: 'BUY', type: 'CALL', moneyness: 1.0 }, { action: 'SELL', type: 'CALL', moneyness: 1.05 }] },
-  { id: 'put_spread', name: 'Bear Put Spread', category: 'Options', description: 'Bearish, limited risk and reward.',
+  { id: 'bull_put_spread', name: 'Bull Put Spread', category: 'Bullish',
+    description: 'Credit spread. Profits if price holds above the short put.', sensen: 'bull_put_spread',
+    legs: [{ action: 'SELL', type: 'PUT', moneyness: 1.0 }, { action: 'BUY', type: 'PUT', moneyness: 0.95 }] },
+  { id: 'call_backspread', name: 'Call Ratio Backspread', category: 'Bullish',
+    description: 'Short one near call against two further calls. Long convexity.',
+    legs: [{ action: 'SELL', type: 'CALL', moneyness: 1.0 }, { action: 'BUY', type: 'CALL', moneyness: 1.05, quantity: 2 }] },
+  { id: 'risk_reversal', name: 'Risk Reversal', category: 'Bullish',
+    description: 'Short put funds a long call. Synthetic long with a gap.',
+    legs: [{ action: 'SELL', type: 'PUT', moneyness: 0.95 }, { action: 'BUY', type: 'CALL', moneyness: 1.05 }] },
+  { id: 'synthetic_long', name: 'Synthetic Long Stock', category: 'Bullish',
+    description: 'Long call plus short put at one strike replicates the shares.',
+    legs: [{ action: 'BUY', type: 'CALL', moneyness: 1.0 }, { action: 'SELL', type: 'PUT', moneyness: 1.0 }] },
+  { id: 'call_ratio_spread', name: 'Call Ratio Spread', category: 'Bullish',
+    description: 'One long call against two short. Naked risk above the wing.',
+    legs: [{ action: 'BUY', type: 'CALL', moneyness: 1.0 }, { action: 'SELL', type: 'CALL', moneyness: 1.05, quantity: 2 }] },
+  { id: 'bull_call_ladder', name: 'Bull Call Ladder', category: 'Bullish',
+    description: 'Spread financed by a second short call further out.',
+    legs: [{ action: 'BUY', type: 'CALL', moneyness: 1.0 }, { action: 'SELL', type: 'CALL', moneyness: 1.05 },
+           { action: 'SELL', type: 'CALL', moneyness: 1.10 }] },
+
+  /* ---------------------------------- Bearish --------------------------- */
+  { id: 'long_put', name: 'Long Put', category: 'Bearish',
+    description: 'Defined risk downside exposure.',
+    legs: [{ action: 'BUY', type: 'PUT', moneyness: 1.0 }] },
+  { id: 'bear_put_spread', name: 'Bear Put Spread', category: 'Bearish',
+    description: 'Debit spread. Capped risk and reward.', sensen: 'bear_put_spread',
     legs: [{ action: 'BUY', type: 'PUT', moneyness: 1.0 }, { action: 'SELL', type: 'PUT', moneyness: 0.95 }] },
-  { id: 'straddle', name: 'Long Straddle', category: 'Options', description: 'Neutral, profits from large moves either way.',
-    legs: [{ action: 'BUY', type: 'CALL', moneyness: 1.0 }, { action: 'BUY', type: 'PUT', moneyness: 1.0 }] },
-  { id: 'strangle', name: 'Long Strangle', category: 'Options', description: 'Cheaper than a straddle, needs a larger move.',
-    legs: [{ action: 'BUY', type: 'CALL', moneyness: 1.05 }, { action: 'BUY', type: 'PUT', moneyness: 0.95 }] },
-  { id: 'iron_condor', name: 'Iron Condor', category: 'Options', description: 'Neutral, profits from low realised volatility.',
-    legs: [{ action: 'SELL', type: 'PUT', moneyness: 0.95 }, { action: 'BUY', type: 'PUT', moneyness: 0.90 },
+  { id: 'bear_call_spread', name: 'Bear Call Spread', category: 'Bearish',
+    description: 'Credit spread. Profits if price stays below the short call.', sensen: 'bear_call_spread',
+    legs: [{ action: 'SELL', type: 'CALL', moneyness: 1.0 }, { action: 'BUY', type: 'CALL', moneyness: 1.05 }] },
+  { id: 'put_backspread', name: 'Put Ratio Backspread', category: 'Bearish',
+    description: 'Short one near put against two lower puts. Long crash risk.',
+    legs: [{ action: 'SELL', type: 'PUT', moneyness: 1.0 }, { action: 'BUY', type: 'PUT', moneyness: 0.95, quantity: 2 }] },
+  { id: 'synthetic_short', name: 'Synthetic Short Stock', category: 'Bearish',
+    description: 'Short call plus long put replicates a short position.',
+    legs: [{ action: 'SELL', type: 'CALL', moneyness: 1.0 }, { action: 'BUY', type: 'PUT', moneyness: 1.0 }] },
+  { id: 'put_ratio_spread', name: 'Put Ratio Spread', category: 'Bearish',
+    description: 'One long put against two short. Naked risk below the wing.',
+    legs: [{ action: 'BUY', type: 'PUT', moneyness: 1.0 }, { action: 'SELL', type: 'PUT', moneyness: 0.95, quantity: 2 }] },
+  { id: 'covered_put', name: 'Covered Put', category: 'Bearish',
+    description: 'Short stock with a short put written against it.',
+    legs: [{ action: 'SELL', type: 'STOCK', moneyness: null }, { action: 'SELL', type: 'PUT', moneyness: 0.95 }] },
+
+  /* ---------------------------------- Neutral --------------------------- */
+  { id: 'iron_condor', name: 'Iron Condor', category: 'Neutral',
+    description: 'Two credit spreads. Profits from low realised volatility.', sensen: 'iron_condor',
+    legs: [{ action: 'BUY', type: 'PUT', moneyness: 0.90 }, { action: 'SELL', type: 'PUT', moneyness: 0.95 },
            { action: 'SELL', type: 'CALL', moneyness: 1.05 }, { action: 'BUY', type: 'CALL', moneyness: 1.10 }] },
-  { id: 'butterfly', name: 'Call Butterfly', category: 'Options', description: 'Targets a specific price pin at expiry.',
+  { id: 'condor', name: 'Condor (all calls)', category: 'Neutral',
+    description: 'Four-strike call condor with a flat profit plateau.', sensen: 'condor',
+    legs: [{ action: 'BUY', type: 'CALL', moneyness: 0.92 }, { action: 'SELL', type: 'CALL', moneyness: 0.97 },
+           { action: 'SELL', type: 'CALL', moneyness: 1.03 }, { action: 'BUY', type: 'CALL', moneyness: 1.08 }] },
+  { id: 'call_butterfly', name: 'Call Butterfly', category: 'Neutral',
+    description: 'Targets a price pin at expiry. Cheap, low probability.', sensen: 'butterfly_spread',
     legs: [{ action: 'BUY', type: 'CALL', moneyness: 0.95 }, { action: 'SELL', type: 'CALL', moneyness: 1.0, quantity: 2 },
            { action: 'BUY', type: 'CALL', moneyness: 1.05 }] },
-  { id: 'covered_call', name: 'Covered Call', category: 'Options', description: 'Long stock with a short call written against it.',
+  { id: 'put_butterfly', name: 'Put Butterfly', category: 'Neutral',
+    description: 'Same payoff shape as the call butterfly, built from puts.', sensen: 'butterfly_spread',
+    legs: [{ action: 'BUY', type: 'PUT', moneyness: 0.95 }, { action: 'SELL', type: 'PUT', moneyness: 1.0, quantity: 2 },
+           { action: 'BUY', type: 'PUT', moneyness: 1.05 }] },
+  { id: 'iron_butterfly', name: 'Iron Butterfly', category: 'Neutral',
+    description: 'Short straddle with protective wings. Higher credit than a condor.', sensen: 'iron_butterfly',
+    legs: [{ action: 'BUY', type: 'PUT', moneyness: 0.95 }, { action: 'SELL', type: 'PUT', moneyness: 1.0 },
+           { action: 'SELL', type: 'CALL', moneyness: 1.0 }, { action: 'BUY', type: 'CALL', moneyness: 1.05 }] },
+  { id: 'broken_wing_butterfly', name: 'Broken-Wing Butterfly', category: 'Neutral',
+    description: 'Asymmetric wings remove risk on one side, add it on the other.',
+    legs: [{ action: 'BUY', type: 'CALL', moneyness: 0.97 }, { action: 'SELL', type: 'CALL', moneyness: 1.02, quantity: 2 },
+           { action: 'BUY', type: 'CALL', moneyness: 1.12 }] },
+  { id: 'short_straddle', name: 'Short Straddle', category: 'Neutral',
+    description: 'Maximum premium, unlimited risk both ways.', sensen: 'straddle',
+    legs: [{ action: 'SELL', type: 'CALL', moneyness: 1.0 }, { action: 'SELL', type: 'PUT', moneyness: 1.0 }] },
+  { id: 'short_strangle', name: 'Short Strangle', category: 'Neutral',
+    description: 'Wider profit zone than a short straddle, less credit.', sensen: 'strangle',
+    legs: [{ action: 'SELL', type: 'CALL', moneyness: 1.05 }, { action: 'SELL', type: 'PUT', moneyness: 0.95 }] },
+  { id: 'jade_lizard', name: 'Jade Lizard', category: 'Neutral',
+    description: 'Short put plus short call spread, sized to have no upside risk.',
+    legs: [{ action: 'SELL', type: 'PUT', moneyness: 0.95 }, { action: 'SELL', type: 'CALL', moneyness: 1.05 },
+           { action: 'BUY', type: 'CALL', moneyness: 1.10 }] },
+  { id: 'box_spread', name: 'Box Spread', category: 'Neutral',
+    description: 'Synthetic long and short combined. A financing trade, not a directional one.',
+    legs: [{ action: 'BUY', type: 'CALL', moneyness: 0.95 }, { action: 'SELL', type: 'PUT', moneyness: 0.95 },
+           { action: 'SELL', type: 'CALL', moneyness: 1.05 }, { action: 'BUY', type: 'PUT', moneyness: 1.05 }] },
+
+  /* --------------------------------- Volatility ------------------------- */
+  { id: 'long_straddle', name: 'Long Straddle', category: 'Volatility',
+    description: 'Profits from a large move either way.', sensen: 'straddle',
+    legs: [{ action: 'BUY', type: 'CALL', moneyness: 1.0 }, { action: 'BUY', type: 'PUT', moneyness: 1.0 }] },
+  { id: 'long_strangle', name: 'Long Strangle', category: 'Volatility',
+    description: 'Cheaper than a straddle, needs a larger move.', sensen: 'strangle',
+    legs: [{ action: 'BUY', type: 'CALL', moneyness: 1.05 }, { action: 'BUY', type: 'PUT', moneyness: 0.95 }] },
+  { id: 'reverse_iron_condor', name: 'Reverse Iron Condor', category: 'Volatility',
+    description: 'Debit structure that pays on a breakout past either wing.',
+    legs: [{ action: 'SELL', type: 'PUT', moneyness: 0.90 }, { action: 'BUY', type: 'PUT', moneyness: 0.95 },
+           { action: 'BUY', type: 'CALL', moneyness: 1.05 }, { action: 'SELL', type: 'CALL', moneyness: 1.10 }] },
+  { id: 'long_guts', name: 'Long Guts', category: 'Volatility',
+    description: 'Both legs in the money. High debit, high intrinsic value.',
+    legs: [{ action: 'BUY', type: 'CALL', moneyness: 0.95 }, { action: 'BUY', type: 'PUT', moneyness: 1.05 }] },
+  { id: 'strip', name: 'Strip', category: 'Volatility',
+    description: 'Straddle weighted to the downside — two puts per call.',
+    legs: [{ action: 'BUY', type: 'CALL', moneyness: 1.0 }, { action: 'BUY', type: 'PUT', moneyness: 1.0, quantity: 2 }] },
+  { id: 'strap', name: 'Strap', category: 'Volatility',
+    description: 'Straddle weighted to the upside — two calls per put.',
+    legs: [{ action: 'BUY', type: 'CALL', moneyness: 1.0, quantity: 2 }, { action: 'BUY', type: 'PUT', moneyness: 1.0 }] },
+  { id: 'calendar_spread', name: 'Calendar Spread', category: 'Volatility', multiExpiry: true,
+    description: 'Sell the near expiry, buy the far one at the same strike.',
+    legs: [{ action: 'SELL', type: 'CALL', moneyness: 1.0 }, { action: 'BUY', type: 'CALL', moneyness: 1.0 }] },
+  { id: 'diagonal_spread', name: 'Diagonal Spread', category: 'Volatility', multiExpiry: true,
+    description: 'Calendar with different strikes on each expiry.',
+    legs: [{ action: 'SELL', type: 'CALL', moneyness: 1.05 }, { action: 'BUY', type: 'CALL', moneyness: 1.0 }] },
+  { id: 'double_diagonal', name: 'Double Diagonal', category: 'Volatility', multiExpiry: true,
+    description: 'Diagonals on both sides. Long vega, short theta near the money.',
+    legs: [{ action: 'SELL', type: 'CALL', moneyness: 1.05 }, { action: 'BUY', type: 'CALL', moneyness: 1.10 },
+           { action: 'SELL', type: 'PUT', moneyness: 0.95 }, { action: 'BUY', type: 'PUT', moneyness: 0.90 }] },
+
+  /* ------------------------------ Income & Hedge ------------------------ */
+  { id: 'covered_call', name: 'Covered Call', category: 'Income & Hedge',
+    description: 'Long stock with a short call written against it.', sensen: 'covered_call',
     legs: [{ action: 'BUY', type: 'STOCK', moneyness: null }, { action: 'SELL', type: 'CALL', moneyness: 1.05 }] },
-  { id: 'futures_outright', name: 'Futures Outright Long', category: 'Futures', description: 'Directional front-month futures position.',
+  { id: 'cash_secured_put', name: 'Cash-Secured Put', category: 'Income & Hedge',
+    description: 'Sell a put you are willing to be assigned on.',
+    legs: [{ action: 'SELL', type: 'PUT', moneyness: 0.95 }] },
+  { id: 'protective_put', name: 'Protective Put', category: 'Income & Hedge',
+    description: 'Long stock with a put as insurance.', sensen: 'protective_put',
+    legs: [{ action: 'BUY', type: 'STOCK', moneyness: null }, { action: 'BUY', type: 'PUT', moneyness: 0.95 }] },
+  { id: 'collar', name: 'Collar', category: 'Income & Hedge',
+    description: 'Protective put financed by a covered call.', sensen: 'collar',
+    legs: [{ action: 'BUY', type: 'STOCK', moneyness: null }, { action: 'BUY', type: 'PUT', moneyness: 0.95 },
+           { action: 'SELL', type: 'CALL', moneyness: 1.05 }] },
+  { id: 'pmcc', name: "Poor Man's Covered Call", category: 'Income & Hedge', multiExpiry: true,
+    description: 'Deep ITM LEAP call stands in for the shares.',
+    legs: [{ action: 'BUY', type: 'CALL', moneyness: 0.80 }, { action: 'SELL', type: 'CALL', moneyness: 1.05 }] },
+
+  /* ---------------------------------- Futures --------------------------- */
+  { id: 'futures_long', name: 'Futures Outright Long', category: 'Futures',
+    description: 'Directional front-month futures position.',
     legs: [{ action: 'BUY', type: 'FUTURE', moneyness: null }] },
-  { id: 'futures_calendar_spread', name: 'Futures Calendar Spread', category: 'Futures', description: 'Inter-month spread on the term structure.',
+  { id: 'futures_short', name: 'Futures Outright Short', category: 'Futures',
+    description: 'Directional short futures position.',
+    legs: [{ action: 'SELL', type: 'FUTURE', moneyness: null }] },
+  { id: 'futures_calendar', name: 'Futures Calendar Spread', category: 'Futures', multiExpiry: true,
+    description: 'Inter-month spread along the term structure.', sensen: 'FuturesStrategyBuilder::calendar_spread',
     legs: [{ action: 'BUY', type: 'FUTURE', moneyness: null }, { action: 'SELL', type: 'FUTURE', moneyness: null }] },
-  { id: 'futures_intercommodity_spread', name: 'Crack / Inter-Commodity Spread', category: 'Futures', description: 'Relative value between related products.',
-    legs: [{ action: 'BUY', type: 'FUTURE', moneyness: null }, { action: 'SELL', type: 'FUTURE', moneyness: null }] },
-  { id: 'covered_futures_call', name: 'Covered Futures Call (FOP)', category: 'Hybrid', description: 'Long futures hedged with a short OTM future option.',
+  { id: 'crack_321', name: '3-2-1 Crack Spread', category: 'Futures',
+    description: 'Three crude against two gasoline and one heating oil.', sensen: 'calculate_crack_spread_321',
+    legs: [{ action: 'BUY', type: 'FUTURE', moneyness: null, quantity: 3 },
+           { action: 'SELL', type: 'FUTURE', moneyness: null, quantity: 2 },
+           { action: 'SELL', type: 'FUTURE', moneyness: null }] },
+  { id: 'spark_spread', name: 'Spark Spread', category: 'Futures',
+    description: 'Power against gas at a given heat rate.', sensen: 'calculate_spark_spread',
+    legs: [{ action: 'SELL', type: 'FUTURE', moneyness: null }, { action: 'BUY', type: 'FUTURE', moneyness: null }] },
+  { id: 'crush_spread', name: 'Soybean Crush Spread', category: 'Futures',
+    description: 'Beans against oil and meal.', sensen: 'calculate_crush_spread',
+    legs: [{ action: 'BUY', type: 'FUTURE', moneyness: null }, { action: 'SELL', type: 'FUTURE', moneyness: null },
+           { action: 'SELL', type: 'FUTURE', moneyness: null }] },
+  { id: 'cash_and_carry', name: 'Cash & Carry / Basis', category: 'Futures',
+    description: 'Long spot against short futures. Captures the carry.',
+    legs: [{ action: 'BUY', type: 'STOCK', moneyness: null }, { action: 'SELL', type: 'FUTURE', moneyness: null }] },
+  { id: 'covered_futures_call', name: 'Covered Futures Call (FOP)', category: 'Futures',
+    description: 'Long futures hedged with a short out-of-the-money future option.',
     legs: [{ action: 'BUY', type: 'FUTURE', moneyness: null }, { action: 'SELL', type: 'CALL', moneyness: 1.05 }] },
-  { id: 'futures_basis_arbitrage', name: 'Cash & Carry / Basis', category: 'Hybrid', description: 'Long spot against a short futures contract.',
+  { id: 'min_variance_hedge', name: 'Minimum-Variance Hedge', category: 'Futures',
+    description: 'Short futures sized by the beta hedge ratio.', sensen: 'calculate_hedge_ratio',
     legs: [{ action: 'BUY', type: 'STOCK', moneyness: null }, { action: 'SELL', type: 'FUTURE', moneyness: null }] },
 ];
 
-const CATEGORIES: Category[] = ['Options', 'Futures', 'Hybrid'];
+const CATEGORIES: Category[] = [
+  'Bullish', 'Bearish', 'Neutral', 'Volatility', 'Income & Hedge', 'Futures',
+];
+
+/** Closest listed strike to a target. Returns null when the chain is empty. */
+function nearestStrike(strikes: ChainStrike[], target: number): ChainStrike | null {
+  if (strikes.length === 0) return null;
+  return strikes.reduce((best, s) =>
+    Math.abs(s.strike - target) < Math.abs(best.strike - target) ? s : best,
+  );
+}
 
 export const StrategySelector: React.FC = () => {
-  const [category, setCategory] = useState<Category>('Options');
+  const [category, setCategory] = useState<Category>('Bullish');
+  const [query, setQuery] = useState('');
   const [selected, setSelected] = useState<string | null>(null);
-  const { addLeg, clearLegs, spotPrice } = useCalculatorStore();
 
-  const visible = STRATEGIES.filter((s) => s.category === category);
-  const selectedData = STRATEGIES.find((s) => s.id === selected);
+  const {
+    addLeg, clearLegs, spotPrice,
+    chainStrikes, chainExpirations, selectedExpiration, chainStatus,
+  } = useCalculatorStore();
+
+  const visible = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    // A search spans every category — with this many structures, forcing the
+    // user to guess which bucket "jade lizard" lives in is hostile.
+    return STRATEGIES.filter((s) =>
+      q ? s.name.toLowerCase().includes(q) || s.description.toLowerCase().includes(q)
+        : s.category === category,
+    );
+  }, [category, query]);
+
+  const def = STRATEGIES.find((s) => s.id === selected);
+  const dte = chainExpirations.find((e) => e.date === selectedExpiration)?.dte ?? 0;
+
+  /** Why Apply is unavailable, or null when it is ready. */
+  const blocker = useMemo(() => {
+    if (!def) return 'Select a strategy';
+    if (def.multiExpiry) return 'Needs two expiries — add these legs from two chains';
+    if (def.category === 'Futures') return 'Needs a futures term structure, which no provider supplies yet';
+    if (spotPrice <= 0) return 'Awaiting quote';
+    if (chainStatus !== 'ready') return 'Awaiting option chain';
+    return null;
+  }, [def, spotPrice, chainStatus]);
 
   /**
-   * Strikes are derived from the live spot rather than the hardcoded 150.0 the
-   * previous build used. Premium is deliberately left at 0: a fill price is
-   * market data, and inventing one would violate spec §3.4. It is populated
-   * when the leg is priced against the option chain.
+   * Builds the position from live chain quotes: nearest listed strike to the
+   * template's moneyness, premium lifted from the ask when buying and hit on
+   * the bid when selling, IV taken from that contract. Nothing is synthesised
+   * — if the chain is not ready, Apply is disabled instead (spec §3.4).
    */
   function apply() {
-    if (!selectedData || spotPrice <= 0) return;
+    if (!def || blocker) return;
     clearLegs();
-    for (const t of selectedData.legs) {
-      const instrument =
-        t.type === 'STOCK' ? 'INSTRUMENT_EQUITY_SPOT'
-        : t.type === 'FUTURE' ? 'INSTRUMENT_FUTURES_SPOT'
-        : 'INSTRUMENT_EQUITY_OPTION';
+
+    for (const t of def.legs) {
+      if (t.type === 'STOCK' || t.type === 'FUTURE') {
+        addLeg({
+          instrument_type: t.type === 'STOCK' ? 'INSTRUMENT_EQUITY_SPOT' : 'INSTRUMENT_FUTURES_SPOT',
+          action: t.action,
+          option_type: t.type,
+          strike_price: spotPrice,
+          premium: spotPrice,
+          quantity: t.quantity ?? 1,
+          expiration_days: dte,
+        });
+        continue;
+      }
+
+      const row = nearestStrike(chainStrikes, spotPrice * (t.moneyness ?? 1));
+      if (!row) continue;
+      const q = t.type === 'CALL' ? row.call : row.put;
+
       addLeg({
-        instrument_type: instrument,
+        instrument_type: 'INSTRUMENT_EQUITY_OPTION',
         action: t.action,
         option_type: t.type,
+        strike_price: row.strike,
+        premium: t.action === 'BUY' ? q.ask : q.bid,
         quantity: t.quantity ?? 1,
-        strike_price: t.moneyness === null ? spotPrice : roundStrike(spotPrice * t.moneyness),
-        premium: 0,
+        expiration_days: dte,
+        implied_volatility: q.iv,
       });
     }
   }
 
-  /** Snap to a plausible listed increment for the price level. */
-  function roundStrike(v: number) {
-    const inc = v >= 1000 ? 25 : v >= 200 ? 5 : v >= 50 ? 1 : 0.5;
-    return Math.round(v / inc) * inc;
+  /** Preview strike for a template leg — the real listed one when we have it. */
+  function previewStrike(t: LegTemplate): string {
+    if (t.moneyness === null) return '';
+    if (chainStatus === 'ready') {
+      const row = nearestStrike(chainStrikes, spotPrice * t.moneyness);
+      if (row) return ` ${row.strike}`;
+    }
+    if (spotPrice > 0) return ` ~${(spotPrice * t.moneyness).toFixed(0)}`;
+    return '';
   }
 
   return (
-    <div className="panel" style={{ flex: 'none' }}>
+    <div className="panel" style={{ flex: 'none', maxHeight: '58vh' }}>
       <div className="panel-head">
         <span className="panel-title">Strategy</span>
-        <div className="segment">
-          {CATEGORIES.map((c) => (
-            <button
-              key={c}
-              className="segment-item"
-              data-active={category === c}
-              onClick={() => { setCategory(c); setSelected(null); }}
-            >
-              {c}
-            </button>
-          ))}
-        </div>
+        <span className="chip">{STRATEGIES.length}</span>
       </div>
 
-      <div className="panel-body panel-body--flush">
-        {visible.map((s) => {
-          const isSel = selected === s.id;
-          return (
-            <button
-              key={s.id}
-              onClick={() => setSelected(s.id)}
-              style={{
-                display: 'block',
-                width: '100%',
-                textAlign: 'left',
-                padding: '0.4375rem 0.625rem',
-                background: isSel ? 'var(--color-base-600)' : 'transparent',
-                borderLeft: `2px solid ${isSel ? 'var(--color-accent)' : 'transparent'}`,
-                borderTop: 0, borderRight: 0,
-                borderBottom: '1px solid var(--color-line-soft)',
-                cursor: 'pointer',
-                color: 'inherit',
-                font: 'inherit',
-              }}
-            >
-              <div
+      <div style={{ padding: '0.4375rem 0.5rem 0', display: 'flex', flexDirection: 'column', gap: '0.375rem' }}>
+        <input
+          className="input"
+          placeholder="Search all strategies…"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          aria-label="Search strategies"
+        />
+        {!query && (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.25rem' }}>
+            {CATEGORIES.map((c) => (
+              <button
+                key={c}
+                className="btn"
+                data-active={category === c}
+                onClick={() => { setCategory(c); setSelected(null); }}
                 style={{
-                  fontSize: 'var(--text-xs)',
-                  fontWeight: 600,
-                  color: isSel ? 'var(--color-ink-100)' : 'var(--color-ink-200)',
+                  padding: '0.125rem 0.4375rem',
+                  background: category === c ? 'var(--color-base-500)' : 'transparent',
+                  borderColor: category === c ? 'var(--color-line-strong)' : 'var(--color-line)',
+                  color: category === c ? 'var(--color-ink-100)' : 'var(--color-ink-300)',
                 }}
               >
-                {s.name}
-              </div>
-              <div style={{ fontSize: 'var(--text-2xs)', color: 'var(--color-ink-400)' }}>
-                {s.description}
-              </div>
-            </button>
-          );
-        })}
+                {c}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
-      {selectedData && (
+      <div className="panel-body panel-body--flush" style={{ marginTop: '0.4375rem' }}>
+        {visible.length === 0 ? (
+          <div className="empty-state">
+            <span>No strategy matches “{query}”.</span>
+          </div>
+        ) : (
+          visible.map((s) => {
+            const isSel = selected === s.id;
+            return (
+              <button
+                key={s.id}
+                onClick={() => setSelected(s.id)}
+                className="animate-fade"
+                style={{
+                  display: 'block',
+                  width: '100%',
+                  textAlign: 'left',
+                  padding: '0.375rem 0.625rem',
+                  background: isSel ? 'var(--color-base-600)' : 'transparent',
+                  borderLeft: `2px solid ${isSel ? 'var(--color-accent)' : 'transparent'}`,
+                  borderTop: 0, borderRight: 0,
+                  borderBottom: '1px solid var(--color-line-soft)',
+                  cursor: 'pointer',
+                  color: 'inherit',
+                  font: 'inherit',
+                  transition: 'background 0.14s var(--ease-out), border-color 0.14s var(--ease-out)',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.3125rem' }}>
+                  <span
+                    style={{
+                      fontSize: 'var(--text-xs)',
+                      fontWeight: 600,
+                      color: isSel ? 'var(--color-ink-100)' : 'var(--color-ink-200)',
+                    }}
+                  >
+                    {s.name}
+                  </span>
+                  <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--color-ink-400)' }}>
+                    {s.legs.length}L
+                  </span>
+                  {query && (
+                    <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--color-ink-400)' }}>
+                      · {s.category}
+                    </span>
+                  )}
+                </div>
+                <div style={{ fontSize: 'var(--text-2xs)', color: 'var(--color-ink-400)' }}>
+                  {s.description}
+                </div>
+              </button>
+            );
+          })
+        )}
+      </div>
+
+      {def && (
         <div
+          className="animate-rise"
           style={{
             padding: '0.5rem 0.625rem',
             borderTop: '1px solid var(--color-line)',
             background: 'var(--color-base-700)',
-            borderRadius: '0 0 var(--radius) var(--radius)',
           }}
         >
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.25rem', marginBottom: '0.4375rem' }}>
-            {selectedData.legs.map((t, i) => (
+            {def.legs.map((t, i) => (
               <span key={i} className="chip">
                 <span className={t.action === 'BUY' ? 'profit' : 'loss'}>
                   {t.action === 'BUY' ? '+' : '−'}
                 </span>
                 {(t.quantity ?? 1) > 1 ? `${t.quantity}× ` : ''}
                 {t.type}
-                {t.moneyness !== null && spotPrice > 0
-                  ? ` ${roundStrike(spotPrice * t.moneyness)}`
-                  : ''}
+                {previewStrike(t)}
               </span>
             ))}
+            {def.sensen && (
+              <span className="chip chip-accent" title={`Backed by sensen::${def.sensen}`}>
+                sensen preset
+              </span>
+            )}
           </div>
+
           <button
             className="btn btn-primary"
             style={{ width: '100%' }}
             onClick={apply}
-            disabled={spotPrice <= 0}
+            disabled={blocker !== null}
           >
-            {spotPrice > 0 ? 'Apply to position' : 'Awaiting quote'}
+            {blocker ?? `Apply at ${selectedExpiration} (${dte}d)`}
           </button>
         </div>
       )}

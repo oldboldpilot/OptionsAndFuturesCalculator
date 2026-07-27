@@ -1,7 +1,8 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useCalculatorStore } from '../store/useCalculatorStore';
+import ThemeToggle from './ThemeToggle';
 
 /**
  * Application header: instrument identity, live spot, and data provenance.
@@ -11,9 +12,26 @@ import { useCalculatorStore } from '../store/useCalculatorStore';
  * freshness is chrome-level information, not something buried in a tooltip.
  */
 export function TopBar() {
-  const { symbol, spotPrice, assetClass, setSymbol, calculateStrategy, isLoading, error } =
-    useCalculatorStore();
+  const {
+    symbol, spotPrice, assetClass, setSymbol, calculateStrategy,
+    isLoading, error, legs,
+  } = useCalculatorStore();
+
   const [draft, setDraft] = useState('');
+
+  // Flash the price when it moves, so an update is never missed. Direction is
+  // carried by colour, which is why the previous value has to be remembered.
+  const prev = useRef(spotPrice);
+  const [flash, setFlash] = useState<'' | 'flash-profit' | 'flash-loss'>('');
+  useEffect(() => {
+    if (prev.current > 0 && spotPrice > 0 && spotPrice !== prev.current) {
+      setFlash(spotPrice > prev.current ? 'flash-profit' : 'flash-loss');
+      const t = setTimeout(() => setFlash(''), 750);
+      prev.current = spotPrice;
+      return () => clearTimeout(t);
+    }
+    prev.current = spotPrice;
+  }, [spotPrice]);
 
   function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -35,6 +53,9 @@ export function TopBar() {
         padding: '0.5rem 0.75rem',
         background: 'var(--color-base-800)',
         borderBottom: '1px solid var(--color-line)',
+        boxShadow: 'var(--shadow-panel)',
+        position: 'relative',
+        zIndex: 5,
         flex: 'none',
       }}
     >
@@ -55,20 +76,19 @@ export function TopBar() {
       <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.4375rem' }}>
         {quoteState === 'live' ? (
           <span
-            className="num"
+            className={`num ${flash}`}
             style={{
               fontSize: 'var(--text-lg)',
               fontWeight: 600,
               color: 'var(--color-ink-100)',
+              padding: '0 0.25rem',
+              borderRadius: 'var(--radius-sm)',
             }}
           >
             {spotPrice.toFixed(2)}
           </span>
         ) : (
-          <span
-            className="num"
-            style={{ fontSize: 'var(--text-lg)', color: 'var(--color-ink-400)' }}
-          >
+          <span className="num" style={{ fontSize: 'var(--text-lg)', color: 'var(--color-ink-400)' }}>
             —
           </span>
         )}
@@ -78,7 +98,7 @@ export function TopBar() {
         </span>
       </div>
 
-      <form onSubmit={submit} style={{ width: '150px' }}>
+      <form onSubmit={submit} style={{ width: '160px' }}>
         <input
           className="input"
           placeholder="Search symbol…"
@@ -91,15 +111,17 @@ export function TopBar() {
       <div style={{ flex: 1 }} />
 
       {error && (
-        <span className="chip" style={{ color: 'var(--color-loss)' }} title={error}>
-          BACKEND UNREACHABLE
+        <span className="chip" style={{ color: 'var(--color-loss)', borderColor: 'var(--color-loss-dim)' }} title={error}>
+          {error.length > 46 ? `${error.slice(0, 46)}…` : error}
         </span>
       )}
+
+      <ThemeToggle />
 
       <button
         className="btn btn-primary"
         onClick={() => calculateStrategy()}
-        disabled={isLoading}
+        disabled={isLoading || legs.length === 0}
       >
         {isLoading ? 'Calculating…' : 'Recalculate'}
       </button>
