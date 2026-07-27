@@ -59,50 +59,30 @@ interface CalculatorState {
 
 const supabase = createClient();
 
-const TICKER_DATABASE: Record<string, { price: number; category: 'EQUITY' | 'FUTURES' | 'CRYPTO' }> = {
-  // Equities & ETFs
-  'SPY': { price: 580.0, category: 'EQUITY' },
-  'QQQ': { price: 490.0, category: 'EQUITY' },
-  'IWM': { price: 220.0, category: 'EQUITY' },
-  'DIA': { price: 410.0, category: 'EQUITY' },
-  'NVDA': { price: 125.0, category: 'EQUITY' },
-  'AAPL': { price: 230.0, category: 'EQUITY' },
-  'MSFT': { price: 440.0, category: 'EQUITY' },
-  'AMZN': { price: 185.0, category: 'EQUITY' },
-  'GOOGL': { price: 175.0, category: 'EQUITY' },
-  'META': { price: 500.0, category: 'EQUITY' },
-  'TSLA': { price: 240.0, category: 'EQUITY' },
-  'AMD': { price: 150.0, category: 'EQUITY' },
-  'PLTR': { price: 28.50, category: 'EQUITY' },
-  'COIN': { price: 220.0, category: 'EQUITY' },
-  'NFLX': { price: 650.0, category: 'EQUITY' },
-  'DIS': { price: 95.0, category: 'EQUITY' },
-  'BA': { price: 180.0, category: 'EQUITY' },
-  'JPM': { price: 210.0, category: 'EQUITY' },
+/**
+ * Symbol -> asset class classification.
+ *
+ * This is reference data about *what an instrument is*, not a market
+ * observation, so hardcoding it is legitimate. The previous build also carried
+ * a hardcoded price for each symbol (SPY at 580.0 against a real 738.93); those
+ * have been removed. Prices come from the backend quote service only — see
+ * spec §3.4, real data only.
+ */
+const FUTURES_SYMBOLS = ['ES', 'NQ', 'RTY', 'YM', 'CL', 'NG', 'GC', 'SI', 'ZB', 'ZN'];
+const CRYPTO_SYMBOLS = ['BTC', 'ETH', 'SOL'];
 
-  // Futures Contracts
-  'ES': { price: 5850.0, category: 'FUTURES' },
-  'NQ': { price: 20400.0, category: 'FUTURES' },
-  'RTY': { price: 2220.0, category: 'FUTURES' },
-  'YM': { price: 41200.0, category: 'FUTURES' },
-  'CL': { price: 78.50, category: 'FUTURES' },
-  'NG': { price: 2.45, category: 'FUTURES' },
-  'GC': { price: 2420.0, category: 'FUTURES' },
-  'SI': { price: 31.00, category: 'FUTURES' },
-  'ZB': { price: 118.25, category: 'FUTURES' },
-  'ZN': { price: 110.50, category: 'FUTURES' },
-
-  // Crypto Derivatives
-  'BTC': { price: 67500.0, category: 'CRYPTO' },
-  'ETH': { price: 3500.0, category: 'CRYPTO' },
-  'SOL': { price: 175.0, category: 'CRYPTO' }
-};
+function classify(symbol: string): 'EQUITY' | 'FUTURES' | 'CRYPTO' {
+  if (FUTURES_SYMBOLS.includes(symbol)) return 'FUTURES';
+  if (CRYPTO_SYMBOLS.includes(symbol)) return 'CRYPTO';
+  return 'EQUITY';
+}
 
 export const useCalculatorStore = create<CalculatorState>((set, get) => ({
   symbol: 'SPY',
   assetClass: 'EQUITY',
   legs: [],
-  spotPrice: 580.0,
+  // Unknown until the quote service answers. Never seeded with a stand-in price.
+  spotPrice: 0,
   riskFreeRate: 0.05,
   result: null,
   isLoading: false,
@@ -110,39 +90,36 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
 
   setSymbol: (symbolInput, customPrice, customAssetClass) => {
     const sym = symbolInput.trim().toUpperCase();
-    const known = TICKER_DATABASE[sym];
 
-    const finalPrice = customPrice !== undefined 
-      ? customPrice 
-      : known 
-        ? known.price 
-        : 100.0;
-
-    const finalCategory = customAssetClass || (known ? known.category : (['ES', 'NQ', 'CL', 'GC', 'ZB', 'NG', 'RTY', 'YM', 'SI', 'ZN'].includes(sym) ? 'FUTURES' : ['BTC', 'ETH', 'SOL'].includes(sym) ? 'CRYPTO' : 'EQUITY'));
-
+    // A user-supplied simulation price is an explicit override and is honoured.
+    // Otherwise the price is unknown until the quote service answers — it is
+    // NOT defaulted to a plausible-looking number.
     set({
       symbol: sym,
-      spotPrice: finalPrice,
-      assetClass: finalCategory
+      spotPrice: customPrice !== undefined ? customPrice : 0,
+      assetClass: customAssetClass || classify(sym),
+      error: null,
     });
 
-    // Asynchronously fetch live Yahoo Finance quote from Railway gRPC-Web backend
-    try {
-      const backendUrl = process.env.NEXT_PUBLIC_API_URL || 'https://api.optionsandfuturescalculator.com';
-      const client = new OptionsCalculatorClient(backendUrl);
-      const req = new QuoteRequest();
-      req.setSymbol(sym);
+    if (customPrice !== undefined) return;
 
-      client.getMarketQuote(req, {}, (err, res) => {
-        if (!err && res && res.getPrice() > 0) {
-          set({
-            spotPrice: res.getPrice()
-          });
-        }
-      });
-    } catch (e) {
-      console.warn('Backend quote lookup fallback to static DB:', e);
-    }
+    const backendUrl = process.env.NEXT_PUBLIC_API_URL || 'https://api.optionsandfuturescalculator.com';
+    const client = new OptionsCalculatorClient(backendUrl);
+    const req = new QuoteRequest();
+    req.setSymbol(sym);
+
+    client.getMarketQuote(req, {}, (err, res) => {
+      if (err || !res || res.getPrice() <= 0) {
+        // Surface the failure. Substituting a fallback price here is what
+        // previously let fabricated data reach the screen unnoticed.
+        set({
+          spotPrice: 0,
+          error: `No quote available for ${sym}${err?.message ? `: ${err.message}` : ''}`,
+        });
+        return;
+      }
+      set({ spotPrice: res.getPrice(), error: null });
+    });
   },
 
   addLeg: (leg) => set((state) => ({ 

@@ -1,5 +1,7 @@
 import * as jspb from 'google-protobuf'
 
+
+
 export class Leg extends jspb.Message {
   getAction(): Leg.Action;
   setAction(value: Leg.Action): Leg;
@@ -223,91 +225,288 @@ export namespace StrategyResponse {
 export class QuoteRequest extends jspb.Message {
   getSymbol(): string;
   setSymbol(value: string): QuoteRequest;
+
   serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): QuoteRequest.AsObject;
+  static toObject(includeInstance: boolean, msg: QuoteRequest): QuoteRequest.AsObject;
+  static serializeBinaryToWriter(message: QuoteRequest, writer: jspb.BinaryWriter): void;
   static deserializeBinary(bytes: Uint8Array): QuoteRequest;
+  static deserializeBinaryFromReader(message: QuoteRequest, reader: jspb.BinaryReader): QuoteRequest;
+}
+
+export namespace QuoteRequest {
+  export type AsObject = {
+    symbol: string,
+  }
 }
 
 export class QuoteResponse extends jspb.Message {
   getSymbol(): string;
   setSymbol(value: string): QuoteResponse;
+
   getPrice(): number;
   setPrice(value: number): QuoteResponse;
+
   getPreviousClose(): number;
   setPreviousClose(value: number): QuoteResponse;
+
   getForwardPe(): number;
   setForwardPe(value: number): QuoteResponse;
+
   getImpliedVolatility(): number;
   setImpliedVolatility(value: number): QuoteResponse;
+
   getAssetClass(): string;
   setAssetClass(value: string): QuoteResponse;
+
   serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): QuoteResponse.AsObject;
+  static toObject(includeInstance: boolean, msg: QuoteResponse): QuoteResponse.AsObject;
+  static serializeBinaryToWriter(message: QuoteResponse, writer: jspb.BinaryWriter): void;
   static deserializeBinary(bytes: Uint8Array): QuoteResponse;
+  static deserializeBinaryFromReader(message: QuoteResponse, reader: jspb.BinaryReader): QuoteResponse;
+}
+
+export namespace QuoteResponse {
+  export type AsObject = {
+    symbol: string,
+    price: number,
+    previousClose: number,
+    forwardPe: number,
+    impliedVolatility: number,
+    assetClass: string,
+  }
 }
 
 export class OptionStrike extends jspb.Message {
   getStrike(): number;
+  setStrike(value: number): OptionStrike;
+
   getCallBid(): number;
+  setCallBid(value: number): OptionStrike;
+
   getCallAsk(): number;
+  setCallAsk(value: number): OptionStrike;
+
   getCallDelta(): number;
+  setCallDelta(value: number): OptionStrike;
+
   getCallVolume(): number;
+  setCallVolume(value: number): OptionStrike;
+
   getCallOpenInterest(): number;
+  setCallOpenInterest(value: number): OptionStrike;
+
   getCallIv(): number;
+  setCallIv(value: number): OptionStrike;
+
   getPutBid(): number;
+  setPutBid(value: number): OptionStrike;
+
   getPutAsk(): number;
+  setPutAsk(value: number): OptionStrike;
+
   getPutDelta(): number;
+  setPutDelta(value: number): OptionStrike;
+
   getPutVolume(): number;
+  setPutVolume(value: number): OptionStrike;
+
   getPutOpenInterest(): number;
+  setPutOpenInterest(value: number): OptionStrike;
+
   getPutIv(): number;
+  setPutIv(value: number): OptionStrike;
+
   getIsAtm(): boolean;
+  setIsAtm(value: boolean): OptionStrike;
+
   getExpirationDate(): string;
+  setExpirationDate(value: string): OptionStrike;
+
   serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): OptionStrike.AsObject;
+  static toObject(includeInstance: boolean, msg: OptionStrike): OptionStrike.AsObject;
+  static serializeBinaryToWriter(message: OptionStrike, writer: jspb.BinaryWriter): void;
   static deserializeBinary(bytes: Uint8Array): OptionStrike;
+  static deserializeBinaryFromReader(message: OptionStrike, reader: jspb.BinaryReader): OptionStrike;
+}
+
+export namespace OptionStrike {
+  export type AsObject = {
+    strike: number,
+    callBid: number,
+    callAsk: number,
+    callDelta: number,
+    callVolume: number,
+    callOpenInterest: number,
+    callIv: number,
+    putBid: number,
+    putAsk: number,
+    putDelta: number,
+    putVolume: number,
+    putOpenInterest: number,
+    putIv: number,
+    isAtm: boolean,
+    expirationDate: string,
+  }
 }
 
 export class FuturesContract extends jspb.Message {
   getCode(): string;
+  setCode(value: string): FuturesContract;
+
   getDeliveryMonth(): string;
+  setDeliveryMonth(value: string): FuturesContract;
+
   getDaysToExpiry(): number;
+  setDaysToExpiry(value: number): FuturesContract;
+
   getFuturesPrice(): number;
+  setFuturesPrice(value: number): FuturesContract;
+
   getBid(): number;
+  setBid(value: number): FuturesContract;
+
   getAsk(): number;
+  setAsk(value: number): FuturesContract;
+
   getBasis(): number;
+  setBasis(value: number): FuturesContract;
+
   getAnnualizedYield(): number;
+  setAnnualizedYield(value: number): FuturesContract;
+
   getVolume(): number;
+  setVolume(value: number): FuturesContract;
+
   getOpenInterest(): number;
+  setOpenInterest(value: number): FuturesContract;
+
   getState(): string;
+  setState(value: string): FuturesContract;
+
   serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): FuturesContract.AsObject;
+  static toObject(includeInstance: boolean, msg: FuturesContract): FuturesContract.AsObject;
+  static serializeBinaryToWriter(message: FuturesContract, writer: jspb.BinaryWriter): void;
   static deserializeBinary(bytes: Uint8Array): FuturesContract;
+  static deserializeBinaryFromReader(message: FuturesContract, reader: jspb.BinaryReader): FuturesContract;
+}
+
+export namespace FuturesContract {
+  export type AsObject = {
+    code: string,
+    deliveryMonth: string,
+    daysToExpiry: number,
+    futuresPrice: number,
+    bid: number,
+    ask: number,
+    basis: number,
+    annualizedYield: number,
+    volume: number,
+    openInterest: number,
+    state: string,
+  }
 }
 
 export class ExpirationDate extends jspb.Message {
   getDateStr(): string;
+  setDateStr(value: string): ExpirationDate;
+
   getDaysToExpiry(): number;
+  setDaysToExpiry(value: number): ExpirationDate;
+
   getLabel(): string;
+  setLabel(value: string): ExpirationDate;
+
   serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): ExpirationDate.AsObject;
+  static toObject(includeInstance: boolean, msg: ExpirationDate): ExpirationDate.AsObject;
+  static serializeBinaryToWriter(message: ExpirationDate, writer: jspb.BinaryWriter): void;
   static deserializeBinary(bytes: Uint8Array): ExpirationDate;
+  static deserializeBinaryFromReader(message: ExpirationDate, reader: jspb.BinaryReader): ExpirationDate;
+}
+
+export namespace ExpirationDate {
+  export type AsObject = {
+    dateStr: string,
+    daysToExpiry: number,
+    label: string,
+  }
 }
 
 export class ChainRequest extends jspb.Message {
   getSymbol(): string;
   setSymbol(value: string): ChainRequest;
+
   getExpirationDays(): number;
   setExpirationDays(value: number): ChainRequest;
+
   getAssetClass(): string;
   setAssetClass(value: string): ChainRequest;
+
   getExpirationDate(): string;
   setExpirationDate(value: string): ChainRequest;
+
   serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): ChainRequest.AsObject;
+  static toObject(includeInstance: boolean, msg: ChainRequest): ChainRequest.AsObject;
+  static serializeBinaryToWriter(message: ChainRequest, writer: jspb.BinaryWriter): void;
   static deserializeBinary(bytes: Uint8Array): ChainRequest;
+  static deserializeBinaryFromReader(message: ChainRequest, reader: jspb.BinaryReader): ChainRequest;
+}
+
+export namespace ChainRequest {
+  export type AsObject = {
+    symbol: string,
+    expirationDays: number,
+    assetClass: string,
+    expirationDate: string,
+  }
 }
 
 export class ChainResponse extends jspb.Message {
   getSymbol(): string;
+  setSymbol(value: string): ChainResponse;
+
   getSpotPrice(): number;
+  setSpotPrice(value: number): ChainResponse;
+
   getOptionStrikesList(): Array<OptionStrike>;
+  setOptionStrikesList(value: Array<OptionStrike>): ChainResponse;
+  clearOptionStrikesList(): ChainResponse;
+  addOptionStrikes(value?: OptionStrike, index?: number): OptionStrike;
+
   getFuturesContractsList(): Array<FuturesContract>;
+  setFuturesContractsList(value: Array<FuturesContract>): ChainResponse;
+  clearFuturesContractsList(): ChainResponse;
+  addFuturesContracts(value?: FuturesContract, index?: number): FuturesContract;
+
   getSelectedExpirationDate(): string;
+  setSelectedExpirationDate(value: string): ChainResponse;
+
   getAvailableExpirationsList(): Array<ExpirationDate>;
+  setAvailableExpirationsList(value: Array<ExpirationDate>): ChainResponse;
+  clearAvailableExpirationsList(): ChainResponse;
+  addAvailableExpirations(value?: ExpirationDate, index?: number): ExpirationDate;
+
   serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): ChainResponse.AsObject;
+  static toObject(includeInstance: boolean, msg: ChainResponse): ChainResponse.AsObject;
+  static serializeBinaryToWriter(message: ChainResponse, writer: jspb.BinaryWriter): void;
   static deserializeBinary(bytes: Uint8Array): ChainResponse;
+  static deserializeBinaryFromReader(message: ChainResponse, reader: jspb.BinaryReader): ChainResponse;
 }
+
+export namespace ChainResponse {
+  export type AsObject = {
+    symbol: string,
+    spotPrice: number,
+    optionStrikesList: Array<OptionStrike.AsObject>,
+    futuresContractsList: Array<FuturesContract.AsObject>,
+    selectedExpirationDate: string,
+    availableExpirationsList: Array<ExpirationDate.AsObject>,
+  }
+}
+

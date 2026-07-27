@@ -1,520 +1,276 @@
 'use client';
 
-import React, { useState, useMemo, useEffect } from 'react';
-import { useCalculatorStore } from '../store/useCalculatorStore';
-import styles from './OptionChain.module.css';
+import { useEffect, useMemo, useState } from 'react';
 import { OptionsCalculatorClient } from '../grpc/CalculatorServiceClientPb';
 import { ChainRequest } from '../grpc/calculator_pb';
+import { useCalculatorStore } from '../store/useCalculatorStore';
 
-interface OptionStrikeRow {
-  strike: number;
-  callBid: number;
-  callAsk: number;
-  callDelta: number;
-  callVolume: number;
-  callOI: number;
-  callIV: number;
-  putBid: number;
-  putAsk: number;
-  putDelta: number;
-  putVolume: number;
-  putOI: number;
-  putIV: number;
-  isATM?: boolean;
-  expirationDate?: string;
-}
-
-interface FuturesContractRow {
-  code: string;
-  month: string;
-  daysToExpiry: number;
-  futuresPrice: number;
+interface SideQuote {
   bid: number;
   ask: number;
-  basis: number;
-  annualizedYield: number;
+  delta: number;
+  iv: number;
   volume: number;
   openInterest: number;
-  state: 'Contango' | 'Backwardation';
 }
 
-const REAL_EXPIRATION_CHAINS = [
-  { date: '2026-07-31', dte: 5, label: 'Jul 31, 2026 (5 Days)' },
-  { date: '2026-08-07', dte: 12, label: 'Aug 07, 2026 (12 Days)' },
-  { date: '2026-08-21', dte: 26, label: 'Aug 21, 2026 (26 Days)' },
-  { date: '2026-09-18', dte: 54, label: 'Sep 18, 2026 (54 Days)' },
-  { date: '2026-10-16', dte: 82, label: 'Oct 16, 2026 (82 Days)' },
-  { date: '2026-11-20', dte: 117, label: 'Nov 20, 2026 (117 Days)' },
-  { date: '2026-12-18', dte: 145, label: 'Dec 18, 2026 (145 Days)' },
-  { date: '2027-01-15', dte: 173, label: 'Jan 15, 2027 (173 Days - 1Y LEAP)' },
-  { date: '2027-06-18', dte: 327, label: 'Jun 18, 2027 (327 Days - LEAP)' },
-  { date: '2027-12-17', dte: 509, label: 'Dec 17, 2027 (509 Days - LEAP)' },
-  { date: '2028-01-21', dte: 544, label: 'Jan 21, 2028 (544 Days - 2Y LEAP)' },
-  { date: '2028-06-16', dte: 691, label: 'Jun 16, 2028 (691 Days - 2Y LEAP)' },
-  { date: '2028-12-15', dte: 873, label: 'Dec 15, 2028 (873 Days - 2.5Y LEAP)' },
-  { date: '2029-01-19', dte: 908, label: 'Jan 19, 2029 (908 Days - 3Y LEAP)' }
-];
+interface Strike {
+  strike: number;
+  isAtm: boolean;
+  call: SideQuote;
+  put: SideQuote;
+}
 
-export default function OptionChain() {
-  const { symbol, spotPrice, assetClass, addLeg, calculateStrategy } = useCalculatorStore();
-  const [activeTab, setActiveTab] = useState<'options' | 'futures'>(assetClass === 'FUTURES' ? 'futures' : 'options');
-  const [selectedExpDate, setSelectedExpDate] = useState<string>('2026-08-21');
-  const [optionSideFilter, setOptionSideFilter] = useState<'all' | 'calls' | 'puts'>('all');
-  const [remoteStrikes, setRemoteStrikes] = useState<OptionStrikeRow[]>([]);
-  const [remoteFutures, setRemoteFutures] = useState<FuturesContractRow[]>([]);
+interface Expiration {
+  date: string;
+  dte: number;
+}
 
-  const selectedChainObj = useMemo(() => {
-    return REAL_EXPIRATION_CHAINS.find(c => c.date === selectedExpDate) || REAL_EXPIRATION_CHAINS[2];
-  }, [selectedExpDate]);
+type SideFilter = 'both' | 'calls' | 'puts';
+
+const n = (v: number, dp = 2) => (Number.isFinite(v) && v !== 0 ? v.toFixed(dp) : '—');
+const int = (v: number) => (Number.isFinite(v) && v !== 0 ? v.toLocaleString() : '—');
+const pct = (v: number) => (Number.isFinite(v) && v > 0 ? `${(v * 100).toFixed(1)}%` : '—');
+
+/**
+ * Live option chain.
+ *
+ * Every strike, price, delta, IV, volume and open-interest figure comes from
+ * the backend chain service. The previous build synthesised strikes from a
+ * step function and filled the columns with constants (volume 1200, OI 3400,
+ * IV 0.22), which with no quote produced negative strikes and $NaN prices.
+ * Per spec §3.4 this renders only provider data and states plainly when there
+ * is none.
+ */
+export function OptionChain() {
+  const { symbol, assetClass, addLeg } = useCalculatorStore();
+
+  const [strikes, setStrikes] = useState<Strike[]>([]);
+  const [expirations, setExpirations] = useState<Expiration[]>([]);
+  const [selectedExp, setSelectedExp] = useState<string>('');
+  const [side, setSide] = useState<SideFilter>('both');
+  const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading');
+  const [message, setMessage] = useState<string>('');
 
   useEffect(() => {
-    try {
-      const backendUrl = process.env.NEXT_PUBLIC_API_URL || 'https://api.optionsandfuturescalculator.com';
-      const client = new OptionsCalculatorClient(backendUrl);
-      const req = new ChainRequest();
-      req.setSymbol(symbol);
-      req.setExpirationDays(selectedChainObj.dte);
-      req.setExpirationDate(selectedExpDate);
-      req.setAssetClass(assetClass);
+    let cancelled = false;
+    setStatus('loading');
 
-      client.getMarketChain(req, {}, (err, res) => {
-        if (!err && res) {
-          const strikes = res.getOptionStrikesList().map((s: any) => ({
-            strike: s.getStrike(),
-            callBid: s.getCallBid(),
-            callAsk: s.getCallAsk(),
-            callDelta: s.getCallDelta(),
-            callVolume: s.getCallVolume(),
-            callOI: s.getCallOpenInterest(),
-            callIV: s.getCallIv(),
-            putBid: s.getPutBid(),
-            putAsk: s.getPutAsk(),
-            putDelta: s.getPutDelta(),
-            putVolume: s.getPutVolume(),
-            putOI: s.getPutOpenInterest(),
-            putIV: s.getPutIv(),
-            isATM: s.getIsAtm(),
-            expirationDate: s.getExpirationDate() || selectedExpDate
-          }));
-          if (strikes.length > 0) setRemoteStrikes(strikes);
+    const backendUrl =
+      process.env.NEXT_PUBLIC_API_URL || 'https://api.optionsandfuturescalculator.com';
+    const client = new OptionsCalculatorClient(backendUrl);
+    const req = new ChainRequest();
+    req.setSymbol(symbol);
+    req.setAssetClass(assetClass);
+    if (selectedExp) req.setExpirationDate(selectedExp);
 
-          const futures = res.getFuturesContractsList().map((f: any) => ({
-            code: f.getCode(),
-            month: f.getDeliveryMonth(),
-            daysToExpiry: f.getDaysToExpiry(),
-            futuresPrice: f.getFuturesPrice(),
-            bid: f.getBid(),
-            ask: f.getAsk(),
-            basis: f.getBasis(),
-            annualizedYield: f.getAnnualizedYield(),
-            volume: f.getVolume(),
-            openInterest: f.getOpenInterest(),
-            state: f.getState() as 'Contango' | 'Backwardation'
-          }));
-          if (futures.length > 0) setRemoteFutures(futures);
-        }
-      });
-    } catch (e) {
-      console.warn('Backend chain lookup fallback:', e);
-    }
-  }, [symbol, selectedExpDate, selectedChainObj.dte, assetClass]);
+    client.getMarketChain(req, {}, (err, res) => {
+      if (cancelled) return;
 
-  // Dynamic Options Chain Generator
-  const optionChainData = useMemo<OptionStrikeRow[]>(() => {
-    if (remoteStrikes.length > 0) return remoteStrikes;
+      if (err || !res) {
+        setStrikes([]);
+        setExpirations([]);
+        setStatus('error');
+        setMessage(err?.message || 'Chain service unreachable');
+        return;
+      }
 
-    const base = spotPrice;
-    let step = 5;
-    if (base >= 2000) step = 50;
-    else if (base >= 500) step = 10;
-    else if (base >= 100) step = 5;
-    else if (base >= 20) step = 2.5;
-    else step = 1;
+      setExpirations(
+        res.getAvailableExpirationsList().map((e: any) => ({
+          date: e.getDateStr(),
+          dte: e.getDaysToExpiry(),
+        })),
+      );
 
-    const atmStrike = Math.round(base / step) * step;
-    const strikes: number[] = [];
+      const rows: Strike[] = res.getOptionStrikesList().map((s: any) => ({
+        strike: s.getStrike(),
+        isAtm: s.getIsAtm(),
+        call: {
+          bid: s.getCallBid(), ask: s.getCallAsk(), delta: s.getCallDelta(),
+          iv: s.getCallIv(), volume: s.getCallVolume(), openInterest: s.getCallOpenInterest(),
+        },
+        put: {
+          bid: s.getPutBid(), ask: s.getPutAsk(), delta: s.getPutDelta(),
+          iv: s.getPutIv(), volume: s.getPutVolume(), openInterest: s.getPutOpenInterest(),
+        },
+      }));
 
-    for (let i = -7; i <= 7; i++) {
-      strikes.push(parseFloat((atmStrike + i * step).toFixed(2)));
-    }
-
-    return strikes.map((strike) => {
-      const isATM = strike === atmStrike;
-      const diff = strike - base;
-      const distPct = diff / base;
-
-      const timeFactor = Math.sqrt((selectedChainObj.dte > 0 ? selectedChainObj.dte : 1) / 365);
-      const iv = 0.22 + Math.abs(distPct) * 0.1;
-      const intrinsicCall = Math.max(0, base - strike);
-      const intrinsicPut = Math.max(0, strike - base);
-      const timeVal = base * iv * timeFactor * 0.4 * Math.exp(-Math.pow(distPct * 3, 2));
-
-      const callEst = intrinsicCall + timeVal;
-      const putEst = intrinsicPut + timeVal;
-
-      const callBid = Math.max(0.05, parseFloat((callEst * 0.98).toFixed(2)));
-      const callAsk = Math.max(0.10, parseFloat((callEst * 1.02).toFixed(2)));
-      const putBid = Math.max(0.05, parseFloat((putEst * 0.98).toFixed(2)));
-      const putAsk = Math.max(0.10, parseFloat((putEst * 1.02).toFixed(2)));
-
-      const callDelta = parseFloat((0.5 - distPct * 3).toFixed(2));
-      const clampedCallDelta = Math.min(0.99, Math.max(0.01, callDelta));
-      const putDelta = parseFloat((clampedCallDelta - 1).toFixed(2));
-
-      const callVolume = Math.floor(Math.max(50, 5000 * Math.exp(-Math.abs(distPct) * 5)));
-      const callOI = callVolume * 3 + 450;
-      const putVolume = Math.floor(Math.max(40, 4500 * Math.exp(-Math.abs(distPct) * 5)));
-      const putOI = putVolume * 3 + 320;
-
-      return {
-        strike,
-        callBid,
-        callAsk,
-        callDelta: clampedCallDelta,
-        callVolume,
-        callOI,
-        callIV: parseFloat((iv * 100).toFixed(1)),
-        putBid,
-        putAsk,
-        putDelta,
-        putVolume,
-        putOI,
-        putIV: parseFloat((iv * 100).toFixed(1)),
-        isATM,
-        expirationDate: selectedExpDate
-      };
+      setStrikes(rows);
+      if (!selectedExp && res.getSelectedExpirationDate()) {
+        setSelectedExp(res.getSelectedExpirationDate());
+      }
+      if (rows.length === 0) {
+        setStatus('error');
+        setMessage(`No listed contracts returned for ${symbol}`);
+      } else {
+        setStatus('ready');
+      }
     });
-  }, [spotPrice, selectedChainObj.dte, selectedExpDate, remoteStrikes]);
 
-  // Dynamic Futures Term Structure Generator
-  const futuresChainData = useMemo<FuturesContractRow[]>(() => {
-    if (remoteFutures.length > 0) return remoteFutures;
+    return () => {
+      cancelled = true;
+    };
+  }, [symbol, assetClass, selectedExp]);
 
-    const monthCodes = [
-      { name: 'SEP 2026', code: `${symbol}U26`, days: 45, r: 0.052 },
-      { name: 'DEC 2026', code: `${symbol}Z26`, days: 135, r: 0.050 },
-      { name: 'MAR 2027', code: `${symbol}H27`, days: 225, r: 0.048 },
-      { name: 'JUN 2027', code: `${symbol}M27`, days: 315, r: 0.046 },
-      { name: 'SEP 2027', code: `${symbol}U27`, days: 405, r: 0.045 },
-      { name: 'DEC 2027', code: `${symbol}Z27`, days: 495, r: 0.044 },
-      { name: 'JAN 2028', code: `${symbol}F28`, days: 540, r: 0.043 },
-      { name: 'JUN 2028', code: `${symbol}M28`, days: 680, r: 0.042 },
-      { name: 'DEC 2028', code: `${symbol}Z28`, days: 870, r: 0.041 },
-      { name: 'JAN 2029', code: `${symbol}F29`, days: 900, r: 0.040 },
-    ];
+  const dte = useMemo(
+    () => expirations.find((e) => e.date === selectedExp)?.dte ?? 0,
+    [expirations, selectedExp],
+  );
 
-    return monthCodes.map((m) => {
-      const t = m.days / 365;
-      const forwardPrice = spotPrice * Math.exp(m.r * t);
-      const basis = forwardPrice - spotPrice;
-      const annualizedYield = (basis / spotPrice / t) * 100;
-      const spread = spotPrice > 1000 ? 0.5 : spotPrice > 100 ? 0.1 : 0.02;
-
-      return {
-        code: m.code,
-        month: m.name,
-        daysToExpiry: m.days,
-        futuresPrice: parseFloat(forwardPrice.toFixed(2)),
-        bid: parseFloat((forwardPrice - spread).toFixed(2)),
-        ask: parseFloat((forwardPrice + spread).toFixed(2)),
-        basis: parseFloat(basis.toFixed(2)),
-        annualizedYield: parseFloat(annualizedYield.toFixed(2)),
-        volume: Math.floor(120000 / (t * 2 + 1)),
-        openInterest: Math.floor(350000 / (t * 1.5 + 1)),
-        state: basis >= 0 ? 'Contango' : 'Backwardation'
-      };
-    });
-  }, [symbol, spotPrice, remoteFutures]);
-
-  const handleAddOptionLeg = (action: 'BUY' | 'SELL', type: 'CALL' | 'PUT', strike: number, premium: number) => {
+  function add(row: Strike, type: 'CALL' | 'PUT', action: 'BUY' | 'SELL') {
+    const q = type === 'CALL' ? row.call : row.put;
+    // Buying lifts the ask, selling hits the bid — the executable price, not a midpoint.
     addLeg({
-      instrument_type: 'EQUITY_OPTION',
+      instrument_type: 'INSTRUMENT_EQUITY_OPTION',
       action,
       option_type: type,
-      strike_price: strike,
-      premium,
+      strike_price: row.strike,
+      premium: action === 'BUY' ? q.ask : q.bid,
       quantity: 1,
-      expiration_days: selectedChainObj.dte,
-      implied_volatility: 0.22
+      expiration_days: dte,
+      implied_volatility: q.iv,
     });
-    calculateStrategy();
-  };
+  }
 
-  const handleAddFuturesLeg = (action: 'BUY' | 'SELL', price: number) => {
-    addLeg({
-      instrument_type: 'INSTRUMENT_FUTURES_SPOT',
-      action,
-      option_type: 'FUTURE',
-      strike_price: price,
-      premium: price,
-      quantity: 1,
-      implied_volatility: 0.20
-    });
-    calculateStrategy();
-  };
+  const showCalls = side !== 'puts';
+  const showPuts = side !== 'calls';
+
+  const actions = (row: Strike, type: 'CALL' | 'PUT') => (
+    <td style={{ whiteSpace: 'nowrap', textAlign: 'center' }}>
+      <button className="btn btn-buy" style={{ padding: '0 0.3125rem' }} onClick={() => add(row, type, 'BUY')} title={`Buy ${type}`}>B</button>{' '}
+      <button className="btn btn-sell" style={{ padding: '0 0.3125rem' }} onClick={() => add(row, type, 'SELL')} title={`Sell ${type}`}>S</button>
+    </td>
+  );
 
   return (
-    <div className={styles.container}>
-      {/* Top Header & Tab Navigation */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-slate-800">
-        <div>
-          <h2 className="text-lg font-bold text-slate-100 flex items-center gap-2">
-            <span>{symbol} Real Option & Futures Chains</span>
-            <span className="text-xs px-2 py-0.5 rounded bg-sky-500/20 text-sky-400 border border-sky-500/30 font-mono">
-              ${spotPrice.toFixed(2)} Spot
-            </span>
-          </h2>
-          <div className="flex gap-2 mt-2">
-            <button 
-              className={`px-3 py-1.5 text-xs rounded-md font-semibold transition ${activeTab === 'options' ? 'bg-sky-500 text-slate-950 font-bold shadow-lg shadow-sky-500/20' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}`}
-              onClick={() => setActiveTab('options')}
-            >
-              Option Chains
-            </button>
-            <button 
-              className={`px-3 py-1.5 text-xs rounded-md font-semibold transition ${activeTab === 'futures' ? 'bg-sky-500 text-slate-950 font-bold shadow-lg shadow-sky-500/20' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}`}
-              onClick={() => setActiveTab('futures')}
-            >
-              Futures Term Structure
-            </button>
-          </div>
+    <div className="panel" style={{ flex: 1, minWidth: 0 }}>
+      <div className="panel-head">
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.4375rem' }}>
+          <span className="panel-title">Option Chain</span>
+          {status === 'ready' && (
+            <>
+              <span className="chip chip-live"><i className="dot" />LIVE</span>
+              <span className="chip">{strikes.length} strikes</span>
+            </>
+          )}
         </div>
 
-        {/* Options Controls: Expiration Selector & Call/Put Filter */}
-        {activeTab === 'options' && (
-          <div className="flex flex-wrap items-center gap-3">
-            {/* Call / Put View Filter */}
-            <div className="flex items-center bg-slate-900 border border-slate-800 rounded-md p-0.5">
-              <button
-                className={`px-2.5 py-1 text-xs rounded font-medium transition ${optionSideFilter === 'all' ? 'bg-slate-700 text-white' : 'text-slate-400 hover:text-slate-200'}`}
-                onClick={() => setOptionSideFilter('all')}
-              >
-                All (Calls & Puts)
-              </button>
-              <button
-                className={`px-2.5 py-1 text-xs rounded font-semibold transition ${optionSideFilter === 'calls' ? 'bg-emerald-600 text-white' : 'text-emerald-400 hover:text-emerald-300'}`}
-                onClick={() => setOptionSideFilter('calls')}
-              >
-                Calls Only 🟢
-              </button>
-              <button
-                className={`px-2.5 py-1 text-xs rounded font-semibold transition ${optionSideFilter === 'puts' ? 'bg-rose-600 text-white' : 'text-rose-400 hover:text-rose-300'}`}
-                onClick={() => setOptionSideFilter('puts')}
-              >
-                Puts Only 🔴
-              </button>
-            </div>
-
-            {/* Real Option Expiration Date Selection Dropdown */}
-            <div className="flex items-center gap-2">
-              <label className="text-xs font-semibold text-slate-400">Select Expiration Date:</label>
-              <select 
-                className="bg-slate-900 border border-slate-700 rounded-md px-3 py-1.5 text-xs text-sky-400 font-bold focus:outline-none focus:border-sky-500 font-mono" 
-                value={selectedExpDate} 
-                onChange={(e) => setSelectedExpDate(e.target.value)}
-              >
-                {REAL_EXPIRATION_CHAINS.map((chain) => (
-                  <option key={chain.date} value={chain.date}>
-                    {chain.date} ({chain.label})
-                  </option>
-                ))}
-              </select>
-            </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.375rem' }}>
+          <div className="segment">
+            <button className="segment-item" data-active={side === 'both'} onClick={() => setSide('both')}>Both</button>
+            <button className="segment-item" data-active={side === 'calls'} onClick={() => setSide('calls')}>Calls</button>
+            <button className="segment-item" data-active={side === 'puts'} onClick={() => setSide('puts')}>Puts</button>
           </div>
-        )}
+          <select
+            className="select"
+            style={{ width: 'auto' }}
+            value={selectedExp}
+            onChange={(e) => setSelectedExp(e.target.value)}
+            disabled={expirations.length === 0}
+            aria-label="Expiration date"
+          >
+            {expirations.length === 0 ? (
+              <option value="">No expirations</option>
+            ) : (
+              expirations.map((e) => (
+                <option key={e.date} value={e.date}>
+                  {e.date} · {e.dte}d
+                </option>
+              ))
+            )}
+          </select>
+        </div>
       </div>
 
-      {/* OPTIONS CHAIN TABLE */}
-      {activeTab === 'options' ? (
-        <div className={styles.tableWrapper + " mt-4"}>
-          <div className="bg-slate-900/80 px-4 py-2 text-xs font-mono text-slate-300 flex items-center justify-between border-x border-t border-slate-800 rounded-t-lg">
-            <span>Expiring: <strong className="text-sky-400">{selectedExpDate}</strong> ({selectedChainObj.dte} Days to Expiration)</span>
-            <span>Symbol: <strong className="text-slate-100">{symbol}</strong></span>
+      <div className="panel-body panel-body--flush" style={{ flex: 1 }}>
+        {status === 'loading' ? (
+          <div className="empty-state">
+            <span className="empty-state-title">Loading chain…</span>
           </div>
-          <table className={styles.chainTable}>
+        ) : status === 'error' ? (
+          <div className="empty-state empty-state--error">
+            <span className="empty-state-title">Chain unavailable</span>
+            <span>{message}</span>
+            <span style={{ color: 'var(--color-ink-400)' }}>
+              Strikes appear only when the provider returns listed contracts.
+            </span>
+          </div>
+        ) : (
+          <table className="grid-table">
             <thead>
               <tr>
-                {(optionSideFilter === 'all' || optionSideFilter === 'calls') && (
-                  <th colSpan={6} className={styles.callHeader + " bg-emerald-950/40 text-emerald-400"}>
-                    CALL OPTIONS ({selectedExpDate})
+                {showCalls && (
+                  <th colSpan={7} style={{ color: 'var(--color-profit)', background: 'var(--color-call-tint)', textAlign: 'center' }}>
+                    CALLS
                   </th>
                 )}
-                <th className={styles.strikeHeader + " bg-slate-900"}>STRIKE</th>
-                {(optionSideFilter === 'all' || optionSideFilter === 'puts') && (
-                  <th colSpan={6} className={styles.putHeader + " bg-rose-950/40 text-rose-400"}>
-                    PUT OPTIONS ({selectedExpDate})
+                <th style={{ textAlign: 'center' }}>STRIKE</th>
+                {showPuts && (
+                  <th colSpan={7} style={{ color: 'var(--color-loss)', background: 'var(--color-put-tint)', textAlign: 'center' }}>
+                    PUTS
                   </th>
                 )}
               </tr>
-              <tr className={styles.subHeader}>
-                {(optionSideFilter === 'all' || optionSideFilter === 'calls') && (
+              <tr>
+                {showCalls && (
                   <>
-                    <th>Delta</th>
-                    <th>OI</th>
-                    <th>Vol</th>
-                    <th>Bid</th>
-                    <th>Ask</th>
-                    <th>Action</th>
+                    <th>OI</th><th>Vol</th><th>IV</th><th>Δ</th><th>Bid</th><th>Ask</th>
+                    <th style={{ textAlign: 'center' }}>+/−</th>
                   </>
                 )}
-                <th className="bg-slate-950">Strike</th>
-                {(optionSideFilter === 'all' || optionSideFilter === 'puts') && (
+                <th />
+                {showPuts && (
                   <>
-                    <th>Action</th>
-                    <th>Bid</th>
-                    <th>Ask</th>
-                    <th>Vol</th>
-                    <th>OI</th>
-                    <th>Delta</th>
+                    <th style={{ textAlign: 'center' }}>+/−</th>
+                    <th>Bid</th><th>Ask</th><th>Δ</th><th>IV</th><th>Vol</th><th>OI</th>
                   </>
                 )}
               </tr>
             </thead>
             <tbody>
-              {optionChainData.map((row) => {
-                const isITMCall = spotPrice > row.strike;
-                const isITMPut = spotPrice < row.strike;
-
-                return (
-                  <tr key={row.strike} className={`${styles.row} ${row.isATM ? 'bg-sky-500/10 border-y border-sky-500/30' : ''}`}>
-                    {/* CALLS SIDE */}
-                    {(optionSideFilter === 'all' || optionSideFilter === 'calls') && (
-                      <>
-                        <td className={styles.cell} style={{ color: '#38bdf8' }}>{row.callDelta}</td>
-                        <td className={styles.cell}>{row.callOI.toLocaleString()}</td>
-                        <td className={styles.cell}>{row.callVolume.toLocaleString()}</td>
-                        <td className={`${styles.cell} ${styles.bid} ${isITMCall ? 'bg-emerald-950/20' : ''}`}>
-                          ${row.callBid.toFixed(2)}
-                        </td>
-                        <td className={`${styles.cell} ${styles.ask} ${isITMCall ? 'bg-emerald-950/20' : ''}`}>
-                          ${row.callAsk.toFixed(2)}
-                        </td>
-                        <td className={styles.cell}>
-                          <div className="flex gap-1 justify-center">
-                            <button
-                              className="px-1.5 py-0.5 text-[10px] bg-emerald-600/70 hover:bg-emerald-500 text-white rounded font-bold"
-                              title={`Buy Call @ $${row.callAsk}`}
-                              onClick={() => handleAddOptionLeg('BUY', 'CALL', row.strike, row.callAsk)}
-                            >
-                              +Buy
-                            </button>
-                            <button
-                              className="px-1.5 py-0.5 text-[10px] bg-slate-700 hover:bg-slate-600 text-slate-200 rounded font-bold"
-                              title={`Sell Call @ $${row.callBid}`}
-                              onClick={() => handleAddOptionLeg('SELL', 'CALL', row.strike, row.callBid)}
-                            >
-                              -Sell
-                            </button>
-                          </div>
-                        </td>
-                      </>
-                    )}
-
-                    {/* CENTER STRIKE COLUMN */}
-                    <td className={`${styles.strikeCell} ${row.isATM ? 'text-sky-400 font-extrabold bg-sky-950/40' : 'bg-slate-900/60 font-bold'}`}>
-                      ${row.strike} {row.isATM ? ' (ATM)' : ''}
-                    </td>
-
-                    {/* PUTS SIDE */}
-                    {(optionSideFilter === 'all' || optionSideFilter === 'puts') && (
-                      <>
-                        <td className={styles.cell}>
-                          <div className="flex gap-1 justify-center">
-                            <button
-                              className="px-1.5 py-0.5 text-[10px] bg-rose-600/70 hover:bg-rose-500 text-white rounded font-bold"
-                              title={`Buy Put @ $${row.putAsk}`}
-                              onClick={() => handleAddOptionLeg('BUY', 'PUT', row.strike, row.putAsk)}
-                            >
-                              +Buy
-                            </button>
-                            <button
-                              className="px-1.5 py-0.5 text-[10px] bg-slate-700 hover:bg-slate-600 text-slate-200 rounded font-bold"
-                              title={`Sell Put @ $${row.putBid}`}
-                              onClick={() => handleAddOptionLeg('SELL', 'PUT', row.strike, row.putBid)}
-                            >
-                              -Sell
-                            </button>
-                          </div>
-                        </td>
-                        <td className={`${styles.cell} ${styles.bid} ${isITMPut ? 'bg-rose-950/20' : ''}`}>
-                          ${row.putBid.toFixed(2)}
-                        </td>
-                        <td className={`${styles.cell} ${styles.ask} ${isITMPut ? 'bg-rose-950/20' : ''}`}>
-                          ${row.putAsk.toFixed(2)}
-                        </td>
-                        <td className={styles.cell}>{row.putVolume.toLocaleString()}</td>
-                        <td className={styles.cell}>{row.putOI.toLocaleString()}</td>
-                        <td className={styles.cell} style={{ color: '#f43f5e' }}>{row.putDelta}</td>
-                      </>
-                    )}
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      ) : (
-        /* FUTURES TERM STRUCTURE CHAIN TABLE */
-        <div className={styles.tableWrapper + " mt-4"}>
-          <table className={styles.chainTable}>
-            <thead>
-              <tr className={styles.subHeader}>
-                <th style={{ textAlign: 'left' }}>Contract Code</th>
-                <th style={{ textAlign: 'left' }}>Delivery Month</th>
-                <th>Days to Expiry</th>
-                <th>Futures Price</th>
-                <th>Bid</th>
-                <th>Ask</th>
-                <th>Basis (vs Spot)</th>
-                <th>Cost of Carry (p.a)</th>
-                <th>Volume</th>
-                <th>Open Interest</th>
-                <th>Action</th>
-              </tr>
-            </thead>
-            <tbody>
-              {futuresChainData.map((row) => (
-                <tr key={row.code} className={styles.row}>
-                  <td className={styles.cell} style={{ textAlign: 'left', fontWeight: 'bold', color: '#38bdf8' }}>
-                    {row.code}
+              {strikes.map((row) => (
+                <tr key={row.strike} style={row.isAtm ? { background: 'var(--color-atm-tint)' } : undefined}>
+                  {showCalls && (
+                    <>
+                      <td>{int(row.call.openInterest)}</td>
+                      <td>{int(row.call.volume)}</td>
+                      <td>{pct(row.call.iv)}</td>
+                      <td>{n(row.call.delta, 3)}</td>
+                      <td className="profit">{n(row.call.bid)}</td>
+                      <td className="profit">{n(row.call.ask)}</td>
+                      {actions(row, 'CALL')}
+                    </>
+                  )}
+                  <td
+                    style={{
+                      textAlign: 'center',
+                      fontWeight: 700,
+                      color: row.isAtm ? 'var(--color-accent)' : 'var(--color-ink-100)',
+                      borderLeft: '1px solid var(--color-line)',
+                      borderRight: '1px solid var(--color-line)',
+                    }}
+                  >
+                    {row.strike.toFixed(2)}
                   </td>
-                  <td className={styles.cell} style={{ textAlign: 'left', fontWeight: '600' }}>
-                    {row.month}
-                  </td>
-                  <td className={styles.cell}>{row.daysToExpiry}d</td>
-                  <td className={styles.cell} style={{ fontWeight: 'bold', color: '#f8fafc' }}>
-                    ${row.futuresPrice.toLocaleString('en-US', { minimumFractionDigits: 2 })}
-                  </td>
-                  <td className={`${styles.cell} ${styles.bid}`}>${row.bid.toFixed(2)}</td>
-                  <td className={`${styles.cell} ${styles.ask}`}>${row.ask.toFixed(2)}</td>
-                  <td className={styles.cell} style={{ color: row.basis >= 0 ? '#4ade80' : '#f87171' }}>
-                    {row.basis >= 0 ? `+${row.basis.toFixed(2)}` : row.basis.toFixed(2)}
-                  </td>
-                  <td className={styles.cell}>{row.annualizedYield}%</td>
-                  <td className={styles.cell}>{row.volume.toLocaleString()}</td>
-                  <td className={styles.cell}>{row.openInterest.toLocaleString()}</td>
-                  <td className={styles.cell}>
-                    <div className="flex gap-1 justify-end">
-                      <button 
-                        className="px-2 py-0.5 text-xs bg-emerald-600/60 hover:bg-emerald-500 text-white rounded font-bold"
-                        onClick={() => handleAddFuturesLeg('BUY', row.futuresPrice)}
-                      >
-                        +Buy
-                      </button>
-                      <button 
-                        className="px-2 py-0.5 text-xs bg-rose-600/60 hover:bg-rose-500 text-white rounded font-bold"
-                        onClick={() => handleAddFuturesLeg('SELL', row.futuresPrice)}
-                      >
-                        -Sell
-                      </button>
-                    </div>
-                  </td>
+                  {showPuts && (
+                    <>
+                      {actions(row, 'PUT')}
+                      <td className="loss">{n(row.put.bid)}</td>
+                      <td className="loss">{n(row.put.ask)}</td>
+                      <td>{n(row.put.delta, 3)}</td>
+                      <td>{pct(row.put.iv)}</td>
+                      <td>{int(row.put.volume)}</td>
+                      <td>{int(row.put.openInterest)}</td>
+                    </>
+                  )}
                 </tr>
               ))}
             </tbody>
           </table>
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 }
+
+export default OptionChain;

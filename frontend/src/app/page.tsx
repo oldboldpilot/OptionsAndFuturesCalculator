@@ -1,66 +1,95 @@
 'use client';
 
 import { useEffect } from 'react';
-import OptionsHeatmap from '../components/OptionsHeatmap';
-import { DashboardLayout } from '../components/DashboardLayout';
-import { SymbolSelector } from '../components/SymbolSelector';
-import { StrategySelector } from '../components/StrategySelector';
+import TopBar from '../components/TopBar';
+import PnLMatrix from '../components/PnLMatrix';
+import PositionLegs from '../components/PositionLegs';
+import StrategyMetrics from '../components/StrategyMetrics';
 import OptionChain from '../components/OptionChain';
-import { BrokerRouter } from '../components/BrokerRouter';
-import RiskMetrics from '../components/RiskMetrics';
-import ProbabilityDistribution from '../components/ProbabilityDistribution';
+import { StrategySelector } from '../components/StrategySelector';
 import { useCalculatorStore } from '../store/useCalculatorStore';
 
+/**
+ * Workspace layout.
+ *
+ * Three columns, ordered the way the work actually flows: pick the structure
+ * and legs on the left, read the outcome in the centre, check risk on the
+ * right. The P&L matrix is the centre of gravity — it is the reason the tool
+ * exists, so it gets the largest, tallest region rather than being demoted to
+ * a panel in a split view.
+ */
 export default function Home() {
-  const { calculateStrategy, isLoading } = useCalculatorStore();
+  const { calculateStrategy, legs } = useCalculatorStore();
 
   useEffect(() => {
-    // Scaffold initial render
-    calculateStrategy();
-  }, [calculateStrategy]);
+    // Only compute once there is something to compute. Firing on an empty
+    // position produced a meaningless "result" in the previous build.
+    if (legs.length > 0) calculateStrategy();
+  }, [legs, calculateStrategy]);
 
   return (
-    <DashboardLayout>
-      <div style={{ 
-        display: 'grid', 
-        gridTemplateColumns: '1fr 1fr', 
-        gap: '1.5rem', 
-        height: '100%',
-        paddingBottom: '2rem'
-      }}>
-        {/* Left Column: Symbol, Strategy and Option Chain */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem', overflowY: 'auto', paddingRight: '0.5rem' }}>
-          <SymbolSelector />
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        height: '100vh',
+        overflow: 'hidden',
+      }}
+    >
+      <TopBar />
+
+      <main
+        style={{
+          flex: 1,
+          display: 'grid',
+          gridTemplateColumns: 'minmax(300px, 340px) minmax(0, 1fr) minmax(250px, 290px)',
+          gap: '0.5rem',
+          padding: '0.5rem',
+          minHeight: 0,
+        }}
+      >
+        {/* Build */}
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '0.5rem',
+            minHeight: 0,
+            overflowY: 'auto',
+          }}
+        >
           <StrategySelector />
-          <OptionChain />
-          <BrokerRouter />
+          <PositionLegs />
         </div>
 
-        {/* Right Column: 3D Visualization */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-          <div className="glass-panel" style={{ flexGrow: 1, minHeight: '600px', display: 'flex', flexDirection: 'column' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-              <h2 style={{ fontSize: '1.25rem', fontWeight: 600, color: 'var(--text-primary)' }}>Risk Profile & P&L Heatmap</h2>
-              <button className="btn" onClick={() => calculateStrategy()}>
-                {isLoading ? 'Calculating...' : 'Recalculate'}
-              </button>
-            </div>
-            <div style={{ flexGrow: 1, borderRadius: '8px', overflow: 'hidden', position: 'relative' }}>
-              <OptionsHeatmap />
-            </div>
-          </div>
-          
-          {/* Risk & Probabilities Sub-Panel */}
-          <div style={{ display: 'flex', gap: '1.5rem' }}>
-             <div style={{ flex: 1 }}>
-               <RiskMetrics />
-             </div>
-             <div style={{ flex: 1 }}>
-               <ProbabilityDistribution mean={100} stdDev={15} />
-             </div>
+        {/* Read */}
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '0.5rem',
+            minHeight: 0,
+          }}
+        >
+          <PnLMatrix />
+          <div style={{ flex: '0 0 40%', minHeight: 0, display: 'flex' }}>
+            <OptionChain />
           </div>
         </div>
-      </div>
-    </DashboardLayout>
+
+        {/* Assess */}
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '0.5rem',
+            minHeight: 0,
+            overflowY: 'auto',
+          }}
+        >
+          <StrategyMetrics />
+        </div>
+      </main>
+    </div>
   );
 }

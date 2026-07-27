@@ -1,29 +1,73 @@
-:root {
-  /* Core Colors */
-  --bg-primary: #0a0a0f;
-  --bg-secondary: #12121a;
-  --text-primary: #f8f9fa;
-  --text-secondary: #a0a0ab;
-  
-  /* Brand Accents */
-  --accent-primary: #4f46e5;
-  --accent-hover: #4338ca;
-  --accent-glow: rgba(79, 70, 229, 0.5);
-  
-  /* Semantic Colors */
-  --success: #10b981;
-  --danger: #ef4444;
-  --warning: #f59e0b;
+@import "tailwindcss";
 
-  /* Glassmorphism Surface Tokens */
-  --glass-bg: rgba(18, 18, 26, 0.6);
-  --glass-border: rgba(255, 255, 255, 0.08);
-  --glass-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
-  --glass-blur: blur(12px);
+/* ============================================================================
+   Options & Futures Calculator — design tokens
 
-  /* Typography */
-  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+   Aesthetic target: a professional trading terminal, not a consumer SaaS app.
+   Flat surfaces, hairline borders, high contrast, tight vertical rhythm.
+   No glassmorphism, no glow, no gradient text — density and legibility first.
+
+   P&L semantics use the TradingView convention (teal profit / coral loss),
+   which traders read pre-attentively.
+   ========================================================================== */
+
+@theme {
+  /* --- Surfaces: near-black, layered by elevation, never pure #000 --- */
+  --color-base-900: #0b0d10;   /* app background            */
+  --color-base-800: #10131a;   /* panel background          */
+  --color-base-700: #161a22;   /* raised / header row       */
+  --color-base-600: #1d222c;   /* hover, input background   */
+  --color-base-500: #272d39;   /* active / pressed          */
+
+  /* --- Hairline borders: low-alpha white reads correctly on any surface --- */
+  --color-line-strong: rgba(255, 255, 255, 0.14);
+  --color-line: rgba(255, 255, 255, 0.08);
+  --color-line-soft: rgba(255, 255, 255, 0.045);
+
+  /* --- Text: a real hierarchy, not two greys --- */
+  --color-ink-100: #e8eaed;    /* primary values, headings  */
+  --color-ink-200: #b4bac4;    /* body                      */
+  --color-ink-300: #848c99;    /* labels, column headers    */
+  --color-ink-400: #5a6270;    /* disabled, hints           */
+
+  /* --- Semantic P&L (TradingView convention) --- */
+  --color-profit: #26a69a;
+  --color-profit-dim: #1b7168;
+  --color-loss: #ef5350;
+  --color-loss-dim: #a33734;
+  --color-flat: #6b7280;
+
+  /* --- Accent: restrained. Meaning is carried by P&L color, not chrome. --- */
+  --color-accent: #58a6ff;
+  --color-accent-dim: #1f6feb;
+  --color-warn: #d29922;
+
+  /* --- Option-side tints: calls and puts must be distinguishable at a glance --- */
+  --color-call-tint: rgba(38, 166, 154, 0.07);
+  --color-put-tint: rgba(239, 83, 80, 0.07);
+  --color-atm-tint: rgba(88, 166, 255, 0.10);
+
+  /* --- Type: system stack for UI, true monospace for every number --- */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+               "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono",
+               Menlo, Consolas, monospace;
+
+  /* Dense scale — a trading grid lives between 10px and 13px */
+  --text-2xs: 0.6875rem;  /* 11px — table cells, dense labels */
+  --text-xs: 0.75rem;     /* 12px — body, inputs              */
+  --text-sm: 0.8125rem;   /* 13px — panel titles              */
+  --text-base: 0.875rem;  /* 14px — section headings          */
+  --text-lg: 1.0625rem;   /* 17px — the spot price            */
+
+  --radius-sm: 3px;
+  --radius: 5px;
+  --radius-lg: 7px;
 }
+
+/* ---------------------------------------------------------------------------
+   Base
+   ------------------------------------------------------------------------- */
 
 * {
   box-sizing: border-box;
@@ -31,50 +75,305 @@
   padding: 0;
 }
 
+html,
 body {
-  background-color: var(--bg-primary);
-  color: var(--text-primary);
+  height: 100%;
+}
+
+body {
+  background: var(--color-base-900);
+  color: var(--color-ink-200);
   font-family: var(--font-sans);
-  line-height: 1.6;
+  font-size: var(--text-xs);
+  line-height: 1.4;
   -webkit-font-smoothing: antialiased;
-  background-image: radial-gradient(circle at 50% 0%, var(--bg-secondary) 0%, var(--bg-primary) 70%);
-  min-height: 100vh;
+  -moz-osx-font-smoothing: grayscale;
+  /* Numbers must never shift width as they change — this is the single most
+     important typographic decision in a live-updating trading UI. */
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1, "cv05" 1;
 }
 
-/* Base UI Components */
-.glass-panel {
-  background: var(--glass-bg);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
-  border: 1px solid var(--glass-border);
-  box-shadow: var(--glass-shadow);
-  border-radius: 16px;
-  padding: 24px;
+/* Scrollbars: present but recessive */
+::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-base-500);
+  border-radius: 5px;
+  border: 2px solid var(--color-base-900);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #333b49;
 }
 
-.btn {
-  background: var(--accent-primary);
-  color: white;
-  border: none;
-  padding: 10px 20px;
-  border-radius: 8px;
+:focus-visible {
+  outline: 1px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+/* ---------------------------------------------------------------------------
+   Primitives
+   ------------------------------------------------------------------------- */
+
+.panel {
+  background: var(--color-base-800);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius);
+  display: flex;
+  flex-direction: column;
+  min-height: 0; /* lets children scroll inside a grid track */
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.4375rem 0.625rem;
+  border-bottom: 1px solid var(--color-line);
+  background: var(--color-base-700);
+  border-radius: var(--radius) var(--radius) 0 0;
+  flex: none;
+}
+
+.panel-title {
+  font-size: var(--text-2xs);
   font-weight: 600;
+  letter-spacing: 0.055em;
+  text-transform: uppercase;
+  color: var(--color-ink-300);
+}
+
+.panel-body {
+  padding: 0.625rem;
+  overflow: auto;
+  min-height: 0;
+}
+.panel-body--flush {
+  padding: 0;
+}
+
+/* Numeric display — use anywhere a figure is shown */
+.num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+.profit { color: var(--color-profit); }
+.loss   { color: var(--color-loss); }
+.flat   { color: var(--color-flat); }
+
+/* Label / value pair, the workhorse of the metric panels */
+.stat {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.3125rem 0;
+  border-bottom: 1px solid var(--color-line-soft);
+}
+.stat:last-child { border-bottom: 0; }
+
+.stat-label {
+  font-size: var(--text-2xs);
+  color: var(--color-ink-300);
+  white-space: nowrap;
+}
+
+.stat-value {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--color-ink-100);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Controls */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+  background: var(--color-base-600);
+  color: var(--color-ink-100);
+  border: 1px solid var(--color-line);
+  padding: 0.3125rem 0.625rem;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-2xs);
+  font-weight: 500;
   cursor: pointer;
-  transition: all 0.2s ease;
-  box-shadow: 0 0 10px transparent;
+  white-space: nowrap;
+  transition: background 0.1s ease, border-color 0.1s ease;
+}
+.btn:hover:not(:disabled) {
+  background: var(--color-base-500);
+  border-color: var(--color-line-strong);
+}
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
-.btn:hover {
-  background: var(--accent-hover);
-  box-shadow: 0 0 15px var(--accent-glow);
-  transform: translateY(-1px);
+.btn-primary {
+  background: var(--color-accent-dim);
+  border-color: var(--color-accent-dim);
+  color: #fff;
+}
+.btn-primary:hover:not(:disabled) {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
 }
 
-.heading-1 {
-  font-size: 2.5rem;
-  font-weight: 700;
-  background: linear-gradient(135deg, #fff 0%, #a0a0ab 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  margin-bottom: 1rem;
+.btn-buy {
+  background: color-mix(in srgb, var(--color-profit) 16%, transparent);
+  border-color: color-mix(in srgb, var(--color-profit) 45%, transparent);
+  color: var(--color-profit);
 }
+.btn-buy:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-profit) 26%, transparent);
+}
+
+.btn-sell {
+  background: color-mix(in srgb, var(--color-loss) 16%, transparent);
+  border-color: color-mix(in srgb, var(--color-loss) 45%, transparent);
+  color: var(--color-loss);
+}
+.btn-sell:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-loss) 26%, transparent);
+}
+
+/* Segmented control — replaces scattered one-off toggle buttons */
+.segment {
+  display: inline-flex;
+  background: var(--color-base-900);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-sm);
+  padding: 1px;
+}
+.segment-item {
+  padding: 0.1875rem 0.5rem;
+  font-size: var(--text-2xs);
+  font-weight: 500;
+  color: var(--color-ink-300);
+  background: transparent;
+  border: 0;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: background 0.1s ease, color 0.1s ease;
+}
+.segment-item:hover { color: var(--color-ink-100); }
+.segment-item[data-active="true"] {
+  background: var(--color-base-600);
+  color: var(--color-ink-100);
+}
+
+.input,
+.select {
+  background: var(--color-base-900);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-sm);
+  color: var(--color-ink-100);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  padding: 0.25rem 0.4375rem;
+  width: 100%;
+}
+.input:focus,
+.select:focus {
+  border-color: var(--color-accent-dim);
+  outline: none;
+}
+.select { font-family: var(--font-sans); cursor: pointer; }
+
+/* Dense data grid */
+.grid-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-2xs);
+}
+.grid-table th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--color-base-700);
+  color: var(--color-ink-300);
+  font-weight: 600;
+  font-size: var(--text-2xs);
+  letter-spacing: 0.03em;
+  text-align: right;
+  padding: 0.3125rem 0.4375rem;
+  border-bottom: 1px solid var(--color-line);
+  white-space: nowrap;
+}
+.grid-table td {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  padding: 0.25rem 0.4375rem;
+  border-bottom: 1px solid var(--color-line-soft);
+  white-space: nowrap;
+  color: var(--color-ink-200);
+}
+.grid-table tbody tr:hover td {
+  background: var(--color-base-600);
+}
+
+/* Status / provenance chips — used to label data freshness and modelled values */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: var(--text-2xs);
+  font-weight: 500;
+  padding: 0.0625rem 0.375rem;
+  border-radius: 2px;
+  border: 1px solid var(--color-line);
+  color: var(--color-ink-300);
+  background: var(--color-base-900);
+  white-space: nowrap;
+}
+.chip-live {
+  color: var(--color-profit);
+  border-color: color-mix(in srgb, var(--color-profit) 40%, transparent);
+}
+.chip-modelled {
+  color: var(--color-warn);
+  border-color: color-mix(in srgb, var(--color-warn) 40%, transparent);
+}
+.chip-stale {
+  color: var(--color-ink-300);
+}
+
+.dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+}
+
+/* Empty / error states. Required by spec §3.4: when data is unavailable we say
+   so explicitly rather than rendering a plausible-looking substitute. */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 1.75rem 1rem;
+  text-align: center;
+  color: var(--color-ink-400);
+  font-size: var(--text-2xs);
+  min-height: 100px;
+}
+.empty-state-title {
+  color: var(--color-ink-300);
+  font-weight: 600;
+  font-size: var(--text-xs);
+}
+.empty-state--error .empty-state-title { color: var(--color-loss); }
