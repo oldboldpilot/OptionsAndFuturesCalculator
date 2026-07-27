@@ -103,6 +103,44 @@ delta, volume, open interest — with Γ Θ V ρ available at no extra cost.
   `ALPACA_API_SECRET`, `ALPACA_DATA_URL`, `ALPACA_TRADING_URL`). Never in source, never
   baked into the image. `config/config.yaml` is gitignored and stays out of the container.
 
+### 3.4 Real data only — no fabrication (binding requirement)
+
+**Every number displayed to a user must originate from a market data provider or from the
+pricing engine operating on provider inputs. No synthetic constants, no placeholder
+defaults, no invented series.** Where data is genuinely unavailable, the UI shows an
+explicit unavailable/degraded state — never a plausible-looking substitute.
+
+This is a hard acceptance criterion, not an aspiration. A feature is not complete if it
+renders a fabricated value.
+
+Complete inventory of current fabrication sites, all of which this work removes:
+
+| Location | Fabrication | Replacement |
+|---|---|---|
+| `calculator_service.cpp:377` | `double spot = 100.0` — the entire generated chain is built around a fake spot | Alpaca stock snapshot |
+| `calculator_service.cpp:387` | Strikes synthesised by `step = spot>=1000 ? 50 : spot>=100 ? 5 : 1` | Real strikes from Alpaca contracts |
+| `calculator_service.cpp:396` | `call_delta = 0.5 - (strike-spot)/spot*3.0` — an invented formula, not a Greek | Alpaca `greeks.delta` |
+| `calculator_service.cpp:397-399` | `call_volume=1200`, `call_open_interest=3400`, `call_iv=0.22` | Alpaca `dailyBar.v`, `open_interest`, `impliedVolatility` |
+| `calculator_service.cpp:403-406` | `put_delta = call_delta - 1.0`, `put_volume=1100`, `put_open_interest=2900`, `put_iv=0.22` | Alpaca per-contract put values |
+| `calculator_service.cpp:412-421` | Nine hardcoded futures months (`U26`…`F29`) with fixed day counts | Computed contract calendar |
+| `calculator_service.cpp:428` | `f_price = spot * exp(0.045 * dte/365)` — a fixed 4.5% carry | Cost-of-carry from live spot + risk-free rate, labelled modelled |
+| `market_data.cppm:145` | `quote.impliedVolatility = 0.20` | Per-contract IV from Alpaca |
+| `calculator_service.cpp:351-357` | Quote failure returns `price = 100.0` as success | Typed `std::error_code`, propagated as gRPC status |
+| `useCalculatorStore.ts:62-99` | `TICKER_DATABASE` — 31 static prices (SPY 580.0 vs actual 738.93) | Live quotes |
+| `useCalculatorStore.ts:172-174` | `setUnderlyingSymbol('SPY')`, `setImpliedVolatility(0.20)` hardcoded | Selected symbol, per-leg chain IV |
+| `useCalculatorStore.ts:182` | `setExpirationDays(30)` hardcoded | Selected expiration |
+| `useCalculatorStore.ts:193,195` | `days_to_expiration: 30 // Mocked`, `probability_density: 0.5` | Real `MatrixCell` fields |
+| `OptionChain.tsx:41-55` | `REAL_EXPIRATION_CHAINS` — 11 hardcoded dates, of which **`2027-06-18` and `2029-01-19` do not exist** | `ChainResponse.available_expirations` from Alpaca (35 real SPY expirations) |
+
+**Modelled values are permitted only where no market data exists** — specifically the
+futures term structure and FOP legs (§2). These must be visibly labelled as modelled in
+the UI so a user cannot mistake them for quoted markets.
+
+**Enforcement.** `scripts/code_policy_check.sh` gains a fabrication check that fails the
+build on reintroduced synthetic market constants (hardcoded IV/volume/open-interest
+literals in service code, and any quote-failure path returning a defaulted price). A test
+asserts that a provider error yields an error status rather than a substituted value.
+
 ## 4. Architecture
 
 ```
