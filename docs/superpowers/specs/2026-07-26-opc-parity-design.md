@@ -314,6 +314,46 @@ Rule 18 (parallelism exclusively oneTBB) is **not** deferred. TBB is currently n
 into `calculator_engine` at all, and `_GLIBCXX_USE_TBB_PAR_BACKEND=0` is defined; §4.3
 closes that gap by linking TBB and using `tbb::parallel_for` for the matrix.
 
+#### 5.4.1 Rule 3 (no raw pointers) — third-party API surface
+
+Rule 3 is absolute and rule 4 permits pointers only where necessary, via smart pointers.
+Three call sites cannot comply, and in each the compliant-looking alternative would be a
+memory-safety bug rather than an improvement:
+
+| Site | Why a smart pointer is impossible | Containment |
+|---|---|---|
+| `CalculateStrategy` / `GetMarketQuote` / `GetMarketChain` parameters | Signatures are fixed by the protoc-generated base class; changing a parameter type means the function no longer overrides the virtual. The pointers are non-owning views onto memory gRPC owns and reuses across calls, so wrapping them would double free. | Null-checked and bound to a reference on the first line of each body; no raw pointer appears below that. |
+| `response.add_*()` / `mutable_*()` | Protobuf returns non-owning pointers into the message's own arena. A `unique_ptr` would free arena memory. | Bound immediately: `auto& cell = *response.add_matrix();` |
+| `std::from_chars`, `std::error_category::name()`, `std::getenv` | Standard library signatures. | `getenv`'s result is copied into a `std::string` at the call site and never stored. |
+
+Everything the project owns complies: no `new`, no `delete`, no owning raw pointer, and no
+raw pointer in any interface we define. `RegisterCalculatorService` previously took a
+`void*` and cast it back to `grpc::ServerBuilder*` — a genuine violation, since it was our
+own signature — and now takes a reference.
+
+#### 5.4.2 Toolchain deviations found during implementation
+
+| Deviation | Reason |
+|---|---|
+| `gRPC_SSL_PROVIDER=package` (was `module`) | Vendored BoringSSL and system OpenSSL both export `SSL_CTX_new`; httplib's calls resolved into BoringSSL and segfaulted on every outbound HTTPS request. One TLS library per binary. |
+| Generated `openssl/engine.h` shim + `OPENSSL_NO_ENGINE` | OpenSSL 3.5 removed the ENGINE API. gRPC includes the header unconditionally although every use is already guarded by that macro. Engages only on hosts without the header. |
+| `CMAKE_POLICY_VERSION_MINIMUM=3.5` | CMake 4 removed compatibility with `cmake_minimum_required(VERSION < 3.5)`; gRPC 1.62 vendors a c-ares that still declares 3.0. |
+| CMake 4.2 from Kitware in the builder image | `sensen/CMakeLists.txt` requires 4.1+; Ubuntu 24.04 ships 3.28.3. |
+
+#### 5.4.3 SGEE usage constraints
+
+Two properties of the vendored engine shape how the pipeline may be written. Both were
+found by instrumenting a graph that silently computed nothing:
+
+- `Builder::Execute(F&&)` **discards the callable**, registering only a generated name.
+  Actions run only when an `ActionRegistry` is passed to the `Interpreter`. Binding must
+  use `GraphBlueprint::GetActionId(name)`, because `ActionRegistry::Register` hashes the
+  name (`hash % 10000`) while the builder assigns sequential IDs — registering by name
+  compiles, runs, and never executes.
+- The batch interpreter does not evaluate predicates on deterministic `Branch` nodes; it
+  takes `branches[0]` unconditionally. `OnTrue`/`OnFalse` is therefore not a usable
+  conditional, and validation lives inside the actions instead.
+
 ### 5.5 Review gate
 
 Per `config/agents/code_review_agent.yaml` and `code_update_agent.yaml`: adversarial

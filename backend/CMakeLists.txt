@@ -56,14 +56,61 @@ if(NOT HAVE_OPENSSL_ENGINE_H)
     include_directories(SYSTEM "${OPENSSL_COMPAT_DIR}")
 endif()
 
+# CMake 4 removed compatibility with `cmake_minimum_required(VERSION < 3.5)`,
+# and gRPC 1.62 vendors a c-ares that still declares 3.0. Without this a fresh
+# configure fails outright; an existing build tree only kept working because
+# the subproject had been configured by an older CMake and cached.
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "Floor for vendored subprojects" FORCE)
+
+# gRPC 1.62 (Feb 2024) predates Clang 20's stricter C++ conformance and does not
+# compile with it unpatched. Three genuine defects, all fatal here:
+#
+#   basic_seq.h              `Traits::template CallSeqFactory(...)` — the
+#                            `template` keyword with no argument list, a
+#                            default-error diagnostic since Clang 19.
+#   server.cc                RegisteredMethod's constructor/destructor defined
+#   health_check_client.cc   in-class while referencing a nested type that is
+#                            not complete until later in the file.
+#
+# The patch moves the two definitions out-of-line and drops the stray keyword.
+# It MUST live in the repo: a local build tree that happens to be patched by
+# hand still builds, but every fresh clone — including the Railway container —
+# re-fetches pristine sources and fails. Applied idempotently so re-running
+# configure against an already-patched tree is a no-op rather than an error.
+set(GRPC_PATCH "${CMAKE_CURRENT_SOURCE_DIR}/patches/grpc-1.62-clang20-conformance.patch")
+
 include(FetchContent)
 FetchContent_Declare(
   grpc
   GIT_REPOSITORY https://github.com/grpc/grpc
   GIT_TAG v1.62.0
+  PATCH_COMMAND sh -c "git apply --reverse --check '${GRPC_PATCH}' 2>/dev/null || git apply '${GRPC_PATCH}'"
 )
 set(FETCHCONTENT_QUIET OFF)
+
+# Build gRPC at C++17 — the standard it actually supports and tests — rather
+# than inheriting this project's C++23.
+#
+# Under C++23 the xds certificate provider stops compiling: std::bind_front's
+# result is no longer convertible to std::function, because C++23 constrains the
+# call wrapper's call operator in a way libstdc++ 14 does not satisfy through
+# std::function's const operator(). That is one instance of a general problem —
+# a 2024 codebase compiled against a standard released after it. Chasing each
+# occurrence with another patch is unbounded; building it as its own authors do
+# is not.
+#
+# Safe to mix: both sides use the same libstdc++, and Abseil's ABI-significant
+# split is pre-C++17 vs C++17-and-later, so 17 and 23 agree on the aliases
+# (string_view, optional, variant) that cross the boundary. This is also the
+# ordinary arrangement for any distro-packaged gRPC.
+#
+# Side benefit: C++17 targets are not scanned for modules, so the global
+# CXX_SCAN_FOR_MODULES no longer walks ~3000 gRPC sources looking for imports
+# none of them have.
+set(SAVED_CXX_STANDARD ${CMAKE_CXX_STANDARD})
+set(CMAKE_CXX_STANDARD 17)
 FetchContent_MakeAvailable(grpc)
+set(CMAKE_CXX_STANDARD ${SAVED_CXX_STANDARD})
 
 # Generate gRPC and Protobuf C++ code
 set(PROTO_FILE "${CMAKE_CURRENT_SOURCE_DIR}/proto/calculator.proto")
@@ -92,6 +139,11 @@ target_link_libraries(proto_lib PUBLIC grpc++ libprotobuf)
 set(BUILD_PYTHON_BINDINGS OFF CACHE BOOL "Disable sensen python bindings" FORCE)
 set(BUILD_TESTS OFF CACHE BOOL "Disable sensen tests" FORCE)
 set(BUILD_EXAMPLES OFF CACHE BOOL "Disable sensen examples" FORCE)
+# sensen defaults BUILD_BENCHMARKS to ON and calls add_subdirectory(benchmarks)
+# unconditionally when it is set. The deploy image has no use for them, and
+# .dockerignore excludes backend/sensen/benchmarks from the build context, so
+# leaving this on fails configure outright inside the container.
+set(BUILD_BENCHMARKS OFF CACHE BOOL "Disable sensen benchmarks" FORCE)
 set(SKIP_CLANG_TIDY ON CACHE BOOL "Disable clang-tidy due to c++23 module scanning bugs" FORCE)
 add_subdirectory(sensen EXCLUDE_FROM_ALL)
 
