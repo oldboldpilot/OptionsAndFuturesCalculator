@@ -4,41 +4,54 @@ import React, { useState, useMemo } from 'react';
 import { useCalculatorStore } from '../store/useCalculatorStore';
 import './SymbolSelector.css';
 
+/**
+ * A selectable instrument.
+ *
+ * Symbol, display name and asset class are reference data — facts about *what
+ * the instrument is* — so carrying them here is legitimate. Price deliberately
+ * is not a field. This table previously held one (SPY at 580.0 against a real
+ * 738.93) and passed it to setSymbol as an explicit override, which made the
+ * store skip the quote fetch entirely (see useCalculatorStore setSymbol: it
+ * returns early when customPrice is defined). The fabricated number therefore
+ * did not merely flash before the real one arrived — it *was* the spot price
+ * for the rest of the session, and every payoff, Greek and probability
+ * computed off it. Prices come from the backend quote service only.
+ * See spec §3.4, real data only.
+ */
 interface SymbolPreset {
   symbol: string;
   name: string;
-  price: number;
   category: 'EQUITY' | 'FUTURES' | 'CRYPTO';
 }
 
 const ALL_SYMBOLS: SymbolPreset[] = [
   // Equities & ETFs
-  { symbol: 'SPY', name: 'S&P 500 ETF Trust', price: 580.0, category: 'EQUITY' },
-  { symbol: 'QQQ', name: 'Invesco QQQ Trust', price: 490.0, category: 'EQUITY' },
-  { symbol: 'IWM', name: 'iShares Russell 2000 ETF', price: 220.0, category: 'EQUITY' },
-  { symbol: 'NVDA', name: 'NVIDIA Corp', price: 125.0, category: 'EQUITY' },
-  { symbol: 'AAPL', name: 'Apple Inc', price: 230.0, category: 'EQUITY' },
-  { symbol: 'MSFT', name: 'Microsoft Corp', price: 440.0, category: 'EQUITY' },
-  { symbol: 'AMZN', name: 'Amazon.com Inc', price: 185.0, category: 'EQUITY' },
-  { symbol: 'GOOGL', name: 'Alphabet Inc', price: 175.0, category: 'EQUITY' },
-  { symbol: 'META', name: 'Meta Platforms Inc', price: 500.0, category: 'EQUITY' },
-  { symbol: 'TSLA', name: 'Tesla Inc', price: 240.0, category: 'EQUITY' },
-  { symbol: 'AMD', name: 'Advanced Micro Devices', price: 150.0, category: 'EQUITY' },
-  { symbol: 'PLTR', name: 'Palantir Technologies', price: 28.50, category: 'EQUITY' },
-  { symbol: 'COIN', name: 'Coinbase Global', price: 220.0, category: 'EQUITY' },
+  { symbol: 'SPY', name: 'S&P 500 ETF Trust', category: 'EQUITY' },
+  { symbol: 'QQQ', name: 'Invesco QQQ Trust', category: 'EQUITY' },
+  { symbol: 'IWM', name: 'iShares Russell 2000 ETF', category: 'EQUITY' },
+  { symbol: 'NVDA', name: 'NVIDIA Corp', category: 'EQUITY' },
+  { symbol: 'AAPL', name: 'Apple Inc', category: 'EQUITY' },
+  { symbol: 'MSFT', name: 'Microsoft Corp', category: 'EQUITY' },
+  { symbol: 'AMZN', name: 'Amazon.com Inc', category: 'EQUITY' },
+  { symbol: 'GOOGL', name: 'Alphabet Inc', category: 'EQUITY' },
+  { symbol: 'META', name: 'Meta Platforms Inc', category: 'EQUITY' },
+  { symbol: 'TSLA', name: 'Tesla Inc', category: 'EQUITY' },
+  { symbol: 'AMD', name: 'Advanced Micro Devices', category: 'EQUITY' },
+  { symbol: 'PLTR', name: 'Palantir Technologies', category: 'EQUITY' },
+  { symbol: 'COIN', name: 'Coinbase Global', category: 'EQUITY' },
 
   // Futures Contracts
-  { symbol: 'ES', name: 'E-mini S&P 500 Futures', price: 5850.0, category: 'FUTURES' },
-  { symbol: 'NQ', name: 'E-mini Nasdaq 100 Futures', price: 20400.0, category: 'FUTURES' },
-  { symbol: 'RTY', name: 'E-mini Russell 2000 Futures', price: 2220.0, category: 'FUTURES' },
-  { symbol: 'CL', name: 'Crude Oil Futures (WTI)', price: 78.50, category: 'FUTURES' },
-  { symbol: 'NG', name: 'Natural Gas Futures', price: 2.45, category: 'FUTURES' },
-  { symbol: 'GC', name: 'Gold Futures', price: 2420.0, category: 'FUTURES' },
-  { symbol: 'ZB', name: '30Y T-Bond Futures', price: 118.25, category: 'FUTURES' },
+  { symbol: 'ES', name: 'E-mini S&P 500 Futures', category: 'FUTURES' },
+  { symbol: 'NQ', name: 'E-mini Nasdaq 100 Futures', category: 'FUTURES' },
+  { symbol: 'RTY', name: 'E-mini Russell 2000 Futures', category: 'FUTURES' },
+  { symbol: 'CL', name: 'Crude Oil Futures (WTI)', category: 'FUTURES' },
+  { symbol: 'NG', name: 'Natural Gas Futures', category: 'FUTURES' },
+  { symbol: 'GC', name: 'Gold Futures', category: 'FUTURES' },
+  { symbol: 'ZB', name: '30Y T-Bond Futures', category: 'FUTURES' },
 
   // Crypto Derivatives
-  { symbol: 'BTC', name: 'Bitcoin Index', price: 67500.0, category: 'CRYPTO' },
-  { symbol: 'ETH', name: 'Ethereum Index', price: 3500.0, category: 'CRYPTO' },
+  { symbol: 'BTC', name: 'Bitcoin Index', category: 'CRYPTO' },
+  { symbol: 'ETH', name: 'Ethereum Index', category: 'CRYPTO' },
 ];
 
 export const SymbolSelector: React.FC = () => {
@@ -62,7 +75,10 @@ export const SymbolSelector: React.FC = () => {
 
     if (match) {
       setQuery(match.symbol);
-      setSymbol(match.symbol, match.price, match.category);
+      // No price argument: setSymbol treats a defined customPrice as a user
+      // simulation override and skips the quote fetch. Passing undefined is
+      // what makes it ask the backend for the real spot.
+      setSymbol(match.symbol, undefined, match.category);
     } else {
       setQuery(targetSym);
       setSymbol(targetSym);
@@ -128,8 +144,7 @@ export const SymbolSelector: React.FC = () => {
                   <span className="text-xs text-slate-300">{item.name}</span>
                 </div>
                 <div className="text-right">
-                  <span className="text-xs font-semibold text-slate-200">${item.price.toLocaleString()}</span>
-                  <span className="ml-2 text-[10px] uppercase font-bold text-sky-500/80 bg-sky-500/10 px-1.5 py-0.5 rounded">
+                  <span className="text-[10px] uppercase font-bold text-sky-500/80 bg-sky-500/10 px-1.5 py-0.5 rounded">
                     {item.category}
                   </span>
                 </div>
@@ -175,7 +190,7 @@ export const SymbolSelector: React.FC = () => {
               onClick={() => applySymbol(item)}
             >
               <span className="pill-sym">{item.symbol}</span>
-              <span className="pill-price">${item.price > 1000 ? Math.round(item.price) : item.price}</span>
+              <span className="pill-class">{item.category}</span>
             </button>
           ))}
         </div>

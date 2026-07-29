@@ -160,7 +160,11 @@
   font-weight: 700;
 }
 
-.pill-price {
-  font-size: 0.75rem;
-  opacity: 0.8;
+/* Asset class, not price. The pill used to show a hardcoded price; the spot is
+   only known once the quote service answers, so it is not shown here. */
+.pill-class {
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  opacity: 0.65;
 }
