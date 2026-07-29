@@ -46,6 +46,35 @@ This document outlines the system architecture, build commands, and deployment i
 - **Backend Deployment:** Railway CLI (`railway up --detach` linked to project `fearless-amazement` service `options-calculator-backend`).
 - **Database Schema:** Applied `backend/migrations/01_init.sql` to Railway Postgres via `psql`.
 
+### DNS (Cloudflare zone `optionsandfuturescalculator.com`)
+
+Recorded here because none of it is otherwise represented in the repository.
+
+| Record | Target | Proxied |
+| --- | --- | --- |
+| `optionsandfuturescalculator.com` CNAME | `optionsandfuturescalculator.pages.dev` | yes |
+| `www` CNAME | `optionsandfuturescalculator.pages.dev` | yes |
+| `api` CNAME | `3nw3v5qd.up.railway.app` | **no** |
+| `_railway-verify.api` TXT | `railway-verify=8f82c9d1...` | n/a |
+
+Three constraints on the `api` records, each of which broke the endpoint once:
+
+1. The CNAME must target the **per-domain** endpoint Railway mints when the
+   custom domain is attached (`3nw3v5qd.up.railway.app`), *not* the service
+   domain `options-calculator-backend-production.up.railway.app`. Railway's
+   router rejects the hostname otherwise and answers with
+   `x-railway-fallback: true` and a 404.
+2. It must stay **un-proxied**. Behind Cloudflare's proxy Railway resolves the
+   record to anycast addresses, sees no CNAME, and can neither verify ownership
+   nor complete the ACME challenge.
+3. The `_railway-verify.api` TXT record must persist. It is what moves the
+   certificate out of `VALIDATING_OWNERSHIP`, and removing it breaks renewal.
+
+Attaching a custom domain needs an account-scoped Railway credential. If
+`railway domain <name>` returns `Unauthorized` while read commands succeed,
+`~/.railway/config.json` holds only a read-scoped `accessToken`; run
+`railway login` or use the dashboard.
+
 ## Build Commands
 - **Frontend Production Build:** `cd frontend && npm run build`
 - **Frontend Dev Server:** `cd frontend && npm run dev`
