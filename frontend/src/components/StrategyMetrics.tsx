@@ -150,6 +150,43 @@ export function StrategyMetrics() {
               The engine returned no VaR/CVaR for this position.
             </div>,
           )}
+
+      {/*
+        Model inputs, shown because they are not all observations.
+        Spot and implied volatility are measured — they come off the quote and
+        the option chain. The risk-free rate does not: nothing in this system
+        observes it, so it is a stated assumption. It was previously an
+        invisible constant that still shaped expected value, probability of
+        profit and the whole distribution curve, which is precisely the kind of
+        invented figure spec §3.4 forbids presenting as fact. Disclosing it is
+        the minimum; sourcing it is tracked as follow-up work.
+      */}
+      {section(
+        'Model inputs',
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '0 0.75rem' }}>
+          <div className="stat">
+            <span className="stat-label">Spot</span>
+            <span className="stat-value">{money(result.inputs.spot)}</span>
+          </div>
+          <div className="stat">
+            <span className="stat-label">Implied vol</span>
+            <span className="stat-value">{(result.inputs.impliedVolatility * 100).toFixed(1)}%</span>
+          </div>
+          <div className="stat">
+            <span className="stat-label">Days</span>
+            <span className="stat-value">{result.inputs.days}</span>
+          </div>
+          <div className="stat">
+            <span className="stat-label">
+              Risk-free rate{' '}
+              <span className="chip" title="Not measured by this system — a stated model assumption, editable in the header.">
+                assumption
+              </span>
+            </span>
+            <span className="stat-value">{(result.inputs.riskFreeRate * 100).toFixed(2)}%</span>
+          </div>
+        </div>,
+      )}
     </div>,
   );
 }

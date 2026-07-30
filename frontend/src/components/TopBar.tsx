@@ -14,10 +14,18 @@ import ThemeToggle from './ThemeToggle';
 export function TopBar() {
   const {
     symbol, spotPrice, assetClass, setSymbol, calculateStrategy,
-    isLoading, error, legs,
+    isLoading, error, legs, riskFreeRate, setRiskFreeRate,
   } = useCalculatorStore();
 
   const [draft, setDraft] = useState('');
+
+  // The rate field keeps its own string draft. Binding a number input straight
+  // to the store value makes the field impossible to clear and retype: an empty
+  // string parses to NaN, the guard rejects it, and React snaps the old value
+  // back mid-edit. Holding the text locally and only pushing valid numbers
+  // through keeps typing natural while never letting NaN reach the store.
+  const [rateDraft, setRateDraft] = useState<string | null>(null);
+  const ratePct = rateDraft ?? (riskFreeRate * 100).toFixed(2);
 
   // Flash the price when it moves, so an update is never missed. Direction is
   // carried by colour, which is why the previous value has to be remembered.
@@ -107,6 +115,36 @@ export function TopBar() {
           aria-label="Search symbol"
         />
       </form>
+
+      {/*
+        The risk-free rate, exposed because it is an assumption rather than an
+        observation. Nothing here measures it, yet it feeds every engine request
+        and the distribution's drift, so leaving it as an invisible constant put
+        an invented number behind figures the user reads as computed fact.
+        Editable, and labelled ASSUMPTION so it is never mistaken for a quote.
+      */}
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.3125rem' }}>
+        <label htmlFor="rfr" className="chip" title="Risk-free rate: a stated model assumption, not observed market data.">
+          ASSUMPTION
+        </label>
+        <input
+          id="rfr"
+          className="input num"
+          type="number"
+          step="0.05"
+          min="0"
+          max="25"
+          value={ratePct}
+          onChange={(e) => {
+            setRateDraft(e.target.value);
+            const pct = parseFloat(e.target.value);
+            if (!Number.isNaN(pct) && pct >= 0) setRiskFreeRate(pct / 100);
+          }}
+          style={{ width: '64px', textAlign: 'right' }}
+          aria-label="Risk-free rate, percent"
+        />
+        <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--color-ink-400)' }}>% r</span>
+      </div>
 
       <div style={{ flex: 1 }} />
 
