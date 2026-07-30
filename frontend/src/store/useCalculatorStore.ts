@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { createClient } from '../lib/supabase/client';
 import { OptionsCalculatorClient } from '../grpc/CalculatorServiceClientPb';
-import { StrategyRequest, Leg as ProtoLeg, QuoteRequest, ChainRequest } from '../grpc/calculator_pb';
+import { StrategyRequest, Leg as ProtoLeg, QuoteRequest, ChainRequest, RiskFreeRateRequest } from '../grpc/calculator_pb';
 
 export interface Leg {
   id: string;
@@ -19,6 +19,23 @@ export interface Leg {
 export interface CurvePoint {
   price: number;
   pnl: number;
+}
+
+/**
+ * Where the risk-free rate came from. The distinction is the whole point:
+ * 'measured' is an observation with a date and a source behind it, 'user' is a
+ * number somebody typed. Collapsing the two is what let a hardcoded 0.05 sit
+ * behind expected value, probability of profit and the distribution curve
+ * looking exactly like a quoted figure (spec §3.4).
+ */
+export type RateSource = 'pending' | 'measured' | 'user' | 'unavailable';
+
+export interface RateMeta {
+  tenor: string;      // "3M"
+  asOfDate: string;   // "2026-07-29" — the observation date, not when we asked
+  source: string;     // "us_treasury_par_yield"
+  published: number;  // as published (bond-equivalent), decimal
+  fetchedAt: string;  // RFC3339
 }
 
 /**
@@ -61,7 +78,10 @@ export interface CalculationResult {
     spot: number;
     impliedVolatility: number;
     days: number;
+    /** The rate the engine priced with. Continuous when measured, as-typed when stated. */
     riskFreeRate: number;
+    rateSource: RateSource;
+    rateMeta: RateMeta | null;
   };
 }
 
@@ -103,7 +123,9 @@ interface CalculatorState {
   assetClass: 'EQUITY' | 'FUTURES' | 'CRYPTO';
   legs: Leg[];
   spotPrice: number;
-  riskFreeRate: number;
+  riskFreeRate: number | null;
+  rateSource: RateSource;
+  rateMeta: RateMeta | null;
   result: CalculationResult | null;
   isLoading: boolean;
   error: string | null;
@@ -121,6 +143,7 @@ interface CalculatorState {
   updateLeg: (id: string, updates: Partial<Leg>) => void;
   setSpotPrice: (price: number) => void;
   setRiskFreeRate: (rate: number) => void;
+  loadRiskFreeRate: () => Promise<void>;
   loadChain: (expiration?: string) => void;
   setSelectedExpiration: (date: string) => void;
 
@@ -173,13 +196,29 @@ function horizonDays(legs: Leg[]): number {
   return legs.reduce((m, l) => Math.max(m, l.expiration_days ?? 0), 0);
 }
 
+/**
+ * The in-flight rate request, shared by every caller.
+ *
+ * The rate is one global datum, so concurrent callers must not each open their
+ * own RPC — the header mounting and a widget calculating at the same time is
+ * the ordinary case, not an edge one. Holding the promise at module scope means
+ * the second caller awaits the first request instead of racing it. Cleared on
+ * settle so a later retry after a failure is still possible.
+ */
+let rateRequest: Promise<void> | null = null;
+
 export const useCalculatorStore = create<CalculatorState>((set, get) => ({
   symbol: 'SPY',
   assetClass: 'EQUITY',
   legs: [],
   // Unknown until the quote service answers. Never seeded with a stand-in price.
   spotPrice: 0,
-  riskFreeRate: 0.05,
+  // Unknown until the rate service answers, exactly like spotPrice above. The
+  // previous 0.05 was invisible, unsourced, and still shaped every probability
+  // the UI displayed.
+  riskFreeRate: null,
+  rateSource: 'pending',
+  rateMeta: null,
   result: null,
   isLoading: false,
   error: null,
@@ -257,7 +296,77 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
 
   setSpotPrice: (price) => set({ spotPrice: price }),
 
-  setRiskFreeRate: (rate) => set({ riskFreeRate: rate }),
+  // A manual edit is a stated assumption, never a measurement. The typed value
+  // is used exactly as given: we do not convert it between compounding
+  // conventions, because we cannot know which one the user meant and picking
+  // one would silently restate their input.
+  setRiskFreeRate: (rate) => set({ riskFreeRate: rate, rateSource: 'user' }),
+
+  /**
+   * Fetch the measured risk-free rate.
+   *
+   * Lives in the store rather than in a component effect because it is a
+   * precondition of calculating, not a decoration of one particular header.
+   * When the header owned it, every route that computes without rendering the
+   * header — `/widget` does exactly that — left the rate permanently `null` and
+   * so could never produce a result at all. `calculateStrategy` awaits this
+   * itself, which makes any future route correct by construction instead of
+   * obliging it to remember a setup call.
+   */
+  loadRiskFreeRate: () => {
+    if (rateRequest) return rateRequest;
+
+    const backendUrl = process.env.NEXT_PUBLIC_API_URL || 'https://api.optionsandfuturescalculator.com';
+    const client = new OptionsCalculatorClient(backendUrl);
+
+    rateRequest = new Promise<void>((resolve) => {
+      client.getRiskFreeRate(new RiskFreeRateRequest(), {}, (err, res) => {
+        // A rate the user has already typed outranks a late arrival: it was an
+        // explicit decision, and overwriting it would move a number out from
+        // under the cursor.
+        if (get().rateSource === 'user') {
+          resolve();
+          return;
+        }
+
+        // Gate on the observation date, not on the value being positive. A zero
+        // or negative short rate is a real observation — US 3-month bills have
+        // printed at 0.00 — so rejecting one would be a policy judgement dressed
+        // up as a data check. A response with no as_of_date is the unusable case,
+        // and the backend already refuses to send one.
+        if (err || !res || !res.getAsOfDate()) {
+          set({ riskFreeRate: null, rateSource: 'unavailable', rateMeta: null });
+          resolve();
+          return;
+        }
+
+        set({
+          // The continuous figure is what Black-Scholes wants, and it is also
+          // what is displayed: the published par yield is a different number
+          // (bond-equivalent, semiannual) and showing that in an editable field
+          // while pricing with this one meant a single keystroke silently
+          // re-entered the published figure as if it were continuous. Both are
+          // stated in the chip tooltip; only the one in use is in the slot.
+          riskFreeRate: res.getRate(),
+          rateSource: 'measured',
+          rateMeta: {
+            tenor: res.getTenor(),
+            asOfDate: res.getAsOfDate(),
+            source: res.getSource(),
+            published: res.getRatePublished(),
+            fetchedAt: res.getFetchedAt(),
+          },
+        });
+        resolve();
+      });
+    }).finally(() => {
+      // Allow a later retry: a failed fetch must not latch 'unavailable' for
+      // the lifetime of the tab.
+      rateRequest = null;
+    });
+
+    return rateRequest;
+  },
 
   setSelectedExpiration: (date) => {
     set({ selectedExpiration: date });
@@ -324,7 +433,9 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
   },
 
   calculateStrategy: async () => {
-    const { legs, spotPrice, riskFreeRate, symbol } = get();
+    // The rate is deliberately not destructured here: it is read after the
+    // fetch below, so a snapshot taken now would be the pre-fetch null.
+    const { legs, spotPrice, symbol } = get();
 
     if (legs.length === 0) {
       set({ result: null, error: null });
@@ -352,6 +463,32 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
       set({ result: null, error: 'No expiration on any leg — pick an expiry from the chain.' });
       return;
     }
+    // Fetch the rate on demand if nothing has yet. This is what makes the rate
+    // a precondition of the calculation rather than a side effect of rendering
+    // one particular component, so a route that computes without the header
+    // still gets a measured rate.
+    if (get().rateSource === 'pending') {
+      await get().loadRiskFreeRate();
+    }
+
+    // Same rule as spot and IV: refuse rather than answer a question we were
+    // not asked. The rate is no longer a constant we can fall back on, and
+    // inventing one would put a fabricated number behind PoP, expected value
+    // and the whole distribution. Re-read after the await — the fetch above
+    // resolves into the store, not into the destructured snapshot.
+    const rate = get().riskFreeRate;
+    if (rate === null) {
+      // Distinguish the two cases: saying the feed is unavailable while the
+      // request is still in flight asserts a failure that has not happened.
+      set({
+        result: null,
+        error:
+          get().rateSource === 'pending'
+            ? 'Still fetching the Treasury rate — retry in a moment.'
+            : 'No risk-free rate — the Treasury feed is unavailable. Enter a rate to proceed; it will be labelled an assumption.',
+      });
+      return;
+    }
 
     set({ isLoading: true, error: null });
     try {
@@ -361,7 +498,7 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
       req.setUnderlyingSymbol(symbol);
       req.setCurrentPrice(spotPrice);
       req.setImpliedVolatility(iv);
-      req.setRiskFreeRate(riskFreeRate);
+      req.setRiskFreeRate(rate);
 
       const legType = (l: Leg) => {
         switch (l.option_type) {
@@ -425,11 +562,15 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
             cvar95: rm?.getCvarParametric95() ?? 0,
             cvar99: rm?.getCvarParametric99() ?? 0,
           },
+          // What the engine was actually given, so the panel can state the
+          // inputs rather than a snapshot taken before the rate resolved.
           inputs: {
             spot: spotPrice,
             impliedVolatility: iv,
             days,
-            riskFreeRate,
+            riskFreeRate: rate,
+            rateSource: get().rateSource,
+            rateMeta: get().rateMeta,
           },
         },
       });

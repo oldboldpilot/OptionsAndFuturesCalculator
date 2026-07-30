@@ -648,3 +648,91 @@ export namespace ChainResponse {
   }
 }
 
+export class RiskFreeRateRequest extends jspb.Message {
+  serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): RiskFreeRateRequest.AsObject;
+  static toObject(includeInstance: boolean, msg: RiskFreeRateRequest): RiskFreeRateRequest.AsObject;
+  static serializeBinaryToWriter(message: RiskFreeRateRequest, writer: jspb.BinaryWriter): void;
+  static deserializeBinary(bytes: Uint8Array): RiskFreeRateRequest;
+  static deserializeBinaryFromReader(message: RiskFreeRateRequest, reader: jspb.BinaryReader): RiskFreeRateRequest;
+}
+
+export namespace RiskFreeRateRequest {
+  export type AsObject = {
+  }
+}
+
+export class RatePoint extends jspb.Message {
+  getTenor(): string;
+  setTenor(value: string): RatePoint;
+
+  getDays(): number;
+  setDays(value: number): RatePoint;
+
+  getRateBey(): number;
+  setRateBey(value: number): RatePoint;
+
+  getRateContinuous(): number;
+  setRateContinuous(value: number): RatePoint;
+
+  serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): RatePoint.AsObject;
+  static toObject(includeInstance: boolean, msg: RatePoint): RatePoint.AsObject;
+  static serializeBinaryToWriter(message: RatePoint, writer: jspb.BinaryWriter): void;
+  static deserializeBinary(bytes: Uint8Array): RatePoint;
+  static deserializeBinaryFromReader(message: RatePoint, reader: jspb.BinaryReader): RatePoint;
+}
+
+export namespace RatePoint {
+  export type AsObject = {
+    tenor: string,
+    days: number,
+    rateBey: number,
+    rateContinuous: number,
+  }
+}
+
+export class RiskFreeRateResponse extends jspb.Message {
+  getRate(): number;
+  setRate(value: number): RiskFreeRateResponse;
+
+  getRatePublished(): number;
+  setRatePublished(value: number): RiskFreeRateResponse;
+
+  getTenor(): string;
+  setTenor(value: string): RiskFreeRateResponse;
+
+  getAsOfDate(): string;
+  setAsOfDate(value: string): RiskFreeRateResponse;
+
+  getSource(): string;
+  setSource(value: string): RiskFreeRateResponse;
+
+  getCurveList(): Array<RatePoint>;
+  setCurveList(value: Array<RatePoint>): RiskFreeRateResponse;
+  clearCurveList(): RiskFreeRateResponse;
+  addCurve(value?: RatePoint, index?: number): RatePoint;
+
+  getFetchedAt(): string;
+  setFetchedAt(value: string): RiskFreeRateResponse;
+
+  serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): RiskFreeRateResponse.AsObject;
+  static toObject(includeInstance: boolean, msg: RiskFreeRateResponse): RiskFreeRateResponse.AsObject;
+  static serializeBinaryToWriter(message: RiskFreeRateResponse, writer: jspb.BinaryWriter): void;
+  static deserializeBinary(bytes: Uint8Array): RiskFreeRateResponse;
+  static deserializeBinaryFromReader(message: RiskFreeRateResponse, reader: jspb.BinaryReader): RiskFreeRateResponse;
+}
+
+export namespace RiskFreeRateResponse {
+  export type AsObject = {
+    rate: number,
+    ratePublished: number,
+    tenor: string,
+    asOfDate: string,
+    source: string,
+    curveList: Array<RatePoint.AsObject>,
+    fetchedAt: string,
+  }
+}
+

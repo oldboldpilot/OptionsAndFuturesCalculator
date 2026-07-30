@@ -168,5 +168,48 @@ export class OptionsCalculatorClient {
     this.methodDescriptorGetMarketChain);
   }
 
+  methodDescriptorGetRiskFreeRate = new grpcWeb.MethodDescriptor(
+    '/calculator.OptionsCalculator/GetRiskFreeRate',
+    grpcWeb.MethodType.UNARY,
+    calculator_pb.RiskFreeRateRequest,
+    calculator_pb.RiskFreeRateResponse,
+    (request: calculator_pb.RiskFreeRateRequest) => {
+      return request.serializeBinary();
+    },
+    calculator_pb.RiskFreeRateResponse.deserializeBinary
+  );
+
+  getRiskFreeRate(
+    request: calculator_pb.RiskFreeRateRequest,
+    metadata?: grpcWeb.Metadata | null): Promise<calculator_pb.RiskFreeRateResponse>;
+
+  getRiskFreeRate(
+    request: calculator_pb.RiskFreeRateRequest,
+    metadata: grpcWeb.Metadata | null,
+    callback: (err: grpcWeb.RpcError,
+               response: calculator_pb.RiskFreeRateResponse) => void): grpcWeb.ClientReadableStream<calculator_pb.RiskFreeRateResponse>;
+
+  getRiskFreeRate(
+    request: calculator_pb.RiskFreeRateRequest,
+    metadata?: grpcWeb.Metadata | null,
+    callback?: (err: grpcWeb.RpcError,
+               response: calculator_pb.RiskFreeRateResponse) => void) {
+    if (callback !== undefined) {
+      return this.client_.rpcCall(
+        this.hostname_ +
+          '/calculator.OptionsCalculator/GetRiskFreeRate',
+        request,
+        metadata || {},
+        this.methodDescriptorGetRiskFreeRate,
+        callback);
+    }
+    return this.client_.unaryCall(
+    this.hostname_ +
+      '/calculator.OptionsCalculator/GetRiskFreeRate',
+    request,
+    metadata || {},
+    this.methodDescriptorGetRiskFreeRate);
+  }
+
 }
 

@@ -61,6 +61,16 @@ export function StrategyMetrics() {
     </div>
   );
 
+  const greek = (label: string, unit: string, value: string) => (
+    <div className="stat">
+      <span className="stat-label">
+        {label}{' '}
+        <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--color-ink-400)' }}>{unit}</span>
+      </span>
+      <span className="stat-value">{value}</span>
+    </div>
+  );
+
   return shell(
     <div className="panel-body">
       <div className="stat">
@@ -96,29 +106,27 @@ export function StrategyMetrics() {
         </span>
       </div>
 
+      {/*
+        Units are part of the datum, not decoration.
+
+        These arrive from the engine already converted to trader conventions —
+        theta per calendar day, vega and rho per one point of vol and of rate —
+        and already multiplied by contract multiplier and quantity, so they are
+        position numbers rather than per-share ones. They were previously
+        rendered bare, and the same theta printed as -21251.836: correct as
+        dollars per year, unreadable as anything a trader acts on. Labelling
+        them is the fix on this side; rescaling them here would double-convert
+        what the engine already did (spec §3.4 — a value shown without its unit
+        is not a value the user can verify).
+      */}
       {section(
         'Greeks',
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '0 0.75rem' }}>
-          <div className="stat">
-            <span className="stat-label">Delta Δ</span>
-            <span className="stat-value">{g.delta.toFixed(3)}</span>
-          </div>
-          <div className="stat">
-            <span className="stat-label">Gamma Γ</span>
-            <span className="stat-value">{g.gamma.toFixed(4)}</span>
-          </div>
-          <div className="stat">
-            <span className="stat-label">Theta Θ</span>
-            <span className="stat-value">{g.theta.toFixed(3)}</span>
-          </div>
-          <div className="stat">
-            <span className="stat-label">Vega V</span>
-            <span className="stat-value">{g.vega.toFixed(3)}</span>
-          </div>
-          <div className="stat">
-            <span className="stat-label">Rho ρ</span>
-            <span className="stat-value">{g.rho.toFixed(3)}</span>
-          </div>
+          {greek('Delta Δ', 'shares', g.delta.toFixed(3))}
+          {greek('Gamma Γ', 'Δ/$1', g.gamma.toFixed(4))}
+          {greek('Theta Θ', '$/day', g.theta.toFixed(2))}
+          {greek('Vega V', '$/1% IV', g.vega.toFixed(2))}
+          {greek('Rho ρ', '$/1% rate', g.rho.toFixed(2))}
         </div>,
       )}
 
@@ -152,14 +160,16 @@ export function StrategyMetrics() {
           )}
 
       {/*
-        Model inputs, shown because they are not all observations.
-        Spot and implied volatility are measured — they come off the quote and
-        the option chain. The risk-free rate does not: nothing in this system
-        observes it, so it is a stated assumption. It was previously an
-        invisible constant that still shaped expected value, probability of
-        profit and the whole distribution curve, which is precisely the kind of
-        invented figure spec §3.4 forbids presenting as fact. Disclosing it is
-        the minimum; sourcing it is tracked as follow-up work.
+        Model inputs, shown because they are not all observations and the user
+        must be able to tell which is which. Spot and implied volatility are
+        measured — they come off the quote and the option chain. The risk-free
+        rate is now measured too, from the Treasury par yield curve, and it is
+        labelled with its tenor and observation date so it can be verified at
+        source; when the feed is unavailable and the user states a rate instead,
+        the same slot says so. It was previously an invisible constant that
+        still shaped expected value, probability of profit and the whole
+        distribution curve, which is exactly the invented figure spec §3.4
+        forbids presenting as fact.
       */}
       {section(
         'Model inputs',
@@ -179,11 +189,30 @@ export function StrategyMetrics() {
           <div className="stat">
             <span className="stat-label">
               Risk-free rate{' '}
-              <span className="chip" title="Not measured by this system — a stated model assumption, editable in the header.">
-                assumption
-              </span>
+              {result.inputs.rateSource === 'measured' && result.inputs.rateMeta ? (
+                <span
+                  className="chip chip-live"
+                  title={`${result.inputs.rateMeta.tenor} US Treasury par yield (CMT) as of ${result.inputs.rateMeta.asOfDate}, source ${result.inputs.rateMeta.source}. Published ${(result.inputs.rateMeta.published * 100).toFixed(2)}% bond-equivalent; priced at ${(result.inputs.riskFreeRate * 100).toFixed(2)}% continuously compounded.`}
+                >
+                  CMT {result.inputs.rateMeta.tenor} · {result.inputs.rateMeta.asOfDate}
+                </span>
+              ) : (
+                <span className="chip" title="A rate stated in the header, not observed market data.">
+                  assumption
+                </span>
+              )}
             </span>
-            <span className="stat-value">{(result.inputs.riskFreeRate * 100).toFixed(2)}%</span>
+            {/*
+              The rate the engine was given, not the published par yield. This
+              section is titled "Model inputs" and this row is the model's r —
+              rendering the bond-equivalent figure here stated a number the
+              calculation did not use. The published figure remains in the chip
+              tooltip above, which is where a user goes to reconcile against
+              treasury.gov.
+            */}
+            <span className="stat-value">
+              {(result.inputs.riskFreeRate * 100).toFixed(2)}%
+            </span>
           </div>
         </div>,
       )}
