@@ -8,6 +8,7 @@ module;
 #include <cmath>
 #include <cstdlib>
 #include <expected>
+#include <format>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -149,20 +150,21 @@ struct Credentials {
     return *it->second;
 }
 
-[[nodiscard]] auto get_json(const std::string& host, const std::string& path)
-    -> std::expected<fastjson::json_value, std::error_code> {
+/**
+ * One GET, no vendor assumptions.
+ *
+ * Split out of get_json because not every feed is Alpaca: the Treasury yield
+ * curve is keyless and answers in CSV, so it must not travel a path that
+ * refuses without ALPACA_* credentials and then insists on parsing JSON.
+ * Reuses client_for() so it inherits the same per-(thread, host) keep-alive
+ * client and the same error mapping.
+ */
+[[nodiscard]] auto get_text(const std::string& host, const std::string& path,
+                            const httplib::Headers& headers)
+    -> std::expected<std::string, std::error_code> {
     auto& log = logger::Logger::getInstance();
-    const auto& creds = credentials();
-    if (!creds.configured()) {
-        return std::unexpected(make_error_code(MarketDataError::NotConfigured));
-    }
 
-    auto res = client_for(host).Get(path, {
-        {"APCA-API-KEY-ID", creds.key},
-        {"APCA-API-SECRET-KEY", creds.secret},
-        {"Accept", "application/json"},
-    });
-
+    auto res = client_for(host).Get(path, headers);
     if (!res) {
         log.error("Network error: {}{} ({})", host, path, httplib::to_string(res.error()));
         return std::unexpected(make_error_code(MarketDataError::NetworkError));
@@ -171,8 +173,24 @@ struct Credentials {
         log.error("HTTP {} from {}{}: {}", res->status, host, path, res->body.substr(0, 240));
         return std::unexpected(make_error_code(MarketDataError::HttpError));
     }
+    return std::move(res->body);
+}
 
-    auto parsed = fastjson::parse(res->body);
+[[nodiscard]] auto get_json(const std::string& host, const std::string& path)
+    -> std::expected<fastjson::json_value, std::error_code> {
+    const auto& creds = credentials();
+    if (!creds.configured()) {
+        return std::unexpected(make_error_code(MarketDataError::NotConfigured));
+    }
+
+    auto body = get_text(host, path, {
+        {"APCA-API-KEY-ID", creds.key},
+        {"APCA-API-SECRET-KEY", creds.secret},
+        {"Accept", "application/json"},
+    });
+    if (!body) return std::unexpected(body.error());
+
+    auto parsed = fastjson::parse(*body);
     if (!parsed.has_value()) {
         return std::unexpected(make_error_code(MarketDataError::ParseError));
     }
@@ -209,6 +227,54 @@ struct Credentials {
 [[nodiscard]] auto today() -> std::chrono::year_month_day {
     return std::chrono::year_month_day{
         std::chrono::floor<std::chrono::days>(std::chrono::system_clock::now())};
+}
+
+/**
+ * Constant-maturity par yields are bond-equivalent yields on a semiannual
+ * compounding convention; Black-Scholes discounts continuously. They are not
+ * interchangeable — 3.83% published is 3.794% continuous, 3.6 bp — so both
+ * numbers travel to the client: the published one is what a user can check
+ * against the source, the continuous one is what the engine may price with.
+ */
+[[nodiscard]] inline auto bey_to_continuous(double bey) noexcept -> double {
+    return 2.0 * std::log1p(bey / 2.0);
+}
+
+/** "07/29/2026" -> "2026-07-29". The rest of the system speaks ISO dates. */
+[[nodiscard]] auto iso_from_us_date(std::string_view mdy) -> std::string {
+    if (mdy.size() != 10 || mdy[2] != '/' || mdy[5] != '/') return {};
+    return std::string{mdy.substr(6, 4)} + "-" + std::string{mdy.substr(0, 2)} + "-" +
+           std::string{mdy.substr(3, 2)};
+}
+
+[[nodiscard]] auto rfc3339_now() -> std::string {
+    return std::format("{:%Y-%m-%dT%H:%M:%SZ}",
+                       std::chrono::floor<std::chrono::seconds>(
+                           std::chrono::system_clock::now()));
+}
+
+/**
+ * Splits one CSV line. Treasury quotes its header labels ("1 Mo", "1.5 Month")
+ * and leaves the data cells bare, and no label contains a comma, so a full CSV
+ * grammar would be dead weight here. Empty cells are preserved because they
+ * carry meaning: a tenor with no print that day must be skipped, not guessed.
+ */
+[[nodiscard]] auto csv_cells(std::string_view line) -> std::vector<std::string_view> {
+    std::vector<std::string_view> out;
+    std::size_t pos = 0;
+    while (true) {
+        const auto comma = line.find(',', pos);
+        auto cell = (comma == std::string_view::npos) ? line.substr(pos)
+                                                     : line.substr(pos, comma - pos);
+        while (!cell.empty() && (cell.front() == '"' || cell.front() == ' ')) cell.remove_prefix(1);
+        while (!cell.empty() && (cell.back() == '"' || cell.back() == '\r' || cell.back() == ' ')) {
+            cell.remove_suffix(1);
+        }
+        out.push_back(cell);
+        if (comma == std::string_view::npos) break;
+        pos = comma + 1;
+    }
+    return out;
 }
 
 /** "2026-08-21" -> days from today. Negative for past dates. */
@@ -324,6 +390,31 @@ export struct Chain {
     std::vector<StrikeRow> strikes;
 };
 
+/** One tenor on the published curve. */
+export struct RatePoint {
+    std::string tenor;             // "1M", "2M", "3M", "6M", "1Y"
+    int days{0};                   // nominal tenor in calendar days
+    double rate_bey{0.0};          // as published, decimal: 3.83% -> 0.0383
+    double rate_continuous{0.0};   // 2*ln(1 + bey/2), decimal
+};
+
+/**
+ * The risk-free rate, with its provenance attached.
+ *
+ * Source-agnostic on purpose: `source` and `as_of_date` are strings that travel
+ * with the value, so the client's provenance labelling survives a provider swap
+ * without a proto change.
+ */
+export struct RiskFreeRate {
+    double rate{0.0};              // default tenor, continuously compounded
+    double rate_published{0.0};    // default tenor, exactly as published
+    std::string tenor;             // which tenor the two scalars above are
+    std::string as_of_date;        // observation date, "YYYY-MM-DD"
+    std::string source;            // provider dataset identifier
+    std::string fetched_at;        // RFC3339, when we obtained it
+    std::vector<RatePoint> curve;  // short end, ascending by days
+};
+
 // --------------------------------------------------------------------------
 // Cache
 // --------------------------------------------------------------------------
@@ -378,6 +469,25 @@ private:
 [[nodiscard]] auto chain_cache() -> TtlCache<Chain>& {
     static TtlCache<Chain> cache{std::chrono::seconds{15}};
     return cache;
+}
+
+[[nodiscard]] auto rate_cache() -> TtlCache<RiskFreeRate>& {
+    // One publication per business day at about 15:30 ET, so a long TTL costs
+    // nothing in freshness: at most four requests a day to the source, and a
+    // new print is picked up within hours. The 12 h expiration_cache above is
+    // the precedent for this shape.
+    static TtlCache<RiskFreeRate> cache{std::chrono::hours{6}};
+    return cache;
+}
+
+[[nodiscard]] auto last_good_rate() -> std::optional<RiskFreeRate>& {
+    static std::optional<RiskFreeRate> slot;
+    return slot;
+}
+
+[[nodiscard]] auto last_good_rate_mutex() -> std::shared_mutex& {
+    static std::shared_mutex mutex;
+    return mutex;
 }
 
 // --------------------------------------------------------------------------
@@ -449,6 +559,52 @@ public:
     [[nodiscard]] auto chain(const std::string& symbol, const std::string& expiration,
                              double spot) const -> std::expected<Chain, std::error_code> override {
         return provider_.chain(symbol, expiration, spot);
+    }
+
+private:
+    P provider_;
+};
+
+/**
+ * What an interest-rate provider has to supply.
+ *
+ * Deliberately the same two-layer shape as the market data seam: a concept so a
+ * new provider is checked where it is defined, and an interface so the active
+ * one can be chosen from configuration without any call site knowing which it
+ * got. Nothing above this boundary — the type, the cache, the error taxonomy,
+ * the gRPC handler — mentions Treasury.
+ */
+export template <typename P>
+concept RateProvider = requires(const P& provider) {
+    { provider.name() } -> std::convertible_to<std::string_view>;
+    { provider.risk_free_rate() } -> std::same_as<std::expected<RiskFreeRate, std::error_code>>;
+};
+
+export class IRateProvider {
+public:
+    IRateProvider() = default;
+    IRateProvider(const IRateProvider&) = delete;
+    IRateProvider(IRateProvider&&) = delete;
+    auto operator=(const IRateProvider&) -> IRateProvider& = delete;
+    auto operator=(IRateProvider&&) -> IRateProvider& = delete;
+    virtual ~IRateProvider() = default;
+
+    [[nodiscard]] virtual auto name() const -> std::string_view = 0;
+    [[nodiscard]] virtual auto risk_free_rate() const
+        -> std::expected<RiskFreeRate, std::error_code> = 0;
+};
+
+/** Adapts any type satisfying the concept to the runtime interface. */
+export template <RateProvider P>
+class RateProviderAdapter final : public IRateProvider {
+public:
+    explicit RateProviderAdapter(P provider) noexcept : provider_{std::move(provider)} {}
+
+    [[nodiscard]] auto name() const -> std::string_view override { return provider_.name(); }
+
+    [[nodiscard]] auto risk_free_rate() const
+        -> std::expected<RiskFreeRate, std::error_code> override {
+        return provider_.risk_free_rate();
     }
 
 private:
@@ -670,6 +826,142 @@ static_assert(MarketDataProvider<AlpacaProvider>,
               "AlpacaProvider must satisfy the MarketDataProvider concept");
 
 // --------------------------------------------------------------------------
+// US Treasury
+//
+// The Daily Treasury Par Yield Curve, keyless, one row per business day,
+// published around 15:30 ET. The 3-month constant-maturity bill is the standard
+// risk-free proxy for listed equity options: it matches typical 0-60 DTE usage
+// and it is the deepest point on the short end. The 1-year overstates the
+// discount for short-dated positions by real curve slope, 21 bp on the
+// 2026-07-29 print, so it is not the default.
+//
+// The rejected alternative was fiscaldata's avg_interest_rates, which is
+// keyless and works but is the monthly average interest cost of Treasury's
+// outstanding debt — an accounting statistic blended over a year of issuance,
+// a month stale, and not a market yield. Rejected on correctness.
+//
+// CSV rather than the XML/OData form of the same data because the only parser
+// in this module is fastjson: the CSV is a fixed header plus MM/DD/YYYY rows
+// and needs std::from_chars, while XML would need a parser or string scraping.
+// --------------------------------------------------------------------------
+
+export class TreasuryParYieldProvider {
+public:
+    [[nodiscard]] auto name() const -> std::string_view { return "us_treasury"; }
+
+    [[nodiscard]] auto risk_free_rate() const -> std::expected<RiskFreeRate, std::error_code> {
+        // No key fields, so no configured() check: that is the whole point of
+        // this feed. The host is overridable the same way the Alpaca hosts are.
+        const auto host = env_or("TREASURY_RATES_URL", "https://home.treasury.gov");
+        const auto year = static_cast<int>(today().year());
+
+        auto body = fetch_year(host, year);
+
+        // The file is year-scoped, so on the first business days of January the
+        // new year's file exists with a header and no rows. December's last
+        // print is still the most recent real observation, and it carries its
+        // own date, so falling back to it reports data rather than nothing.
+        if (!body || !has_data_row(*body)) {
+            auto previous = fetch_year(host, year - 1);
+            if (previous && has_data_row(*previous)) body = std::move(previous);
+        }
+        if (!body) return std::unexpected(body.error());
+        return parse(*body);
+    }
+
+private:
+    struct TenorColumn {
+        std::string_view label;   // exactly as Treasury prints it
+        std::string_view tenor;   // what we call it on the wire
+        int days;                 // nominal tenor, for later interpolation
+    };
+
+    [[nodiscard]] static auto fetch_year(const std::string& host, int year)
+        -> std::expected<std::string, std::error_code> {
+        const auto y = std::to_string(year);
+        const auto path =
+            "/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/" + y +
+            "/all?type=daily_treasury_yield_curve&field_tdr_date_value=" + y + "&_format=csv";
+        return get_text(host, path, {{"Accept", "text/csv"}});
+    }
+
+    [[nodiscard]] static auto has_data_row(std::string_view csv) noexcept -> bool {
+        const auto nl = csv.find('\n');
+        return nl != std::string_view::npos && csv.substr(nl + 1).find_first_not_of("\r\n") !=
+                                                  std::string_view::npos;
+    }
+
+    [[nodiscard]] static auto parse(std::string_view csv)
+        -> std::expected<RiskFreeRate, std::error_code> {
+        // Column positions are never assumed: Treasury inserted a "1.5 Month"
+        // column mid-2023 and shifted every index after it. Look the labels up.
+        static constexpr std::array<TenorColumn, 5> kTenors{{
+            {"1 Mo", "1M", 30},
+            {"2 Mo", "2M", 61},
+            {"3 Mo", "3M", 91},
+            {"6 Mo", "6M", 182},
+            {"1 Yr", "1Y", 365},
+        }};
+        static constexpr std::string_view kDefaultTenor{"3M"};
+
+        const auto header_end = csv.find('\n');
+        if (header_end == std::string_view::npos) {
+            return std::unexpected(make_error_code(MarketDataError::ParseError));
+        }
+        const auto header = csv_cells(csv.substr(0, header_end));
+
+        // Rows are newest first, so the first data row is the latest print.
+        auto rest = csv.substr(header_end + 1);
+        const auto row_end = rest.find('\n');
+        const auto row_line = (row_end == std::string_view::npos) ? rest : rest.substr(0, row_end);
+        if (row_line.find_first_not_of("\r") == std::string_view::npos) {
+            return std::unexpected(make_error_code(MarketDataError::ParseError));
+        }
+        const auto row = csv_cells(row_line);
+
+        RiskFreeRate out;
+        out.source = "us_treasury_par_yield";
+        out.fetched_at = rfc3339_now();
+        out.as_of_date = row.empty() ? std::string{} : iso_from_us_date(row[0]);
+
+        for (const auto& [label, tenor, days] : kTenors) {
+            const auto it = std::ranges::find(header, label);
+            if (it == header.end()) continue;
+            const auto idx = static_cast<std::size_t>(std::ranges::distance(header.begin(), it));
+            if (idx >= row.size() || row[idx].empty()) continue;
+
+            double pct{};
+            const auto* first = row[idx].data();
+            const auto* last = row[idx].data() + row[idx].size();
+            if (std::from_chars(first, last, pct).ec != std::errc{}) continue;
+
+            const double bey = pct / 100.0;
+            out.curve.push_back(RatePoint{.tenor = std::string{tenor},
+                                          .days = days,
+                                          .rate_bey = bey,
+                                          .rate_continuous = bey_to_continuous(bey)});
+        }
+
+        // A rate without its observation date is not reportable — the date is
+        // what lets the client say which day's print it is showing instead of
+        // implying "now". Same for a missing default tenor: there is nothing to
+        // substitute for it that would not be an invention.
+        const auto def = std::ranges::find_if(
+            out.curve, [](const RatePoint& p) noexcept { return p.tenor == kDefaultTenor; });
+        if (def == out.curve.end() || out.as_of_date.empty()) {
+            return std::unexpected(make_error_code(MarketDataError::MissingData));
+        }
+        out.tenor = def->tenor;
+        out.rate = def->rate_continuous;
+        out.rate_published = def->rate_bey;
+        return out;
+    }
+};
+
+static_assert(RateProvider<TreasuryParYieldProvider>,
+              "TreasuryParYieldProvider must satisfy the RateProvider concept");
+
+// --------------------------------------------------------------------------
 // Provider selection
 // --------------------------------------------------------------------------
 
@@ -738,6 +1030,73 @@ export [[nodiscard]] auto provider() -> std::shared_ptr<IMarketDataProvider> {
     return provider_slot();
 }
 
+using RateProviderFactory = std::function<std::shared_ptr<IRateProvider>()>;
+
+[[nodiscard]] auto rate_factories() -> std::unordered_map<std::string, RateProviderFactory>& {
+    static std::unordered_map<std::string, RateProviderFactory> registry{
+        {"us_treasury", [] -> std::shared_ptr<IRateProvider> {
+             return std::make_shared<RateProviderAdapter<TreasuryParYieldProvider>>(
+                 TreasuryParYieldProvider{});
+         }},
+    };
+    return registry;
+}
+
+/**
+ * Adds a rate provider under a name usable in RISK_FREE_RATE_PROVIDER. The
+ * whole extension point: a FRED or broker feed later is one type satisfying the
+ * concept, one registration, and one environment variable — no call site moves,
+ * and a keyed provider brings its own credentials struct without touching this.
+ */
+export template <RateProvider P>
+auto register_rate_provider(std::string name) -> void {
+    rate_factories().insert_or_assign(std::move(name), [] -> std::shared_ptr<IRateProvider> {
+        return std::make_shared<RateProviderAdapter<P>>(P{});
+    });
+}
+
+[[nodiscard]] auto rate_provider_slot() -> std::shared_ptr<IRateProvider>& {
+    static std::shared_ptr<IRateProvider> active;
+    return active;
+}
+
+[[nodiscard]] auto rate_provider_mutex() -> std::shared_mutex& {
+    static std::shared_mutex mutex;
+    return mutex;
+}
+
+/** Overrides the configured rate provider, mainly so tests can substitute a fake. */
+export auto set_rate_provider(std::shared_ptr<IRateProvider> provider) -> void {
+    const std::unique_lock lock{rate_provider_mutex()};
+    rate_provider_slot() = std::move(provider);
+}
+
+/** The active rate provider, resolved from RISK_FREE_RATE_PROVIDER on first use. */
+export [[nodiscard]] auto rate_provider() -> std::shared_ptr<IRateProvider> {
+    {
+        const std::shared_lock lock{rate_provider_mutex()};
+        if (rate_provider_slot()) return rate_provider_slot();
+    }
+
+    const std::unique_lock lock{rate_provider_mutex()};
+    if (rate_provider_slot()) return rate_provider_slot();
+
+    const auto requested = env_or("RISK_FREE_RATE_PROVIDER", "us_treasury");
+    const auto& registry = rate_factories();
+    const auto it = registry.find(requested);
+    if (it == registry.end()) {
+        logger::Logger::getInstance().error(
+            "RISK_FREE_RATE_PROVIDER='{}' is not registered; falling back to us_treasury",
+            requested);
+        rate_provider_slot() = registry.at("us_treasury")();
+    } else {
+        rate_provider_slot() = it->second();
+    }
+    logger::Logger::getInstance().info("Risk-free rate provider: {}",
+                                       rate_provider_slot()->name());
+    return rate_provider_slot();
+}
+
 // --------------------------------------------------------------------------
 // Public API
 //
@@ -794,6 +1153,35 @@ export [[nodiscard]] auto fetch_chain(const std::string& symbol, const std::stri
 
     result->expirations = *expirations;
     chain_cache().put(cache_key, *result);
+    return result;
+}
+
+export [[nodiscard]] auto fetch_risk_free_rate() -> std::expected<RiskFreeRate, std::error_code> {
+    // The datum is global, not per symbol, so there is exactly one key.
+    static const std::string kKey{"latest"};
+    if (auto hit = rate_cache().get(kKey)) return *hit;
+
+    auto result = rate_provider()->risk_free_rate();
+    if (result) {
+        rate_cache().put(kKey, *result);
+        const std::unique_lock lock{last_good_rate_mutex()};
+        last_good_rate() = *result;
+        return result;
+    }
+
+    // A transport failure must never become an invented number, but the last
+    // print we actually read is still an observation and it carries its own
+    // as_of_date, which the client displays — so the user sees exactly which
+    // day they are looking at rather than a rate with no date behind it.
+    {
+        const std::shared_lock lock{last_good_rate_mutex()};
+        if (last_good_rate()) {
+            logger::Logger::getInstance().warn(
+                "Risk-free rate refresh failed ({}); serving the {} print",
+                result.error().message(), last_good_rate()->as_of_date);
+            return *last_good_rate();
+        }
+    }
     return result;
 }
 

@@ -100,6 +100,11 @@ namespace md = options_calculator::market_data;
                             double years_remaining, double r) noexcept -> double {
     if (years_remaining <= 1e-9) return payoff_at_expiry(req, price);
 
+    // One clock for every leg. Correct for the single-expiry structures the UI
+    // builds today; for a genuine calendar spread the near leg should expire
+    // partway along this axis and be carried at intrinsic thereafter. That is a
+    // change to the whole matrix, the expiry curve and every metric derived
+    // from them, so it is tracked separately rather than smuggled in here.
     double total = 0.0;
     for (const auto& leg : req.legs()) {
         const double dir = direction_of(leg);
@@ -426,7 +431,6 @@ using sgee::ExecutionResult;
 
     double delta = 0.0, gamma = 0.0, theta = 0.0, vega = 0.0, rho = 0.0;
     double vanna = 0.0, volga = 0.0, charm = 0.0;
-    const double years = ctx->horizon / 365.0;
 
     for (const auto& leg : ctx->request.legs()) {
         const double dir = direction_of(leg);
@@ -436,19 +440,52 @@ using sgee::ExecutionResult;
         if (leg.type() == calculator::Leg::CALL || leg.type() == calculator::Leg::PUT) {
             const double iv = leg.implied_volatility() > 0.0 ? leg.implied_volatility() : ctx->sigma;
             if (iv <= 0.0) continue;
+
+            // Every leg used to be priced at the horizon of the LONGEST-dated
+            // leg (ctx->horizon, set in action_initialize from horizon_days(),
+            // which is a max over the legs), so a calendar spread's near leg
+            // was priced with the far leg's time to expiry and its delta,
+            // gamma and theta were simply wrong. Each leg carries its own
+            // expiration_days; use it. A leg that arrives without one falls
+            // back to the position horizon — what it was already getting —
+            // rather than to zero, because sensen returns all-zero Greeks for
+            // T <= 0 (options.cppm:558) and the leg would silently vanish out
+            // of the aggregate instead of being visibly absent.
+            const double leg_days =
+                (leg.expiration_days() > 0.0) ? leg.expiration_days() : ctx->horizon;
+            const double years = leg_days / 365.0;
+
             const auto type = (leg.type() == calculator::Leg::CALL) ? sensen::OptionType::Call
                                                                    : sensen::OptionType::Put;
             const auto bs =
                 sensen::price_black_scholes(ctx->spot, leg.strike(), ctx->r, iv, years, type);
             const double scale = dir * mult * qty;
-            delta += bs.delta * scale;
-            gamma += bs.gamma * scale;
-            theta += bs.theta * scale;
-            vega  += bs.vega  * scale;
-            rho   += bs.rho   * scale;
-            vanna += bs.vanna * scale;
-            volga += bs.volga * scale;
-            charm += bs.charm * scale;
+
+            // Unit conversion belongs here, at the presentation boundary, not
+            // in sensen. sensen returns textbook Black-Scholes derivatives:
+            // theta and charm are per YEAR because T is in years
+            // (options.cppm:582), and vega, vanna, volga and rho are per 1.00
+            // of vol or rate (options.cppm:568, 583) — there is no /365 and no
+            // /100 anywhere in the library, which is correct for a maths
+            // library and is left alone. A trader, however, reads theta as
+            // dollars per calendar day and vega as dollars per one IV point,
+            // so a per-year theta scaled by the 100x contract multiplier
+            // rendered as -21251 for a spread whose entire risk was $861: the
+            // right number in a unit nobody reads it in. The proto documents
+            // these units so the next client inherits the convention instead
+            // of the trap.
+            delta += bs.delta * scale;                // position share-equivalents
+            gamma += bs.gamma * scale;                // change in delta per $1 of spot
+            theta += (bs.theta / 365.0) * scale;      // $ per calendar day
+            vega  += (bs.vega / 100.0) * scale;       // $ per 1 IV point
+            rho   += (bs.rho / 100.0) * scale;        // $ per 1 rate point
+            // Second order, converted to match so the whole message is one
+            // system of units: vanna is d(delta)/d(vol) so it carries one vol
+            // factor, volga is d(vega)/d(vol) so it carries two, and charm is
+            // d(delta)/d(time) so it converts on the day count.
+            vanna += (bs.vanna / 100.0) * scale;
+            volga += (bs.volga / 10000.0) * scale;
+            charm += (bs.charm / 365.0) * scale;
         } else {
             delta += dir * mult * qty;
         }
@@ -689,6 +726,56 @@ public:
         res.set_quote_timestamp(quote->timestamp);
         // Forward P/E and a single underlying IV are not on this feed. They
         // stay at zero, which the client renders as "unknown".
+        return Status::OK;
+    }
+
+    /**
+     * The risk-free rate, measured.
+     *
+     * Its own RPC because the rate is a property of the market, not of an
+     * instrument; a field on QuoteResponse would refetch a global datum on
+     * every symbol change and attribute its provenance to whichever ticker
+     * asked. It replaces a hardcoded 0.05 in the browser that nevertheless
+     * shaped expected value, probability of profit and the distribution curve.
+     *
+     * A failure is reported as a failure, exactly as in GetMarketQuote. There
+     * is no sentinel: 0.0 in a `double rate` cannot be told apart from a
+     * genuine zero rate — historically a real observation — and that is the
+     * class of fabrication spec §3.4 exists to prevent. The client then states
+     * the rate is unavailable and lets the user supply one, labelled as an
+     * assumption because that is what it is.
+     */
+    auto GetRiskFreeRate(ServerContext*, const calculator::RiskFreeRateRequest* request,
+                         calculator::RiskFreeRateResponse* response) -> Status override {
+        if (request == nullptr || response == nullptr) {
+            return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
+        }
+        auto& log = logger::Logger::getInstance();
+
+        const auto rate = md::fetch_risk_free_rate();
+        if (!rate) {
+            log.error("Risk-free rate unavailable: {}", rate.error().message());
+            return Status(grpc::StatusCode::UNAVAILABLE,
+                          "Risk-free rate unavailable: " + rate.error().message());
+        }
+
+        auto& res = *response;
+        res.set_rate(rate->rate);
+        res.set_rate_published(rate->rate_published);
+        res.set_tenor(rate->tenor);
+        res.set_as_of_date(rate->as_of_date);
+        res.set_source(rate->source);
+        res.set_fetched_at(rate->fetched_at);
+        for (const auto& point : rate->curve) {
+            auto& out = *res.add_curve();
+            out.set_tenor(point.tenor);
+            out.set_days(point.days);
+            out.set_rate_bey(point.rate_bey);
+            out.set_rate_continuous(point.rate_continuous);
+        }
+
+        log.info("GetRiskFreeRate: {} {:.5f} continuous as of {}", rate->tenor, rate->rate,
+                 rate->as_of_date);
         return Status::OK;
     }
 

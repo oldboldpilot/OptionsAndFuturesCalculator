@@ -1,7 +1,7 @@
 /*
  * Smoke client.
  *
- * Exercises the three RPCs against a running engine and prints what comes
+ * Exercises all four RPCs against a running engine and prints what comes
  * back, so a deploy can be verified end to end without a browser. Hand-rolled
  * rather than built on a test framework, per config/cpp_details.txt rule 39
  * (no external testing libraries).
@@ -53,6 +53,48 @@ auto check_quote(calculator::OptionsCalculator::Stub& stub, const std::string& s
               << std::setprecision(2) << res.price()
               << "  prev_close=" << res.previous_close()
               << "  provider=" << res.provider() << "  at=" << res.quote_timestamp() << "\n";
+    return true;
+}
+
+/**
+ * The risk-free rate must be reachable, or the whole product is down.
+ *
+ * Not a nicety in the gate. The browser refuses to calculate without a measured
+ * rate rather than substituting one, so a container that cannot reach
+ * home.treasury.gov serves a calculator that returns nothing on every route
+ * while passing every other check here. Egress from the deployment environment
+ * is the specific thing this proves — it cannot be established from a
+ * workstation, where the fetch always succeeds.
+ *
+ * Gated on as_of_date, not on the rate being positive: a zero short rate is a
+ * real observation, and rejecting one would be a policy judgement disguised as
+ * a data check.
+ */
+auto check_risk_free_rate(calculator::OptionsCalculator::Stub& stub) -> bool {
+    const calculator::RiskFreeRateRequest req;
+    calculator::RiskFreeRateResponse res;
+
+    const auto ctx = make_context();
+    const auto status = stub.GetRiskFreeRate(ctx.get(), req, &res);
+    if (!status.ok()) {
+        std::cerr << "GetRiskFreeRate FAILED: " << status.error_code() << " "
+                  << status.error_message() << "\n";
+        return false;
+    }
+    if (res.as_of_date().empty()) {
+        std::cerr << "GetRiskFreeRate returned no observation date\n";
+        return false;
+    }
+    if (res.curve().empty()) {
+        std::cerr << "GetRiskFreeRate returned an empty curve\n";
+        return false;
+    }
+
+    std::cout << "GetRiskFreeRate  " << res.tenor() << "  rate=" << std::fixed
+              << std::setprecision(4) << (res.rate() * 100.0) << "% continuous"
+              << "  published=" << std::setprecision(2) << (res.rate_published() * 100.0) << "%"
+              << "  as_of=" << res.as_of_date() << "  source=" << res.source()
+              << "  tenors=" << res.curve_size() << "\n";
     return true;
 }
 
@@ -185,6 +227,8 @@ auto main(int argc, char** argv) -> int {
     double spot = 0.0;
     if (!check_quote(*stub, symbol, spot)) return 1;
 
+    if (!check_risk_free_rate(*stub)) return 1;
+
     calculator::OptionStrike atm;
     std::string expiry;
     if (!check_chain(*stub, symbol, atm, expiry)) return 1;
@@ -196,6 +240,6 @@ auto main(int argc, char** argv) -> int {
 
     if (!check_strategy(*stub, symbol, spot, atm, 30)) return 1;
 
-    std::cout << "\nAll three RPCs returned live data.\n";
+    std::cout << "\nAll four RPCs returned live data.\n";
     return 0;
 }

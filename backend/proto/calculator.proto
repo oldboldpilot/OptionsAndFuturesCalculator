@@ -16,6 +16,11 @@ service OptionsCalculator {
   rpc CalculateStrategy (StrategyRequest) returns (StrategyResponse);
   rpc GetMarketQuote (QuoteRequest) returns (QuoteResponse);
   rpc GetMarketChain (ChainRequest) returns (ChainResponse);
+  // The risk-free rate is a property of the market, not of a symbol, so it has
+  // its own call rather than a field on QuoteResponse: hanging it off a
+  // per-symbol response would refetch a global datum on every symbol change
+  // and attribute its provenance to whichever ticker happened to ask.
+  rpc GetRiskFreeRate (RiskFreeRateRequest) returns (RiskFreeRateResponse);
 }
 
 message Leg {
@@ -50,20 +55,29 @@ message StrategyRequest {
   double price_range_percent = 6;  // e.g. 0.20 for ±20%
   uint32 price_steps = 7;
   uint32 date_steps = 8;
+  // Not yet consumed: the pricing path is sensen's Black-Scholes, which has no
+  // dividend-yield term (options.cppm:562-588). Sending a value here changes
+  // nothing, so no caller should present it to a user as modelled.
   double dividend_yield = 9;
 }
 
+// Position-level sensitivities, already multiplied by contract multiplier,
+// quantity and direction — these are position numbers, not per-share numbers.
+//
+// Units are part of the datum. sensen computes textbook Black-Scholes
+// derivatives, which are per year and per 1.00 of vol/rate; the service
+// converts them here to the conventions a trader reads, once, so that every
+// client gets the same answer instead of each guessing.
 message Greeks {
-  double delta = 1;
-  double gamma = 2;
-  double theta = 3;
-  double vega = 4;
-  double rho = 5;
-  // Second-order sensitivities, computed by finite difference on the
-  // first-order Greeks.
-  double vanna = 6;
-  double volga = 7;
-  double charm = 8;
+  double delta = 1;   // share-equivalents of the underlying
+  double gamma = 2;   // change in delta per $1 move in the underlying
+  double theta = 3;   // dollars per calendar day
+  double vega = 4;    // dollars per 1 implied-vol point (1%)
+  double rho = 5;     // dollars per 1 interest-rate point (1%)
+  // Second-order sensitivities, on the same units as their first-order parents.
+  double vanna = 6;   // change in delta per 1 IV point
+  double volga = 7;   // change in vega per 1 IV point
+  double charm = 8;   // change in delta per calendar day
 }
 
 // A point on the at-expiry payoff curve.
@@ -187,4 +201,37 @@ message ChainResponse {
   string selected_expiration_date = 5;
   repeated ExpirationDate available_expirations = 6;
   string provider = 7;
+}
+
+// --------------------------------------------------------------------------
+// Risk-free rate
+//
+// Previously a hardcoded 0.05 in the browser that still shaped expected value,
+// probability of profit and the whole distribution curve. It is now measured,
+// and it travels with its observation date and its source so the client can
+// say which it is showing instead of implying it was quoted.
+// --------------------------------------------------------------------------
+
+message RiskFreeRateRequest {}  // Empty today; room for a tenor filter later.
+
+message RatePoint {
+  string tenor = 1;            // "1M", "2M", "3M", "6M", "1Y"
+  int32 days = 2;              // nominal tenor in calendar days
+  double rate_bey = 3;         // as published: bond-equivalent yield, decimal
+  double rate_continuous = 4;  // 2*ln(1 + bey/2), decimal
+}
+
+message RiskFreeRateResponse {
+  // Continuously compounded, for the default tenor. This is the number to put
+  // in StrategyRequest.risk_free_rate: Black-Scholes discounts continuously,
+  // and par yields are quoted on a semiannual convention, so the two are not
+  // interchangeable (3.6 bp apart at 3.83%).
+  double rate = 1;
+  // The same tenor exactly as published, so a user can verify it at source.
+  double rate_published = 2;
+  string tenor = 3;            // which tenor `rate` and `rate_published` are
+  string as_of_date = 4;       // observation date, YYYY-MM-DD — not fetch time
+  string source = 5;           // provider dataset id, e.g. "us_treasury_par_yield"
+  repeated RatePoint curve = 6; // short end, ascending — allows expiry interpolation later
+  string fetched_at = 7;       // RFC3339, when the backend obtained it
 }
