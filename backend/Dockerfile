@@ -108,13 +108,22 @@ ENV DEBIAN_FRONTEND=noninteractive
 # named explicitly rather than relied on transitively, since the engine is the
 # only thing that needs it and the base image does not ship it.
 #
-# libz3-4 is here because libsensen links Z3 for gp_ara's SMT reasoning. It was
-# never an explicit build dependency: the LLVM apt packages pull it in for
+# libz3-4 was here because libsensen linked Z3 for gp_ara's SMT reasoning. It
+# was never an explicit build dependency: the LLVM apt packages pull it in for
 # Clang's static analyzer, so the builder had it by accident and the link
 # silently succeeded. Nothing carried that accident to the runtime stage, and
 # apt cannot notice — the image builds clean and the engine then dies at process
 # start on a missing shared object. `ldd` against the built binaries is what
 # catches this class, so treat that check as part of the build, not an extra.
+#
+# As of the sensen_slim trim (backend/CMakeLists.txt) the engine no longer links
+# libsensen at all, and `ldd calculator_engine` reports no libz3, no libpq and
+# no libtbb — TBB is now linked statically. So libz3-4, libpq5 and liburing2
+# are very likely vestigial here. They are deliberately left in place: dropping
+# them is a separate change that wants its own container build and `ldd` pass to
+# confirm, and the failure mode if that reasoning is wrong is a container that
+# will not start. Kept as a known, costed piece of dead weight rather than an
+# untested saving.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libstdc++6 libssl3t64 libtbb12 liburing2 libjemalloc2 libpq5 \
         libevent-2.1-7t64 libunwind8 libbrotli1 zlib1g libgssapi-krb5-2 \

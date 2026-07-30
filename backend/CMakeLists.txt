@@ -147,6 +147,94 @@ set(BUILD_BENCHMARKS OFF CACHE BOOL "Disable sensen benchmarks" FORCE)
 set(SKIP_CLANG_TIDY ON CACHE BOOL "Disable clang-tidy due to c++23 module scanning bugs" FORCE)
 add_subdirectory(sensen EXCLUDE_FROM_ALL)
 
+# --------------------------------------------------------------------------
+# sensen_slim — the part of sensen this engine actually uses.
+#
+# We import exactly two modules, sensen.options and sensen.portfolio. Linking
+# sensen's own `sensen` target compiled all 271 of its translation units and
+# produced a 93 MB libsensen.so, because `add_subdirectory` + linking a target
+# builds every module interface unit in its FILE_SET whether or not anything
+# imports it. Headers do not behave this way, which is why the cost stayed
+# invisible: nothing in our source referenced the other 253 modules.
+#
+# The price was not only build time. Any breakage anywhere in sensen — in a
+# diffusion model, a CUDA kernel, an SMT solver binding — failed this deploy,
+# and gp_ara dragged Z3 into the runtime image for code that is never called.
+#
+# The closure below is transitive and computed, not guessed:
+#
+#     python3 scripts/sensen_module_closure.py --check
+#
+# Nothing in the sensen submodule is modified. `add_subdirectory` above is
+# already EXCLUDE_FROM_ALL, so its targets build only when something links
+# them; linking sensen_slim instead of sensen is what leaves the other 263
+# uncompiled. sensen's tree is still configured, which is deliberate — fastjson,
+# logger and TBB come from it and are still linked.
+#
+# If a future import pulls in another sensen module, the build fails with
+# "module 'sensen.x' not found" — a clear error naming the fix. Re-run the
+# script above and add what it reports.
+#
+# One compile-flag difference is deliberate and is an improvement, not drift.
+# sensen/CMakeLists.txt:573 appends `-march=native` to everything in its own
+# directory scope. That lands AFTER this project's canonical
+# `-march=x86-64-v3 -mtune=generic`, so it won, and every sensen module was
+# built for whatever CPU happened to run the compiler — in the container, the
+# Railway builder rather than the host that runs the engine. config/
+# cpp_details.txt requires x86-64-v3/generic precisely to avoid that, for
+# cross-host FP parity and durable-replay determinism. sensen_slim is declared
+# in this directory scope, so it does not inherit the override and gets the
+# canonical flags. AVX2 and FMA are still enabled explicitly in CANONICAL_FLAGS;
+# only AVX-512 and host-tuning are given up, which no closure module uses.
+#
+# The other flags sensen_objects carries (SENSEN_HAS_AVX512F, HAS_LIBURING,
+# SENSEN_HAS_LIBPQ, _LIBCPP_NO_ABI_TAG and the mm_malloc suppressions) are
+# referenced by none of the eight files in the closure — verified by grep
+# before dropping them.
+# --------------------------------------------------------------------------
+set(SENSEN_SRC "${CMAKE_CURRENT_SOURCE_DIR}/sensen/src")
+
+add_library(sensen_slim STATIC)
+target_sources(sensen_slim
+    PUBLIC
+        FILE_SET CXX_MODULES BASE_DIRS "${SENSEN_SRC}" FILES
+            "${SENSEN_SRC}/bigdecimal.cppm"
+            "${SENSEN_SRC}/cpu_features.cppm"
+            "${SENSEN_SRC}/float_types.cppm"
+            "${SENSEN_SRC}/linear_algebra.cppm"
+            "${SENSEN_SRC}/options.cppm"
+            "${SENSEN_SRC}/parallel.cppm"
+            "${SENSEN_SRC}/portfolio.cppm"
+    PRIVATE
+        # Module implementation unit for sensen.parallel. It is a plain source,
+        # not a FILE_SET entry: it holds the <tbb/...> includes deliberately
+        # kept out of the interface so no importer's BMI carries tbb:: symbols
+        # (sensen/src/parallel.cppm:4-11).
+        "${SENSEN_SRC}/parallel.cpp"
+)
+
+set_target_properties(sensen_slim PROPERTIES
+    CXX_STANDARD 23
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+    POSITION_INDEPENDENT_CODE ON
+)
+
+# sensen's sources include "utils/sensen_std.h" relative to its src root.
+target_include_directories(sensen_slim PUBLIC $<BUILD_INTERFACE:${SENSEN_SRC}>)
+
+# TBB is configured by sensen's own CMakeLists, whether found on the system or
+# fetched. Only parallel.cpp needs it, but it is PUBLIC because consumers link
+# through this target.
+if(TARGET TBB::tbb)
+    target_link_libraries(sensen_slim PUBLIC TBB::tbb)
+elseif(DEFINED TBB_LIB AND TBB_LIB)
+    target_link_libraries(sensen_slim PUBLIC ${TBB_LIB})
+else()
+    message(FATAL_ERROR "sensen_slim needs TBB for sensen.parallel, and neither "
+                        "TBB::tbb nor TBB_LIB is defined after configuring sensen.")
+endif()
+
 # Include StochasticGraphExecutionEngine for distributed execution.
 #
 # SGEE's own standard is `import std;` against libc++, with std.pcm built from
@@ -177,7 +265,7 @@ add_subdirectory(external/SGEE sgee EXCLUDE_FROM_ALL)
 # Core engine binary
 add_executable(calculator_engine src/main.cpp src/modules/calculator_service.cpp)
 target_sources(calculator_engine PUBLIC FILE_SET CXX_MODULES FILES src/modules/calculator_service.cppm src/modules/market_data.cppm)
-target_link_libraries(calculator_engine PRIVATE proto_lib sensen fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto sgee)
+target_link_libraries(calculator_engine PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto sgee)
 
 # Python Bindings via nanobind
 # nanobind_add_module(
@@ -210,7 +298,7 @@ target_sources(test_runner
         src/modules/market_data.cppm
         src/modules/pricing_engine.cppm
 )
-target_link_libraries(test_runner PRIVATE proto_lib sensen fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto)
+target_link_libraries(test_runner PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto)
 
 add_test(NAME CoreEngineTest COMMAND test_runner)
 

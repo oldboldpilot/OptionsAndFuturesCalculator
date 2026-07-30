@@ -218,9 +218,84 @@ uploads faster than 62 MB regardless, and the four excluded sensen directories
 are `FORCE`d off in `backend/CMakeLists.txt:139-146`. Verified by parking all
 four and re-running configure — exit 0, zero errors.
 
-## Known Outstanding (unchanged)
+## Trimming sensen: 271 Files Compiled To Use 2 Modules
 
-- This repo compiles 255 sensen modules and imports 2.
+This engine imports exactly `sensen.options` and `sensen.portfolio`. Linking
+sensen's own target compiled **all 271** of its translation units and produced a
+**93 MB `libsensen.so`**, because `add_subdirectory` plus linking a target
+builds every module interface unit in its `FILE_SET` whether or not anything
+imports it. Headers do not behave this way, which is exactly why the cost stayed
+invisible — nothing in our source referenced the other 253 modules.
+
+The transitive closure is **7 modules in 8 files**:
+
+```
+sensen.options ──> sensen.bigdecimal, sensen.parallel
+sensen.portfolio ─> sensen.linear_algebra, sensen.bigdecimal
+                    (+ sensen.cpu_features, sensen.float_types)
+```
+
+`backend/CMakeLists.txt` now defines `sensen_slim` from those eight files and
+links it instead. **Nothing in the sensen submodule is modified.**
+`add_subdirectory(sensen …)` was already `EXCLUDE_FROM_ALL`, so its targets only
+ever built because we linked `sensen`; linking `sensen_slim` instead is the
+whole mechanism. sensen's tree is still configured, deliberately — `fastjson`,
+`logger` and TBB come from it.
+
+| | Before | After |
+| --- | --- | --- |
+| sensen files compiled | 271 | 8 |
+| incremental build | minutes | 19 s (81 steps) |
+| `libsensen.so` | 93 MB | not produced |
+| engine binary | links `libsensen.so.1` | self-contained, 17.3 MB |
+| runtime `libz3`/`libtbb` | required | neither linked |
+
+`scripts/sensen_module_closure.py --check` computes the closure from the source
+and fails if `sensen_slim` disagrees, so the list cannot drift silently. If a
+future import needs another module the build fails with
+`module 'sensen.x' not found`, which names its own fix.
+
+### A latent deployment hazard removed
+
+`sensen/CMakeLists.txt:573` appends `-march=native` to its whole directory
+scope. That lands *after* this project's canonical `-march=x86-64-v3
+-mtune=generic`, so it won, and every sensen module was compiled for whichever
+CPU ran the compiler — in the container, Railway's **builder**, not the host
+that runs the engine. `config/cpp_details.txt` mandates x86-64-v3/generic
+precisely to avoid this, for cross-host FP parity and durable-replay
+determinism.
+
+`sensen_slim` is declared in the parent directory scope, so it never sees the
+override and gets the canonical flags. AVX2 and FMA remain enabled explicitly;
+only AVX-512 and host tuning are given up, and no closure module uses either.
+
+The other defines `sensen_objects` carried — `SENSEN_HAS_AVX512F`,
+`HAS_LIBURING`, `SENSEN_HAS_LIBPQ`, `_LIBCPP_NO_ABI_TAG`, the `mm_malloc`
+suppressions — are referenced by none of the eight files, verified by grep
+before being dropped.
+
+### Verification
+
+- Configure: exit 0, zero errors. Ninja plans **8** sensen steps, not 271.
+- Build: exit 0, zero failures, 19 s.
+- `ldd calculator_engine`: no `libsensen`, no `libz3`, no `libtbb`, zero
+  missing sonames. TBB is now statically linked (808 in-binary symbols).
+- `build/lib/` still holds the three static libs the Dockerfile copies, so the
+  `COPY --from=builder /src/build/lib/` layer is unaffected.
+- Smoke test: all four RPCs live, calendar spread `curve_at=30d`, matrix axis
+  `30d @ 2026-07-30 -> 0d @ 2026-08-29`.
+
+A first flag comparison "passed" while extracting nothing from either side —
+both greps matched zero lines and `diff` duly called them identical. That is the
+same vacuous-check failure as the policy gate above, caught the same way: by
+asking what the check would have printed had it actually read something.
+
+`libz3-4`, `libpq5` and `liburing2` are now very likely vestigial in the runtime
+image. They are left in place on purpose — removing them wants its own container
+build and `ldd` pass, and the failure mode if that reasoning is wrong is an
+image that will not start.
+
+## Known Outstanding (unchanged)
 - No dividend-yield term in the pricing path.
 - `StrategyResponse.matrix` is filled correctly but not yet rendered; the UI
   still shows only the one-dimensional curve.
