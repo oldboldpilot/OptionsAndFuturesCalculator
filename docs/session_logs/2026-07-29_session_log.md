@@ -148,7 +148,98 @@ rather than substituting a plausible number, and `calculateStrategy` refuses
 when `spotPrice <= 0`. Verified no other hardcoded price table remains in
 `frontend/src`. `npm run build` passes.
 
-## 4. Known Outstanding
+## 4. Greek Units Corrected At The Service Boundary
+
+The strategy panel was displaying `Θ −21,251.836` and `V 3,931.162` for a
+7-DTE call spread whose entire risk was $861. The values were **arithmetically
+correct and conventionally mislabelled** — confirmed by reproducing all five
+Greeks to ≤0.3% against the engine, and again independently by hand-computing
+Black-Scholes for the same position and matching the rebuilt engine to four
+decimals.
+
+`sensen::price_black_scholes` (`backend/sensen/src/options.cppm:550-592`)
+returns textbook derivatives: theta and charm are per **year** because `T` is in
+years, and vega, vanna, volga and rho are per **1.00** of vol or rate. There is
+no `/365` and no `/100` anywhere in the library. That is correct for a maths
+library and was deliberately left alone — it is also a submodule with its own
+review policy. The consuming service owns presentation units, so the conversion
+went into `action_greeks` (`backend/src/modules/calculator_service.cpp:456-478`),
+the single site that emits `net_greeks`, which makes double conversion
+structurally impossible:
+
+| Greek | Divisor | Displayed unit |
+| --- | --- | --- |
+| delta | — | position share-equivalents |
+| gamma | — | delta per $1 of spot |
+| theta | `/365` | $ per calendar day |
+| vega | `/100` | $ per 1 IV point |
+| rho | `/100` | $ per 1 rate point |
+| vanna | `/100` | one vol factor |
+| volga | `/10000` | two vol factors (∂vega/∂σ) |
+| charm | `/365` | day count |
+
+The proto now documents these units so the next client inherits the convention
+rather than the trap, and `StrategyMetrics.tsx` renders an explicit unit beside
+every label. Observed after the fix: `θ −33.03 $/day`, `V 82.92 $/1% IV`.
+
+**A second, unrelated bug fell out of the same function.** `years` was computed
+once *outside* the leg loop from `ctx->horizon`, which is a **max** over the
+legs — so every leg was priced at the longest-dated leg's time to expiry. For a
+same-strike calendar spread that meant identical `S, K, σ, T` with opposite
+direction, and **every Greek cancelled to exactly zero**. Each leg now uses its
+own `expiration_days`, falling back to the position horizon rather than to zero,
+because sensen returns all-zero Greeks for `T <= 0` (`options.cppm:557-561`) and
+a zero fallback would make the leg silently vanish from the aggregate instead of
+being visibly absent.
+
+## 5. Risk-Free Rate Now Measured Rather Than Invented
+
+`riskFreeRate: 0.05` was hardcoded in the browser store, called by nothing, and
+still shaped expected value, probability of profit and the whole distribution
+curve. It is now observed.
+
+New `GetRiskFreeRate` RPC, backed by `TreasuryParYieldProvider` — a **keyless**
+CSV fetch of the US Treasury par yield curve from `home.treasury.gov`, behind a
+`RateProvider` concept and registry mirroring the existing market-data provider
+seam (`RISK_FREE_RATE_PROVIDER` selects, 6h cache, last-good fallback). Keyless
+matters for a practical reason: Railway variable writes return `Not Authorized`
+from this session, so a provider needing an API key could not have been
+provisioned at all.
+
+Its own RPC rather than a field on `QuoteResponse`, because the rate is a
+property of the market, not of an instrument — a field would refetch a global
+datum on every symbol change and attribute its provenance to whichever ticker
+happened to ask.
+
+**Failure is reported as failure.** There is no `0.0` sentinel: in a
+`double rate` a zero cannot be distinguished from a genuine zero short rate,
+which is a real historical observation. The gate is on `as_of_date`, not on the
+value being positive, so a 0.00% print survives while an unusable response does
+not. The client then states the rate is unavailable and lets the user supply one,
+labelled `ASSUMPTION`.
+
+The header chip carries tenor **and observation date** (`CMT 3M · 2026-07-29`)
+and styles itself stale past four calendar days — the widest ordinary gap being
+a Friday print read on a Tuesday after a Monday holiday. The backend serves its
+last good print indefinitely when the feed is down, so without the date on
+screen an arbitrarily old rate would have rendered as live.
+
+### Deploy ordering is not optional
+
+The browser refuses to calculate without a rate rather than substituting one.
+So if the frontend ships first, `GetRiskFreeRate` returns `UNIMPLEMENTED`, no
+route produces any result at all, **and** every Greek renders under a unit label
+the old backend's values do not satisfy — strictly worse than the original bug,
+because an unlabelled number became an explicitly false assertion.
+**Railway first, or simultaneously. Never Cloudflare first.**
+
+`smoke_client` was extended to cover the fourth RPC and assert a non-empty
+`as_of_date` and curve. Without that a container unable to reach treasury.gov
+would pass every check, deploy green, and serve a calculator that returns
+nothing — the smoke test is the only place egress from the deployment
+environment can be proven, since it always succeeds from a workstation.
+
+## 6. Known Outstanding
 
 - **The live UI is a stale Cloudflare Pages bundle.** The deployed JavaScript
   makes zero requests to `api.optionsandfuturescalculator.com` and still
@@ -164,5 +255,25 @@ when `spotPrice <= 0`. Verified no other hardcoded price table remains in
   `backend/external/SGEE` has 98, almost none of this session's work, and it
   carries its own review policy.
 - Futures term-structure panel and the 3D P&L surface from the approved scope.
-- `theta` / `vega` conventions need confirming before display — sensen appears
-  to return per-year and per-1.00-vol rather than per-day and per-1%.
+- **Calendar-spread P&L metrics are wrong**, and now conspicuously so. `value_at`
+  (`calculator_service.cpp:99`) prices every leg on one clock, so SELL 730 @7d /
+  BUY 730 @60d returns `max_profit = max_loss = −1700.00`. The near leg should
+  expire partway along the time axis and be carried at intrinsic thereafter.
+  Deliberately out of scope here — it changes the whole matrix, the expiry curve
+  and every metric derived from them — but this change set makes a calendar
+  spread's *Greeks* correct while its max profit, max loss, expected value and
+  PoP stay wrong, so a user now has less reason to distrust the panel than
+  before. Should be the next change set. No calendar entry was found in the
+  frontend strategy catalogue, so user-facing reachability is unconfirmed.
+- **`-ffast-math` in the build tree violates policy rules 50/55.**
+  `backend/build/build.ninja:32030,32141,32151` compile parts of this tree with
+  `-ffast-math -march=native -mtune=native`. Pre-existing and unrelated to this
+  work, but it is a real finding rather than the false positive it was first
+  taken for.
+- The intra-proto Greek convention split remains: `ChainResponse` per-strike
+  Greeks pass through verbatim from Alpaca (per-share, per-day theta) while
+  `StrategyResponse.net_greeks` is position-scaled. Both are now documented in
+  the proto, but they are still two conventions in one message set.
+- No dividend yield in the Black-Scholes model (`options.cppm:562-588`), so
+  SPY's ~1.2% yield is unmodelled and call deltas and rho are biased slightly
+  high. `StrategyRequest.dividend_yield` exists on the wire and is unconsumed.
