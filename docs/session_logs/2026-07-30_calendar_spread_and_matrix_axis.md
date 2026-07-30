@@ -123,13 +123,42 @@ field, but the next stream-formatted number will be silently wrong too. Prefer
   / 3.7938% continuous, `as_of 2026-07-29`; matrix axis `30d @ 2026-07-30 -> 0d
   @ 2026-08-29`; calendar spread `curve_at=30d`, max_profit 1378.78.
 
+## The Policy Checker Audited Nothing
+
+`scripts/code_policy_check.sh` was failing on `-ffast-math`. Every hit was in
+gitignored build output (`backend/build/**`), downloaded dependencies
+(`_deps/fastjson-src`), or SGEE documentation whose offence was the sentence
+"no `-ffast-math`". No tracked first-party source carries the flag.
+
+Looking closer, the scope was wrong in both directions at once. Rules 1 and 3
+scanned `${REPO_ROOT}/src` — **a directory that does not exist**; the C++ is in
+`backend/src`. `grep` matched nothing and both printed `[PASS]`
+unconditionally. So the gate produced two false PASSes and one false FAIL: it
+had never inspected a single file it claimed to audit.
+
+Rewritten to take its scope from `git ls-files`, which excludes build output,
+downloaded dependencies and `node_modules` by construction, and lists
+submodules as gitlink entries instead of descending into them — SGEE and sensen
+are separate projects with their own checkers. The `-ffast-math` rule now looks
+only at build configuration, where a flag can actually be set, and ignores
+commented-out and negated mentions.
+
+Verified by planting each violation in turn and confirming it is caught by the
+correct rule while the other two still pass, then restoring:
+
+| Planted | Caught | Other rules |
+| --- | --- | --- |
+| `return new int(5);` in `backend/src/main.cpp` | Rule 3 | both PASS |
+| `add_compile_options(-ffast-math)` in `backend/CMakeLists.txt` | Rules 50 & 55 | both PASS |
+| `auto legacy_style(int x) { … }` | Rule 31 warning | both PASS |
+
+A green checker that has never read a file is worse than a red one, because it
+is quoted as evidence. Restoring the planted violations used `cp` from a
+backup, not `git checkout --`, for the reason recorded in
+[2026-07-30_libcxx_std_module_investigation.md](2026-07-30_libcxx_std_module_investigation.md).
+
 ## Known Outstanding (unchanged)
 
-- `scripts/code_policy_check.sh` fails on `-ffast-math`, but every hit is in
-  gitignored build output (`backend/build/**`), downloaded dependencies
-  (`_deps/fastjson-src`), or SGEE documentation that merely *says* "no
-  `-ffast-math`". No tracked first-party source carries the flag. The checker's
-  scope is the defect, not the code.
 - This repo compiles 255 sensen modules and imports 2.
 - No dividend-yield term in the pricing path.
 - `StrategyResponse.matrix` is filled correctly but not yet rendered; the UI
