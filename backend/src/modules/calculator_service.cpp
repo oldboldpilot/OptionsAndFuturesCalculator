@@ -64,6 +64,69 @@ namespace md = options_calculator::market_data;
 }
 
 /**
+ * Black-Scholes-Merton: Black-Scholes with a continuous dividend yield `q`.
+ *
+ * sensen's price_black_scholes has no dividend term (options.cppm:550-591), and
+ * this repo does not modify that submodule. It does not need to. Merton's model
+ * is Black-Scholes evaluated at a discounted spot:
+ *
+ *     d1 = [ln(S/K) + (r - q + sigma^2/2)T] / (sigma*sqrt(T))
+ *
+ * and substituting S' = S*exp(-qT) into the plain Black-Scholes d1 gives
+ * ln(S/K) - qT + (r + sigma^2/2)T, which is the same expression. So d1, d2 and
+ * the option value come out exactly right with no change to the library — the
+ * value needs no correction at all.
+ *
+ * The Greeks do, because they are derivatives with respect to S and T while the
+ * substitution itself depends on both. Each factor below is derived, not
+ * approximated, and every one collapses to 1 (or to zero correction) at q = 0,
+ * so the dividend-free path is bit-for-bit what it was:
+ *
+ *   value  exact               V_M = V_B(S')
+ *   delta  x exp(-qT)          dV/dS  = dV/dS' * dS'/dS
+ *   gamma  x exp(-2qT)         chain rule applied twice
+ *   vega   exact               vega_B(S') = S'*sqrt(T)*phi(d1) is already Merton's
+ *   rho    exact               d2 is unchanged, and rho depends on d2 alone
+ *   theta  + q*S'*delta_B      the dividend stream the holder does not receive
+ *   vanna  x exp(-qT)          d(vega)/dS, one spot factor
+ *   volga  exact               d(vega)/dsigma, no spot factor
+ *   charm  see below
+ *
+ * charm is the one that has to be done carefully. sensen computes
+ *     charm_B = -phi(d1) * (r/(sigma*sqrt(T)) - d2/(2T))
+ * which is precisely Merton's charm at q = 0. Merton's general form replaces r
+ * with (r - q) inside the bracket and adds a q*exp(-qT)*N(d1) term, so
+ *     charm_M = exp(-qT) * [ charm_B(S') + q*delta_B(S') + q*phi(d1)/(sigma*sqrt(T)) ]
+ * and phi(d1) is recovered as vega_B(S')/(S'*sqrt(T)). The same expression holds
+ * for puts, because the put's delta carries the -1 that Merton's put charm needs.
+ */
+[[nodiscard]] auto price_with_dividend(double spot, double strike, double r, double q, double sigma,
+                                       double years, sensen::OptionType type) noexcept
+    -> sensen::BlackScholesResult {
+    if (q == 0.0) return sensen::price_black_scholes(spot, strike, r, sigma, years, type);
+
+    const double discount = std::exp(-q * years);
+    const double adjusted_spot = spot * discount;
+    auto bs = sensen::price_black_scholes(adjusted_spot, strike, r, sigma, years, type);
+
+    // T <= 0 returns intrinsic with all Greeks zero; there is nothing to adjust,
+    // and dividing by `years` below would not be defined.
+    if (years <= 0.0) return bs;
+
+    // phi(d1), recovered from vega before delta is overwritten below.
+    const double pdf_d1 = (adjusted_spot > 0.0) ? bs.vega / (adjusted_spot * std::sqrt(years)) : 0.0;
+    const double delta_b = bs.delta;
+
+    bs.theta += q * adjusted_spot * delta_b;
+    bs.charm = discount * (bs.charm + q * delta_b + q * pdf_d1 / (sigma * std::sqrt(years)));
+    bs.delta = discount * delta_b;
+    bs.gamma *= discount * discount;
+    bs.vanna *= discount;
+    // value, vega, rho and volga are already Merton's; see the table above.
+    return bs;
+}
+
+/**
  * Position P&L at `days_elapsed` from now, for a given underlying price.
  *
  * Every leg is on its OWN clock. A leg with time left is re-priced by
@@ -88,7 +151,7 @@ namespace md = options_calculator::market_data;
  * past a settled leg you read, the more the picture leans on it.
  */
 [[nodiscard]] auto value_at_elapsed(const calculator::StrategyRequest& req, double price,
-                                    double days_elapsed, double r, double sigma,
+                                    double days_elapsed, double r, double q, double sigma,
                                     double horizon) noexcept -> double {
     double total = 0.0;
     for (const auto& leg : req.legs()) {
@@ -126,7 +189,7 @@ namespace md = options_calculator::market_data;
 
         const auto type = (leg.type() == calculator::Leg::CALL) ? sensen::OptionType::Call
                                                                 : sensen::OptionType::Put;
-        const auto bs = sensen::price_black_scholes(price, leg.strike(), r, iv, remaining / 365.0, type);
+        const auto bs = price_with_dividend(price, leg.strike(), r, q, iv, remaining / 365.0, type);
         total += (bs.value - leg.premium()) * dir * mult * qty;
     }
     return total;
@@ -194,14 +257,17 @@ struct Distribution {
 };
 
 [[nodiscard]] auto lognormal_over(const std::vector<double>& grid, double spot, double sigma,
-                                  double years, double r) -> Distribution {
+                                  double years, double r, double q) -> Distribution {
     Distribution dist;
     dist.price = grid;
     dist.density.assign(grid.size(), 0.0);
     if (grid.size() < 2 || spot <= 0.0 || sigma <= 0.0 || years <= 0.0) return dist;
 
     const double sd = sigma * std::sqrt(years);
-    const double mu = std::log(spot) + (r - 0.5 * sigma * sigma) * years;
+    // Risk-neutral drift is (r - q): a dividend-paying underlying has a lower
+    // forward, so the same option is worth less and PoP shifts with it. Using r
+    // alone would shade a distribution the engine did not price against.
+    const double mu = std::log(spot) + (r - q - 0.5 * sigma * sigma) * years;
 
     double total = 0.0;
     for (std::size_t i = 0; i < grid.size(); ++i) {
@@ -289,6 +355,7 @@ struct ComputeContext {
 
     double spot{0.0};
     double r{0.0};
+    double q{0.0};      // Continuous dividend yield.
     double sigma{0.0};
     double horizon{0.0};    // Latest leg expiry: the date axis of the matrix.
     double curve{0.0};      // Earliest leg expiry: the date the payoff curve is drawn at.
@@ -329,6 +396,7 @@ using sgee::ExecutionResult;
 [[nodiscard]] auto action_initialize(Ctx& ctx) -> ExecutionResult<> {
     ctx->spot = ctx->request.current_price();
     ctx->r = ctx->request.risk_free_rate();
+    ctx->q = ctx->request.dividend_yield();
     ctx->sigma = position_iv(ctx->request);
     ctx->horizon = horizon_days(ctx->request);
     ctx->curve = curve_days(ctx->request);
@@ -379,7 +447,7 @@ using sgee::ExecutionResult;
 
     for (const double price : ctx->price_grid) {
         const double pnl =
-            value_at_elapsed(ctx->request, price, ctx->curve, ctx->r, ctx->sigma, ctx->horizon);
+            value_at_elapsed(ctx->request, price, ctx->curve, ctx->r, ctx->q, ctx->sigma, ctx->horizon);
         ctx->expiry_pnl.push_back(pnl);
         max_profit = std::max(max_profit, pnl);
         max_loss = std::min(max_loss, pnl);
@@ -455,7 +523,7 @@ using sgee::ExecutionResult;
 
         for (const double price : ctx->price_grid) {
             const double pnl =
-                value_at_elapsed(ctx->request, price, elapsed, ctx->r, ctx->sigma, ctx->horizon);
+                value_at_elapsed(ctx->request, price, elapsed, ctx->r, ctx->q, ctx->sigma, ctx->horizon);
             auto& cell = *ctx->response.add_matrix();
             cell.set_price(price);
             cell.set_days_to_expiration(static_cast<std::uint32_t>(std::llround(dte)));
@@ -501,7 +569,7 @@ using sgee::ExecutionResult;
             const auto type = (leg.type() == calculator::Leg::CALL) ? sensen::OptionType::Call
                                                                    : sensen::OptionType::Put;
             const auto bs =
-                sensen::price_black_scholes(ctx->spot, leg.strike(), ctx->r, iv, years, type);
+                price_with_dividend(ctx->spot, leg.strike(), ctx->r, ctx->q, iv, years, type);
             const double scale = dir * mult * qty;
 
             // Unit conversion belongs here, at the presentation boundary, not
@@ -563,7 +631,7 @@ using sgee::ExecutionResult;
     // the curve date. A distribution on a different clock would weight the
     // right P&Ls by the wrong probabilities.
     const auto dist =
-        lognormal_over(ctx->price_grid, ctx->spot, ctx->sigma, ctx->curve / 365.0, ctx->r);
+        lognormal_over(ctx->price_grid, ctx->spot, ctx->sigma, ctx->curve / 365.0, ctx->r, ctx->q);
     const auto figures = risk_figures(dist, ctx->expiry_pnl, ctx->response.max_profit());
 
     ctx->response.set_pop(figures.pop);

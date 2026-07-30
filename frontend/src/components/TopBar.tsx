@@ -14,7 +14,7 @@ import ThemeToggle from './ThemeToggle';
 export function TopBar() {
   const {
     symbol, spotPrice, assetClass, setSymbol, calculateStrategy,
-    isLoading, error, legs, riskFreeRate, setRiskFreeRate,
+    isLoading, error, legs, riskFreeRate, setRiskFreeRate, dividendYield, setDividendYield,
     rateSource, rateMeta, loadRiskFreeRate,
   } = useCalculatorStore();
 
@@ -32,6 +32,9 @@ export function TopBar() {
   // back mid-edit. Holding the text locally and only pushing valid numbers
   // through keeps typing natural while never letting NaN reach the store.
   const [rateDraft, setRateDraft] = useState<string | null>(null);
+  // Same string-draft treatment as the rate: a number input bound straight
+  // to state cannot hold an intermediate value like "1." while typing.
+  const [divDraft, setDivDraft] = useState<string | null>(null);
   // Show the rate the engine actually prices with — the continuously compounded
   // one. Showing the published par yield here instead was worse than a cosmetic
   // difference: the two are different numbers (3.83% bond-equivalent vs 3.7938%
@@ -207,6 +210,49 @@ export function TopBar() {
           aria-label="Risk-free rate, percent"
         />
         <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--color-ink-400)' }}>% r</span>
+      </div>
+
+      {/*
+        Continuous dividend yield.
+
+        Deliberately labelled "assumed" and never "measured". The risk-free rate
+        next to it carries a source, a tenor and an observation date because
+        home.treasury.gov publishes one; no provider wired into this engine
+        publishes a forward-looking continuous dividend yield, so this can only
+        ever be a number somebody chose. Zero is the honest default — it means
+        no dividend is modelled, and the engine's q == 0 path is bit-for-bit
+        plain Black-Scholes rather than a dividend model fed a zero.
+      */}
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.3125rem' }}>
+        <label
+          htmlFor="divy"
+          className={dividendYield > 0 ? 'chip chip-modelled' : 'chip'}
+          title={
+            dividendYield > 0
+              ? `Assumed continuous dividend yield of ${(dividendYield * 100).toFixed(2)}% p.a. Priced by Black-Scholes-Merton at a discounted spot. This is a stated assumption, not measured data.`
+              : 'No dividend modelled. Enter a continuous annual yield to price by Black-Scholes-Merton; it will be labelled an assumption.'
+          }
+        >
+          {dividendYield > 0 ? 'div assumed' : 'no div'}
+        </label>
+        <input
+          id="divy"
+          className="input num"
+          type="number"
+          step="0.1"
+          min="0"
+          max="25"
+          value={divDraft ?? (dividendYield === 0 ? '' : (dividendYield * 100).toFixed(2))}
+          placeholder="0.00"
+          onChange={(e) => {
+            setDivDraft(e.target.value);
+            const pct = parseFloat(e.target.value);
+            setDividendYield(Number.isNaN(pct) || pct < 0 ? 0 : pct / 100);
+          }}
+          style={{ width: '58px', textAlign: 'right' }}
+          aria-label="Dividend yield, percent per annum"
+        />
+        <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--color-ink-400)' }}>% q</span>
       </div>
 
       <div style={{ flex: 1 }} />

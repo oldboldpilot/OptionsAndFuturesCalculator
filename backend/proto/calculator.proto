@@ -55,9 +55,17 @@ message StrategyRequest {
   double price_range_percent = 6;  // e.g. 0.20 for ±20%
   uint32 price_steps = 7;
   uint32 date_steps = 8;
-  // Not yet consumed: the pricing path is sensen's Black-Scholes, which has no
-  // dividend-yield term (options.cppm:562-588). Sending a value here changes
-  // nothing, so no caller should present it to a user as modelled.
+  // Continuous dividend yield, as a decimal (0.013 for 1.3% p.a.).
+  //
+  // Consumed by the Black-Scholes-Merton path: the engine prices at a
+  // discounted spot S*exp(-qT), which is exactly Merton's model, and adjusts
+  // each Greek by its derived factor. Zero means no dividend is modelled and
+  // the result is bit-for-bit the plain Black-Scholes answer.
+  //
+  // This is an ASSUMPTION, not measured data — no provider wired into this
+  // engine publishes a forward-looking continuous yield. A client that lets a
+  // user set it must label it as stated rather than measured, the same way the
+  // risk-free rate distinguishes its two sources.
   double dividend_yield = 9;
 }
 

@@ -7,6 +7,7 @@ import PayoffLadder from './PayoffLadder';
 import PositionLegs from './PositionLegs';
 import StrategyMetrics from './StrategyMetrics';
 import OptionChain from './OptionChain';
+import PnLMatrix from './PnLMatrix';
 import { StrategySelector } from './StrategySelector';
 import { useCalculatorStore } from '../store/useCalculatorStore';
 
@@ -82,7 +83,13 @@ export function StrategyWorkspace({ heading }: { heading?: string }) {
         {/* Read */}
         <div className="stagger" style={column}>
           <ProbabilityCurve />
-          <div style={{ flex: '0 0 42%', minHeight: 0, display: 'flex' }}>
+          {/* The matrix wants width — twelve date columns plus the price axis —
+              so it lives in the widest column. It scrolls internally rather
+              than forcing the page to scroll sideways. */}
+          <div style={{ flex: '0 0 34%', minHeight: 0, display: 'flex' }}>
+            <PnLMatrix />
+          </div>
+          <div style={{ flex: '0 0 32%', minHeight: 0, display: 'flex' }}>
             <OptionChain />
           </div>
         </div>

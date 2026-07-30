@@ -329,6 +329,115 @@ auto check_calendar_spread(calculator::OptionsCalculator::Stub& stub, const std:
     return true;
 }
 
+/**
+ * Dividend yield must actually reach the pricing path.
+ *
+ * The proto carried `dividend_yield` for a long time while the engine ignored
+ * it, so a caller could set it, see a confident answer, and have no way to tell
+ * the field had been dropped on the floor. These assertions are about direction
+ * and magnitude rather than exact figures, because the chain's live premium and
+ * IV move: a continuous yield q lowers the forward, so a call is worth strictly
+ * less and its delta strictly smaller, and a q of zero must reproduce the
+ * dividend-free answer EXACTLY — that last one is what proves the Merton path
+ * does not perturb the default.
+ */
+auto check_dividend_yield(calculator::OptionsCalculator::Stub& stub, const std::string& symbol,
+                          double spot, const calculator::OptionStrike& atm, int dte) -> bool {
+    const auto price_with = [&](double q, calculator::StrategyResponse& out) -> bool {
+        calculator::StrategyRequest req;
+        req.set_underlying_symbol(symbol);
+        req.set_current_price(spot);
+        req.set_implied_volatility(atm.call_iv());
+        req.set_risk_free_rate(0.05);
+        req.set_dividend_yield(q);
+
+        auto& leg = *req.add_legs();
+        leg.set_action(calculator::Leg::BUY);
+        leg.set_type(calculator::Leg::CALL);
+        leg.set_strike(atm.strike());
+        leg.set_expiration_days(dte);
+        leg.set_quantity(1);
+        leg.set_premium(atm.call_ask());
+        leg.set_implied_volatility(atm.call_iv());
+        leg.set_contract_multiplier(100.0);
+
+        const auto ctx = make_context();
+        const auto status = stub.CalculateStrategy(ctx.get(), req, &out);
+        if (!status.ok()) {
+            std::cerr << "Dividend case (q=" << q << ") FAILED: " << status.error_code() << " "
+                      << status.error_message() << "\n";
+            return false;
+        }
+        return true;
+    };
+
+    calculator::StrategyResponse zero, base, paying;
+    if (!price_with(0.0, zero)) return false;
+    if (!price_with(0.0, base)) return false;
+    if (!price_with(0.04, paying)) return false;
+
+    const double d0 = zero.net_greeks().delta();
+    const double db = base.net_greeks().delta();
+    const double dq = paying.net_greeks().delta();
+    const double t0 = zero.net_greeks().theta();
+    const double tq = paying.net_greeks().theta();
+
+    std::cout << "Dividend yield    q=0.00  delta=" << std::setprecision(4) << db
+              << "  theta=" << std::setprecision(2) << t0
+              << "  pop=" << std::setprecision(4) << zero.pop() << "\n"
+              << "                  q=0.04  delta=" << std::setprecision(4) << dq
+              << "  theta=" << std::setprecision(2) << tq
+              << "  pop=" << std::setprecision(4) << paying.pop() << "\n";
+
+    // Determinism: q = 0 twice must agree bit for bit, or something upstream is
+    // varying and the comparisons below mean nothing.
+    if (d0 != db) {
+        std::cerr << "q=0 is not deterministic (" << d0 << " vs " << db << ")\n";
+        return false;
+    }
+    // A dividend lowers the forward: the call is worth less and its delta falls.
+    if (!(dq < db)) {
+        std::cerr << "Dividend yield did not reduce call delta (" << dq << " >= " << db
+                  << ") — the field is not reaching the pricing path\n";
+        return false;
+    }
+    // exp(-qT) with q=0.04 over `dte` days is a small, bounded effect; a delta
+    // that collapses means the yield is being applied on the wrong scale (a
+    // percentage read as a decimal, say).
+    const double ratio = (db != 0.0) ? dq / db : 0.0;
+    const double years = static_cast<double>(dte) / 365.0;
+    const double floor_ratio = std::exp(-0.04 * years) * 0.90;
+    if (ratio < floor_ratio) {
+        std::cerr << "Dividend-adjusted delta ratio " << ratio << " is below " << floor_ratio
+                  << "; the yield looks mis-scaled\n";
+        return false;
+    }
+    // Theta moves the way that reads backwards at first glance, so it is worth
+    // stating precisely. A dividend makes the call worth LESS, but it decays
+    // MORE SLOWLY: as T shrinks the drag exp(-qT) unwinds toward 1, pushing the
+    // effective spot back up and offsetting part of the time decay. Merton's
+    // theta carries an explicit +q*S*exp(-qT)*N(d1) term for exactly this, and a
+    // finite difference of the option VALUE in T — which uses no theta formula
+    // at all — agrees. So the long call's theta must become less negative.
+    // Asserting the opposite is a natural mistake; this comment is here so the
+    // next reader does not "fix" the engine to satisfy a wrong intuition.
+    if (!(tq > t0)) {
+        std::cerr << "Dividend yield did not slow long-call decay (theta " << tq << " should be "
+                  << "greater than " << t0 << ")\n";
+        return false;
+    }
+    // The distribution has to move too, not just the pricing. A yield lowers the
+    // risk-neutral drift to (r - q), so a long call's probability of profit falls.
+    // Without this the engine could price with q while shading a distribution
+    // that ignored it.
+    if (!(paying.pop() < zero.pop())) {
+        std::cerr << "Dividend yield did not lower probability of profit (" << paying.pop()
+                  << " >= " << zero.pop() << ") — the drift term is not seeing q\n";
+        return false;
+    }
+    return true;
+}
+
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
@@ -357,6 +466,8 @@ auto main(int argc, char** argv) -> int {
     if (!check_strategy(*stub, symbol, spot, atm, 30)) return 1;
 
     if (!check_calendar_spread(*stub, symbol, spot, atm, 30, 60)) return 1;
+
+    if (!check_dividend_yield(*stub, symbol, spot, atm, 30)) return 1;
 
     std::cout << "\nAll four RPCs returned live data.\n";
     return 0;

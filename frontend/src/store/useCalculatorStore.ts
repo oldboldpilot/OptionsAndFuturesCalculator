@@ -38,6 +38,16 @@ export interface RateMeta {
   fetchedAt: string;  // RFC3339
 }
 
+/** One cell of the price x date grid. Maps 1:1 onto `MatrixCell`. */
+export interface MatrixCell {
+  price: number;
+  daysToExpiration: number;
+  /** ISO-8601 YYYY-MM-DD. */
+  date: string;
+  pnl: number;
+  returnOnRiskPercent: number;
+}
+
 /**
  * The engine's answer.
  *
@@ -49,6 +59,16 @@ export interface RateMeta {
 export interface CalculationResult {
   /** At-expiry P&L across the price axis. `StrategyResponse.pnl_matrix`. */
   expiryCurve: CurvePoint[];
+  /**
+   * The price x date grid. `StrategyResponse.matrix`.
+   *
+   * The engine has always computed this — every leg re-priced at every future
+   * date — and the UI rendered only the one-dimensional curve above, so the
+   * work was thrown away on arrival. It is the only view in which a calendar
+   * or diagonal spread is legible at all, because those positions are defined
+   * by how their value moves BETWEEN today and the near expiry.
+   */
+  matrix: MatrixCell[];
   max_profit: number;
   max_loss: number;
   break_even: number;
@@ -90,6 +110,12 @@ export interface CalculationResult {
     curveDays: number;
     /** The rate the engine priced with. Continuous when measured, as-typed when stated. */
     riskFreeRate: number;
+    /**
+     * Continuous dividend yield the engine priced with. Always an assumption —
+     * no provider wired into this engine publishes a forward-looking yield — so
+     * it is presented as stated, never as measured.
+     */
+    dividendYield: number;
     rateSource: RateSource;
     rateMeta: RateMeta | null;
   };
@@ -135,6 +161,8 @@ interface CalculatorState {
   spotPrice: number;
   riskFreeRate: number | null;
   rateSource: RateSource;
+  /** Continuous dividend yield, decimal. Zero means no dividend is modelled. */
+  dividendYield: number;
   rateMeta: RateMeta | null;
   result: CalculationResult | null;
   isLoading: boolean;
@@ -153,6 +181,7 @@ interface CalculatorState {
   updateLeg: (id: string, updates: Partial<Leg>) => void;
   setSpotPrice: (price: number) => void;
   setRiskFreeRate: (rate: number) => void;
+  setDividendYield: (q: number) => void;
   loadRiskFreeRate: () => Promise<void>;
   loadChain: (expiration?: string) => void;
   setSelectedExpiration: (date: string) => void;
@@ -228,6 +257,7 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
   // the UI displayed.
   riskFreeRate: null,
   rateSource: 'pending',
+  dividendYield: 0,
   rateMeta: null,
   result: null,
   isLoading: false,
@@ -311,6 +341,7 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
   // conventions, because we cannot know which one the user meant and picking
   // one would silently restate their input.
   setRiskFreeRate: (rate) => set({ riskFreeRate: rate, rateSource: 'user' }),
+  setDividendYield: (q) => set({ dividendYield: q >= 0 ? q : 0 }),
 
   /**
    * Fetch the measured risk-free rate.
@@ -509,6 +540,10 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
       req.setCurrentPrice(spotPrice);
       req.setImpliedVolatility(iv);
       req.setRiskFreeRate(rate);
+      // Always sent, including zero. Zero is meaningful — it says 'no dividend
+      // modelled' — and the engine's q == 0 path is bit-for-bit plain
+      // Black-Scholes, so this cannot perturb a non-dividend position.
+      req.setDividendYield(get().dividendYield);
 
       const legType = (l: Leg) => {
         switch (l.option_type) {
@@ -544,6 +579,14 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
         pnl: p.getPnl(),
       }));
 
+      const matrix: MatrixCell[] = res.getMatrixList().map((c) => ({
+        price: c.getPrice(),
+        daysToExpiration: c.getDaysToExpiration(),
+        date: c.getDateStr(),
+        pnl: c.getPnlDollars(),
+        returnOnRiskPercent: c.getReturnOnRiskPercent(),
+      }));
+
       const g = res.getNetGreeks();
       const rm = res.getRiskMetrics();
       const maxLoss = res.getMaxLoss();
@@ -553,6 +596,7 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
         error: null,
         result: {
           expiryCurve,
+          matrix,
           max_profit: res.getMaxProfit(),
           max_loss: maxLoss,
           break_even: res.getBreakEven(),
@@ -583,6 +627,7 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
             // that predates the field, and 0 would collapse the distribution.
             curveDays: res.getCurveDaysToExpiration() || days,
             riskFreeRate: rate,
+            dividendYield: get().dividendYield,
             rateSource: get().rateSource,
             rateMeta: get().rateMeta,
           },

@@ -88,13 +88,23 @@ export function ProbabilityCurve() {
     // position horizon. Modelling the density over the horizon instead would
     // shade one distribution beneath a PoP taken from another — two answers to
     // the same question in a single panel.
-    const { spot, impliedVolatility: iv, curveDays: days, riskFreeRate: r } = result.inputs;
+    const {
+      spot,
+      impliedVolatility: iv,
+      curveDays: days,
+      riskFreeRate: r,
+      dividendYield: q,
+    } = result.inputs;
     const curve = result.expiryCurve;
     if (spot <= 0 || iv <= 0 || days <= 0 || curve.length < 2) return null;
 
     const T = days / 365;
     const sd = iv * Math.sqrt(T);
-    const mu = Math.log(spot) + (r - 0.5 * iv * iv) * T;
+    // Drift is (r - q), matching the engine's lognormal_over. A dividend-paying
+    // underlying has a lower forward; shading a distribution centred on r while
+    // the engine's PoP came from one centred on (r - q) would put two different
+    // answers in the same panel.
+    const mu = Math.log(spot) + (r - q - 0.5 * iv * iv) * T;
 
     // Span ±3.2σ in log space — wide enough that the tails visibly close.
     const lo = Math.max(0.01, spot * Math.exp(-3.2 * sd));

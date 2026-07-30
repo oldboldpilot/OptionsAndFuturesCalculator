@@ -357,6 +357,95 @@ spread probe — bit-identical to the untrimmed engine on the same inputs, despi
 moving from `-march=native` to `-march=x86-64-v3`. Determinism is the point of
 those canonical flags, and this is it being demonstrated rather than asserted.
 
+## Dividend Yield, Without Touching sensen
+
+`StrategyRequest.dividend_yield` existed and was documented as "not yet
+consumed": sensen's `price_black_scholes` has no dividend term
+(`options.cppm:550-591`), and this repo does not modify that submodule. A caller
+could set the field, get a confident answer, and have no way to tell it had been
+dropped.
+
+It turns out no library change is needed. Merton's model is Black-Scholes
+evaluated at a discounted spot — substituting `S' = S·exp(-qT)` into the plain
+`d1` yields `ln(S/K) - qT + (r + σ²/2)T`, which is exactly Merton's
+`ln(S/K) + (r - q + σ²/2)T`. So `d1`, `d2` and the option **value** come out
+right with no correction at all.
+
+The Greeks need correcting, because they differentiate with respect to `S` and
+`T` while the substitution itself depends on both. Every factor is derived, and
+every one collapses at `q = 0`:
+
+| Greek | Adjustment | Why |
+| --- | --- | --- |
+| value | exact | `V_M = V_B(S')` |
+| delta | `× exp(-qT)` | chain rule, one spot factor |
+| gamma | `× exp(-2qT)` | chain rule twice |
+| vega | exact | `S'√T·φ(d1)` is already Merton's |
+| rho | exact | depends on `d2` alone, which is unchanged |
+| theta | `+ q·S'·delta_B` | the dividend stream the holder does not receive |
+| vanna | `× exp(-qT)` | `d(vega)/dS`, one spot factor |
+| volga | exact | `d(vega)/dσ`, no spot factor |
+| charm | see below | |
+
+charm needed care. sensen computes
+`charm_B = -φ(d1)·(r/(σ√T) - d2/(2T))`, which is *precisely* Merton's charm at
+`q = 0`. The general form replaces `r` with `(r - q)` in the bracket and adds a
+`q·exp(-qT)·N(d1)` term, giving
+`charm_M = exp(-qT)·[charm_B + q·delta_B + q·φ(d1)/(σ√T)]`, with `φ(d1)`
+recovered as `vega_B/(S'√T)`. The same expression holds for puts, because the
+put's delta carries the `-1` that Merton's put charm needs.
+
+Verified against an independent Merton implementation across 8 parameter sets ×
+9 Greeks, calls and puts: **worst relative error 1.76e-14**.
+
+The risk-neutral drift moved with it — `lognormal_over` now uses `(r - q)`, so
+PoP, EV and VaR describe the same distribution the engine priced against, and
+`ProbabilityCurve` shades that same drift rather than a second one.
+
+### A test that encoded a wrong belief
+
+The first smoke assertion was *"a dividend must make long-call theta worse"*.
+It failed: theta went from `-21.47` to `-16.95`. The engine was right and the
+assertion was wrong. A dividend makes the call worth **less** but decay **more
+slowly** — as `T` shrinks the drag `exp(-qT)` unwinds toward 1, pushing the
+effective spot back up. Confirmed by finite-differencing the option *value* in
+`T`, which uses no theta formula at all: `-78.452/yr` at `q=0` versus
+`-62.017/yr` at `q=0.04`, matching the analytic figures exactly.
+
+Level and rate of change are different quantities, and conflating them is an
+easy mistake to make twice — hence the comment in `smoke_client.cpp` telling the
+next reader not to "fix" the engine to satisfy the wrong intuition.
+
+The yield is presented as an **assumption**, never as measured data. No provider
+wired into this engine publishes a forward-looking continuous yield, so the chip
+reads "div assumed" and the default of zero means no dividend is modelled at
+all — the `q == 0` path is bit-for-bit plain Black-Scholes rather than a
+dividend model fed a zero.
+
+## The Matrix Was Computed And Thrown Away
+
+`StrategyResponse.matrix` — 972 cells, every leg re-priced at its own remaining
+maturity for each price and date — was populated by the engine and never
+rendered. The UI drew only the one-dimensional expiry curve.
+
+That is precisely the view a calendar spread needs. Such a position is defined
+by how its value moves *between* today and the near expiry, as the short leg
+decays faster than the long one. On the expiry curve that is a single instant;
+on the grid it is the whole left-to-right sweep.
+
+`PnLMatrix.tsx` renders it: prices descending down the rows, dates across, cells
+tinted by P&L against the position's own risk so the scale means the same thing
+across strategies. Colour intensity is scaled to the maximum magnitude among the
+rendered cells rather than to `max_profit`/`max_loss`, because those come from
+the expiry curve and the grid legitimately exceeds them mid-life — which is
+exactly where a calendar spread peaks.
+
+Verified in a real browser against the live backend, not merely by a passing
+build: **21 rows × 8 date columns, 168 tinted cells**, dates ascending from
+today, sticky price column, tooltips carrying both dollar and percent-of-risk
+figures, and zero console errors. A build passing proves nothing about
+rendering — the `/widget` regression earlier in this work made that point.
+
 ## Known Outstanding (unchanged)
 - No dividend-yield term in the pricing path.
 - `StrategyResponse.matrix` is filled correctly but not yet rendered; the UI
