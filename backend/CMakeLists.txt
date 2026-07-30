@@ -147,7 +147,26 @@ set(BUILD_BENCHMARKS OFF CACHE BOOL "Disable sensen benchmarks" FORCE)
 set(SKIP_CLANG_TIDY ON CACHE BOOL "Disable clang-tidy due to c++23 module scanning bugs" FORCE)
 add_subdirectory(sensen EXCLUDE_FROM_ALL)
 
-# Include StochasticGraphExecutionEngine for distributed execution
+# Include StochasticGraphExecutionEngine for distributed execution.
+#
+# SGEE's own standard is `import std;` against libc++, with std.pcm built from
+# libc++'s module sources — that is how it builds standalone and how it is
+# documented. This tree cannot use that: sensen is built against libstdc++ (see
+# SENSEN_NO_IMPORT_STD at the top of this file), and linking libc++ and libstdc++
+# into one binary is an ABI conflict rather than a matter of taste. So SGEE is
+# switched to its header-shim path here, which leaves the standard library
+# selection alone. The compiler is clang either way; only the standard library
+# and the std-module mechanism differ.
+set(SGEE_NO_IMPORT_STD ON CACHE BOOL "Build SGEE against libstdc++ via its header shim" FORCE)
+
+# SGEE needs the directory holding the logger BMI when a parent already provides
+# the `logger` target, and only this tree knows where that is. Previously this
+# path was hardcoded inside SGEE's own CMakeLists, which made SGEE unbuildable
+# for anyone whose layout differed.
+set(SGEE_LOGGER_MODULE_DIR
+    "${CMAKE_BINARY_DIR}/sensen/external/fastestjsoninthewest/external/cpp23-logger/CMakeFiles/logger.dir"
+    CACHE PATH "Directory containing the logger module BMI for SGEE" FORCE)
+
 add_subdirectory(external/SGEE sgee EXCLUDE_FROM_ALL)
 
 # Include logging and bindings submodules
