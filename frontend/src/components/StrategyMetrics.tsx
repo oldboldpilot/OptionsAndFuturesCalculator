@@ -184,7 +184,22 @@ export function StrategyMetrics() {
           </div>
           <div className="stat">
             <span className="stat-label">Days</span>
-            <span className="stat-value">{result.inputs.days}</span>
+            {/* Two numbers when the legs expire on different dates: the payoff
+                and every probability are measured at the near expiry, while the
+                position itself runs to the far one. One number here would hide
+                which of the two the panel above is describing. */}
+            <span
+              className="stat-value"
+              title={
+                result.inputs.curveDays < result.inputs.days
+                  ? 'Near expiry (where the payoff and probabilities are measured) → position horizon'
+                  : ''
+              }
+            >
+              {result.inputs.curveDays < result.inputs.days
+                ? `${Math.round(result.inputs.curveDays)} → ${Math.round(result.inputs.days)}`
+                : Math.round(result.inputs.days)}
+            </span>
           </div>
           <div className="stat">
             <span className="stat-label">

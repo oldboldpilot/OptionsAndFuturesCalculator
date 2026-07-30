@@ -119,6 +119,19 @@ message StrategyResponse {
   uint64 calculation_time_microseconds = 12;
   double probability_of_touch = 13;
   double probability_of_target_profit = 14; // P(reaching 50% of max profit)
+
+  // Days from now at which `pnl_matrix` — and every figure derived from it
+  // (max_profit, max_loss, breakevens, pop, EV, VaR/CVaR) — is evaluated.
+  //
+  // This is the EARLIEST leg expiry, not the latest. For a single-expiry
+  // structure the two coincide and this is simply the expiry. For a calendar
+  // spread they do not: at the far expiry both legs are intrinsic and a
+  // same-strike calendar collapses to a flat line at the net debit, which
+  // says nothing about the trade. The near expiry is where the structure has
+  // its characteristic shape, so that is where the curve is drawn. A client
+  // that labels the curve "at expiration" without reading this field will
+  // mislabel every multi-expiry position.
+  double curve_days_to_expiration = 15;
 }
 
 // --------------------------------------------------------------------------

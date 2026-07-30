@@ -77,7 +77,17 @@ export interface CalculationResult {
   inputs: {
     spot: number;
     impliedVolatility: number;
+    /** Latest leg expiry: the horizon the position runs to. */
     days: number;
+    /**
+     * The date the payoff curve — and every figure derived from it, including
+     * PoP — is evaluated at, in days from now. This is the EARLIEST leg expiry,
+     * so it equals `days` for a single-expiry position and is shorter for a
+     * calendar or diagonal. Anything modelling the terminal price distribution
+     * must use this, not `days`, or it shades a different distribution from the
+     * one the engine's probabilities came from.
+     */
+    curveDays: number;
     /** The rate the engine priced with. Continuous when measured, as-typed when stated. */
     riskFreeRate: number;
     rateSource: RateSource;
@@ -568,6 +578,10 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
             spot: spotPrice,
             impliedVolatility: iv,
             days,
+            // Falls back to the horizon when the field is absent: proto3 gives
+            // an unset double as 0, which is indistinguishable from a backend
+            // that predates the field, and 0 would collapse the distribution.
+            curveDays: res.getCurveDaysToExpiration() || days,
             riskFreeRate: rate,
             rateSource: get().rateSource,
             rateMeta: get().rateMeta,

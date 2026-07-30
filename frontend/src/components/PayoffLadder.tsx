@@ -6,19 +6,42 @@ import { useCalculatorStore } from '../store/useCalculatorStore';
 type ValueMode = 'dollars' | 'percent';
 
 /**
- * At-expiry payoff, priced row by row.
+ * Payoff at the curve date, priced row by row.
  *
  * `StrategyResponse.pnl_matrix` is a one-dimensional curve — P&L against
- * underlying price at expiration — so that is what this renders. The previous
- * component presented it as the optionsprofitcalculator price × date grid by
- * stamping every cell with `days_to_expiration: 30`, a constant invented
- * during mapping. The date axis is real work the engine has to do (re-pricing
- * each leg at each future date); it returns here when `MatrixCell` from
- * backend/proto/calculator.proto is wired up.
+ * underlying price on a single date — so that is what this renders. That date
+ * is `curve_days_to_expiration`, the earliest leg expiry, which is why the
+ * chip above the table names it rather than saying "at expiry" flatly. The
+ * previous component presented this as the optionsprofitcalculator price ×
+ * date grid by stamping every cell with `days_to_expiration: 30`, a constant
+ * invented during mapping. The real date axis is `StrategyResponse.matrix`,
+ * which the engine now fills correctly; wiring it up here is separate work.
  */
 export function PayoffLadder() {
   const { result, spotPrice, isLoading, error } = useCalculatorStore();
   const [mode, setMode] = useState<ValueMode>('dollars');
+
+  /**
+   * "at expiry" was true only while every position had one expiry. The engine
+   * draws this curve at the EARLIEST leg expiry, so on a calendar or diagonal
+   * the flat label named a date the curve was not drawn at — and the shape it
+   * describes belongs to the near leg's expiry, not the far one.
+   */
+  const curveLabel = useMemo(() => {
+    if (!result) return { text: 'at expiry', title: '' };
+    const { days, curveDays } = result.inputs;
+    if (curveDays >= days) {
+      return { text: `at expiry · ${Math.round(curveDays)}d`, title: 'Every leg expires on this date.' };
+    }
+    return {
+      text: `at near expiry · ${Math.round(curveDays)}d`,
+      title:
+        `Drawn at the earliest leg expiry (${Math.round(curveDays)} days), not the ` +
+        `position horizon (${Math.round(days)} days). Legs still open on that date ` +
+        `are carried at their Black-Scholes value; legs already settled are ` +
+        `carried at intrinsic against the price shown.`,
+    };
+  }, [result]);
 
   const rows = useMemo(() => {
     const curve = result?.expiryCurve ?? [];
@@ -65,7 +88,7 @@ export function PayoffLadder() {
       <div className="panel-head">
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.4375rem' }}>
           <span className="panel-title">Payoff</span>
-          <span className="chip">at expiry</span>
+          <span className="chip" title={curveLabel.title}>{curveLabel.text}</span>
         </div>
         <div className="segment">
           <button className="segment-item" data-active={mode === 'dollars'} onClick={() => setMode('dollars')}>$</button>

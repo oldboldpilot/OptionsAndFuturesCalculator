@@ -83,7 +83,12 @@ export function ProbabilityCurve() {
 
   const model = useMemo(() => {
     if (!result) return null;
-    const { spot, impliedVolatility: iv, days, riskFreeRate: r } = result.inputs;
+    // curveDays, not days. The engine draws the payoff and computes PoP at the
+    // EARLIEST leg expiry; for a calendar spread that is well short of the
+    // position horizon. Modelling the density over the horizon instead would
+    // shade one distribution beneath a PoP taken from another — two answers to
+    // the same question in a single panel.
+    const { spot, impliedVolatility: iv, curveDays: days, riskFreeRate: r } = result.inputs;
     const curve = result.expiryCurve;
     if (spot <= 0 || iv <= 0 || days <= 0 || curve.length < 2) return null;
 

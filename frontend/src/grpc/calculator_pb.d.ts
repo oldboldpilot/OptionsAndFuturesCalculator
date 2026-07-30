@@ -297,6 +297,9 @@ export class StrategyResponse extends jspb.Message {
   getProbabilityOfTargetProfit(): number;
   setProbabilityOfTargetProfit(value: number): StrategyResponse;
 
+  getCurveDaysToExpiration(): number;
+  setCurveDaysToExpiration(value: number): StrategyResponse;
+
   serializeBinary(): Uint8Array;
   toObject(includeInstance?: boolean): StrategyResponse.AsObject;
   static toObject(includeInstance: boolean, msg: StrategyResponse): StrategyResponse.AsObject;
@@ -321,6 +324,7 @@ export namespace StrategyResponse {
     calculationTimeMicroseconds: number,
     probabilityOfTouch: number,
     probabilityOfTargetProfit: number,
+    curveDaysToExpiration: number,
   }
 }
 

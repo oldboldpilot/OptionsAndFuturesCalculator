@@ -2179,7 +2179,8 @@ proto.calculator.StrategyResponse.toObject = function(includeInstance, msg) {
     proto.calculator.MatrixCell.toObject, includeInstance),
     calculationTimeMicroseconds: jspb.Message.getFieldWithDefault(msg, 12, 0),
     probabilityOfTouch: jspb.Message.getFloatingPointFieldWithDefault(msg, 13, 0.0),
-    probabilityOfTargetProfit: jspb.Message.getFloatingPointFieldWithDefault(msg, 14, 0.0)
+    probabilityOfTargetProfit: jspb.Message.getFloatingPointFieldWithDefault(msg, 14, 0.0),
+    curveDaysToExpiration: jspb.Message.getFloatingPointFieldWithDefault(msg, 15, 0.0)
   };
 
   if (includeInstance) {
@@ -2277,6 +2278,10 @@ proto.calculator.StrategyResponse.deserializeBinaryFromReader = function(msg, re
     case 14:
       var value = /** @type {number} */ (reader.readDouble());
       msg.setProbabilityOfTargetProfit(value);
+      break;
+    case 15:
+      var value = /** @type {number} */ (reader.readDouble());
+      msg.setCurveDaysToExpiration(value);
       break;
     default:
       reader.skipField();
@@ -2406,6 +2411,13 @@ proto.calculator.StrategyResponse.serializeBinaryToWriter = function(message, wr
   if (f !== 0.0) {
     writer.writeDouble(
       14,
+      f
+    );
+  }
+  f = message.getCurveDaysToExpiration();
+  if (f !== 0.0) {
+    writer.writeDouble(
+      15,
       f
     );
   }
@@ -2758,6 +2770,24 @@ proto.calculator.StrategyResponse.prototype.getProbabilityOfTargetProfit = funct
  */
 proto.calculator.StrategyResponse.prototype.setProbabilityOfTargetProfit = function(value) {
   return jspb.Message.setProto3FloatField(this, 14, value);
+};
+
+
+/**
+ * optional double curve_days_to_expiration = 15;
+ * @return {number}
+ */
+proto.calculator.StrategyResponse.prototype.getCurveDaysToExpiration = function() {
+  return /** @type {number} */ (jspb.Message.getFloatingPointFieldWithDefault(this, 15, 0.0));
+};
+
+
+/**
+ * @param {number} value
+ * @return {!proto.calculator.StrategyResponse} returns this
+ */
+proto.calculator.StrategyResponse.prototype.setCurveDaysToExpiration = function(value) {
+  return jspb.Message.setProto3FloatField(this, 15, value);
 };
 
 

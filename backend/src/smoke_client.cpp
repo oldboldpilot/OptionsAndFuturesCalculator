@@ -12,11 +12,13 @@
  * market data, so it works as a deploy gate.
  */
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
 #include <memory>
 #include <string>
+#include <utility>
 
 #include <grpcpp/grpcpp.h>
 #include "calculator.pb.h"
@@ -210,6 +212,120 @@ auto check_strategy(calculator::OptionsCalculator::Stub& stub, const std::string
                   << premium_paid << ")\n";
         return false;
     }
+
+    // The matrix carries two views of the same axis — days remaining and a
+    // calendar date — and they must agree: more days remaining means an
+    // EARLIER date. They used to run in opposite directions, so every cell
+    // named the wrong day. Comparing the extremes is enough to catch it.
+    const calculator::MatrixCell* most_time = nullptr;
+    const calculator::MatrixCell* least_time = nullptr;
+    for (const auto& cell : res.matrix()) {
+        if (most_time == nullptr || cell.days_to_expiration() > most_time->days_to_expiration()) {
+            most_time = &cell;
+        }
+        if (least_time == nullptr || cell.days_to_expiration() < least_time->days_to_expiration()) {
+            least_time = &cell;
+        }
+    }
+    if (most_time == nullptr || least_time == nullptr) {
+        std::cerr << "CalculateStrategy returned an empty price x date matrix\n";
+        return false;
+    }
+    std::cout << "  matrix axis  " << most_time->days_to_expiration() << "d @ "
+              << most_time->date_str() << "  ->  " << least_time->days_to_expiration() << "d @ "
+              << least_time->date_str() << "\n";
+    // Well-formed ISO-8601, exactly YYYY-MM-DD. The global locale that
+    // logger installs groups thousands, so a stream-formatted year arrived as
+    // "2,026-07-30" and the axis was unparseable by any client.
+    for (const auto* cell : {most_time, least_time}) {
+        const auto& text = cell->date_str();
+        const bool shaped = text.size() == 10 && text[4] == '-' && text[7] == '-';
+        if (!shaped) {
+            std::cerr << "Matrix date is not ISO-8601 YYYY-MM-DD: '" << text << "'\n";
+            return false;
+        }
+    }
+    // ISO-8601 dates compare correctly as strings.
+    if (most_time->date_str() >= least_time->date_str()) {
+        std::cerr << "Matrix date axis runs backwards: " << most_time->days_to_expiration()
+                  << " days to expiry is dated " << most_time->date_str() << " but "
+                  << least_time->days_to_expiration() << " days is dated " << least_time->date_str()
+                  << "\n";
+        return false;
+    }
+    return true;
+}
+
+/**
+ * A calendar spread: short the near expiry, long the far one, same strike.
+ *
+ * This is the structure that exposed the shared-clock bug. Both legs are given
+ * the SAME real ATM premium on purpose — that removes the premium difference
+ * as a source of P&L, so any curvature at all must come from the two legs
+ * being on different clocks. Under the old single-clock pricing both legs had
+ * identical (S, K, sigma, T) with opposite direction, everything cancelled,
+ * and the curve was flat at exactly 0.00 at every price. A flat curve here is
+ * therefore a regression, not a rounding artefact.
+ */
+auto check_calendar_spread(calculator::OptionsCalculator::Stub& stub, const std::string& symbol,
+                           double spot, const calculator::OptionStrike& atm, int near_dte,
+                           int far_dte) -> bool {
+    calculator::StrategyRequest req;
+    req.set_underlying_symbol(symbol);
+    req.set_current_price(spot);
+    req.set_risk_free_rate(0.05);
+    req.set_implied_volatility(atm.call_iv());
+
+    for (const auto [action, dte] :
+         {std::pair{calculator::Leg::SELL, near_dte}, std::pair{calculator::Leg::BUY, far_dte}}) {
+        auto& leg = *req.add_legs();
+        leg.set_action(action);
+        leg.set_type(calculator::Leg::CALL);
+        leg.set_strike(atm.strike());
+        leg.set_expiration_days(dte);
+        leg.set_quantity(1);
+        leg.set_premium(atm.call_ask());
+        leg.set_implied_volatility(atm.call_iv());
+        leg.set_contract_multiplier(100.0);
+    }
+
+    calculator::StrategyResponse res;
+    const auto ctx = make_context();
+    const auto status = stub.CalculateStrategy(ctx.get(), req, &res);
+    if (!status.ok()) {
+        std::cerr << "Calendar spread FAILED: " << status.error_code() << " "
+                  << status.error_message() << "\n";
+        return false;
+    }
+
+    std::cout << "Calendar spread   " << near_dte << "d short / " << far_dte << "d long @ "
+              << std::setprecision(2) << atm.strike()
+              << "  curve_at=" << res.curve_days_to_expiration() << "d\n"
+              << "  max_profit=" << res.max_profit() << "  max_loss=" << res.max_loss()
+              << "  breakevens=" << res.breakeven_prices_size()
+              << "  pop=" << std::setprecision(4) << res.pop() << "\n";
+
+    // The curve must be drawn at the NEAR expiry; at the far one both legs are
+    // intrinsic and the diagram carries no information.
+    if (std::abs(res.curve_days_to_expiration() - static_cast<double>(near_dte)) > 1e-9) {
+        std::cerr << "Curve drawn at " << res.curve_days_to_expiration() << "d, expected the near "
+                  << near_dte << "d expiry\n";
+        return false;
+    }
+
+    // The tent: long time value at the strike, decaying to nothing at the
+    // wings. Flat means every leg was priced on one clock again.
+    const double spread = res.max_profit() - res.max_loss();
+    if (spread < 1.0) {
+        std::cerr << "Calendar spread P&L is flat (max_profit " << res.max_profit()
+                  << " == max_loss " << res.max_loss()
+                  << "): the legs are being priced on a single clock\n";
+        return false;
+    }
+    if (res.max_profit() <= 0.0) {
+        std::cerr << "Calendar spread has no profitable price at the near expiry\n";
+        return false;
+    }
     return true;
 }
 
@@ -239,6 +355,8 @@ auto main(int argc, char** argv) -> int {
     }
 
     if (!check_strategy(*stub, symbol, spot, atm, 30)) return 1;
+
+    if (!check_calendar_spread(*stub, symbol, spot, atm, 30, 60)) return 1;
 
     std::cout << "\nAll four RPCs returned live data.\n";
     return 0;

@@ -7,11 +7,11 @@ module;
 #include <cmath>
 #include <cstdint>
 #include <expected>
+#include <format>
 #include <future>
 #include <limits>
 #include <memory>
 #include <numeric>
-#include <sstream>
 #include <string>
 #include <vector>
 
@@ -57,74 +57,77 @@ namespace md = options_calculator::market_data;
     return (leg.quantity() > 0) ? static_cast<double>(leg.quantity()) : 1.0;
 }
 
-/**
- * Position P&L at expiration for a given underlying price.
- *
- * Options settle to intrinsic value; linear instruments settle to the move
- * from their entry. Premium is the price actually paid or received, which the
- * client now sends per leg — before the contract carried no premium field, so
- * every structure was implicitly free and every payoff was wrong.
- */
-[[nodiscard]] auto payoff_at_expiry(const calculator::StrategyRequest& req, double price) noexcept -> double {
-    double total = 0.0;
-    for (const auto& leg : req.legs()) {
-        const double dir = direction_of(leg);
-        const double mult = multiplier_of(leg);
-        const double qty = quantity_of(leg);
-
-        switch (leg.type()) {
-            case calculator::Leg::CALL:
-                total += (std::max(0.0, price - leg.strike()) - leg.premium()) * dir * mult * qty;
-                break;
-            case calculator::Leg::PUT:
-                total += (std::max(0.0, leg.strike() - price) - leg.premium()) * dir * mult * qty;
-                break;
-            default: {
-                // Linear legs: entry is the premium when supplied, otherwise
-                // the strike field carries the entry level.
-                const double entry = (leg.premium() > 0.0) ? leg.premium() : leg.strike();
-                total += (price - entry) * dir * mult * qty;
-                break;
-            }
-        }
-    }
-    return total;
+/** Intrinsic value of a settled option leg, per share. */
+[[nodiscard]] auto intrinsic_of(const calculator::Leg& leg, double price) noexcept -> double {
+    return (leg.type() == calculator::Leg::CALL) ? std::max(0.0, price - leg.strike())
+                                                 : std::max(0.0, leg.strike() - price);
 }
 
 /**
- * Position P&L at an intermediate date, with every option re-priced by
- * Black-Scholes at the remaining time. This is what makes the price × date
- * matrix meaningful rather than a repeated expiry column.
+ * Position P&L at `days_elapsed` from now, for a given underlying price.
+ *
+ * Every leg is on its OWN clock. A leg with time left is re-priced by
+ * Black-Scholes at its own remaining maturity; a leg whose expiry has already
+ * passed is carried at intrinsic. Linear legs carry the move from their entry
+ * and do not decay. Premium is the price actually paid or received, which the
+ * client sends per leg.
+ *
+ * The single shared clock this replaced was correct only while every leg
+ * expired on the same day. Given two expiries it priced the near leg with the
+ * far leg's maturity, so a same-strike calendar spread had identical
+ * `(S, K, sigma, T)` on both legs with opposite direction: the option values
+ * cancelled exactly and the whole position collapsed to a flat line at the net
+ * debit, at every price and every date. `max_profit == max_loss == -premium`
+ * is the signature of that bug.
+ *
+ * One assumption is unavoidable and worth stating: past a leg's expiry we use
+ * the underlying price at the EVALUATION date, not the (unknowable) price on
+ * the day that leg actually settled. Every payoff diagram of this kind makes
+ * the same single-path assumption — "the underlying arrives here and stays" —
+ * and it is exactly why `curve_days_to_expiration` is reported: the further
+ * past a settled leg you read, the more the picture leans on it.
  */
-[[nodiscard]] auto value_at(const calculator::StrategyRequest& req, double price,
-                            double years_remaining, double r) noexcept -> double {
-    if (years_remaining <= 1e-9) return payoff_at_expiry(req, price);
-
-    // One clock for every leg. Correct for the single-expiry structures the UI
-    // builds today; for a genuine calendar spread the near leg should expire
-    // partway along this axis and be carried at intrinsic thereafter. That is a
-    // change to the whole matrix, the expiry curve and every metric derived
-    // from them, so it is tracked separately rather than smuggled in here.
+[[nodiscard]] auto value_at_elapsed(const calculator::StrategyRequest& req, double price,
+                                    double days_elapsed, double r, double sigma,
+                                    double horizon) noexcept -> double {
     double total = 0.0;
     for (const auto& leg : req.legs()) {
         const double dir = direction_of(leg);
         const double mult = multiplier_of(leg);
         const double qty = quantity_of(leg);
 
-        if (leg.type() == calculator::Leg::CALL || leg.type() == calculator::Leg::PUT) {
-            const double iv = (leg.implied_volatility() > 0.0)
-                                  ? leg.implied_volatility()
-                                  : req.implied_volatility();
-            if (iv <= 0.0) return payoff_at_expiry(req, price);
-
-            const auto type = (leg.type() == calculator::Leg::CALL) ? sensen::OptionType::Call
-                                                                   : sensen::OptionType::Put;
-            const auto bs = sensen::price_black_scholes(price, leg.strike(), r, iv, years_remaining, type);
-            total += (bs.value - leg.premium()) * dir * mult * qty;
-        } else {
+        if (leg.type() != calculator::Leg::CALL && leg.type() != calculator::Leg::PUT) {
+            // Linear legs: entry is the premium when supplied, otherwise the
+            // strike field carries the entry level.
             const double entry = (leg.premium() > 0.0) ? leg.premium() : leg.strike();
             total += (price - entry) * dir * mult * qty;
+            continue;
         }
+
+        // A leg that arrives without an expiry falls back to the position
+        // horizon — the same treatment action_greeks gives it — rather than to
+        // zero, which would silently settle a live leg.
+        const double leg_days = (leg.expiration_days() > 0.0) ? leg.expiration_days() : horizon;
+        const double remaining = leg_days - days_elapsed;
+
+        // Fall back to the quantity-weighted position IV, the same figure the
+        // Greeks use. This previously fell back to the request-level IV while
+        // the Greeks fell back to the position IV, so one position could be
+        // priced two ways within a single response.
+        const double iv = (leg.implied_volatility() > 0.0) ? leg.implied_volatility() : sigma;
+
+        // Settled, or unpriceable for want of a volatility: carry it at
+        // intrinsic. There is no time value to add without a sigma, and
+        // intrinsic is the one figure that is right regardless.
+        if (remaining <= 1e-9 || iv <= 0.0) {
+            total += (intrinsic_of(leg, price) - leg.premium()) * dir * mult * qty;
+            continue;
+        }
+
+        const auto type = (leg.type() == calculator::Leg::CALL) ? sensen::OptionType::Call
+                                                                : sensen::OptionType::Put;
+        const auto bs = sensen::price_black_scholes(price, leg.strike(), r, iv, remaining / 365.0, type);
+        total += (bs.value - leg.premium()) * dir * mult * qty;
     }
     return total;
 }
@@ -136,6 +139,26 @@ namespace md = options_calculator::market_data;
         days = std::max(days, leg.expiration_days());
     }
     return days;
+}
+
+/**
+ * Earliest-dated leg, in days: the date the payoff curve is drawn at.
+ *
+ * For a single-expiry structure this equals horizon_days() and nothing about
+ * the curve changes. For a calendar spread it is the near expiry — the date
+ * the structure has a shape worth plotting, rather than the far expiry where
+ * both legs are intrinsic and the diagram is a flat line.
+ *
+ * Legs with no expiry (stock, futures) are skipped: they never settle, so they
+ * cannot set the date, and a position of nothing but linear legs falls back to
+ * the horizon.
+ */
+[[nodiscard]] auto curve_days(const calculator::StrategyRequest& req) noexcept -> double {
+    double days = std::numeric_limits<double>::infinity();
+    for (const auto& leg : req.legs()) {
+        if (leg.expiration_days() > 0.0) days = std::min(days, leg.expiration_days());
+    }
+    return std::isfinite(days) ? days : horizon_days(req);
 }
 
 /** Quantity-weighted position IV, falling back to the request-level figure. */
@@ -267,7 +290,8 @@ struct ComputeContext {
     double spot{0.0};
     double r{0.0};
     double sigma{0.0};
-    double horizon{0.0};
+    double horizon{0.0};    // Latest leg expiry: the date axis of the matrix.
+    double curve{0.0};      // Earliest leg expiry: the date the payoff curve is drawn at.
     std::uint32_t date_steps{0};
     std::uint32_t price_steps{0};
     std::vector<double> price_grid;
@@ -307,6 +331,7 @@ using sgee::ExecutionResult;
     ctx->r = ctx->request.risk_free_rate();
     ctx->sigma = position_iv(ctx->request);
     ctx->horizon = horizon_days(ctx->request);
+    ctx->curve = curve_days(ctx->request);
 
     // Refuse rather than answer a question we were not asked. Each of these
     // was previously defaulted server-side, so the engine always produced a
@@ -349,8 +374,12 @@ using sgee::ExecutionResult;
     double max_profit = -std::numeric_limits<double>::infinity();
     double max_loss = std::numeric_limits<double>::infinity();
 
+    // Drawn at the EARLIEST leg expiry, not the latest. See curve_days().
+    ctx->response.set_curve_days_to_expiration(ctx->curve);
+
     for (const double price : ctx->price_grid) {
-        const double pnl = payoff_at_expiry(ctx->request, price);
+        const double pnl =
+            value_at_elapsed(ctx->request, price, ctx->curve, ctx->r, ctx->sigma, ctx->horizon);
         ctx->expiry_pnl.push_back(pnl);
         max_profit = std::max(max_profit, pnl);
         max_loss = std::min(max_loss, pnl);
@@ -397,22 +426,36 @@ using sgee::ExecutionResult;
         const double frac = (ctx->date_steps > 1)
                                 ? static_cast<double>(d) / static_cast<double>(ctx->date_steps - 1)
                                 : 1.0;
+        // The axis runs from today (d = 0, full time remaining) to the latest
+        // leg's expiry. `dte` counts down; `elapsed` counts up.
         const double dte = ctx->horizon * (1.0 - frac);
-        const double years = std::max(0.0, dte / 365.0);
+        const double elapsed = std::max(0.0, ctx->horizon - dte);
 
+        // Previously `now + dte`, which ran the calendar column BACKWARDS
+        // against the days-to-expiration column beside it: the first cell was
+        // labelled "today's DTE" and dated at the expiry, the last was
+        // labelled "0 DTE" and dated today. Every date in the grid named the
+        // wrong day except the midpoint.
         const auto day = std::chrono::floor<std::chrono::days>(now) +
-                         std::chrono::days{static_cast<int>(std::llround(dte))};
+                         std::chrono::days{static_cast<int>(std::llround(elapsed))};
         const std::chrono::year_month_day ymd{day};
-        std::ostringstream date_str;
-        date_str << static_cast<int>(ymd.year()) << '-'
-                 << (static_cast<unsigned>(ymd.month()) < 10 ? "0" : "")
-                 << static_cast<unsigned>(ymd.month()) << '-'
-                 << (static_cast<unsigned>(ymd.day()) < 10 ? "0" : "")
-                 << static_cast<unsigned>(ymd.day());
-        const auto date_text = date_str.str();
+
+        // std::format, not a stream, and deliberately so. A default-constructed
+        // ostringstream carries the GLOBAL locale, and logger's initialisation
+        // sets that to en_US.UTF-8 (cpp23-logger/logger.cppm:2007) for the sake
+        // of UTF-8 console output. That locale groups thousands, so the year
+        // came out as "2,026" and every cell in the grid carried a date string
+        // no client could parse — the frontend reads this field straight into
+        // its date axis. std::format is locale-independent unless you ask it
+        // otherwise, which is the property this field needs: it is a wire
+        // value in ISO-8601, not display text.
+        const auto date_text = std::format("{:04}-{:02}-{:02}", static_cast<int>(ymd.year()),
+                                           static_cast<unsigned>(ymd.month()),
+                                           static_cast<unsigned>(ymd.day()));
 
         for (const double price : ctx->price_grid) {
-            const double pnl = value_at(ctx->request, price, years, ctx->r);
+            const double pnl =
+                value_at_elapsed(ctx->request, price, elapsed, ctx->r, ctx->sigma, ctx->horizon);
             auto& cell = *ctx->response.add_matrix();
             cell.set_price(price);
             cell.set_days_to_expiration(static_cast<std::uint32_t>(std::llround(dte)));
@@ -509,14 +552,18 @@ using sgee::ExecutionResult;
     // Without a volatility there is no distribution. The probability fields
     // stay at zero rather than being filled from a default vol, which the
     // caller could not tell apart from a real answer.
-    if (ctx->sigma <= 0.0 || ctx->horizon <= 0.0) {
+    if (ctx->sigma <= 0.0 || ctx->curve <= 0.0) {
         logger::Logger::getInstance().warn(
             "No implied volatility on the position; probability metrics omitted");
         return {};
     }
 
+    // Over ctx->curve, not ctx->horizon: risk_figures pairs each density with
+    // the P&L at the same grid point, and ctx->expiry_pnl is now evaluated at
+    // the curve date. A distribution on a different clock would weight the
+    // right P&Ls by the wrong probabilities.
     const auto dist =
-        lognormal_over(ctx->price_grid, ctx->spot, ctx->sigma, ctx->horizon / 365.0, ctx->r);
+        lognormal_over(ctx->price_grid, ctx->spot, ctx->sigma, ctx->curve / 365.0, ctx->r);
     const auto figures = risk_figures(dist, ctx->expiry_pnl, ctx->response.max_profit());
 
     ctx->response.set_pop(figures.pop);
@@ -536,7 +583,7 @@ using sgee::ExecutionResult;
         for (const double be : ctx->response.breakeven_prices()) {
             if (std::abs(be - ctx->spot) < std::abs(nearest - ctx->spot)) nearest = be;
         }
-        const double sd = ctx->sigma * std::sqrt(ctx->horizon / 365.0);
+        const double sd = ctx->sigma * std::sqrt(ctx->curve / 365.0);
         if (sd > 0.0 && nearest > 0.0) {
             const double z = std::abs(std::log(nearest / ctx->spot)) / sd;
             const double touch = 2.0 * (1.0 - 0.5 * (1.0 + std::erf(z / std::sqrt(2.0))));
