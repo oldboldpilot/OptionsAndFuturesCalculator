@@ -157,6 +157,67 @@ is quoted as evidence. Restoring the planted violations used `cp` from a
 backup, not `git checkout --`, for the reason recorded in
 [2026-07-30_libcxx_std_module_investigation.md](2026-07-30_libcxx_std_module_investigation.md).
 
+## Deploying: `railway up` Lies About Failing
+
+Seven consecutive `railway up` invocations printed:
+
+```
+Uploading...
+error sending request for url (.../up?serviceId=...)
+Caused by:
+    operation timed out
+```
+
+each after almost exactly 32 seconds. **At least one of them deployed
+successfully anyway.** Deployment `30647b56` reached `SUCCESS` and replaced
+`a544b15c` while the CLI was reporting failure. The client deadline is shorter
+than the endpoint's response time; the upload completes server-side and the
+deployment proceeds regardless of what the CLI says.
+
+Three hypotheses were tested and disproved before that became clear:
+
+| Hypothesis | Test | Result |
+| --- | --- | --- |
+| Slow tree indexing (16 GB) | parked the 13 GB `backend/build` | still 32 s |
+| Expired credential | `railway whoami` after CLI self-refresh | authenticated, still 32 s |
+| Payload too large | trimmed 62 MB → 36 MB | still 32 s |
+
+What settled it: a **1-byte** POST to the same endpoint returned `HTTP 200`
+with a **25.2 s time-to-first-byte**. The latency is server-side and unrelated
+to payload, so it is Railway's to fix and ours to wait out.
+
+Two lessons, both about evidence:
+
+1. **A timeout with server-side effects is not a failed request.** Deployments
+   were being created on every "failed" attempt — that alone showed the
+   requests were arriving. Retrying seven times generated seven deployments,
+   five of which went to `FAILED` as empty shells.
+2. **`healthz` 200 does not identify which build answered.** Confirming the
+   deploy needed a request that only the new engine can satisfy.
+
+Hence `scripts/probe_live_engine.py`, which is now the post-deploy gate. It
+hand-encodes a calendar spread over gRPC-Web — `smoke_client` speaks native
+gRPC and so can only ever test a local engine — and keys on
+`curve_days_to_expiration`, a field absent from every prior build:
+
+```
+trailers: grpc-status:0
+curve_days_to_expiration  : 30.0
+max_profit                : 1397.2577510147933
+max_loss                  : 3.2855496101547033e-09
+VERDICT: NEW ENGINE LIVE — curve at near expiry, calendar has real shape
+```
+
+`1397.2578` against the hand derivation of `1397.26` — the deployed engine
+agrees with pencil and paper to four decimal places. The local smoke run
+reports slightly less only because its price grid lands at 738.96 rather than
+on the 739 strike.
+
+The payload trim was kept even though it did not fix the timeout: 36 MB
+uploads faster than 62 MB regardless, and the four excluded sensen directories
+are `FORCE`d off in `backend/CMakeLists.txt:139-146`. Verified by parking all
+four and re-running configure — exit 0, zero errors.
+
 ## Known Outstanding (unchanged)
 
 - This repo compiles 255 sensen modules and imports 2.

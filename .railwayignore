@@ -35,8 +35,27 @@ backend/StochasticGraphExecutionEngine
 backend/BigBrotherAnalytics
 backend/sensen/external/CosyVoice
 backend/sensen/eval_samples
-backend/sensen/benchmarks
 backend/sensen/demo_qwen3
+
+# sensen subtrees this build never configures. backend/CMakeLists.txt:139-146
+# FORCEs BUILD_PYTHON_BINDINGS, BUILD_TESTS, BUILD_EXAMPLES and
+# BUILD_BENCHMARKS to OFF, and sensen only calls add_subdirectory on each of
+# them behind exactly those options (sensen/CMakeLists.txt:1281-1296), so none
+# is read during configure. `docs` is documentation and is referenced by no
+# CMake at all.
+#
+# This is not housekeeping. `railway up` enforces a fixed ~30 s deadline on the
+# upload request, and at ~2.4 MB/s upstream a 62 MB payload does not fit: four
+# consecutive deploys failed at 32 s with `operation timed out`, each leaving a
+# stuck INITIALIZING deployment behind. These four directories are 18.5 MB of
+# that 62 MB. Anything added here must be genuinely unreferenced by the build —
+# `backend/external` was once excluded on the same reasoning and broke
+# configure outright, because CMake did read it.
+backend/sensen/benchmarks
+backend/sensen/tests
+backend/sensen/python
+backend/sensen/examples
+backend/sensen/docs
 **/*.nsys-rep
 **/*.sqlite
 **/perf.data*
