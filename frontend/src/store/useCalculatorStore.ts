@@ -221,6 +221,13 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
     req.setSymbol(sym);
 
     client.getMarketQuote(req, {}, (err, res) => {
+      // Same staleness guard loadChain applies below. Without it a response for
+      // a symbol the user has already navigated away from still writes its
+      // price, so the store shows the new symbol carrying the old symbol's
+      // spot — a real number attributed to the wrong instrument, which then
+      // prices every leg.
+      if (get().symbol !== sym) return;
+
       if (err || !res || res.getPrice() <= 0) {
         // Surface the failure. Substituting a fallback price here is what
         // previously let fabricated data reach the screen unnoticed.
