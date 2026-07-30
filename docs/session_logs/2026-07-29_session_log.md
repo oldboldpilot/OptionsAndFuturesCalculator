@@ -247,13 +247,32 @@ environment can be proven, since it always succeeds from a workstation.
   that no longer exist anywhere in source. Republishing
   `frontend/out` is required before the panels show real data; the endpoint
   configuration already points at the right host and needs no change.
-- **`backend/sensen` does not build from a clean recursive clone.**
-  `src/gp_ara_distributed.cpp` is untracked in the submodule yet referenced by
-  `sensen/src/CMakeLists.txt:529`. The `std::views::filter` fix applied to it
-  (libstdc++ 14 rejects the pipe over that const range; 15 accepts) is also
-  uncommitted. Left alone: that submodule has 29 modified paths and
-  `backend/external/SGEE` has 98, almost none of this session's work, and it
-  carries its own review policy.
+- **`backend/sensen` carries an unfinished refactor, and the one fix of ours in
+  it cannot be separated from it.** Earlier notes in this log claimed the
+  submodule would not build from a clean recursive clone because
+  `src/gp_ara_distributed.cpp` is untracked while `src/CMakeLists.txt:529`
+  references it. That is wrong, and the correction matters: the *committed*
+  `src/CMakeLists.txt` references only `gp_ara_distributed.cppm`. The two `.cpp`
+  references at lines 529 and 546 are themselves uncommitted, so a clean
+  recursive clone never looks for the missing file and builds normally. The
+  breakage exists only in this working tree.
+
+  What is actually in flight there is a module-partition split: the working tree
+  guts `gp_ara_distributed.cppm` by 989 lines and moves the implementation into
+  the new untracked `gp_ara_distributed.cpp`, with CMakeLists updated to compile
+  it. Our `std::views::filter` → direct-iteration fix (libstdc++ 14 rejects the
+  pipe over that const range; 15 accepts) lives *inside* that new file, so
+  committing the fix would mean committing the entire refactor.
+
+  Both submodules are therefore left untouched: `sensen` is on a detached HEAD
+  with 26 modified tracked paths, 3 untracked, and dirty nested submodules
+  (`external/cpp23-logger`, `external/fastestjsoninthewest`); `backend/external/SGEE`
+  has 98. Almost none of it is this session's work, an in-progress TBB →
+  `sensen::parallel` migration runs through it, and each carries its own review
+  policy. Nothing in the parent repository depends on any of it being committed:
+  the Greeks deployed here come from committed sensen code — the uncommitted
+  `options.cppm` diff touches only the Monte Carlo Asian-option path, not
+  `price_black_scholes`.
 - Futures term-structure panel and the 3D P&L surface from the approved scope.
 - **Calendar-spread P&L metrics are wrong**, and now conspicuously so. `value_at`
   (`calculator_service.cpp:99`) prices every leg on one clock, so SELL 730 @7d /
