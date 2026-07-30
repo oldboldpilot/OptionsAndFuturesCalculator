@@ -25,8 +25,17 @@ backend/StochasticGraphExecutionEngine
 backend/BigBrotherAnalytics
 backend/sensen/external/CosyVoice
 backend/sensen/eval_samples
-backend/sensen/benchmarks
 backend/sensen/demo_qwen3
+
+# Kept in step with .railwayignore. backend/CMakeLists.txt:139-146 FORCEs
+# BUILD_PYTHON_BINDINGS, BUILD_TESTS, BUILD_EXAMPLES and BUILD_BENCHMARKS off,
+# and sensen guards add_subdirectory on exactly those options, so none of these
+# is read during configure. Verified by parking all four and re-configuring.
+backend/sensen/benchmarks
+backend/sensen/tests
+backend/sensen/python
+backend/sensen/examples
+backend/sensen/docs
 **/*.nsys-rep
 **/*.sqlite
 **/perf.data*

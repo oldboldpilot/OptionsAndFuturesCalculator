@@ -295,6 +295,68 @@ image. They are left in place on purpose — removing them wants its own contain
 build and `ldd` pass, and the failure mode if that reasoning is wrong is an
 image that will not start.
 
+## Fixing The Deploy Properly
+
+Eleven consecutive `railway up` invocations failed at ~32 s. The chain:
+
+1. Railway's `/up` endpoint answers in **~25 s even for a 1-byte body** (measured).
+2. `railway up` imposes a fixed **~30 s** client deadline, with no flag to raise it.
+3. Any real payload overruns it, so the CLI aborts mid-transfer.
+4. Railway finds no `railway.json`, falls back to its RAILPACK auto-detector,
+   finds nothing to build, and the deployment FAILS with no build attached.
+5. The CLI prints `operation timed out`, which says nothing about whether the
+   deploy happened — deployment `30647b56` succeeded while printing it.
+
+`scripts/railway_deploy.sh` uploads the same archive to the same endpoint with
+curl, which has no such deadline. This is not a workaround of Railway's API; it
+is the same call, allowed to finish. First run, after eleven CLI failures:
+
+```
+archive: 6.4 MB
+archive verified: 1921 entries, railway.json + Dockerfile + sensen closure present
+http=200 elapsed=10.451645s
+  f4e2c76c INITIALIZING RAILPACK
+  f4e2c76c BUILDING DOCKERFILE
+upload landed intact — Railway is building.
+```
+
+The script verifies the archive contains `railway.json`, the Dockerfile and the
+sensen closure *before* spending the upload, then waits for the builder to flip
+to DOCKERFILE rather than trusting an exit code.
+
+**A wrong diagnosis, corrected.** RAILPACK was read as proof of a truncated
+upload. It is not: `builder` reads RAILPACK on *every* deployment initially, as
+a placeholder while the archive is extracted, flipping to DOCKERFILE once
+railway.json is found. The successful deploy showed exactly that transition.
+RAILPACK only indicts an upload once the deployment has stopped moving.
+
+**A bug written into the validator itself.** `tar … | grep -q` looks obvious and
+is wrong under `set -o pipefail`: `grep -q` exits at the first match, `tar` takes
+SIGPIPE, and the pipeline reports failure although the match succeeded. Whether
+it bites depends on whether tar finished writing, so it fails intermittently and
+on a different entry each run — which is why the `railway.json` check passed and
+the very next one did not. It failed safe, refusing to upload. The listing is
+now materialised once and grepped as a file.
+
+### Container build, verified before deploying
+
+`podman build -f backend/Dockerfile -t options-backend:trim .`
+
+| | Before | After |
+| --- | --- | --- |
+| build steps | 2362 | 1840 |
+| image | 346 MB | 257 MB |
+| `/app/lib` | + 93 MB `libsensen.so` | two static libs |
+| missing sonames | — | 0 |
+| `libsensen`/`libz3`/`libtbb` linked | yes | none |
+
+### The trim changed no numbers
+
+The deployed trimmed engine returns **1397.2577510147933** for the calendar
+spread probe — bit-identical to the untrimmed engine on the same inputs, despite
+moving from `-march=native` to `-march=x86-64-v3`. Determinism is the point of
+those canonical flags, and this is it being demonstrated rather than asserted.
+
 ## Known Outstanding (unchanged)
 - No dividend-yield term in the pricing path.
 - `StrategyResponse.matrix` is filled correctly but not yet rendered; the UI
