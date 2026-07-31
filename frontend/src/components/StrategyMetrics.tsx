@@ -17,6 +17,17 @@ const money = (v: number) =>
  * here. When there is no result we render an explicit empty state rather than
  * zeros, which would read as a genuine computed outcome (spec §3.4).
  */
+/**
+ * Colour follows the SIGN, never the label.
+ *
+ * "Max profit" was hardcoded green and "max loss" red, so a structure whose
+ * best outcome is a loss — a calendar spread priced on one clock used to
+ * return max_profit of -503 — printed that loss in green. The word said profit
+ * and the colour agreed with the word rather than the number. On a screen a
+ * trader scans for red, that is the one place colour must not be decorative.
+ */
+const tone = (v: number) => (v > 0 ? 'profit' : v < 0 ? 'loss' : 'flat');
+
 export function StrategyMetrics() {
   const { result, error } = useCalculatorStore();
 
@@ -75,11 +86,11 @@ export function StrategyMetrics() {
     <div className="panel-body">
       <div className="stat">
         <span className="stat-label">Max profit</span>
-        <span className="stat-value profit">{money(result.max_profit)}</span>
+        <span className={`stat-value ${tone(result.max_profit)}`}>{money(result.max_profit)}</span>
       </div>
       <div className="stat">
         <span className="stat-label">Max loss</span>
-        <span className="stat-value loss">{money(result.max_loss)}</span>
+        <span className={`stat-value ${tone(result.max_loss)}`}>{money(result.max_loss)}</span>
       </div>
       <div className="stat">
         <span className="stat-label">Risk / reward</span>
@@ -136,19 +147,19 @@ export function StrategyMetrics() {
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '0 0.75rem' }}>
               <div className="stat">
                 <span className="stat-label">VaR 95</span>
-                <span className="stat-value loss">{money(r.var95)}</span>
+                <span className={`stat-value ${tone(r.var95)}`}>{money(r.var95)}</span>
               </div>
               <div className="stat">
                 <span className="stat-label">VaR 99</span>
-                <span className="stat-value loss">{money(r.var99)}</span>
+                <span className={`stat-value ${tone(r.var99)}`}>{money(r.var99)}</span>
               </div>
               <div className="stat">
                 <span className="stat-label">CVaR 95</span>
-                <span className="stat-value loss">{money(r.cvar95)}</span>
+                <span className={`stat-value ${tone(r.cvar95)}`}>{money(r.cvar95)}</span>
               </div>
               <div className="stat">
                 <span className="stat-label">CVaR 99</span>
-                <span className="stat-value loss">{money(r.cvar99)}</span>
+                <span className={`stat-value ${tone(r.cvar99)}`}>{money(r.cvar99)}</span>
               </div>
             </div>,
           )

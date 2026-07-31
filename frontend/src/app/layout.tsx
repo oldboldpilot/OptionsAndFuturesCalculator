@@ -87,7 +87,13 @@ export default function RootLayout({
         <script
           dangerouslySetInnerHTML={{
             __html:
-              "try{document.documentElement.dataset.theme=localStorage.getItem('ofc-theme')||'light'}catch(e){document.documentElement.dataset.theme='light'}",
+              "try{var t=localStorage.getItem('ofc-theme');"+
+              /* One-time migration: the dark 'slate' theme was the default
+                 before the light rework, so a returning browser still carries
+                 it and never sees the new default. Clear that one stored
+                 value once; a choice made after this point is respected. */
+              "if(!localStorage.getItem('ofc-theme-v2')){if(t==='slate'){t=null;localStorage.removeItem('ofc-theme')}localStorage.setItem('ofc-theme-v2','1')}"+
+              "document.documentElement.dataset.theme=t||'light'}catch(e){document.documentElement.dataset.theme='light'}",
           }}
         />
         {/*
