@@ -325,19 +325,23 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 0.5rem;
-  padding: 0.4375rem 0.625rem;
+  padding: 0.5rem 0.6875rem;
   border-bottom: 1px solid var(--color-line);
-  background: var(--color-base-700);
+  background: var(--color-ink-100);
   flex: none;
 }
 
 .panel-title {
-  font-size: var(--text-2xs);
-  font-weight: 600;
-  letter-spacing: 0.06em;
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: var(--color-ink-300);
+  /* On the navy bar, not against the card. */
+  color: #ffffff;
 }
+/* Section headings reused inside a body still sit on the card, so they take
+   the ink colour rather than the header bar's white. */
+.panel-body .panel-title { color: var(--color-ink-100); }
 
 .panel-body {
   padding: 0.625rem;
@@ -510,14 +514,14 @@ body {
   position: sticky;
   top: 0;
   z-index: 2;
-  background: var(--color-base-700);
-  color: var(--color-ink-300);
-  font-weight: 600;
+  background: var(--color-base-600);
+  color: var(--color-ink-100);
+  font-weight: 700;
   font-size: var(--text-2xs);
   letter-spacing: 0.03em;
   text-align: right;
-  padding: 0.3125rem 0.4375rem;
-  border-bottom: 1px solid var(--color-line);
+  padding: 0.375rem 0.4375rem;
+  border-bottom: 2px solid var(--color-line-strong);
   white-space: nowrap;
 }
 .grid-table td {
@@ -530,6 +534,12 @@ body {
   color: var(--color-ink-200);
   transition: background 0.12s var(--ease-out);
 }
+/* Banded rows. A hundred-strike ladder scanned across eight columns needs the
+   eye anchored to a line; the reference bands its rate tables for the same
+   reason. Kept faint so the ATM tint and the P&L colour still read on top. */
+.grid-table tbody tr:nth-child(even) { background: var(--color-base-700); }
+.grid-table tbody tr:hover { background: var(--color-atm-tint); }
+
 .grid-table tbody tr {
   transition: background 0.12s var(--ease-out);
 }
