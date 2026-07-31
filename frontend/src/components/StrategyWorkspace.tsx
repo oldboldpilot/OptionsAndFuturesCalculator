@@ -11,6 +11,7 @@ import PnLMatrix from './PnLMatrix';
 import OptionTicket from './OptionTicket';
 import PnLSurface from './PnLSurface';
 import AdSlot from './AdSlot';
+import TermStructure from './TermStructure';
 import { StrategySelector } from './StrategySelector';
 import { useCalculatorStore } from '../store/useCalculatorStore';
 
@@ -110,6 +111,7 @@ export function StrategyWorkspace({ heading }: { heading?: string }) {
 
         {/* Reference: the chain, at full height, opened at the money */}
         <div className="stagger" style={column}>
+          <TermStructure />
           <OptionChain />
           <div style={{ flex: '0 0 30%', minHeight: 0, display: 'flex' }}>
             <StrategyMetrics />

@@ -174,6 +174,24 @@ export interface ChainExpiration {
   label: string;
 }
 
+/**
+ * One contract on the futures forward curve. Maps 1:1 onto `FuturesContract`.
+ *
+ * DERIVED, not quoted. Forward price is cost-of-carry from a measured spot and
+ * the measured Treasury rate; `state` carries MODELLED for exactly that reason.
+ * bid, ask, volume and open interest are order-book facts no formula produces
+ * and arrive as zero — rendered as an em dash, never as a number.
+ */
+export interface FuturesContract {
+  code: string;
+  deliveryMonth: string;
+  daysToExpiry: number;
+  futuresPrice: number;
+  basis: number;
+  annualizedYield: number;
+  state: string;
+}
+
 export type ChainStatus = 'idle' | 'loading' | 'ready' | 'error';
 
 /**
@@ -212,6 +230,7 @@ interface CalculatorState {
   error: string | null;
 
   chainStrikes: ChainStrike[];
+  futuresCurve: FuturesContract[];
   chainExpirations: ChainExpiration[];
   selectedExpiration: string;
   chainStatus: ChainStatus;
@@ -312,6 +331,7 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
 
   chainStrikes: [],
   chainExpirations: [],
+  futuresCurve: [],
   selectedExpiration: '',
   chainStatus: 'idle',
   chainError: null,
@@ -559,10 +579,24 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
       set({
         chainExpirations: expirations,
         chainStrikes: strikes,
+        futuresCurve: res.getFuturesContractsList().map((c) => ({
+          code: c.getCode(),
+          deliveryMonth: c.getDeliveryMonth(),
+          daysToExpiry: c.getDaysToExpiry(),
+          futuresPrice: c.getFuturesPrice(),
+          basis: c.getBasis(),
+          annualizedYield: c.getAnnualizedYield(),
+          state: c.getState(),
+        })),
         selectedExpiration: wanted || res.getSelectedExpirationDate() || '',
-        chainStatus: strikes.length > 0 ? 'ready' : 'error',
+        // A futures symbol returns a forward curve and no option strikes. The
+        // strikes-only test called that an error and blanked the panel.
+        chainStatus:
+          strikes.length > 0 || res.getFuturesContractsList().length > 0 ? 'ready' : 'error',
         chainError:
-          strikes.length > 0 ? null : `No listed contracts returned for ${symbol}`,
+          strikes.length > 0 || res.getFuturesContractsList().length > 0
+            ? null
+            : `No listed contracts returned for ${symbol}`,
       });
     });
   },
