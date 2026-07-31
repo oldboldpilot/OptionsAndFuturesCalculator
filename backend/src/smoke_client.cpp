@@ -543,6 +543,43 @@ auto check_term_structure(calculator::OptionsCalculator::Stub& stub) -> bool {
         prev_days = c.days_to_expiry();
         prev_basis = c.basis();
     }
+
+    // A curve is only allowed where the underlying is actually known. Roots that
+    // collide with a listed equity of the same ticker must REFUSE rather than
+    // price a mining stock or an oil major and call it a futures curve — the
+    // failure that made ES read 71 instead of 7400.
+    for (const char* root : {"GC", "CL", "NG", "SI", "ZB"}) {
+        calculator::ChainRequest r2;
+        r2.set_symbol(root);
+        r2.set_asset_class("FUTURES");
+        calculator::ChainResponse res2;
+        const auto c2 = make_context();
+        const auto s2 = stub.GetMarketChain(c2.get(), r2, &res2);
+        if (s2.ok()) {
+            std::cerr << root << " returned a curve, but no futures quote source is mapped "
+                      << "for it — that curve is priced off the equity of the same name\n";
+            return false;
+        }
+    }
+    std::cout << "  unmapped roots  GC CL NG SI ZB all refuse rather than mispricing\n";
+
+    // The mapped roots must both work and land at an index-like level.
+    for (const auto& [root, floor] : {std::pair<const char*, double>{"ES", 1000.0},
+                                      std::pair<const char*, double>{"NQ", 1000.0}}) {
+        calculator::ChainRequest r3;
+        r3.set_symbol(root);
+        r3.set_asset_class("FUTURES");
+        calculator::ChainResponse res3;
+        const auto c3 = make_context();
+        const auto s3 = stub.GetMarketChain(c3.get(), r3, &res3);
+        if (!s3.ok() || res3.spot_price() < floor) {
+            std::cerr << root << " resolved to " << res3.spot_price()
+                      << ", below an index level — the equity ticker is being used again\n";
+            return false;
+        }
+        std::cout << "  " << root << " spot " << std::setprecision(2) << res3.spot_price()
+                  << " (index level, not the equity of the same ticker)\n";
+    }
     return true;
 }
 
