@@ -24,6 +24,8 @@
 #include <grpcpp/grpcpp.h>
 #include "calculator.pb.h"
 #include "calculator.grpc.pb.h"
+#include "finance.pb.h"
+#include "finance.grpc.pb.h"
 
 namespace {
 
@@ -674,6 +676,380 @@ auto check_futures_quote(calculator::OptionsCalculator::Stub& stub) -> bool {
     return true;
 }
 
+/**
+ * The sensen financial library, over its own contract.
+ *
+ * Every assertion below is checked against something derived INDEPENDENTLY of
+ * the engine -- a closed-form formula evaluated here, or an identity the answer
+ * must satisfy no matter how it was computed. Comparing the engine to a number
+ * the engine produced earlier would only detect a crash, and this service's
+ * failure mode is a wrong figure, not a crash.
+ */
+auto check_finance(sensen::finance::Finance::Stub& stub) -> bool {
+    // -- Time value of money, against the closed-form annuity formula --------
+    {
+        sensen::finance::PaymentRequest req;
+        req.set_rate("0.005");           // 6% nominal, monthly
+        req.set_periods(360);            // 30 years
+        req.set_present_value("300000");
+        sensen::finance::DecimalResponse res;
+        const auto ctx = make_context();
+        if (const auto s = stub.ComputePayment(ctx.get(), req, &res); !s.ok()) {
+            std::cerr << "ComputePayment FAILED: " << s.error_message() << "\n";
+            return false;
+        }
+        const double pmt = std::stod(res.value());
+        // PMT = -PV*r / (1 - (1+r)^-n). Written out here so it shares no code
+        // with the engine.
+        const double r = 0.005;
+        const double expected = -300000.0 * r / (1.0 - std::pow(1.0 + r, -360.0));
+        if (std::abs(pmt - expected) > 1e-6) {
+            std::cerr << "pmt " << pmt << " disagrees with the closed form " << expected << "\n";
+            return false;
+        }
+        std::cout << "Finance   pmt(300k, 6%, 30y) = " << std::fixed << std::setprecision(6)
+                  << pmt << "  (closed form " << expected << ")\n";
+    }
+
+    // Interest + principal must reconstruct the payment exactly, and period-1
+    // interest must be balance x rate. Both hold for any correct scheduler.
+    {
+        sensen::finance::PeriodPaymentRequest req;
+        req.set_rate("0.005");
+        req.set_period(1);
+        req.set_periods(360);
+        req.set_present_value("300000");
+        sensen::finance::DecimalResponse ires;
+        sensen::finance::DecimalResponse pres;
+        const auto c1 = make_context();
+        const auto c2 = make_context();
+        if (!stub.ComputeInterestPayment(c1.get(), req, &ires).ok() ||
+            !stub.ComputePrincipalPayment(c2.get(), req, &pres).ok()) {
+            std::cerr << "ipmt/ppmt FAILED\n";
+            return false;
+        }
+        const double ip = std::stod(ires.value());
+        const double pp = std::stod(pres.value());
+        const double r = 0.005;
+        const double expected_pmt = -300000.0 * r / (1.0 - std::pow(1.0 + r, -360.0));
+        if (std::abs((ip + pp) - expected_pmt) > 1e-6) {
+            std::cerr << "ipmt+ppmt " << (ip + pp) << " != pmt " << expected_pmt << "\n";
+            return false;
+        }
+        if (std::abs(std::abs(ip) - 300000.0 * r) > 1e-6) {
+            std::cerr << "period-1 interest " << std::abs(ip) << " != PV*r " << (300000.0 * r)
+                      << "\n";
+            return false;
+        }
+        std::cout << "          ipmt + ppmt reconstructs pmt; period-1 interest = PV x r\n";
+    }
+
+    // -- Amortization: the schedule must close on itself --------------------
+    {
+        sensen::finance::AmortizationRequest req;
+        req.set_loan_amount("300000");
+        req.set_annual_rate("0.06");
+        req.set_term_months(360);
+        sensen::finance::AmortizationResponse res;
+        const auto ctx = make_context();
+        if (const auto s = stub.ComputeAmortization(ctx.get(), req, &res); !s.ok()) {
+            std::cerr << "ComputeAmortization FAILED: " << s.error_message() << "\n";
+            return false;
+        }
+        if (res.schedule_size() != 360) {
+            std::cerr << "schedule has " << res.schedule_size() << " rows, expected 360\n";
+            return false;
+        }
+        // start - principal == end on every row. A schedule that fails this is
+        // not a schedule.
+        double worst = 0.0;
+        for (const auto& row : res.schedule()) {
+            const double gap = std::abs(std::stod(row.start_balance()) -
+                                        std::stod(row.principal_paid()) -
+                                        std::stod(row.end_balance()));
+            worst = std::max(worst, gap);
+        }
+        if (worst > 1e-6) {
+            std::cerr << "amortization rows do not close: worst gap " << worst << "\n";
+            return false;
+        }
+        const double final_balance = std::stod(res.schedule(359).end_balance());
+        if (std::abs(final_balance) > 0.01) {
+            std::cerr << "loan does not retire: final balance " << final_balance << "\n";
+            return false;
+        }
+        // Total principal repaid is definitionally the amount borrowed.
+        const double total_principal = std::stod(res.summary().total_principal_paid());
+        if (std::abs(total_principal - 300000.0) > 0.01) {
+            std::cerr << "total principal " << total_principal << " != loan 300000\n";
+            return false;
+        }
+        std::cout << "          360 rows close to 0.00, total principal = the loan, interest = "
+                  << std::setprecision(2) << std::stod(res.summary().total_interest_paid()) << "\n";
+    }
+
+    // An overpayment must retire the loan EARLY. This is the field a borrower
+    // actually asks about, so it gets its own check rather than riding on the
+    // schedule length.
+    {
+        sensen::finance::AmortizationRequest req;
+        req.set_loan_amount("300000");
+        req.set_annual_rate("0.06");
+        req.set_term_months(360);
+        req.set_monthly_overpayment("500");
+        sensen::finance::AmortizationResponse res;
+        const auto ctx = make_context();
+        if (!stub.ComputeAmortization(ctx.get(), req, &res).ok()) {
+            std::cerr << "overpayment amortization FAILED\n";
+            return false;
+        }
+        if (res.summary().actual_term_months() >= 360) {
+            std::cerr << "a 500/month overpayment did not shorten the term ("
+                      << res.summary().actual_term_months() << ")\n";
+            return false;
+        }
+        std::cout << "          +500/mo retires it in " << res.summary().actual_term_months()
+                  << " months instead of 360\n";
+    }
+
+    // -- Black-Scholes, against put-call parity -----------------------------
+    //
+    // Parity is an arbitrage identity, not a pricing formula: it holds for any
+    // correct call/put pair regardless of how they were computed, which is what
+    // makes it a real check rather than a restatement of the model.
+    {
+        sensen::finance::BlackScholesRequest req;
+        req.set_spot(100.0);
+        req.set_strike(100.0);
+        req.set_rate(0.05);
+        req.set_volatility(0.2);
+        req.set_years_to_expiry(1.0);
+        sensen::finance::BlackScholesResponse call_res;
+        sensen::finance::BlackScholesResponse put_res;
+        const auto c1 = make_context();
+        if (!stub.PriceBlackScholes(c1.get(), req, &call_res).ok()) {
+            std::cerr << "PriceBlackScholes(call) FAILED\n";
+            return false;
+        }
+        req.set_option_type(sensen::finance::PUT);
+        const auto c2 = make_context();
+        if (!stub.PriceBlackScholes(c2.get(), req, &put_res).ok()) {
+            std::cerr << "PriceBlackScholes(put) FAILED\n";
+            return false;
+        }
+        const double parity_lhs = call_res.value() - put_res.value();
+        const double parity_rhs = 100.0 - 100.0 * std::exp(-0.05 * 1.0);
+        if (std::abs(parity_lhs - parity_rhs) > 1e-9) {
+            std::cerr << "put-call parity violated: C-P = " << parity_lhs << " vs S-Ke^-rT = "
+                      << parity_rhs << "\n";
+            return false;
+        }
+        if (std::abs((call_res.delta() - put_res.delta()) - 1.0) > 1e-9) {
+            std::cerr << "delta_call - delta_put = " << (call_res.delta() - put_res.delta())
+                      << ", must be exactly 1\n";
+            return false;
+        }
+        // Gamma and vega do not depend on which side of the strike you are on.
+        if (std::abs(call_res.gamma() - put_res.gamma()) > 1e-12 ||
+            std::abs(call_res.vega() - put_res.vega()) > 1e-12) {
+            std::cerr << "gamma/vega differ between call and put\n";
+            return false;
+        }
+        std::cout << "          BS call " << std::setprecision(6) << call_res.value() << " put "
+                  << put_res.value() << "  parity holds, delta_c - delta_p = 1\n";
+    }
+
+    // -- Bonds: price and yield must invert each other ----------------------
+    {
+        sensen::finance::BondRequest req;
+        req.set_par(1000.0);
+        req.set_coupon_rate(0.05);
+        req.set_frequency(2);
+        req.set_years_to_maturity(10.0);
+        req.set_redemption(100.0);
+        req.set_yield(0.04);
+        sensen::finance::BondResponse res;
+        const auto c1 = make_context();
+        if (const auto s = stub.AnalyzeBond(c1.get(), req, &res); !s.ok()) {
+            std::cerr << "AnalyzeBond FAILED: " << s.error_message() << "\n";
+            return false;
+        }
+        // A coupon above the yield means the bond trades above par. If this is
+        // ever false the sign convention has inverted somewhere.
+        if (res.price() <= 1000.0) {
+            std::cerr << "a 5% coupon at a 4% yield priced at " << res.price()
+                      << ", which is not a premium\n";
+            return false;
+        }
+        if (res.macaulay_duration() <= 0.0 || res.macaulay_duration() >= 10.0) {
+            std::cerr << "duration " << res.macaulay_duration()
+                      << " is not inside (0, maturity)\n";
+            return false;
+        }
+        if (res.convexity() <= 0.0) {
+            std::cerr << "convexity " << res.convexity() << " is not positive\n";
+            return false;
+        }
+        // Feed the price back: the yield must come out where it went in.
+        sensen::finance::BondRequest back;
+        back.set_par(1000.0);
+        back.set_coupon_rate(0.05);
+        back.set_frequency(2);
+        back.set_years_to_maturity(10.0);
+        back.set_redemption(100.0);
+        back.set_price(res.price());
+        sensen::finance::BondResponse back_res;
+        const auto c2 = make_context();
+        if (!stub.AnalyzeBond(c2.get(), back, &back_res).ok()) {
+            std::cerr << "AnalyzeBond(price) FAILED\n";
+            return false;
+        }
+        if (std::abs(back_res.yield() - 0.04) > 1e-8) {
+            std::cerr << "price -> yield did not invert: got " << back_res.yield() << "\n";
+            return false;
+        }
+        std::cout << "          bond 5%/10y at 4% yield = " << std::setprecision(6) << res.price()
+                  << ", inverts back to " << back_res.yield()
+                  << ", duration " << res.macaulay_duration() << "\n";
+    }
+
+    // -- HELOC and rental ROI, the features added upstream today ------------
+    {
+        sensen::finance::HelocRequest req;
+        req.set_home_value("500000");
+        req.set_current_mortgage_balance("300000");
+        req.set_max_ltv_rate("0.80");
+        req.set_drawn_amount("50000");
+        req.set_annual_rate("0.07");
+        req.set_repayment_term_years(15);
+        req.set_payments_per_year(12);
+        sensen::finance::HelocResponse res;
+        const auto ctx = make_context();
+        if (const auto s = stub.ComputeHeloc(ctx.get(), req, &res); !s.ok()) {
+            std::cerr << "ComputeHeloc FAILED: " << s.error_message() << "\n";
+            return false;
+        }
+        // 500k x 0.80 = 400k ceiling, less 300k owed = 100k, less 50k drawn.
+        if (std::abs(std::stod(res.available_equity()) - 50000.0) > 0.01) {
+            std::cerr << "HELOC available equity " << res.available_equity()
+                      << ", expected 50000\n";
+            return false;
+        }
+        // The draw period is interest only: 50000 x 0.07/12.
+        const double expected_draw = 50000.0 * 0.07 / 12.0;
+        if (std::abs(std::stod(res.draw_period_payment()) - expected_draw) > 0.01) {
+            std::cerr << "HELOC draw payment " << res.draw_period_payment() << ", expected "
+                      << expected_draw << "\n";
+            return false;
+        }
+        if (std::stod(res.repayment_period_payment()) <=
+            std::stod(res.draw_period_payment())) {
+            std::cerr << "amortizing payment is not above the interest-only payment\n";
+            return false;
+        }
+        std::cout << "          HELOC equity " << std::setprecision(2)
+                  << std::stod(res.available_equity()) << ", draw "
+                  << std::stod(res.draw_period_payment()) << "/mo, repayment "
+                  << std::stod(res.repayment_period_payment()) << "/mo\n";
+    }
+
+    {
+        sensen::finance::RentalRoiRequest req;
+        req.set_property_value("400000");
+        req.set_total_cash_invested("100000");
+        req.set_periodic_gross_rent("3000");
+        req.set_periodic_operating_expenses("800");
+        req.set_periodic_mortgage_payment("1500");
+        req.set_periods_per_year(12);
+        sensen::finance::RentalRoiResponse res;
+        const auto ctx = make_context();
+        if (const auto s = stub.ComputeRentalRoi(ctx.get(), req, &res); !s.ok()) {
+            std::cerr << "ComputeRentalRoi FAILED: " << s.error_message() << "\n";
+            return false;
+        }
+        // NOI excludes debt service: (3000 - 800) x 12.
+        if (std::abs(std::stod(res.net_operating_income()) - 26400.0) > 0.01) {
+            std::cerr << "NOI " << res.net_operating_income() << ", expected 26400 -- debt "
+                      << "service may be leaking into operating expenses\n";
+            return false;
+        }
+        // Cash flow subtracts it: 26400 - 18000.
+        if (std::abs(std::stod(res.annual_cash_flow()) - 8400.0) > 0.01) {
+            std::cerr << "cash flow " << res.annual_cash_flow() << ", expected 8400\n";
+            return false;
+        }
+        // Cap rate is NOI over value, NOT cash flow over value.
+        if (std::abs(std::stod(res.cap_rate()) - 0.066) > 1e-6) {
+            std::cerr << "cap rate " << res.cap_rate() << ", expected 0.066 = 26400/400000\n";
+            return false;
+        }
+        std::cout << "          rental NOI 26400, cash flow 8400, cap rate 6.60%\n";
+    }
+
+    // -- Refusals: malformed input must be rejected, not coerced ------------
+    //
+    // BigDecimal's own parser skips every non-digit, so "12x3" would silently
+    // become 123. The service validates before parsing; these prove it, and
+    // prove the other places where an unstated input is refused rather than
+    // defaulted.
+    {
+        sensen::finance::PaymentRequest req;
+        req.set_rate("12x3");
+        req.set_periods(12);
+        req.set_present_value("1000");
+        sensen::finance::DecimalResponse res;
+        const auto ctx = make_context();
+        if (stub.ComputePayment(ctx.get(), req, &res).ok()) {
+            std::cerr << "\"12x3\" was accepted as a rate -- it silently becomes 123\n";
+            return false;
+        }
+    }
+    {
+        // No compounding frequency stated. The engine must not pick one.
+        sensen::finance::FutureValueDetailedRequest req;
+        req.set_annual_rate("0.05");
+        req.set_years(10);
+        req.set_annual_contribution("1000");
+        sensen::finance::FutureValueDetailedResponse res;
+        const auto ctx = make_context();
+        if (stub.ComputeFutureValueDetailed(ctx.get(), req, &res).ok()) {
+            std::cerr << "an absent compound_frequency was defaulted rather than refused\n";
+            return false;
+        }
+    }
+    {
+        // Neither yield nor price: nothing here is derivable.
+        sensen::finance::BondRequest req;
+        req.set_par(1000.0);
+        req.set_coupon_rate(0.05);
+        req.set_frequency(2);
+        req.set_years_to_maturity(10.0);
+        sensen::finance::BondResponse res;
+        const auto ctx = make_context();
+        if (stub.AnalyzeBond(ctx.get(), req, &res).ok()) {
+            std::cerr << "a bond with neither yield nor price returned an answer\n";
+            return false;
+        }
+    }
+    {
+        // Two loans, one rate. Truncating to the shortest column would return a
+        // shorter list that reads like a complete answer.
+        sensen::finance::AmortizationBatchRequest req;
+        req.add_loan_amounts(100000.0);
+        req.add_loan_amounts(200000.0);
+        req.add_annual_rates(0.05);
+        sensen::finance::AmortizationBatchResponse res;
+        const auto ctx = make_context();
+        if (stub.ComputeAmortizationBatch(ctx.get(), req, &res).ok()) {
+            std::cerr << "a ragged batch was accepted rather than refused\n";
+            return false;
+        }
+    }
+    std::cout << "          refusals  malformed decimal, absent frequency, underspecified "
+                 "bond, ragged batch\n";
+    return true;
+}
+
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
@@ -709,6 +1085,12 @@ auto main(int argc, char** argv) -> int {
 
     if (!check_futures_quote(*stub)) return 1;
 
-    std::cout << "\nAll four RPCs returned live data.\n";
+    // The sensen financial library, on the same channel and the same port --
+    // a separate contract, not a separate service to reach.
+    auto finance = sensen::finance::Finance::NewStub(channel);
+    if (!check_finance(*finance)) return 1;
+
+    std::cout << "\nCalculator RPCs returned live data; the financial library's answers "
+                 "satisfy their independent identities.\n";
     return 0;
 }

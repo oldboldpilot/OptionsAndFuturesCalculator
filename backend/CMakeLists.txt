@@ -128,9 +128,29 @@ add_custom_command(
     DEPENDS ${PROTO_FILE}
 )
 
+# The sensen financial library's own contract, kept separate from
+# calculator.proto: that one speaks this application's language (strategies,
+# legs, payoff curves), this one exposes the general-purpose financial engine
+# underneath so other services can call it without inheriting a calculator's
+# vocabulary. Both are served by the same binary on the same port.
+set(FINANCE_PROTO_FILE "${CMAKE_CURRENT_SOURCE_DIR}/proto/finance.proto")
+
+add_custom_command(
+    OUTPUT "${PROTO_GEN_DIR}/finance.pb.cc" "${PROTO_GEN_DIR}/finance.pb.h" "${PROTO_GEN_DIR}/finance.grpc.pb.cc" "${PROTO_GEN_DIR}/finance.grpc.pb.h"
+    COMMAND $<TARGET_FILE:protoc>
+    ARGS --cpp_out=${PROTO_GEN_DIR}
+         --grpc_out=${PROTO_GEN_DIR}
+         --plugin=protoc-gen-grpc=$<TARGET_FILE:grpc_cpp_plugin>
+         -I${CMAKE_CURRENT_SOURCE_DIR}/proto
+         ${FINANCE_PROTO_FILE}
+    DEPENDS ${FINANCE_PROTO_FILE}
+)
+
 add_library(proto_lib STATIC
     "${PROTO_GEN_DIR}/calculator.pb.cc"
     "${PROTO_GEN_DIR}/calculator.grpc.pb.cc"
+    "${PROTO_GEN_DIR}/finance.pb.cc"
+    "${PROTO_GEN_DIR}/finance.grpc.pb.cc"
 )
 target_include_directories(proto_lib PUBLIC ${PROTO_GEN_DIR})
 target_link_libraries(proto_lib PUBLIC grpc++ libprotobuf)
@@ -145,6 +165,16 @@ set(BUILD_EXAMPLES OFF CACHE BOOL "Disable sensen examples" FORCE)
 # leaving this on fails configure outright inside the container.
 set(BUILD_BENCHMARKS OFF CACHE BOOL "Disable sensen benchmarks" FORCE)
 set(SKIP_CLANG_TIDY ON CACHE BOOL "Disable clang-tidy due to c++23 module scanning bugs" FORCE)
+# This binary is libstdc++ throughout -- gRPC, protobuf, httplib and SGEE are
+# all built that way, and SENSEN_NO_IMPORT_STD at the top of this file says so.
+# Standalone, sensen forces -stdlib=libc++ across its own directory scope, which
+# would leave the sensen subtree speaking libc++ while everything it links
+# against speaks libstdc++. That is not a preference to reconcile later: the two
+# disagree about the layout of std::string, so it is a link-time hazard even
+# where it compiles, and the compile errors it does produce
+# ("no viable conversion from 'std::__cxx11::basic_string<char>' to
+# 'std::string'") never mention the standard library at all.
+set(SENSEN_USE_LIBCXX OFF CACHE BOOL "Keep sensen on libstdc++ to match the rest of this binary" FORCE)
 add_subdirectory(sensen EXCLUDE_FROM_ALL)
 
 # --------------------------------------------------------------------------
@@ -200,6 +230,7 @@ target_sources(sensen_slim
         FILE_SET CXX_MODULES BASE_DIRS "${SENSEN_SRC}" FILES
             "${SENSEN_SRC}/bigdecimal.cppm"
             "${SENSEN_SRC}/cpu_features.cppm"
+            "${SENSEN_SRC}/financial.cppm"
             "${SENSEN_SRC}/float_types.cppm"
             "${SENSEN_SRC}/linear_algebra.cppm"
             "${SENSEN_SRC}/options.cppm"
@@ -251,8 +282,24 @@ set(SGEE_NO_IMPORT_STD ON CACHE BOOL "Build SGEE against libstdc++ via its heade
 # the `logger` target, and only this tree knows where that is. Previously this
 # path was hardcoded inside SGEE's own CMakeLists, which made SGEE unbuildable
 # for anyone whose layout differed.
+#
+# The directory is named after the REAL target, which is not `logger`.
+# cpp23-logger builds "${CPP23_LOGGER_TARGET_PREFIX}logger" and makes `logger`
+# an ALIAS onto it, so with sensen's "sgee_" prefix the BMIs land in
+# sgee_logger.dir. Naming logger.dir here pointed SGEE at a directory that only
+# exists as a leftover from an older configure -- so `import
+# logger.code_generator` in SGEE's transpiler silently resolved against a
+# six-day-old BMI compiled with different flags, and the errors it produced
+# ("no known conversion from 'const std::string_view' to 'std::string_view'")
+# name neither the module system nor the stale file. Derive it from the target
+# name so it cannot drift out of step again.
+if(NOT CPP23_LOGGER_TARGET_NAME)
+    message(FATAL_ERROR
+        "CPP23_LOGGER_TARGET_NAME is unset -- sensen's cpp23-logger did not configure. "
+        "SGEE's logger BMI path is derived from it and would otherwise be guessed.")
+endif()
 set(SGEE_LOGGER_MODULE_DIR
-    "${CMAKE_BINARY_DIR}/sensen/external/fastestjsoninthewest/external/cpp23-logger/CMakeFiles/logger.dir"
+    "${CMAKE_BINARY_DIR}/sensen/external/fastestjsoninthewest/external/cpp23-logger/CMakeFiles/${CPP23_LOGGER_TARGET_NAME}.dir"
     CACHE PATH "Directory containing the logger module BMI for SGEE" FORCE)
 
 add_subdirectory(external/SGEE sgee EXCLUDE_FROM_ALL)
@@ -263,8 +310,8 @@ add_subdirectory(external/SGEE sgee EXCLUDE_FROM_ALL)
 # add_subdirectory(nanobind EXCLUDE_FROM_ALL)
 
 # Core engine binary
-add_executable(calculator_engine src/main.cpp src/modules/calculator_service.cpp)
-target_sources(calculator_engine PUBLIC FILE_SET CXX_MODULES FILES src/modules/calculator_service.cppm src/modules/market_data.cppm)
+add_executable(calculator_engine src/main.cpp src/modules/calculator_service.cpp src/modules/finance_service.cpp)
+target_sources(calculator_engine PUBLIC FILE_SET CXX_MODULES FILES src/modules/calculator_service.cppm src/modules/market_data.cppm src/modules/finance_service.cppm)
 target_link_libraries(calculator_engine PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto sgee)
 
 # Python Bindings via nanobind

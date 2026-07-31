@@ -25,6 +25,37 @@ This document outlines the system architecture, build commands, and deployment i
              • Database: railway (Tables: users, profiles, saved_strategies)
 ```
 
+## gRPC Surface
+
+The engine serves **two** services on one port (`:50051` native, and through
+Envoy's catch-all route as gRPC-Web). They are separate contracts, not separate
+deployments.
+
+| Service | Proto | Purpose |
+| --- | --- | --- |
+| `calculator.OptionsCalculator` | `backend/proto/calculator.proto` | This application's own API — strategies, legs, payoff curves, market data |
+| `sensen.finance.Finance` | `backend/proto/finance.proto` | The general-purpose sensen financial library, exposed for reuse by other applications |
+
+`sensen.finance.Finance` covers roughly fifty functions across sensen's
+`financial.cppm`, `options.cppm` and `portfolio.cppm`: time value of money,
+mortgage amortization (with tax deductions), HELOC, rental ROI, NPV/IRR/XIRR,
+depreciation, bonds, T-bills, futures pricing and margin simulation, hedging,
+commodity spreads, option pricing (trees, Black-Scholes with full Greeks, Monte
+Carlo) and portfolio statistics/optimization.
+
+**Numeric types are not uniform, and the difference is deliberate.** A field is
+`string` where sensen computes in `BigDecimal` (an exact `__int128` fixed-point
+decimal, eighteen places) and `double` where sensen genuinely computes in
+`double`. Money is a decimal string because rounding it to `double` compounds
+over a 360-period amortization, and because this service is reachable from
+browsers where JavaScript's `number` *is* a float64 — a `double` money field is
+lossy on the client before anyone writes a line of code.
+
+Gate: `backend/src/smoke_client.cpp` (`check_finance`) verifies the answers
+against independent identities — put-call parity, price/yield inversion,
+schedule closure, and the closed-form annuity formula — not against figures the
+engine produced earlier.
+
 ## Features & Capabilities
 
 1. **Futures & Options Strategy Modeler:**
