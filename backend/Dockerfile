@@ -117,13 +117,32 @@ ENV DEBIAN_FRONTEND=noninteractive
 # catches this class, so treat that check as part of the build, not an extra.
 #
 # As of the sensen_slim trim (backend/CMakeLists.txt) the engine no longer links
-# libsensen at all, and `ldd calculator_engine` reports no libz3, no libpq and
-# no libtbb — TBB is now linked statically. So libz3-4, libpq5 and liburing2
-# are very likely vestigial here. They are deliberately left in place: dropping
-# them is a separate change that wants its own container build and `ldd` pass to
-# confirm, and the failure mode if that reasoning is wrong is a container that
-# will not start. Kept as a known, costed piece of dead weight rather than an
-# untested saving.
+# libsensen, so the packages that existed only for it are no longer reachable
+# through that path. THE WHOLE LIST IS NEVERTHELESS LEFT INTACT, deliberately.
+#
+# Correcting an earlier claim in this file, because acting on it would break the
+# image: liburing2 is NOT vestigial. `ldd /app/calculator_engine` inside the
+# built image lists liburing.so.2, and it arrives via SGEE, not sensen —
+# libsgee.a carries io_uring symbols. Dropping it would produce an image that
+# fails at process start, which is exactly the failure this comment block was
+# written to warn about.
+#
+# For the record, the sonames the three shipped binaries (calculator_engine,
+# smoke_client, envoy) actually resolve to are:
+#
+#   libbrotlicommon/dec/enc.so.1  libcap.so.2   libcrypto.so.3  libc.so.6
+#   libdl.so.2   libgcc_s.so.1   libgcrypt.so.20   libgpg-error.so.0
+#   libjemalloc.so.2   liblz4.so.1   liblzma.so.5   libm.so.6
+#   libpthread.so.0   librt.so.1   libssl.so.3   libstdc++.so.6
+#   libsystemd.so.0   liburing.so.2   libz.so.1   libzstd.so.1
+#
+# libz3 and libpq do not appear there, and TBB is now linked statically. Trimming
+# them would save a little image size; it is not being done, because the saving
+# is small and the cost of getting it wrong is a container that will not start.
+# Anyone revisiting this should re-derive the list above from the built image
+# rather than from this comment — `ldd` on the binaries is the source of truth,
+# and reasoning about which subproject "owns" a library is how the wrong answer
+# gets reached.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libstdc++6 libssl3t64 libtbb12 liburing2 libjemalloc2 libpq5 \
         libevent-2.1-7t64 libunwind8 libbrotli1 zlib1g libgssapi-krb5-2 \
