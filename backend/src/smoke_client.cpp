@@ -583,6 +583,97 @@ auto check_term_structure(calculator::OptionsCalculator::Stub& stub) -> bool {
     return true;
 }
 
+/**
+ * The quote and the curve must describe the SAME instrument.
+ *
+ * This is the check that was missing, and its absence is what let a shipped
+ * build put an 8-contract E-mini curve around 7500 directly underneath a header
+ * reading "ES spot 71.59". Both numbers were real quotes from the same feed.
+ * One was the E-mini S&P; the other was Eversource Energy, a utility that
+ * happens to own the ticker. Every per-contract assertion in the curve passed,
+ * because the curve was right — it was the spot beside it, which prices every
+ * leg on the screen, that was the wrong instrument.
+ *
+ * Checking either RPC alone cannot catch this. Only comparing them can.
+ */
+auto check_futures_quote(calculator::OptionsCalculator::Stub& stub) -> bool {
+    for (const char* root : {"ES", "NQ"}) {
+        calculator::QuoteRequest fq;
+        fq.set_symbol(root);
+        fq.set_asset_class("FUTURES");
+        calculator::QuoteResponse fr;
+        const auto c1 = make_context();
+        if (const auto s1 = stub.GetMarketQuote(c1.get(), fq, &fr); !s1.ok()) {
+            std::cerr << root << " as FUTURES has no quote: " << s1.error_message() << "\n";
+            return false;
+        }
+
+        calculator::ChainRequest cq;
+        cq.set_symbol(root);
+        cq.set_asset_class("FUTURES");
+        calculator::ChainResponse cr;
+        const auto c2 = make_context();
+        if (const auto s2 = stub.GetMarketChain(c2.get(), cq, &cr); !s2.ok()) {
+            std::cerr << root << " as FUTURES has no chain: " << s2.error_message() << "\n";
+            return false;
+        }
+
+        // Both read the same proxy moments apart, so they may differ by a tick,
+        // but not by an instrument. 1% is far tighter than the ~100x gap an
+        // equity/futures mix-up produces and far looser than intraday drift
+        // between two calls.
+        const double q = fr.price(), s = cr.spot_price();
+        if (q <= 0.0 || std::abs(q - s) / s > 0.01) {
+            std::cerr << root << " quote " << q << " disagrees with chain spot " << s
+                      << " — the quote path and the curve are on different instruments\n";
+            return false;
+        }
+        if (fr.provider().find("proxy") == std::string::npos) {
+            std::cerr << root << " quote provider is " << fr.provider()
+                      << ", which does not disclose that the level is derived\n";
+            return false;
+        }
+        std::cout << "  " << root << " quote " << std::setprecision(2) << q
+                  << " agrees with curve spot " << s << "  via " << fr.provider() << "\n";
+
+        // The same ticker asked as an EQUITY is a different instrument and must
+        // answer as one. If both classes return the same number, asset_class is
+        // being ignored and the agreement above proves nothing.
+        calculator::QuoteRequest eq;
+        eq.set_symbol(root);
+        eq.set_asset_class("EQUITY");
+        calculator::QuoteResponse er;
+        const auto c3 = make_context();
+        if (const auto s3 = stub.GetMarketQuote(c3.get(), eq, &er); s3.ok()) {
+            if (std::abs(er.price() - q) < 0.01) {
+                std::cerr << root << " prices identically as EQUITY and FUTURES — asset_class "
+                          << "is not routing\n";
+                return false;
+            }
+            std::cout << "  " << root << " as EQUITY is " << std::setprecision(2) << er.price()
+                      << ", a different instrument, and stays that way\n";
+        }
+    }
+
+    // A futures root with no priceable proxy must refuse here too. Refusing in
+    // the chain while the quote path serves an equity is exactly the split this
+    // check exists to close.
+    for (const char* root : {"GC", "CL", "NG", "SI", "ZB"}) {
+        calculator::QuoteRequest r;
+        r.set_symbol(root);
+        r.set_asset_class("FUTURES");
+        calculator::QuoteResponse res;
+        const auto ctx = make_context();
+        if (stub.GetMarketQuote(ctx.get(), r, &res).ok()) {
+            std::cerr << root << " as FUTURES returned " << res.price()
+                      << ", but no futures source is mapped — that is the listed equity\n";
+            return false;
+        }
+    }
+    std::cout << "  unmapped roots refuse on the quote path as well as the chain\n";
+    return true;
+}
+
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
@@ -615,6 +706,8 @@ auto main(int argc, char** argv) -> int {
     if (!check_dividend_yield(*stub, symbol, spot, atm, 30)) return 1;
 
     if (!check_term_structure(*stub)) return 1;
+
+    if (!check_futures_quote(*stub)) return 1;
 
     std::cout << "\nAll four RPCs returned live data.\n";
     return 0;

@@ -378,6 +378,11 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
     const client = new OptionsCalculatorClient(backendUrl);
     const req = new QuoteRequest();
     req.setSymbol(sym);
+    // The ticker alone is ambiguous and the backend cannot guess: "ES" is both
+    // the E-mini S&P root and Eversource Energy's NYSE symbol. Sending the class
+    // the user is actually working in is what stops a futures screen from being
+    // priced off a utility company that happens to share the ticker.
+    req.setAssetClass(customAssetClass || classify(sym));
 
     client.getMarketQuote(req, {}, (err, res) => {
       // Same staleness guard loadChain applies below. Without it a response for

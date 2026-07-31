@@ -3139,7 +3139,8 @@ proto.calculator.QuoteRequest.prototype.toObject = function(opt_includeInstance)
  */
 proto.calculator.QuoteRequest.toObject = function(includeInstance, msg) {
   var f, obj = {
-    symbol: jspb.Message.getFieldWithDefault(msg, 1, "")
+    symbol: jspb.Message.getFieldWithDefault(msg, 1, ""),
+    assetClass: jspb.Message.getFieldWithDefault(msg, 2, "")
   };
 
   if (includeInstance) {
@@ -3180,6 +3181,10 @@ proto.calculator.QuoteRequest.deserializeBinaryFromReader = function(msg, reader
       var value = /** @type {string} */ (reader.readString());
       msg.setSymbol(value);
       break;
+    case 2:
+      var value = /** @type {string} */ (reader.readString());
+      msg.setAssetClass(value);
+      break;
     default:
       reader.skipField();
       break;
@@ -3216,6 +3221,13 @@ proto.calculator.QuoteRequest.serializeBinaryToWriter = function(message, writer
       f
     );
   }
+  f = message.getAssetClass();
+  if (f.length > 0) {
+    writer.writeString(
+      2,
+      f
+    );
+  }
 };
 
 
@@ -3234,6 +3246,24 @@ proto.calculator.QuoteRequest.prototype.getSymbol = function() {
  */
 proto.calculator.QuoteRequest.prototype.setSymbol = function(value) {
   return jspb.Message.setProto3StringField(this, 1, value);
+};
+
+
+/**
+ * optional string asset_class = 2;
+ * @return {string}
+ */
+proto.calculator.QuoteRequest.prototype.getAssetClass = function() {
+  return /** @type {string} */ (jspb.Message.getFieldWithDefault(this, 2, ""));
+};
+
+
+/**
+ * @param {string} value
+ * @return {!proto.calculator.QuoteRequest} returns this
+ */
+proto.calculator.QuoteRequest.prototype.setAssetClass = function(value) {
+  return jspb.Message.setProto3StringField(this, 2, value);
 };
 
 

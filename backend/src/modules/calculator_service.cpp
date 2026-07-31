@@ -12,6 +12,7 @@ module;
 #include <limits>
 #include <memory>
 #include <numeric>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -38,6 +39,57 @@ using grpc::ServerContext;
 using grpc::Status;
 
 namespace md = options_calculator::market_data;
+
+// --------------------------------------------------------------------------
+// Futures underlying resolution
+// --------------------------------------------------------------------------
+
+/**
+ * How a futures root gets a price, when the quote feed only knows equities.
+ *
+ * Futures roots collide with listed equity tickers. "ES" is the E-mini S&P root
+ * AND Eversource Energy's NYSE symbol; ask Alpaca for "ES" and it answers ~71,
+ * which is a real quote for the wrong instrument. Arithmetic downstream is then
+ * flawless and the answer is nonsense — the worst failure mode available,
+ * because nothing looks broken.
+ *
+ * Where a documented, stable relationship to a tradeable proxy exists, use it
+ * and carry the multiple. Where none does, REFUSE. A wrong level is worse than
+ * an absent one: absence prompts a question, a wrong level gets traded on.
+ *
+ * This lives at file scope because BOTH the quote path and the term structure
+ * need it. It previously existed only inside build_term_structure, which meant
+ * the curve was index-level while the spot in the header — and the spot that
+ * priced every leg — was the utility company's. One symbol, two instruments,
+ * on the same screen.
+ */
+struct FuturesProxy {
+    std::string_view root;
+    std::string_view quote_symbol;
+    double multiple;
+};
+
+static constexpr std::array<FuturesProxy, 2> kFuturesProxies{{
+    {"ES", "SPY", 10.0},   // E-mini S&P 500 vs SPY, which tracks SPX/10
+    {"NQ", "QQQ", 41.0},   // E-mini Nasdaq-100 vs QQQ, which tracks NDX/41
+}};
+
+[[nodiscard]] auto futures_proxy_for(std::string_view root) noexcept
+    -> std::optional<FuturesProxy> {
+    for (const auto& p : kFuturesProxies) {
+        if (root == p.root) return p;
+    }
+    return std::nullopt;
+}
+
+/** The refusal, worded identically wherever a root has no priceable proxy. */
+[[nodiscard]] auto no_futures_source(const std::string& symbol) -> Status {
+    return Status(grpc::StatusCode::UNIMPLEMENTED,
+                  "No futures quote source for " + symbol +
+                      ". The root resolves to a listed equity of the same name, "
+                      "which is a different instrument, so nothing is returned "
+                      "rather than a price at the wrong level.");
+}
 
 // --------------------------------------------------------------------------
 // Pricing helpers
@@ -845,6 +897,18 @@ public:
      * A failure is reported as a failure. The previous implementation logged
      * the error and then returned price 100.0 with `Status::OK`, so the client
      * could not tell a real quote from a fabricated one.
+     *
+     * A FUTURES request is not the same question as an EQUITY request even when
+     * the ticker is identical, so it does not take the same path. "ES" asked as
+     * an equity is Eversource Energy and the quote is returned as-is; "ES" asked
+     * as a future is the E-mini S&P, which this feed does not carry, so it is
+     * answered through the index proxy or not at all.
+     *
+     * This is where the level for the whole application is set — the header, the
+     * strike ladder, the distribution and every leg's price all read this one
+     * number. It served the equity to a futures symbol for as long as the term
+     * structure resolved the proxy privately, which put a 7500 curve directly
+     * above a 71 spot. Both were real quotes. Only one was the right instrument.
      */
     auto GetMarketQuote(ServerContext*, const calculator::QuoteRequest* request,
                         calculator::QuoteResponse* response) -> Status override {
@@ -856,19 +920,38 @@ public:
 
         auto& log = logger::Logger::getInstance();
         const auto symbol = req.symbol();
-        log.info("GetMarketQuote: {}", symbol);
+        const bool as_futures = (req.asset_class() == "FUTURES");
+        log.info("GetMarketQuote: {} as {}", symbol,
+                 req.asset_class().empty() ? "EQUITY (unstated)" : req.asset_class());
 
-        const auto quote = md::fetch_quote(symbol);
-        if (!quote) {
-            log.error("Quote unavailable for {}: {}", symbol, quote.error().message());
-            return Status(grpc::StatusCode::UNAVAILABLE,
-                          "No quote for " + symbol + ": " + quote.error().message());
+        // What to actually ask the feed for, and what to scale its answer by.
+        std::string quote_symbol = symbol;
+        double multiple = 1.0;
+        if (as_futures) {
+            const auto proxy = futures_proxy_for(symbol);
+            if (!proxy) return no_futures_source(symbol);
+            quote_symbol = std::string(proxy->quote_symbol);
+            multiple = proxy->multiple;
         }
 
-        res.set_symbol(quote->symbol);
-        res.set_price(quote->price);
-        res.set_previous_close(quote->previous_close);
-        res.set_provider("alpaca");
+        const auto quote = md::fetch_quote(quote_symbol);
+        if (!quote) {
+            log.error("Quote unavailable for {}: {}", quote_symbol, quote.error().message());
+            return Status(grpc::StatusCode::UNAVAILABLE,
+                          "No quote for " + quote_symbol + ": " + quote.error().message());
+        }
+
+        // The symbol the caller asked about, not the one that was priced. The
+        // provenance below is what says they differ.
+        res.set_symbol(symbol);
+        res.set_price(quote->price * multiple);
+        res.set_previous_close(quote->previous_close * multiple);
+        res.set_asset_class(as_futures ? "FUTURES" : "EQUITY");
+        // A derived level must not be attributable to a plain feed lookup. The
+        // client shows this string, so it has to carry the derivation.
+        res.set_provider(multiple == 1.0
+                             ? "alpaca"
+                             : std::format("alpaca:{}x{:g} (index proxy)", quote_symbol, multiple));
         res.set_quote_timestamp(quote->timestamp);
         // Forward P/E and a single underlying IV are not on this feed. They
         // stay at zero, which the client renders as "unknown".
@@ -951,54 +1034,20 @@ public:
      * Every contract carries state = "MODELLED" so a client cannot present this
      * as a quote by accident.
      *
-     * KNOWN LIMITATION, and it is a real one. The spot comes from whatever the
-     * quote provider resolves the symbol to, and Alpaca resolves futures root
-     * symbols as EQUITY tickers: "ES" returns Eversource Energy at ~71, not the
-     * E-mini S&P at ~6900. The curve built on top is arithmetically correct and
-     * describes the wrong instrument. Roots that collide with a listed equity —
-     * ES, GC, CL, NG, SI, ZB — are all affected.
-     *
-     * Not papered over here, because the fix belongs upstream: either a futures
-     * quote source, or an explicit root-to-underlying mapping (ES -> SPX) with
-     * its own provenance. Until one exists, a caller should treat the SHAPE of
-     * this curve as meaningful and its LEVEL as belonging to whatever the quote
-     * service returned. The state marker and this comment are what keep that
-     * from being discovered the hard way.
+     * The LEVEL is as much a derivation as the shape. This feed carries no
+     * futures, so the spot comes from an index proxy through
+     * `futures_proxy_for` — the same resolution GetMarketQuote applies, which is
+     * what keeps the curve and the spot above it describing one instrument. A
+     * root with no proxy gets no curve; see that helper for why refusing beats
+     * answering at the wrong level.
      */
     auto build_term_structure(const std::string& symbol, calculator::ChainResponse& res) -> Status {
         auto& log = logger::Logger::getInstance();
 
-        // Futures roots collide with listed equities: Alpaca resolves "ES" to
-        // Eversource Energy at ~71, not the E-mini S&P at ~6900, and a curve
-        // built on that is arithmetically perfect and describes the wrong
-        // instrument. Where a documented, stable relationship to a tradeable
-        // proxy exists, use it and state the multiplier. Where none does,
-        // REFUSE — a wrong level is worse than an absent one, because it looks
-        // like an answer.
-        struct Proxy { std::string_view root, quote_symbol; double multiple; };
-        static constexpr std::array<Proxy, 2> kProxies{{
-            {"ES", "SPY", 10.0},   // E-mini S&P 500 vs SPY, which tracks SPX/10
-            {"NQ", "QQQ", 41.0},   // E-mini Nasdaq-100 vs QQQ, which tracks NDX/41
-        }};
-
-        std::string quote_symbol = symbol;
-        double multiple = 1.0;
-        bool proxied = false;
-        for (const auto& p : kProxies) {
-            if (symbol == p.root) {
-                quote_symbol = std::string(p.quote_symbol);
-                multiple = p.multiple;
-                proxied = true;
-                break;
-            }
-        }
-        if (!proxied) {
-            return Status(grpc::StatusCode::UNIMPLEMENTED,
-                          "No futures quote source for " + symbol +
-                              ". The root resolves to a listed equity of the same name, "
-                              "which is a different instrument, so no curve is returned "
-                              "rather than one at the wrong level.");
-        }
+        const auto proxy = futures_proxy_for(symbol);
+        if (!proxy) return no_futures_source(symbol);
+        const auto quote_symbol = std::string(proxy->quote_symbol);
+        const double multiple = proxy->multiple;
 
         const auto quote = md::fetch_quote(quote_symbol);
         if (!quote) {

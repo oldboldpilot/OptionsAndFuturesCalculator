@@ -169,6 +169,14 @@ message LegRisk {
 
 message QuoteRequest {
   string symbol = 1;
+  // What the caller believes it is asking for: "EQUITY", "FUTURES", "CRYPTO".
+  //
+  // Not redundant with the symbol. Futures roots collide with listed equities —
+  // "ES" is both the E-mini S&P root and Eversource Energy's NYSE ticker — and
+  // the ticker alone cannot say which one was meant. Empty is treated as
+  // EQUITY, which is what a bare ticker means and what every caller before this
+  // field intended.
+  string asset_class = 2;
 }
 
 message QuoteResponse {

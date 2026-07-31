@@ -370,6 +370,9 @@ export class QuoteRequest extends jspb.Message {
   getSymbol(): string;
   setSymbol(value: string): QuoteRequest;
 
+  getAssetClass(): string;
+  setAssetClass(value: string): QuoteRequest;
+
   serializeBinary(): Uint8Array;
   toObject(includeInstance?: boolean): QuoteRequest.AsObject;
   static toObject(includeInstance: boolean, msg: QuoteRequest): QuoteRequest.AsObject;
@@ -381,6 +384,7 @@ export class QuoteRequest extends jspb.Message {
 export namespace QuoteRequest {
   export type AsObject = {
     symbol: string,
+    assetClass: string,
   }
 }
 
