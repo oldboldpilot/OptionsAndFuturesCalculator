@@ -219,11 +219,113 @@ failure mode is a wrong number.
 
 ---
 
-## 8. Operational notes
+## 8. Quotas
 
-- **No authentication.** Anyone with the URL can call it. Envoy applies a local
-  rate limit; there is no per-caller quota or key. Do not put anything behind
-  this that assumes the caller is trusted.
+**Off unless configured.** With no policy set the service behaves exactly as it
+did before quotas existed. That is the only safe default for a mechanism that
+can otherwise start refusing real traffic.
+
+Two limits run per caller, because they answer different questions:
+
+- **rate** — requests per minute. Catches bursts and runaway retry loops.
+- **budget** — compute units per hour. Catches a caller doing genuinely
+  expensive work at a perfectly reasonable request rate.
+
+The second exists because a request count is the wrong unit here.
+`ComputePayment` is a handful of integer operations; `PriceOptionMonteCarlo` at
+a million paths and a thousand steps is ~10⁹ RNG draws. Six orders of magnitude
+apart — so a caller comfortably inside a requests-per-minute limit can still
+saturate the engine. Cost is priced from each request's own arguments.
+
+### Configuring
+
+Two environment variables on the backend service:
+
+```bash
+QUOTA_POLICY='{
+  "anonymous_tier": "anonymous",
+  "tiers": {
+    "anonymous": {"requests_per_minute": 60,   "compute_units_per_hour": 600},
+    "free":      {"requests_per_minute": 600,  "compute_units_per_hour": 10000},
+    "partner":   {"requests_per_minute": 6000, "compute_units_per_hour": 500000}
+  }
+}'
+
+QUOTA_API_KEYS='{
+  "sk_live_abc123": "partner",
+  "sk_live_def456": "free"
+}'
+```
+
+Zero on either axis means unlimited for that axis. Keys live in their own
+variable so the policy can be logged and reviewed without exposing them.
+
+The startup log states what loaded, so "are quotas on?" is answerable without
+sending traffic:
+
+```
+Quotas ENABLED: 3 tiers, 2 keys, unkeyed callers get 'anonymous'
+Quota enforcement is ON
+```
+
+A policy that fails to parse logs an error and leaves quotas **off** — it never
+reads as "no limits configured". A key mapped to a tier that does not exist is
+named in the log and treated as anonymous, rather than silently getting limits
+its issuer did not intend.
+
+### Calling with a key
+
+```ts
+client.computePayment(req, { 'x-api-key': 'sk_live_abc123' }, cb);
+```
+
+```python
+stub.ComputePayment(req, metadata=[("x-api-key", "sk_live_abc123")])
+```
+
+### What being over looks like
+
+`RESOURCE_EXHAUSTED` (gRPC status 8) with a real retry-after computed from the
+bucket's own refill rate:
+
+```
+quota exceeded for tier 'anonymous' on ComputePayment (request rate); retry in 12s
+```
+
+`RESOURCE_EXHAUSTED` rather than `UNAVAILABLE` deliberately: `UNAVAILABLE`
+invites a gRPC client library to retry immediately, which is precisely wrong.
+
+A single call priced above a whole hour's allowance is refused outright, with no
+retry-after, because waiting cannot help:
+
+```
+quota exceeded for tier 'partner' on PriceOptionMonteCarlo (compute budget
+(this call alone exceeds the tier's hourly allowance)); this request cannot
+succeed at this tier regardless of waiting
+```
+
+### Two properties worth knowing
+
+**An unrecognised key is not a free pass, and not an error.** It gets the
+anonymous tier AND shares the single anonymous bucket. Bucketing on the raw
+header would let a caller send a fresh random `x-api-key` per request and mint a
+new allowance every time — which is not a limit at all. This is checked by the
+deploy gate.
+
+**Quotas are per instance.** The buckets live in the process. One replica today,
+so this is exact; behind N replicas a caller would get up to N times the stated
+limit. Moving to a shared store is the change to make before scaling out.
+
+### Monitoring clients
+
+Set `SMOKE_API_KEY` for `smoke_client` so the gate's own dozens of calls run on a
+generous tier instead of throttling themselves partway through.
+
+## 9. Operational notes
+
+- **Quotas are not authentication.** An API key selects a tier; it grants no
+  privileges and protects no data. Everything here is readable by anyone with
+  the URL.
 - **No streaming.** Every RPC is unary.
 - **Shared with the calculator.** `calculator.OptionsCalculator` is on the same
   host and port. The two are independent contracts; a client needs only the

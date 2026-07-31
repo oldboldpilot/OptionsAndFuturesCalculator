@@ -29,9 +29,26 @@
 
 namespace {
 
-auto make_context() -> std::unique_ptr<grpc::ClientContext> {
+/** A context with no identity. Used only where the anonymous tier is the point. */
+auto make_anonymous_context() -> std::unique_ptr<grpc::ClientContext> {
     auto ctx = std::make_unique<grpc::ClientContext>();
     ctx->set_deadline(std::chrono::system_clock::now() + std::chrono::seconds{30});
+    return ctx;
+}
+
+/**
+ * The context every functional check uses.
+ *
+ * Carries SMOKE_API_KEY when set, because otherwise this gate throttles itself:
+ * it makes dozens of calls, and against a small anonymous tier the later checks
+ * fail on quota rather than on anything they were written to test. A monitoring
+ * client having its own key is also what a real deployment looks like.
+ */
+auto make_context() -> std::unique_ptr<grpc::ClientContext> {
+    auto ctx = make_anonymous_context();
+    if (const char* key = std::getenv("SMOKE_API_KEY"); key != nullptr && *key != '\0') {
+        ctx->AddMetadata("x-api-key", key);
+    }
     return ctx;
 }
 
@@ -1050,6 +1067,94 @@ auto check_finance(sensen::finance::Finance::Stub& stub) -> bool {
     return true;
 }
 
+/**
+ * Quota enforcement, when a policy is configured.
+ *
+ * Skipped entirely when QUOTA_POLICY is unset, because the correct behaviour
+ * then is that nothing changes -- and the rest of this gate already proves
+ * that by passing.
+ *
+ * Needs a tier small enough to exhaust in a few calls. Run with something like:
+ *
+ *   QUOTA_POLICY='{"tiers":{"anonymous":{"requests_per_minute":5,
+ *                                        "compute_units_per_hour":50}}}'
+ */
+auto check_quota(sensen::finance::Finance::Stub& stub) -> bool {
+    const char* policy = std::getenv("QUOTA_POLICY");
+    if (policy == nullptr || *policy == '\0') {
+        std::cout << "Quota    not configured (QUOTA_POLICY unset) -- enforcement not exercised\n";
+        return true;
+    }
+
+    const auto call = [&stub](const char* api_key) -> grpc::StatusCode {
+        sensen::finance::PaymentRequest req;
+        req.set_rate("0.005");
+        req.set_periods(360);
+        req.set_present_value("300000");
+        sensen::finance::DecimalResponse res;
+        auto ctx = make_anonymous_context();
+        if (api_key != nullptr) ctx->AddMetadata("x-api-key", api_key);
+        return stub.ComputePayment(ctx.get(), req, &res).error_code();
+    };
+
+    // Spend until refused. A tier that never refuses is not a limit, and a
+    // bounded loop keeps a misconfigured (huge) tier from hanging the gate.
+    int allowed = 0;
+    bool refused = false;
+    for (int i = 0; i < 200; ++i) {
+        const auto code = call(nullptr);
+        if (code == grpc::StatusCode::RESOURCE_EXHAUSTED) {
+            refused = true;
+            break;
+        }
+        if (code != grpc::StatusCode::OK) {
+            std::cerr << "quota probe got an unexpected status " << static_cast<int>(code) << "\n";
+            return false;
+        }
+        ++allowed;
+    }
+    if (!refused) {
+        std::cerr << "quota never refused after " << allowed
+                  << " calls -- the configured tier is not a limit\n";
+        return false;
+    }
+    std::cout << "Quota    anonymous tier refused after " << allowed << " calls\n";
+
+    // THE bypass check. Buckets keyed on the raw header would let a caller mint
+    // a fresh allowance per request by sending a different random key each
+    // time, which defeats the limit entirely. Unrecognised keys must land in
+    // the same exhausted bucket as no key at all.
+    for (int i = 0; i < 5; ++i) {
+        const std::string key = "unregistered-" + std::to_string(i);
+        if (call(key.c_str()) != grpc::StatusCode::RESOURCE_EXHAUSTED) {
+            std::cerr << "an unregistered api key got a fresh bucket -- the quota is bypassable "
+                      << "by sending a random x-api-key per request\n";
+            return false;
+        }
+    }
+    std::cout << "         unregistered keys share the anonymous bucket, not a private one\n";
+
+    // A call priced above a whole hour's allowance must be refused outright
+    // rather than handed a retry-after it can never satisfy.
+    sensen::finance::MonteCarloRequest mc;
+    mc.set_spot(100.0);
+    mc.set_strike(100.0);
+    mc.set_rate(0.05);
+    mc.set_volatility(0.2);
+    mc.set_years_to_expiry(1.0);
+    mc.set_paths(10000000);
+    mc.set_steps(10000);
+    sensen::finance::DoubleResponse mres;
+    auto mctx = make_anonymous_context();
+    const auto mstatus = stub.PriceOptionMonteCarlo(mctx.get(), mc, &mres);
+    if (mstatus.error_code() != grpc::StatusCode::RESOURCE_EXHAUSTED) {
+        std::cerr << "a 10^11-operation Monte Carlo was admitted; cost is not being charged\n";
+        return false;
+    }
+    std::cout << "         a 10^11-operation Monte Carlo is refused on cost, not on count\n";
+    return true;
+}
+
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
@@ -1089,6 +1194,10 @@ auto main(int argc, char** argv) -> int {
     // a separate contract, not a separate service to reach.
     auto finance = sensen::finance::Finance::NewStub(channel);
     if (!check_finance(*finance)) return 1;
+
+    // Last, because it deliberately exhausts an allowance -- anything after it
+    // would be refused for reasons that have nothing to do with what it tests.
+    if (!check_quota(*finance)) return 1;
 
     std::cout << "\nCalculator RPCs returned live data; the financial library's answers "
                  "satisfy their independent identities.\n";

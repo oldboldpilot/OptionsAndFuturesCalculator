@@ -19,6 +19,7 @@ import sensen.options;
 import sensen.portfolio;
 import sensen.linear_algebra;
 import logger;
+import quota;
 
 namespace options_calculator::finance {
 
@@ -128,6 +129,28 @@ template <typename T>
     return Status(grpc::StatusCode::FAILED_PRECONDITION, e.error());
 }
 
+/**
+ * Charges this call against the caller's quota, or refuses it.
+ *
+ * A macro because it must RETURN from the RPC on refusal -- the whole point is
+ * that the work below never runs. Placed before any computation and after the
+ * null check, so a refused call costs the server a hash lookup rather than a
+ * Monte Carlo.
+ *
+ * `cost` is priced from the request's own arguments, which is why this sits at
+ * the call site instead of in a gRPC interceptor: an interceptor sees the
+ * method name and the metadata, but not `paths`, `steps` or `term_months`, so
+ * it could only ever charge every RPC the same.
+ */
+#define CHARGE(method_name, cost)                                                \
+    do {                                                                         \
+        if (auto _q = ::options_calculator::quota::QuotaEnforcer::instance()      \
+                          .admit(*context, (method_name), (cost));                \
+            !_q.ok()) {                                                          \
+            return _q;                                                           \
+        }                                                                        \
+    } while (false)
+
 // ---------------------------------------------------------------------------
 // Service
 // ---------------------------------------------------------------------------
@@ -136,11 +159,12 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
   public:
     // -- Time value of money -------------------------------------------------
 
-    auto ComputePayment(ServerContext*, const sensen::finance::PaymentRequest* request,
+    auto ComputePayment(ServerContext* context, const sensen::finance::PaymentRequest* request,
                         sensen::finance::DecimalResponse* response) -> Status override {
         if (request == nullptr || response == nullptr) {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
+        CHARGE("ComputePayment", quota::cost_default());
         READ_DECIMAL(rate, request->rate(), "rate");
         READ_DECIMAL(pv, request->present_value(), "present_value");
         READ_DECIMAL(fv, request->future_value(), "future_value");
@@ -149,11 +173,12 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         return Status::OK;
     }
 
-    auto ComputePresentValue(ServerContext*, const sensen::finance::PresentValueRequest* request,
+    auto ComputePresentValue(ServerContext* context, const sensen::finance::PresentValueRequest* request,
                              sensen::finance::DecimalResponse* response) -> Status override {
         if (request == nullptr || response == nullptr) {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
+        CHARGE("ComputePresentValue", quota::cost_default());
         READ_DECIMAL(rate, request->rate(), "rate");
         READ_DECIMAL(pmt_v, request->payment(), "payment");
         READ_DECIMAL(fv, request->future_value(), "future_value");
@@ -162,11 +187,12 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         return Status::OK;
     }
 
-    auto ComputeFutureValue(ServerContext*, const sensen::finance::FutureValueRequest* request,
+    auto ComputeFutureValue(ServerContext* context, const sensen::finance::FutureValueRequest* request,
                             sensen::finance::DecimalResponse* response) -> Status override {
         if (request == nullptr || response == nullptr) {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
+        CHARGE("ComputeFutureValue", quota::cost_default());
         READ_DECIMAL(rate, request->rate(), "rate");
         READ_DECIMAL(pmt_v, request->payment(), "payment");
         READ_DECIMAL(pv_v, request->present_value(), "present_value");
@@ -175,13 +201,14 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         return Status::OK;
     }
 
-    auto ComputeFutureValueDetailed(ServerContext*,
+    auto ComputeFutureValueDetailed(ServerContext* context,
                                     const sensen::finance::FutureValueDetailedRequest* request,
                                     sensen::finance::FutureValueDetailedResponse* response)
         -> Status override {
         if (request == nullptr || response == nullptr) {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
+        CHARGE("ComputeFutureValueDetailed", quota::cost_default());
         // Refused rather than defaulted. A compounding frequency changes the
         // answer materially, and picking one the caller did not state would be
         // this service inventing an assumption on their behalf.
@@ -206,21 +233,24 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         return Status::OK;
     }
 
-    auto ComputeInterestPayment(ServerContext*, const sensen::finance::PeriodPaymentRequest* request,
+    auto ComputeInterestPayment(ServerContext* context, const sensen::finance::PeriodPaymentRequest* request,
                                 sensen::finance::DecimalResponse* response) -> Status override {
+        CHARGE("ComputeInterestPayment", quota::cost_default());
         return period_payment(request, response, /*interest=*/true);
     }
 
-    auto ComputePrincipalPayment(ServerContext*, const sensen::finance::PeriodPaymentRequest* request,
+    auto ComputePrincipalPayment(ServerContext* context, const sensen::finance::PeriodPaymentRequest* request,
                                  sensen::finance::DecimalResponse* response) -> Status override {
+        CHARGE("ComputePrincipalPayment", quota::cost_default());
         return period_payment(request, response, /*interest=*/false);
     }
 
-    auto ComputeRate(ServerContext*, const sensen::finance::RateRequest* request,
+    auto ComputeRate(ServerContext* context, const sensen::finance::RateRequest* request,
                      sensen::finance::DecimalResponse* response) -> Status override {
         if (request == nullptr || response == nullptr) {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
+        CHARGE("ComputeRate", quota::cost_default());
         READ_DECIMAL(pmt_v, request->payment(), "payment");
         READ_DECIMAL(pv_v, request->present_value(), "present_value");
         READ_DECIMAL(fv_v, request->future_value(), "future_value");
@@ -241,11 +271,12 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         return Status::OK;
     }
 
-    auto ComputePeriods(ServerContext*, const sensen::finance::PeriodsRequest* request,
+    auto ComputePeriods(ServerContext* context, const sensen::finance::PeriodsRequest* request,
                         sensen::finance::DecimalResponse* response) -> Status override {
         if (request == nullptr || response == nullptr) {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
+        CHARGE("ComputePeriods", quota::cost_default());
         READ_DECIMAL(rate, request->rate(), "rate");
         READ_DECIMAL(pmt_v, request->payment(), "payment");
         READ_DECIMAL(pv_v, request->present_value(), "present_value");
@@ -258,11 +289,12 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         return Status::OK;
     }
 
-    auto ConvertInterestRate(ServerContext*, const sensen::finance::RateConversionRequest* request,
+    auto ConvertInterestRate(ServerContext* context, const sensen::finance::RateConversionRequest* request,
                              sensen::finance::DoubleResponse* response) -> Status override {
         if (request == nullptr || response == nullptr) {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
+        CHARGE("ConvertInterestRate", quota::cost_default());
         if (request->periods_per_year() <= 0.0) {
             return Status(grpc::StatusCode::INVALID_ARGUMENT, "periods_per_year must be positive");
         }
@@ -274,11 +306,12 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         return Status::OK;
     }
 
-    auto ComputeFisherRate(ServerContext*, const sensen::finance::FisherRequest* request,
+    auto ComputeFisherRate(ServerContext* context, const sensen::finance::FisherRequest* request,
                            sensen::finance::DoubleResponse* response) -> Status override {
         if (request == nullptr || response == nullptr) {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
+        CHARGE("ComputeFisherRate", quota::cost_default());
         const double v =
             (request->direction() == sensen::finance::FisherRequest::REAL_TO_NOMINAL)
                 ? sensen::fisher_nominal_rate(request->rate(), request->inflation_rate())
@@ -289,11 +322,12 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
 
     // -- Mortgages -----------------------------------------------------------
 
-    auto ComputeAmortization(ServerContext*, const sensen::finance::AmortizationRequest* request,
+    auto ComputeAmortization(ServerContext* context, const sensen::finance::AmortizationRequest* request,
                              sensen::finance::AmortizationResponse* response) -> Status override {
         if (request == nullptr || response == nullptr) {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
+        CHARGE("ComputeAmortization", quota::cost_amortization(request->term_months()));
         if (auto s = check_term(request->term_months()); !s.ok()) return s;
         READ_DECIMAL(loan, request->loan_amount(), "loan_amount");
         READ_DECIMAL(rate, request->annual_rate(), "annual_rate");
@@ -324,13 +358,14 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         return Status::OK;
     }
 
-    auto ComputeDetailedAmortization(ServerContext*,
+    auto ComputeDetailedAmortization(ServerContext* context,
                                      const sensen::finance::DetailedAmortizationRequest* request,
                                      sensen::finance::DetailedAmortizationResponse* response)
         -> Status override {
         if (request == nullptr || response == nullptr) {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
+        CHARGE("ComputeDetailedAmortization", quota::cost_amortization(request->term_months()));
         if (auto s = check_term(request->term_months()); !s.ok()) return s;
         READ_DECIMAL(loan, request->loan_amount(), "loan_amount");
         READ_DECIMAL(rate, request->annual_rate(), "annual_rate");
@@ -364,13 +399,17 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         return Status::OK;
     }
 
-    auto ComputeAmortizationBatch(ServerContext*,
+    auto ComputeAmortizationBatch(ServerContext* context,
                                   const sensen::finance::AmortizationBatchRequest* request,
                                   sensen::finance::AmortizationBatchResponse* response)
         -> Status override {
         if (request == nullptr || response == nullptr) {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
+        CHARGE("ComputeAmortizationBatch",
+               quota::cost_amortization_batch(request->loan_amounts_size(),
+                                              request->term_months_size() > 0
+                                                  ? request->term_months(0) : 0));
         const int n = request->loan_amounts_size();
         if (n == 0) return Status::OK;
 
@@ -416,11 +455,12 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         return Status::OK;
     }
 
-    auto ComputeHeloc(ServerContext*, const sensen::finance::HelocRequest* request,
+    auto ComputeHeloc(ServerContext* context, const sensen::finance::HelocRequest* request,
                       sensen::finance::HelocResponse* response) -> Status override {
         if (request == nullptr || response == nullptr) {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
+        CHARGE("ComputeHeloc", quota::cost_default());
         if (request->payments_per_year() <= 0) {
             return Status(grpc::StatusCode::INVALID_ARGUMENT,
                           "payments_per_year must be positive (12 monthly, 26 bi-weekly)");
@@ -445,21 +485,23 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
 
     // -- Cash flow -----------------------------------------------------------
 
-    auto ComputeNpv(ServerContext*, const sensen::finance::NpvRequest* request,
+    auto ComputeNpv(ServerContext* context, const sensen::finance::NpvRequest* request,
                     sensen::finance::DoubleResponse* response) -> Status override {
         if (request == nullptr || response == nullptr) {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
+        CHARGE("ComputeNpv", quota::cost_cash_flow(request->values_size()));
         const std::vector<double> values(request->values().begin(), request->values().end());
         response->set_value(sensen::npv_double(request->rate(), values));
         return Status::OK;
     }
 
-    auto ComputeIrr(ServerContext*, const sensen::finance::IrrRequest* request,
+    auto ComputeIrr(ServerContext* context, const sensen::finance::IrrRequest* request,
                     sensen::finance::DoubleResponse* response) -> Status override {
         if (request == nullptr || response == nullptr) {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
+        CHARGE("ComputeIrr", quota::cost_cash_flow(request->values_size()));
         const std::vector<double> values(request->values().begin(), request->values().end());
         const auto r = (request->guess() == 0.0) ? sensen::irr(values)
                                                  : sensen::irr(values, request->guess());
@@ -468,11 +510,12 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         return Status::OK;
     }
 
-    auto ComputeXnpv(ServerContext*, const sensen::finance::DatedCashFlowRequest* request,
+    auto ComputeXnpv(ServerContext* context, const sensen::finance::DatedCashFlowRequest* request,
                      sensen::finance::DoubleResponse* response) -> Status override {
         if (request == nullptr || response == nullptr) {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
+        CHARGE("ComputeXnpv", quota::cost_cash_flow(request->values_size()));
         if (auto s = check_dated(request); !s.ok()) return s;
         const std::vector<double> values(request->values().begin(), request->values().end());
         const std::vector<double> dates(request->dates().begin(), request->dates().end());
@@ -482,11 +525,12 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         return Status::OK;
     }
 
-    auto ComputeXirr(ServerContext*, const sensen::finance::DatedCashFlowRequest* request,
+    auto ComputeXirr(ServerContext* context, const sensen::finance::DatedCashFlowRequest* request,
                      sensen::finance::DoubleResponse* response) -> Status override {
         if (request == nullptr || response == nullptr) {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
+        CHARGE("ComputeXirr", quota::cost_cash_flow(request->values_size()));
         if (auto s = check_dated(request); !s.ok()) return s;
         const std::vector<double> values(request->values().begin(), request->values().end());
         const std::vector<double> dates(request->dates().begin(), request->dates().end());
@@ -497,11 +541,12 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         return Status::OK;
     }
 
-    auto ComputePaybackPeriod(ServerContext*, const sensen::finance::PaybackRequest* request,
+    auto ComputePaybackPeriod(ServerContext* context, const sensen::finance::PaybackRequest* request,
                               sensen::finance::DoubleResponse* response) -> Status override {
         if (request == nullptr || response == nullptr) {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
+        CHARGE("ComputePaybackPeriod", quota::cost_cash_flow(request->values_size()));
         const std::vector<double> values(request->values().begin(), request->values().end());
         const auto r = request->discounted()
                            ? sensen::discounted_payback_period(request->rate(), values)
@@ -511,11 +556,12 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         return Status::OK;
     }
 
-    auto ComputeCumulative(ServerContext*, const sensen::finance::CumulativeRequest* request,
+    auto ComputeCumulative(ServerContext* context, const sensen::finance::CumulativeRequest* request,
                            sensen::finance::DoubleResponse* response) -> Status override {
         if (request == nullptr || response == nullptr) {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
+        CHARGE("ComputeCumulative", quota::cost_amortization(request->periods()));
         const BigDecimal rate{request->rate()};
         const BigDecimal pv_v{request->present_value()};
         const auto r =
@@ -530,11 +576,12 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
 
     // -- Depreciation --------------------------------------------------------
 
-    auto ComputeDepreciation(ServerContext*, const sensen::finance::DepreciationRequest* request,
+    auto ComputeDepreciation(ServerContext* context, const sensen::finance::DepreciationRequest* request,
                              sensen::finance::DoubleResponse* response) -> Status override {
         if (request == nullptr || response == nullptr) {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
+        CHARGE("ComputeDepreciation", quota::cost_default());
         double v = 0.0;
         switch (request->method()) {
             case sensen::finance::DepreciationRequest::STRAIGHT_LINE:
@@ -578,11 +625,12 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
 
     // -- Fixed income --------------------------------------------------------
 
-    auto AnalyzeBond(ServerContext*, const sensen::finance::BondRequest* request,
+    auto AnalyzeBond(ServerContext* context, const sensen::finance::BondRequest* request,
                      sensen::finance::BondResponse* response) -> Status override {
         if (request == nullptr || response == nullptr) {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
+        CHARGE("AnalyzeBond", quota::cost_default());
         if (request->frequency() <= 0) {
             return Status(grpc::StatusCode::INVALID_ARGUMENT,
                           "frequency must be positive (2 = semi-annual)");
@@ -635,11 +683,12 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         return Status::OK;
     }
 
-    auto AnalyzeTreasuryBill(ServerContext*, const sensen::finance::TreasuryBillRequest* request,
+    auto AnalyzeTreasuryBill(ServerContext* context, const sensen::finance::TreasuryBillRequest* request,
                              sensen::finance::TreasuryBillResponse* response) -> Status override {
         if (request == nullptr || response == nullptr) {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
+        CHARGE("AnalyzeTreasuryBill", quota::cost_default());
         if (request->days_to_maturity() <= 0) {
             return Status(grpc::StatusCode::INVALID_ARGUMENT, "days_to_maturity must be positive");
         }
@@ -676,11 +725,12 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
 
     // -- Futures -------------------------------------------------------------
 
-    auto PriceFutures(ServerContext*, const sensen::finance::FuturesPricingRequest* request,
+    auto PriceFutures(ServerContext* context, const sensen::finance::FuturesPricingRequest* request,
                       sensen::finance::DoubleResponse* response) -> Status override {
         if (request == nullptr || response == nullptr) {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
+        CHARGE("PriceFutures", quota::cost_default());
         sensen::FuturesPricingParams p{};
         p.spot = request->spot();
         p.rate = request->rate();
@@ -691,23 +741,26 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         return Status::OK;
     }
 
-    auto ValueFutures(ServerContext*, const sensen::finance::FuturesValuationRequest* request,
+    auto ValueFutures(ServerContext* context, const sensen::finance::FuturesValuationRequest* request,
                       sensen::finance::DoubleResponse* response) -> Status override {
         if (request == nullptr || response == nullptr) {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
+        CHARGE("ValueFutures", quota::cost_default());
         response->set_value(sensen::value_futures(request->current_spot(), request->delivery_price(),
                                                   request->rate(), request->years_to_maturity(),
                                                   request->is_long()));
         return Status::OK;
     }
 
-    auto SimulateMarginAccount(ServerContext*, const sensen::finance::MarginSimulationRequest* request,
+    auto SimulateMarginAccount(ServerContext* context, const sensen::finance::MarginSimulationRequest* request,
                                sensen::finance::MarginSimulationResponse* response)
         -> Status override {
         if (request == nullptr || response == nullptr) {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
+        CHARGE("SimulateMarginAccount",
+               quota::cost_margin_simulation(request->daily_prices_size()));
         if (request->contract_size() <= 0) {
             return Status(grpc::StatusCode::INVALID_ARGUMENT, "contract_size must be positive");
         }
@@ -725,11 +778,12 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         return Status::OK;
     }
 
-    auto ComputeHedge(ServerContext*, const sensen::finance::HedgeRequest* request,
+    auto ComputeHedge(ServerContext* context, const sensen::finance::HedgeRequest* request,
                       sensen::finance::HedgeResponse* response) -> Status override {
         if (request == nullptr || response == nullptr) {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
+        CHARGE("ComputeHedge", quota::cost_default());
         if (request->futures_volatility() == 0.0) {
             return Status(grpc::StatusCode::INVALID_ARGUMENT,
                           "futures_volatility cannot be zero; the hedge ratio divides by it");
@@ -753,12 +807,13 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         return Status::OK;
     }
 
-    auto ComputeCommoditySpread(ServerContext*,
+    auto ComputeCommoditySpread(ServerContext* context,
                                 const sensen::finance::CommoditySpreadRequest* request,
                                 sensen::finance::DoubleResponse* response) -> Status override {
         if (request == nullptr || response == nullptr) {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
+        CHARGE("ComputeCommoditySpread", quota::cost_default());
         double v = 0.0;
         switch (request->spread()) {
             case sensen::finance::CommoditySpreadRequest::CRACK_321:
@@ -779,11 +834,12 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
 
     // -- Real estate ---------------------------------------------------------
 
-    auto ComputeRentalRoi(ServerContext*, const sensen::finance::RentalRoiRequest* request,
+    auto ComputeRentalRoi(ServerContext* context, const sensen::finance::RentalRoiRequest* request,
                           sensen::finance::RentalRoiResponse* response) -> Status override {
         if (request == nullptr || response == nullptr) {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
+        CHARGE("ComputeRentalRoi", quota::cost_default());
         if (request->periods_per_year() <= 0) {
             return Status(grpc::StatusCode::INVALID_ARGUMENT,
                           "periods_per_year must be positive (12 monthly, 26 bi-weekly)");
@@ -806,11 +862,13 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
 
     // -- Options -------------------------------------------------------------
 
-    auto PriceOptionTree(ServerContext*, const sensen::finance::OptionTreeRequest* request,
+    auto PriceOptionTree(ServerContext* context, const sensen::finance::OptionTreeRequest* request,
                          sensen::finance::OptionPricingResponse* response) -> Status override {
         if (request == nullptr || response == nullptr) {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
+        CHARGE("PriceOptionTree",
+               quota::cost_option_tree(request->steps(), request->averaging_states()));
         // price_option_double THROWS on these rather than returning an error,
         // so they are checked here and reported as the caller's mistake they
         // are, not as an internal fault.
@@ -852,11 +910,12 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         }
     }
 
-    auto PriceBlackScholes(ServerContext*, const sensen::finance::BlackScholesRequest* request,
+    auto PriceBlackScholes(ServerContext* context, const sensen::finance::BlackScholesRequest* request,
                            sensen::finance::BlackScholesResponse* response) -> Status override {
         if (request == nullptr || response == nullptr) {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
+        CHARGE("PriceBlackScholes", quota::cost_default());
         const auto r = sensen::price_black_scholes(
             request->spot(), request->strike(), request->rate(), request->volatility(),
             request->years_to_expiry(), option_type_of(request->option_type()));
@@ -874,11 +933,13 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         return Status::OK;
     }
 
-    auto PriceOptionMonteCarlo(ServerContext*, const sensen::finance::MonteCarloRequest* request,
+    auto PriceOptionMonteCarlo(ServerContext* context, const sensen::finance::MonteCarloRequest* request,
                                sensen::finance::DoubleResponse* response) -> Status override {
         if (request == nullptr || response == nullptr) {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
+        CHARGE("PriceOptionMonteCarlo",
+               quota::cost_monte_carlo(request->paths(), request->steps()));
         if (request->paths() <= 0 || request->steps() <= 0) {
             return Status(grpc::StatusCode::INVALID_ARGUMENT, "paths and steps must be positive");
         }
@@ -890,12 +951,13 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         return Status::OK;
     }
 
-    auto ComputeProbabilityTree(ServerContext*, const sensen::finance::ProbabilityTreeRequest* request,
+    auto ComputeProbabilityTree(ServerContext* context, const sensen::finance::ProbabilityTreeRequest* request,
                                 sensen::finance::ProbabilityTreeResponse* response)
         -> Status override {
         if (request == nullptr || response == nullptr) {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
+        CHARGE("ComputeProbabilityTree", quota::cost_probability_tree(request->steps()));
         if (request->steps() <= 0 || request->years_to_expiry() <= 0.0 ||
             request->volatility() <= 0.0) {
             return Status(grpc::StatusCode::INVALID_ARGUMENT,
@@ -914,12 +976,14 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
 
     // -- Portfolio -----------------------------------------------------------
 
-    auto ComputePortfolioStats(ServerContext*, const sensen::finance::PortfolioStatsRequest* request,
+    auto ComputePortfolioStats(ServerContext* context, const sensen::finance::PortfolioStatsRequest* request,
                                sensen::finance::PortfolioStatsResponse* response)
         -> Status override {
         if (request == nullptr || response == nullptr) {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
+        CHARGE("ComputePortfolioStats",
+               quota::cost_portfolio_stats(request->portfolio_returns_size()));
         if (request->portfolio_returns_size() == 0) {
             return Status(grpc::StatusCode::INVALID_ARGUMENT, "portfolio_returns is empty");
         }
@@ -961,11 +1025,12 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         return Status::OK;
     }
 
-    auto OptimizePortfolio(ServerContext*, const sensen::finance::PortfolioOptimizeRequest* request,
+    auto OptimizePortfolio(ServerContext* context, const sensen::finance::PortfolioOptimizeRequest* request,
                            sensen::finance::PortfolioOptimizeResponse* response) -> Status override {
         if (request == nullptr || response == nullptr) {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
+        CHARGE("OptimizePortfolio", quota::cost_portfolio_optimize(request->size()));
         sensen::MatrixT<double> cov;
         if (auto s = read_covariance(request->size(), request->expected_returns_size(),
                                      request->covariance(), cov);
@@ -984,13 +1049,15 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         return Status::OK;
     }
 
-    auto ComputeRiskContributions(ServerContext*,
+    auto ComputeRiskContributions(ServerContext* context,
                                   const sensen::finance::RiskContributionRequest* request,
                                   sensen::finance::RiskContributionResponse* response)
         -> Status override {
         if (request == nullptr || response == nullptr) {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
+        // Same O(n^3) covariance solve as OptimizePortfolio, so the same price.
+        CHARGE("ComputeRiskContributions", quota::cost_portfolio_optimize(request->size()));
         sensen::MatrixT<double> cov;
         if (auto s = read_covariance(request->size(), request->weights_size(), request->covariance(),
                                      cov);
@@ -1075,6 +1142,9 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         if (request == nullptr || response == nullptr) {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
+        // No charge here: this is the shared body of ComputeInterestPayment
+        // and ComputePrincipalPayment, and both charge at their own entry
+        // point. Charging again would bill one call twice.
         READ_DECIMAL(rate, request->rate(), "rate");
         READ_DECIMAL(pv_v, request->present_value(), "present_value");
         READ_DECIMAL(fv_v, request->future_value(), "future_value");
@@ -1098,6 +1168,13 @@ auto RegisterFinanceService(grpc::ServerBuilder& builder) -> void {
     builder.RegisterService(&service);
     logger::Logger::getInstance().info("Registered {} on the same port as the calculator",
                                        sensen::finance::Finance::service_full_name());
+
+    // Force the enforcer to load its policy NOW rather than on the first RPC.
+    // Otherwise "are quotas on?" is a question only traffic can answer, and a
+    // policy that failed to parse stays silent until the moment it matters.
+    const bool on = quota::QuotaEnforcer::instance().enabled();
+    logger::Logger::getInstance().info(
+        "Quota enforcement is {}", on ? "ON" : "OFF (set QUOTA_POLICY to enable)");
 }
 
 }  // namespace options_calculator::finance
