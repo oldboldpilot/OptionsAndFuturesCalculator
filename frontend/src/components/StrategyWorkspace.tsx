@@ -9,6 +9,8 @@ import StrategyMetrics from './StrategyMetrics';
 import OptionChain from './OptionChain';
 import PnLMatrix from './PnLMatrix';
 import OptionTicket from './OptionTicket';
+import PnLSurface from './PnLSurface';
+import AdSlot from './AdSlot';
 import { StrategySelector } from './StrategySelector';
 import { useCalculatorStore } from '../store/useCalculatorStore';
 
@@ -102,16 +104,19 @@ export function StrategyWorkspace({ heading }: { heading?: string }) {
             <PnLMatrix />
           </div>
           <div style={{ flex: '0 0 30%', minHeight: 0, display: 'flex' }}>
-            <StrategyMetrics />
+            <PnLSurface />
           </div>
         </div>
 
         {/* Reference: the chain, at full height, opened at the money */}
         <div className="stagger" style={column}>
           <OptionChain />
-          <div style={{ flex: '0 0 34%', minHeight: 0, display: 'flex' }}>
-            <PayoffLadder />
+          <div style={{ flex: '0 0 30%', minHeight: 0, display: 'flex' }}>
+            <StrategyMetrics />
           </div>
+          {/* Reserved from first paint, so an ad arriving late cannot shove the
+              chain's buy and sell buttons out from under the cursor. */}
+          <AdSlot size="rectangle" />
         </div>
       </main>
     </div>
