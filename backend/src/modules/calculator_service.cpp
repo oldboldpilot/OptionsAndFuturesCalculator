@@ -968,10 +968,42 @@ public:
     auto build_term_structure(const std::string& symbol, calculator::ChainResponse& res) -> Status {
         auto& log = logger::Logger::getInstance();
 
-        const auto quote = md::fetch_quote(symbol);
+        // Futures roots collide with listed equities: Alpaca resolves "ES" to
+        // Eversource Energy at ~71, not the E-mini S&P at ~6900, and a curve
+        // built on that is arithmetically perfect and describes the wrong
+        // instrument. Where a documented, stable relationship to a tradeable
+        // proxy exists, use it and state the multiplier. Where none does,
+        // REFUSE — a wrong level is worse than an absent one, because it looks
+        // like an answer.
+        struct Proxy { std::string_view root, quote_symbol; double multiple; };
+        static constexpr std::array<Proxy, 2> kProxies{{
+            {"ES", "SPY", 10.0},   // E-mini S&P 500 vs SPY, which tracks SPX/10
+            {"NQ", "QQQ", 41.0},   // E-mini Nasdaq-100 vs QQQ, which tracks NDX/41
+        }};
+
+        std::string quote_symbol = symbol;
+        double multiple = 1.0;
+        bool proxied = false;
+        for (const auto& p : kProxies) {
+            if (symbol == p.root) {
+                quote_symbol = std::string(p.quote_symbol);
+                multiple = p.multiple;
+                proxied = true;
+                break;
+            }
+        }
+        if (!proxied) {
+            return Status(grpc::StatusCode::UNIMPLEMENTED,
+                          "No futures quote source for " + symbol +
+                              ". The root resolves to a listed equity of the same name, "
+                              "which is a different instrument, so no curve is returned "
+                              "rather than one at the wrong level.");
+        }
+
+        const auto quote = md::fetch_quote(quote_symbol);
         if (!quote) {
             return Status(grpc::StatusCode::UNAVAILABLE,
-                          "No spot for " + symbol + ": " + quote.error().message());
+                          "No spot for " + quote_symbol + ": " + quote.error().message());
         }
         // Refuse rather than assume a carry rate. Without a measured rate the
         // forward curve would be a guess wearing a formula.
@@ -982,7 +1014,7 @@ public:
                               rate.error().message());
         }
 
-        const double spot = quote->price;
+        const double spot = quote->price * multiple;
         const double r = rate->rate;
 
         res.set_symbol(symbol);
@@ -1033,8 +1065,8 @@ public:
             }
         }
 
-        log.info("Term structure for {}: {} contracts from spot {:.2f} and r {:.5f} as of {}",
-                 symbol, emitted, spot, r, rate->as_of_date);
+        log.info("Term structure for {}: {} contracts from {} x{:.0f} = {:.2f} and r {:.5f} as of {}",
+                 symbol, emitted, quote_symbol, multiple, spot, r, rate->as_of_date);
         return Status::OK;
     }
 
