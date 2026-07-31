@@ -300,6 +300,11 @@ export class StrategyResponse extends jspb.Message {
   getCurveDaysToExpiration(): number;
   setCurveDaysToExpiration(value: number): StrategyResponse;
 
+  getLegRiskList(): Array<LegRisk>;
+  setLegRiskList(value: Array<LegRisk>): StrategyResponse;
+  clearLegRiskList(): StrategyResponse;
+  addLegRisk(value?: LegRisk, index?: number): LegRisk;
+
   serializeBinary(): Uint8Array;
   toObject(includeInstance?: boolean): StrategyResponse.AsObject;
   static toObject(includeInstance: boolean, msg: StrategyResponse): StrategyResponse.AsObject;
@@ -325,6 +330,39 @@ export namespace StrategyResponse {
     probabilityOfTouch: number,
     probabilityOfTargetProfit: number,
     curveDaysToExpiration: number,
+    legRiskList: Array<LegRisk.AsObject>,
+  }
+}
+
+export class LegRisk extends jspb.Message {
+  getLegIndex(): number;
+  setLegIndex(value: number): LegRisk;
+
+  getGreeks(): Greeks | undefined;
+  setGreeks(value?: Greeks): LegRisk;
+  hasGreeks(): boolean;
+  clearGreeks(): LegRisk;
+
+  getModelPrice(): number;
+  setModelPrice(value: number): LegRisk;
+
+  getOpenPnl(): number;
+  setOpenPnl(value: number): LegRisk;
+
+  serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): LegRisk.AsObject;
+  static toObject(includeInstance: boolean, msg: LegRisk): LegRisk.AsObject;
+  static serializeBinaryToWriter(message: LegRisk, writer: jspb.BinaryWriter): void;
+  static deserializeBinary(bytes: Uint8Array): LegRisk;
+  static deserializeBinaryFromReader(message: LegRisk, reader: jspb.BinaryReader): LegRisk;
+}
+
+export namespace LegRisk {
+  export type AsObject = {
+    legIndex: number,
+    greeks?: Greeks.AsObject,
+    modelPrice: number,
+    openPnl: number,
   }
 }
 

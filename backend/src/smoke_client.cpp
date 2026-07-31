@@ -313,6 +313,34 @@ auto check_calendar_spread(calculator::OptionsCalculator::Stub& stub, const std:
         return false;
     }
 
+    // Per-leg risk must reconcile with the aggregate. This is the property that
+    // makes the breakdown worth showing: if the parts do not sum to the whole,
+    // one of the two is computed from something the other did not see, and a
+    // trader hedging off the per-leg numbers would be hedging a fiction.
+    if (res.leg_risk_size() != 2) {
+        std::cerr << "Expected leg_risk for both legs, got " << res.leg_risk_size() << "\n";
+        return false;
+    }
+    double sum_delta = 0.0, sum_theta = 0.0, sum_vega = 0.0;
+    for (const auto& lr : res.leg_risk()) {
+        sum_delta += lr.greeks().delta();
+        sum_theta += lr.greeks().theta();
+        sum_vega  += lr.greeks().vega();
+    }
+    std::cout << "  leg risk     sum delta=" << std::setprecision(4) << sum_delta
+              << " vs net " << res.net_greeks().delta()
+              << " | sum theta=" << std::setprecision(2) << sum_theta
+              << " vs net " << res.net_greeks().theta() << "\n";
+    const auto close = [](double a, double b) {
+        return std::abs(a - b) <= 1e-9 * std::max(1.0, std::max(std::abs(a), std::abs(b)));
+    };
+    if (!close(sum_delta, res.net_greeks().delta()) ||
+        !close(sum_theta, res.net_greeks().theta()) ||
+        !close(sum_vega,  res.net_greeks().vega())) {
+        std::cerr << "Per-leg Greeks do not sum to net_greeks\n";
+        return false;
+    }
+
     // The tent: long time value at the strike, decaying to nothing at the
     // wings. Flat means every leg was priced on one clock again.
     const double spread = res.max_profit() - res.max_loss();

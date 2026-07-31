@@ -38,6 +38,26 @@ export interface RateMeta {
   fetchedAt: string;  // RFC3339
 }
 
+/**
+ * One leg's contribution to position risk. Maps 1:1 onto `LegRisk`.
+ *
+ * These sum to the aggregate Greeks exactly — the engine accumulates both in
+ * one pass from the same numbers, and the smoke gate asserts the reconciliation.
+ * Worth stating because the breakdown is only useful if it is the same
+ * computation, not a second opinion.
+ */
+export interface LegRisk {
+  legIndex: number;
+  delta: number;
+  gamma: number;
+  theta: number;
+  vega: number;
+  /** Model price now, per share. Zero for a linear leg, which has none. */
+  modelPrice: number;
+  /** Model value against what the leg cost, scaled to the position. */
+  openPnl: number;
+}
+
 /** One cell of the price x date grid. Maps 1:1 onto `MatrixCell`. */
 export interface MatrixCell {
   price: number;
@@ -69,6 +89,8 @@ export interface CalculationResult {
    * by how their value moves BETWEEN today and the near expiry.
    */
   matrix: MatrixCell[];
+  /** Per-leg risk, indexed by position in `legs`. */
+  legRisk: LegRisk[];
   max_profit: number;
   max_loss: number;
   break_even: number;
@@ -659,6 +681,19 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
         returnOnRiskPercent: c.getReturnOnRiskPercent(),
       }));
 
+      const legRisk: LegRisk[] = res.getLegRiskList().map((lr) => {
+        const lg = lr.getGreeks();
+        return {
+          legIndex: lr.getLegIndex(),
+          delta: lg?.getDelta() ?? 0,
+          gamma: lg?.getGamma() ?? 0,
+          theta: lg?.getTheta() ?? 0,
+          vega: lg?.getVega() ?? 0,
+          modelPrice: lr.getModelPrice(),
+          openPnl: lr.getOpenPnl(),
+        };
+      });
+
       const g = res.getNetGreeks();
       const rm = res.getRiskMetrics();
       const maxLoss = res.getMaxLoss();
@@ -669,6 +704,7 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
         result: {
           expiryCurve,
           matrix,
+          legRisk,
           max_profit: res.getMaxProfit(),
           max_loss: maxLoss,
           break_even: res.getBreakEven(),

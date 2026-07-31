@@ -140,6 +140,27 @@ message StrategyResponse {
   // that labels the curve "at expiration" without reading this field will
   // mislabel every multi-expiry position.
   double curve_days_to_expiration = 15;
+
+  // Per-leg risk, in the same units and conventions as net_greeks.
+  //
+  // The aggregate alone cannot answer "which leg is carrying this?". A four-leg
+  // condor nets to a small delta and a small theta while each wing holds a much
+  // larger position; closing the wrong side is how a hedged book becomes an
+  // unhedged one. Index refers to StrategyRequest.legs, in request order.
+  repeated LegRisk leg_risk = 16;
+}
+
+// One leg's contribution to the position, already scaled by direction,
+// quantity and contract multiplier — these sum to net_greeks exactly.
+message LegRisk {
+  int32 leg_index = 1;
+  Greeks greeks = 2;
+  // Black-Scholes value of the leg now, per contract and per share, before
+  // multipliers. Zero for a linear leg, which has no model price.
+  double model_price = 3;
+  // model_price minus the premium paid or received, scaled to the position.
+  // What the leg is worth against what it cost.
+  double open_pnl = 4;
 }
 
 // --------------------------------------------------------------------------

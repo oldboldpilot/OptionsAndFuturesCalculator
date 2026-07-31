@@ -543,7 +543,13 @@ using sgee::ExecutionResult;
     double delta = 0.0, gamma = 0.0, theta = 0.0, vega = 0.0, rho = 0.0;
     double vanna = 0.0, volga = 0.0, charm = 0.0;
 
+    // Per-leg risk is accumulated in the same pass and from the same numbers as
+    // the aggregate, rather than recomputed afterwards. Two passes would be two
+    // chances to diverge, and the guarantee that matters to a reader is that the
+    // legs sum to the net exactly.
+    int leg_index = -1;
     for (const auto& leg : ctx->request.legs()) {
+        ++leg_index;
         const double dir = direction_of(leg);
         const double mult = multiplier_of(leg);
         const double qty = quantity_of(leg);
@@ -597,8 +603,33 @@ using sgee::ExecutionResult;
             vanna += (bs.vanna / 100.0) * scale;
             volga += (bs.volga / 10000.0) * scale;
             charm += (bs.charm / 365.0) * scale;
+
+            auto& lr = *ctx->response.add_leg_risk();
+            lr.set_leg_index(leg_index);
+            lr.set_model_price(bs.value);
+            lr.set_open_pnl((bs.value - leg.premium()) * scale);
+            auto& lg = *lr.mutable_greeks();
+            lg.set_delta(bs.delta * scale);
+            lg.set_gamma(bs.gamma * scale);
+            lg.set_theta((bs.theta / 365.0) * scale);
+            lg.set_vega((bs.vega / 100.0) * scale);
+            lg.set_rho((bs.rho / 100.0) * scale);
+            lg.set_vanna((bs.vanna / 100.0) * scale);
+            lg.set_volga((bs.volga / 10000.0) * scale);
+            lg.set_charm((bs.charm / 365.0) * scale);
         } else {
-            delta += dir * mult * qty;
+            // A linear leg is one delta per unit and nothing else: no gamma, no
+            // decay, no vol sensitivity. Its P&L against entry is spot minus
+            // entry, which is the same convention value_at_elapsed uses.
+            const double scale = dir * mult * qty;
+            delta += scale;
+
+            const double entry = (leg.premium() > 0.0) ? leg.premium() : leg.strike();
+            auto& lr = *ctx->response.add_leg_risk();
+            lr.set_leg_index(leg_index);
+            lr.set_model_price(0.0);
+            lr.set_open_pnl((ctx->spot - entry) * scale);
+            lr.mutable_greeks()->set_delta(scale);
         }
     }
 
