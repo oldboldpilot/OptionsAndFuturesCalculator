@@ -1,15 +1,22 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Open_Sans, IBM_Plex_Mono } from "next/font/google";
 import "./globals.css";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
+// Open Sans is what mortgagecalculator.org sets, and the reference palette was
+// sampled from the same page. Plex Mono carries figures only: a strike ladder
+// and a P&L grid need fixed advance widths to line up column to column, which
+// no proportional face gives.
+const openSans = Open_Sans({
+  variable: "--font-open-sans",
   subsets: ["latin"],
+  display: "swap",
 });
 
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
+const plexMono = IBM_Plex_Mono({
+  variable: "--font-plex-mono",
+  weight: ["400", "500", "600"],
   subsets: ["latin"],
+  display: "swap",
 });
 
 import { branding } from "@/config/branding";
@@ -70,7 +77,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className={`${geistSans.variable} ${geistMono.variable}`}>
+    <html lang="en" className={`${openSans.variable} ${plexMono.variable}`}>
       <head>
         {/*
           Applies the saved theme before first paint. Without this the page
@@ -80,7 +87,7 @@ export default function RootLayout({
         <script
           dangerouslySetInnerHTML={{
             __html:
-              "try{document.documentElement.dataset.theme=localStorage.getItem('ofc-theme')||'slate'}catch(e){document.documentElement.dataset.theme='slate'}",
+              "try{document.documentElement.dataset.theme=localStorage.getItem('ofc-theme')||'light'}catch(e){document.documentElement.dataset.theme='light'}",
           }}
         />
       </head>

@@ -27,12 +27,12 @@ function subscribe(onChange: () => void) {
 }
 
 function getSnapshot(): Theme {
-  return (document.documentElement.dataset.theme as Theme | undefined) ?? 'slate';
+  return (document.documentElement.dataset.theme as Theme | undefined) ?? 'light';
 }
 
 /** Prerendered HTML has no localStorage, so it always renders the default. */
 function getServerSnapshot(): Theme {
-  return 'slate';
+  return 'light';
 }
 
 export function ThemeToggle() {

@@ -63,68 +63,80 @@
   --sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0) 42%);
 
   /* --- Type --- */
-  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
-               "Helvetica Neue", Arial, sans-serif;
-  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono",
-               Menlo, Consolas, monospace;
+  --font-sans: var(--font-open-sans), "Open Sans", Helvetica, Arial, sans-serif;
+  /* Figures only. Open Sans sets prose; columns of numbers need fixed advance
+     widths or the strike ladder will not line up. */
+  --font-mono: var(--font-plex-mono), ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 
   /* Dense scale — a trading grid lives between 11px and 13px */
-  --text-2xs: 0.6875rem;  /* 11px — table cells, dense labels */
-  --text-xs: 0.75rem;     /* 12px — body, inputs              */
-  --text-sm: 0.8125rem;   /* 13px — panel titles              */
-  --text-base: 0.875rem;  /* 14px — section headings          */
-  --text-lg: 1.0625rem;   /* 17px — the spot price            */
+  --text-2xs: 0.75rem;   /* 11px — table cells, dense labels */
+  --text-xs: 0.8125rem;     /* 12px — body, inputs              */
+  --text-sm: 0.875rem;    /* 13px — panel titles              */
+  --text-base: 1rem;      /* 14px — section headings          */
+  --text-lg: 1.25rem;      /* 17px — the spot price            */
 
-  --radius-sm: 4px;
-  --radius: 7px;
-  --radius-lg: 10px;
+  --radius-sm: 2px;
+  --radius: 3px;
+  --radius-lg: 4px;
 
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 /* ---------------------------------------------------------------------------
-   Light theme. Same token names, different values — no component knows which
-   theme is active.
+   Palette: mortgagecalculator.org, sampled from the live site.
+
+     #F2F2F2 page ground   #FFFFFF card   #2F2F2F ink      #767676 rule
+     #20394C deep navy     #155776 header navy             #E3F6FF info tint
+     #4F83C5 link blue     #1A87B9 accent teal             #13AA52 action green
+
+   A calculator people trust reads as a document, not a cockpit. Light ground,
+   white cards, navy structure — the previous near-black terminal was the
+   generic dark-UI default and gave a page of numbers nothing to sit on.
+
+   One rule carries meaning rather than decoration: AMBER IS ONLY EVER AN
+   ASSUMPTION. A stated rate, a dividend yield nobody publishes, a modelled
+   value — those read amber. Anything measured reads ink or green. This
+   product's binding requirement is real data only (spec 3.4), so provenance
+   earns its own colour channel.
    ------------------------------------------------------------------------- */
-
 :root[data-theme="light"] {
-  --color-base-900: #eaeef5;
-  --color-base-800: #ffffff;
-  --color-base-700: #f4f6fa;
-  --color-base-600: #e8ecf3;
-  --color-base-500: #d7dde8;
+  --color-base-900: #f2f2f2;   /* page ground, sampled from the reference */
+  --color-base-800: #ffffff;   /* cards                                   */
+  --color-base-700: #f7f7f7;   /* recessed rows                           */
+  --color-base-600: #e9eef2;
+  --color-base-500: #dbe3ea;
 
-  --color-line-strong: rgba(15, 23, 42, 0.20);
-  --color-line: rgba(15, 23, 42, 0.11);
-  --color-line-soft: rgba(15, 23, 42, 0.06);
+  --color-line-strong: rgba(32, 57, 76, 0.30);
+  --color-line: rgba(32, 57, 76, 0.16);
+  --color-line-soft: rgba(32, 57, 76, 0.08);
 
-  --color-ink-100: #0f172a;
-  --color-ink-200: #33415a;
-  --color-ink-300: #64748b;
-  --color-ink-400: #94a3b8;
+  --color-ink-100: #20394c;
+  --color-ink-200: #2f2f2f;
+  --color-ink-300: #5a6b78;
+  --color-ink-400: #767676;
 
-  --color-profit: #0d9488;
-  --color-profit-dim: #0f766e;
-  --color-loss: #dc2626;
-  --color-loss-dim: #b91c1c;
-  --color-flat: #94a3b8;
+  --color-profit: #13aa52;
+  --color-profit-dim: #0f8b43;
+  --color-loss: #c0392b;
+  --color-loss-dim: #9c2c21;
+  --color-flat: #767676;
 
-  --rgb-profit: 13, 148, 136;
-  --rgb-loss: 220, 38, 38;
+  --rgb-profit: 19, 170, 82;
+  --rgb-loss: 192, 57, 43;
 
-  --color-accent: #2563eb;
-  --color-accent-dim: #1d4ed8;
-  --color-violet: #7c3aed;
-  --color-cyan: #0284c7;
-  --color-warn: #b45309;
+  --color-accent: #1a87b9;
+  --color-accent-dim: #155776;
+  --color-violet: #4f83c5;
+  --color-cyan: #4f83c5;
+  --color-warn: #b8791a;
 
-  --color-call-tint: rgba(13, 148, 136, 0.07);
-  --color-put-tint: rgba(220, 38, 38, 0.06);
-  --color-atm-tint: rgba(37, 99, 235, 0.10);
+  --color-call-tint: rgba(19, 170, 82, 0.07);
+  --color-put-tint: rgba(192, 57, 43, 0.06);
+  --color-atm-tint: #e3f6ff;
 
-  --shadow-panel: 0 1px 2px rgba(15, 23, 42, 0.06), 0 6px 16px -10px rgba(15, 23, 42, 0.22);
-  --shadow-pop: 0 8px 28px -6px rgba(15, 23, 42, 0.20);
-  --sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(255, 255, 255, 0) 42%);
+  --shadow-panel: 0 1px 0 rgba(32, 57, 76, 0.06), 0 1px 3px rgba(32, 57, 76, 0.10);
+  --shadow-pop: 0 6px 22px -6px rgba(32, 57, 76, 0.28);
+  --sheen: none;
 }
 
 /* ---------------------------------------------------------------------------
