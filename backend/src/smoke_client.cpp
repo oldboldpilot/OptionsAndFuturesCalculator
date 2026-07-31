@@ -12,6 +12,7 @@
  * market data, so it works as a deploy gate.
  */
 #include <chrono>
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <iomanip>
@@ -466,6 +467,85 @@ auto check_dividend_yield(calculator::OptionsCalculator::Stub& stub, const std::
     return true;
 }
 
+/**
+ * The futures term structure is derived, and the gate checks it as derived.
+ *
+ * Forward price is cost-of-carry off a measured spot and a measured rate, so
+ * the assertions are about internal consistency and provenance rather than
+ * about matching a quote there is no vendor for: the curve must carry the
+ * MODELLED marker, must be monotonic in carry when the rate is positive, and
+ * must leave bid, ask, volume and open interest EMPTY. That last one is the
+ * one that matters — those are order-book facts, no formula produces them, and
+ * filling them with plausible numbers is exactly the failure the real-data-only
+ * requirement exists to prevent.
+ */
+auto check_term_structure(calculator::OptionsCalculator::Stub& stub) -> bool {
+    calculator::ChainRequest req;
+    req.set_symbol("ES");
+    req.set_asset_class("FUTURES");
+    calculator::ChainResponse res;
+
+    const auto ctx = make_context();
+    const auto status = stub.GetMarketChain(ctx.get(), req, &res);
+    if (!status.ok()) {
+        std::cerr << "Term structure FAILED: " << status.error_code() << " "
+                  << status.error_message() << "\n";
+        return false;
+    }
+    if (res.futures_contracts_size() == 0) {
+        std::cerr << "Term structure returned no contracts\n";
+        return false;
+    }
+
+    const double spot = res.spot_price();
+    std::cout << "Term structure    ES spot=" << std::setprecision(2) << spot
+              << "  contracts=" << res.futures_contracts_size() << "\n";
+    for (int i = 0; i < std::min(3, res.futures_contracts_size()); ++i) {
+        const auto& c = res.futures_contracts(i);
+        std::cout << "  " << c.code() << "  " << c.delivery_month()
+                  << "  " << c.days_to_expiry() << "d"
+                  << "  fwd=" << std::setprecision(2) << c.futures_price()
+                  << "  basis=" << c.basis()
+                  << "  carry=" << std::setprecision(4) << (c.annualized_yield() * 100.0) << "%"
+                  << "  [" << c.state() << "]\n";
+    }
+
+    double prev_days = -1.0, prev_basis = -1e18;
+    for (const auto& c : res.futures_contracts()) {
+        if (c.state() != "MODELLED") {
+            std::cerr << "Contract " << c.code() << " is not marked MODELLED (" << c.state()
+                      << ") — a derived curve must not look like a quote\n";
+            return false;
+        }
+        if (c.bid() != 0.0 || c.ask() != 0.0 || c.volume() != 0 || c.open_interest() != 0) {
+            std::cerr << "Contract " << c.code() << " carries fabricated book data\n";
+            return false;
+        }
+        if (c.futures_price() <= 0.0 || c.days_to_expiry() <= 0) {
+            std::cerr << "Contract " << c.code() << " has a non-positive price or tenor\n";
+            return false;
+        }
+        // Positive carry means the curve rises with tenor, and the basis with it.
+        if (c.annualized_yield() > 0.0) {
+            if (c.futures_price() <= spot) {
+                std::cerr << "Positive carry but " << c.code() << " prices at or below spot\n";
+                return false;
+            }
+            if (c.days_to_expiry() <= prev_days) {
+                std::cerr << "Contracts are not ordered by tenor\n";
+                return false;
+            }
+            if (c.basis() <= prev_basis) {
+                std::cerr << "Basis does not widen with tenor under positive carry\n";
+                return false;
+            }
+        }
+        prev_days = c.days_to_expiry();
+        prev_basis = c.basis();
+    }
+    return true;
+}
+
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
@@ -496,6 +576,8 @@ auto main(int argc, char** argv) -> int {
     if (!check_calendar_spread(*stub, symbol, spot, atm, 30, 60)) return 1;
 
     if (!check_dividend_yield(*stub, symbol, spot, atm, 30)) return 1;
+
+    if (!check_term_structure(*stub)) return 1;
 
     std::cout << "\nAll four RPCs returned live data.\n";
     return 0;

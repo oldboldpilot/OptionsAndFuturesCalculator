@@ -926,6 +926,119 @@ public:
     }
 
     /**
+     * Futures term structure, derived — and labelled as such.
+     *
+     * No vendor wired into this engine publishes a futures forward curve, which
+     * spec section 2 accepts explicitly: the term structure is modelled, not
+     * live. That is not licence to invent one. A previous implementation
+     * emitted nine hardcoded months priced off a fixed 4.5% carry with
+     * fabricated volume and open interest, and it was deleted for exactly that
+     * reason.
+     *
+     * The difference here is where the numbers come from. Forward price is
+     * cost-of-carry, F = S * exp((r - q) * T), evaluated from a MEASURED spot
+     * (the Alpaca quote) and a MEASURED risk-free rate (the Treasury CMT curve,
+     * with its own observation date). Those are the same two inputs the option
+     * pricer uses. Nothing is asserted that was not either observed or derived
+     * from something observed by a stated formula.
+     *
+     * What is NOT modelled stays empty rather than plausible: bid, ask, volume
+     * and open interest are order-book facts, and no formula produces them. They
+     * are left at zero and the UI renders an em dash. Filling them with
+     * something reasonable-looking is precisely the failure spec section 3.4
+     * exists to prevent.
+     *
+     * Every contract carries state = "MODELLED" so a client cannot present this
+     * as a quote by accident.
+     *
+     * KNOWN LIMITATION, and it is a real one. The spot comes from whatever the
+     * quote provider resolves the symbol to, and Alpaca resolves futures root
+     * symbols as EQUITY tickers: "ES" returns Eversource Energy at ~71, not the
+     * E-mini S&P at ~6900. The curve built on top is arithmetically correct and
+     * describes the wrong instrument. Roots that collide with a listed equity —
+     * ES, GC, CL, NG, SI, ZB — are all affected.
+     *
+     * Not papered over here, because the fix belongs upstream: either a futures
+     * quote source, or an explicit root-to-underlying mapping (ES -> SPX) with
+     * its own provenance. Until one exists, a caller should treat the SHAPE of
+     * this curve as meaningful and its LEVEL as belonging to whatever the quote
+     * service returned. The state marker and this comment are what keep that
+     * from being discovered the hard way.
+     */
+    auto build_term_structure(const std::string& symbol, calculator::ChainResponse& res) -> Status {
+        auto& log = logger::Logger::getInstance();
+
+        const auto quote = md::fetch_quote(symbol);
+        if (!quote) {
+            return Status(grpc::StatusCode::UNAVAILABLE,
+                          "No spot for " + symbol + ": " + quote.error().message());
+        }
+        // Refuse rather than assume a carry rate. Without a measured rate the
+        // forward curve would be a guess wearing a formula.
+        const auto rate = md::fetch_risk_free_rate();
+        if (!rate) {
+            return Status(grpc::StatusCode::UNAVAILABLE,
+                          "Term structure needs a measured risk-free rate: " +
+                              rate.error().message());
+        }
+
+        const double spot = quote->price;
+        const double r = rate->rate;
+
+        res.set_symbol(symbol);
+        res.set_spot_price(spot);
+
+        // The quarterly cycle (March, June, September, December) is the listed
+        // convention for index futures, and the single-letter month codes are
+        // the CME's. This is reference data about how contracts are named, not
+        // a market observation.
+        static constexpr std::array<std::pair<unsigned, char>, 4> kCycle{
+            {{3, 'H'}, {6, 'M'}, {9, 'U'}, {12, 'Z'}}};
+
+        const auto today = std::chrono::floor<std::chrono::days>(std::chrono::system_clock::now());
+        const std::chrono::year_month_day now_ymd{today};
+        int year = static_cast<int>(now_ymd.year());
+        const auto month_now = static_cast<unsigned>(now_ymd.month());
+
+        int emitted = 0;
+        for (int y = year; y <= year + 2 && emitted < 8; ++y) {
+            for (const auto& [m, code] : kCycle) {
+                if (emitted >= 8) break;
+                if (y == year && m <= month_now) continue;
+
+                // Listed index futures settle on the third Friday of the
+                // delivery month.
+                const std::chrono::year_month_day settle{
+                    std::chrono::year{y} / std::chrono::month{m} /
+                    std::chrono::Friday[3]};
+                const auto settle_days = std::chrono::sys_days{settle};
+                const auto dte = (settle_days - today).count();
+                if (dte <= 0) continue;
+
+                const double years = static_cast<double>(dte) / 365.0;
+                const double forward = spot * std::exp(r * years);
+
+                auto& c = *res.add_futures_contracts();
+                c.set_code(std::format("{}{}{:02}", symbol, code, y % 100));
+                c.set_delivery_month(std::format("{:04}-{:02}", y, m));
+                c.set_days_to_expiry(static_cast<int>(dte));
+                c.set_futures_price(forward);
+                c.set_basis(forward - spot);
+                // Cost of carry as an annualised rate: exactly the r that was
+                // measured, restated as the yield the basis implies.
+                c.set_annualized_yield(r);
+                c.set_state("MODELLED");
+                // bid, ask, volume, open_interest deliberately left at zero.
+                ++emitted;
+            }
+        }
+
+        log.info("Term structure for {}: {} contracts from spot {:.2f} and r {:.5f} as of {}",
+                 symbol, emitted, spot, r, rate->as_of_date);
+        return Status::OK;
+    }
+
+    /**
      * Live option chain.
      *
      * Everything here is provider data joined across two Alpaca endpoints. The
@@ -947,7 +1060,10 @@ public:
         const auto symbol = req.symbol();
         log.info("GetMarketChain: {} expiration='{}'", symbol, req.expiration_date());
 
-        if (req.asset_class() == "FUTURES" || req.asset_class() == "CRYPTO") {
+        if (req.asset_class() == "FUTURES") {
+            return build_term_structure(symbol, res);
+        }
+        if (req.asset_class() == "CRYPTO") {
             return Status(grpc::StatusCode::UNIMPLEMENTED,
                           "No listed option chain is available for " + req.asset_class() +
                               " from the configured provider");
