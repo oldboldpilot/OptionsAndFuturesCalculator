@@ -90,6 +90,30 @@ export default function RootLayout({
               "try{document.documentElement.dataset.theme=localStorage.getItem('ofc-theme')||'light'}catch(e){document.documentElement.dataset.theme='light'}",
           }}
         />
+        {/*
+          Google AdSense Auto Ads.
+
+          `async` and placed after the theme script on purpose: this is
+          third-party code on the critical path of a page whose first job is to
+          show live prices, and it must never be able to delay or block that.
+
+          Auto Ads means Google chooses placements, so a unit can appear inside
+          the workspace rather than only in the box AdSlot reserves. On a layout
+          where the thing below an insertion point is a strike ladder with buy
+          and sell buttons, a late-arriving ad can shift a control under the
+          cursor. Auto Ads was chosen deliberately over a fixed unit; if that
+          shifting becomes a problem, the fix is to turn Auto Ads off in the
+          AdSense dashboard and wire a manual unit into AdSlot with its slot id,
+          which needs no code change here beyond the unit tag.
+
+          The publisher id is not a secret — it is public in ads.txt by design,
+          which is the whole point of ads.txt.
+        */}
+        <script
+          async
+          src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-3669553016263703"
+          crossOrigin="anonymous"
+        />
       </head>
       <body>
         <div id="root-container">
