@@ -364,6 +364,11 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
       // would be the most convincing kind of wrong data.
       chainStrikes: [],
       chainExpirations: [],
+      // The forward curve is part of that chain and was missed here. Switching
+      // from ES to a root with no futures source left the E-mini curve on
+      // screen under the new symbol's header — a real curve for an instrument
+      // the user was no longer looking at.
+      futuresCurve: [],
       selectedExpiration: '',
       chainStatus: 'idle',
       chainError: null,
@@ -556,6 +561,9 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
         set({
           chainStrikes: [],
           chainExpirations: [],
+          // A failed load must leave nothing behind either. Keeping the last
+          // successful curve here would show a stale one beside an error.
+          futuresCurve: [],
           chainStatus: 'error',
           chainError: err?.message || 'Chain service unreachable',
         });

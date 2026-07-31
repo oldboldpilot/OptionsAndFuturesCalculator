@@ -24,8 +24,14 @@ const n2 = (v: number) => v.toFixed(2);
  * about the front month that the level alone does not.
  */
 export function TermStructure() {
-  const { futuresCurve, chainStatus, chainError, symbol, spotPrice } = useCalculatorStore();
+  const { futuresCurve, chainStatus, chainError, symbol, spotPrice, assetClass } =
+    useCalculatorStore();
 
+  // A forward curve is a futures question. An equity whose chain failed to load
+  // should not sprout a "Term structure — no curve" panel; it never had one to
+  // fail at. Keying on the asset class rather than on the absence of data is
+  // what keeps the empty state meaningful when it does appear.
+  if (assetClass !== 'FUTURES') return null;
   if (futuresCurve.length === 0 && chainStatus !== 'error') return null;
 
   const shape = (() => {

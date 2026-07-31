@@ -33,6 +33,7 @@ import urllib.request
 
 HOST = sys.argv[1] if len(sys.argv) > 1 else "https://api.optionsandfuturescalculator.com"
 METHOD = "/calculator.OptionsCalculator/GetMarketChain"
+QUOTE_METHOD = "/calculator.OptionsCalculator/GetMarketQuote"
 
 
 def varint(n):
@@ -96,12 +97,11 @@ def fields(buf):
             return
 
 
-def call(symbol, asset_class="FUTURES"):
-    """One GetMarketChain round trip. Returns (trailers, decoded response)."""
-    req = s(1, symbol) + i32(2, 30) + s(3, asset_class)
+def invoke(method, req):
+    """One gRPC-Web round trip. Returns (trailers, message bytes)."""
     frame = b"\x00" + struct.pack(">I", len(req)) + req
     r = urllib.request.Request(
-        HOST + METHOD,
+        HOST + method,
         data=base64.b64encode(frame),
         headers={
             "Content-Type": "application/grpc-web-text",
@@ -137,6 +137,12 @@ def call(symbol, asset_class="FUTURES"):
         else:
             trailers = payload.decode(errors="replace").strip()
         off += 5 + ln
+    return trailers, msg
+
+
+def call(symbol, asset_class="FUTURES"):
+    """GetMarketChain. Returns (trailers, decoded response)."""
+    trailers, msg = invoke(METHOD, s(1, symbol) + i32(2, 30) + s(3, asset_class))
 
     out = {"spot": 0.0, "strikes": 0, "contracts": [], "provider": ""}
     for field, _wire, v in fields(msg):
@@ -157,6 +163,17 @@ def call(symbol, asset_class="FUTURES"):
             out["contracts"].append(c)
         elif field == 7:
             out["provider"] = v.decode()
+    return trailers, out
+
+
+def quote(symbol, asset_class):
+    """GetMarketQuote. Returns (trailers, {price, provider, asset_class})."""
+    trailers, msg = invoke(QUOTE_METHOD, s(1, symbol) + s(2, asset_class))
+    out = {"price": 0.0, "provider": "", "asset_class": ""}
+    names = {2: "price", 6: "asset_class", 7: "provider"}
+    for field, _wire, v in fields(msg):
+        if field in names:
+            out[names[field]] = v.decode() if isinstance(v, bytes) else v
     return trailers, out
 
 
@@ -221,6 +238,45 @@ for sym, floor in MAPPED.items():
         failures.append(f"{sym}: basis does not widen with tenor "
                         f"({cs[0]['basis']:.2f} -> {cs[-1]['basis']:.2f})")
 
+    # The quote path must describe the SAME instrument as the curve.
+    #
+    # This is the check that was missing, and its absence shipped a build where
+    # every assertion above passed while the header read "ES spot 71.59" over a
+    # 7500 curve. Both were real quotes; one was Eversource Energy, the utility
+    # that owns the ticker. The spot is what prices every leg on the screen, so
+    # it mattered more than the curve did.
+    try:
+        qt, q = quote(sym, "FUTURES")
+    except Exception as exc:                                # noqa: BLE001
+        failures.append(f"{sym}: FUTURES quote failed: {exc}")
+        continue
+    print(f"  quote {q['price']:.2f}  class={q['asset_class']}  via {q['provider']}")
+    if q["price"] <= 0 or abs(q["price"] - r["spot"]) / r["spot"] > 0.01:
+        failures.append(f"{sym}: quote {q['price']:.2f} disagrees with chain spot "
+                        f"{r['spot']:.2f} — quote path and curve are on "
+                        f"different instruments")
+    if "proxy" not in q["provider"]:
+        failures.append(f"{sym}: quote provider {q['provider']!r} does not "
+                        f"disclose that the level is derived")
+
+    # The same ticker asked as an EQUITY must still answer as one. If both
+    # classes return the same number, asset_class is being ignored and the
+    # agreement above proves nothing.
+    # Not every futures root has an equity twin — NQ has none, and the lookup
+    # simply fails. That is not evidence either way, so it is reported as what
+    # it is rather than counted as a passing distinction.
+    try:
+        _, eq = quote(sym, "EQUITY")
+        if eq["price"] <= 0:
+            print(f"  as EQUITY: no such listed ticker (nothing to confuse it with)")
+        elif abs(eq["price"] - q["price"]) < 0.01:
+            failures.append(f"{sym}: identical price as EQUITY and FUTURES — "
+                            f"asset_class is not routing")
+        else:
+            print(f"  as EQUITY {eq['price']:.2f} — a different instrument")
+    except Exception:                                       # noqa: BLE001
+        print(f"  as EQUITY: refused (no such listed ticker)")
+
 for sym in UNMAPPED:
     try:
         trailers, r = call(sym)
@@ -232,6 +288,16 @@ for sym in UNMAPPED:
     if ok:
         failures.append(f"{sym}: emitted a curve with no index proxy — this is "
                         f"an equity's price dressed as a commodity future")
+
+    # Refusing in the chain while the quote path serves the equity is exactly
+    # the split that shipped. Both have to refuse.
+    try:
+        _, q = quote(sym, "FUTURES")
+        if q["price"] > 0:
+            failures.append(f"{sym}: FUTURES quote returned {q['price']:.2f} with "
+                            f"no futures source mapped — that is the listed equity")
+    except Exception:                                       # noqa: BLE001
+        pass
 
 print()
 if failures:
