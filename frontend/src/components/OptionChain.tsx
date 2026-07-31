@@ -22,7 +22,7 @@ const pct = (v: number) => (Number.isFinite(v) && v > 0 ? `${(v * 100).toFixed(1
 export function OptionChain() {
   const {
     chainStrikes, chainExpirations, selectedExpiration, chainStatus, chainError,
-    setSelectedExpiration, loadChain, setTicket,
+    setSelectedExpiration, loadChain, setTicket, ticket,
   } = useCalculatorStore();
 
   const [side, setSide] = useState<SideFilter>('both');
@@ -76,6 +76,19 @@ export function OptionChain() {
     });
   }
 
+  /**
+   * Clicking a quote selects it. Previously only the 12px B/S buttons did
+   * anything, so the obvious gesture — click the price you want — did nothing
+   * at all, and the ladder looked interactive without being it. The buttons
+   * still set the direction explicitly; clicking a cell keeps whatever
+   * direction the ticket already carries.
+   */
+  const pick = (row: ChainStrike, type: 'CALL' | 'PUT') => ({
+    onClick: () => load(row, type, ticket.action),
+    style: { cursor: 'pointer' as const },
+    title: `Select the ${row.strike.toFixed(2)} ${type.toLowerCase()}`,
+  });
+
   const showCalls = side !== 'puts';
   const showPuts = side !== 'calls';
 
@@ -109,7 +122,12 @@ export function OptionChain() {
             className="select"
             style={{ width: 'auto' }}
             value={selectedExpiration}
-            onChange={(e) => setSelectedExpiration(e.target.value)}
+            onChange={(e) => {
+              setSelectedExpiration(e.target.value);
+              // Clear the strike too: it belonged to the previous expiry and
+              // its price is not this contract's price.
+              setTicket({ expiration: e.target.value, strike: null, premium: null, impliedVolatility: null });
+            }}
             disabled={chainExpirations.length === 0}
             aria-label="Expiration date"
           >
@@ -191,12 +209,12 @@ export function OptionChain() {
                 >
                   {showCalls && (
                     <>
-                      <td>{int(row.call.openInterest)}</td>
-                      <td>{int(row.call.volume)}</td>
-                      <td>{pct(row.call.iv)}</td>
-                      <td>{n(row.call.delta, 3)}</td>
-                      <td className="profit">{n(row.call.bid)}</td>
-                      <td className="profit">{n(row.call.ask)}</td>
+                      <td {...pick(row, 'CALL')}>{int(row.call.openInterest)}</td>
+                      <td {...pick(row, 'CALL')}>{int(row.call.volume)}</td>
+                      <td {...pick(row, 'CALL')}>{pct(row.call.iv)}</td>
+                      <td {...pick(row, 'CALL')}>{n(row.call.delta, 3)}</td>
+                      <td className="profit" {...pick(row, 'CALL')}>{n(row.call.bid)}</td>
+                      <td className="profit" {...pick(row, 'CALL')}>{n(row.call.ask)}</td>
                       {actions(row, 'CALL')}
                     </>
                   )}
@@ -214,12 +232,12 @@ export function OptionChain() {
                   {showPuts && (
                     <>
                       {actions(row, 'PUT')}
-                      <td className="loss">{n(row.put.bid)}</td>
-                      <td className="loss">{n(row.put.ask)}</td>
-                      <td>{n(row.put.delta, 3)}</td>
-                      <td>{pct(row.put.iv)}</td>
-                      <td>{int(row.put.volume)}</td>
-                      <td>{int(row.put.openInterest)}</td>
+                      <td className="loss" {...pick(row, 'PUT')}>{n(row.put.bid)}</td>
+                      <td className="loss" {...pick(row, 'PUT')}>{n(row.put.ask)}</td>
+                      <td {...pick(row, 'PUT')}>{n(row.put.delta, 3)}</td>
+                      <td {...pick(row, 'PUT')}>{pct(row.put.iv)}</td>
+                      <td {...pick(row, 'PUT')}>{int(row.put.volume)}</td>
+                      <td {...pick(row, 'PUT')}>{int(row.put.openInterest)}</td>
                     </>
                   )}
                 </tr>
