@@ -75,67 +75,71 @@
   --text-base: 1rem;      /* 14px — section headings          */
   --text-lg: 1.25rem;      /* 17px — the spot price            */
 
-  --radius-sm: 2px;
-  --radius: 3px;
-  --radius-lg: 4px;
+  --radius-sm: 3px;
+  --radius: 6px;
+  --radius-lg: 8px;
 
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 /* ---------------------------------------------------------------------------
-   Palette: mortgagecalculator.org, sampled from the live site.
+   Light theme.
 
-     #F2F2F2 page ground   #FFFFFF card   #2F2F2F ink      #767676 rule
-     #20394C deep navy     #155776 header navy             #E3F6FF info tint
-     #4F83C5 link blue     #1A87B9 accent teal             #13AA52 action green
+   The previous pass sampled mortgagecalculator.org literally: cold #F2F2F2
+   ground, solid navy header slabs, hairline boxes, tight padding. Correct for
+   a government rates table and wrong for a tool someone chooses to spend hours
+   in — it read bureaucratic.
 
-   A calculator people trust reads as a document, not a cockpit. Light ground,
-   white cards, navy structure — the previous near-black terminal was the
-   generic dark-UI default and gave a page of numbers nothing to sit on.
+   Three changes carry the difference. The ground goes WARM (#F7F6F3, paper
+   rather than concrete), so white cards lift off it instead of dissolving into
+   it. The navy slabs are gone: a section is announced by strong ink type over
+   an accent hairline, which is quieter and lets the numbers be the loudest
+   thing on screen. And elevation becomes real — soft, layered shadow instead of
+   a 1px outline — because depth is what stops a dense grid reading as a
+   spreadsheet.
 
-   One rule carries meaning rather than decoration: AMBER IS ONLY EVER AN
-   ASSUMPTION. A stated rate, a dividend yield nobody publishes, a modelled
-   value — those read amber. Anything measured reads ink or green. This
-   product's binding requirement is real data only (spec 3.4), so provenance
-   earns its own colour channel.
+   Amber still means one thing only: an assumption. A stated rate, a dividend
+   yield no provider publishes. Measured values never wear it.
    ------------------------------------------------------------------------- */
 :root[data-theme="light"] {
-  --color-base-900: #f2f2f2;   /* page ground, sampled from the reference */
-  --color-base-800: #ffffff;   /* cards                                   */
-  --color-base-700: #f7f7f7;   /* recessed rows                           */
-  --color-base-600: #e9eef2;
-  --color-base-500: #dbe3ea;
+  --color-base-900: #f7f6f3;   /* warm paper ground */
+  --color-base-800: #ffffff;   /* cards            */
+  --color-base-700: #faf9f7;   /* banded rows      */
+  --color-base-600: #f1efea;   /* table heads      */
+  --color-base-500: #e4e1da;
 
-  --color-line-strong: rgba(32, 57, 76, 0.30);
-  --color-line: rgba(32, 57, 76, 0.16);
-  --color-line-soft: rgba(32, 57, 76, 0.08);
+  --color-line-strong: rgba(22, 24, 29, 0.18);
+  --color-line: rgba(22, 24, 29, 0.09);
+  --color-line-soft: rgba(22, 24, 29, 0.05);
 
-  --color-ink-100: #20394c;
-  --color-ink-200: #2f2f2f;
-  --color-ink-300: #5a6b78;
-  --color-ink-400: #767676;
+  --color-ink-100: #16181d;
+  --color-ink-200: #2b3038;
+  --color-ink-300: #5b6472;
+  --color-ink-400: #8b93a1;
 
-  --color-profit: #13aa52;
-  --color-profit-dim: #0f8b43;
-  --color-loss: #c0392b;
-  --color-loss-dim: #9c2c21;
-  --color-flat: #767676;
+  --color-profit: #0e9f6e;
+  --color-profit-dim: #0a7a54;
+  --color-loss: #d64545;
+  --color-loss-dim: #ab3232;
+  --color-flat: #8b93a1;
 
-  --rgb-profit: 19, 170, 82;
-  --rgb-loss: 192, 57, 43;
+  --rgb-profit: 14, 159, 110;
+  --rgb-loss: 214, 69, 69;
 
-  --color-accent: #1a87b9;
-  --color-accent-dim: #155776;
-  --color-violet: #4f83c5;
-  --color-cyan: #4f83c5;
-  --color-warn: #b8791a;
+  /* One accent, doing real work: section rules, ATM, focus, the primary action. */
+  --color-accent: #2f5bd8;
+  --color-accent-dim: #1f43a8;
+  --color-violet: #6d5bd8;
+  --color-cyan: #2f8bd8;
+  --color-warn: #c77700;      /* assumptions only */
 
-  --color-call-tint: rgba(19, 170, 82, 0.07);
-  --color-put-tint: rgba(192, 57, 43, 0.06);
-  --color-atm-tint: #e3f6ff;
+  --color-call-tint: rgba(14, 159, 110, 0.055);
+  --color-put-tint: rgba(214, 69, 69, 0.05);
+  --color-atm-tint: rgba(47, 91, 216, 0.09);
 
-  --shadow-panel: 0 1px 0 rgba(32, 57, 76, 0.06), 0 1px 3px rgba(32, 57, 76, 0.10);
-  --shadow-pop: 0 6px 22px -6px rgba(32, 57, 76, 0.28);
+  /* Real elevation. A hairline box is a diagram of a panel; a shadow is one. */
+  --shadow-panel: 0 1px 2px rgba(22, 24, 29, 0.04), 0 4px 12px -4px rgba(22, 24, 29, 0.10);
+  --shadow-pop: 0 12px 32px -8px rgba(22, 24, 29, 0.22);
   --sheen: none;
 }
 
@@ -325,19 +329,19 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 0.5rem;
-  padding: 0.5rem 0.6875rem;
+  padding: 0.5625rem 0.75rem;
   border-bottom: 1px solid var(--color-line);
-  background: var(--color-ink-100);
+  background: var(--color-base-800);
+  box-shadow: inset 0 2px 0 var(--color-accent);
   flex: none;
 }
 
 .panel-title {
   font-size: var(--text-xs);
   font-weight: 700;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.05em;
   text-transform: uppercase;
-  /* On the navy bar, not against the card. */
-  color: #ffffff;
+  color: var(--color-ink-100);
 }
 /* Section headings reused inside a body still sit on the card, so they take
    the ink colour rather than the header bar's white. */
