@@ -23,7 +23,7 @@ export function StrategyMetrics() {
   const shell = (body: React.ReactNode) => (
     <div className="panel" style={{ flex: 'none' }}>
       <div className="panel-head">
-        <span className="panel-title">Strategy</span>
+        <span className="panel-title">Outcome</span>
         {result && <span className="chip chip-accent">engine</span>}
       </div>
       {body}

@@ -8,6 +8,7 @@ import PositionLegs from './PositionLegs';
 import StrategyMetrics from './StrategyMetrics';
 import OptionChain from './OptionChain';
 import PnLMatrix from './PnLMatrix';
+import OptionTicket from './OptionTicket';
 import { StrategySelector } from './StrategySelector';
 import { useCalculatorStore } from '../store/useCalculatorStore';
 
@@ -68,36 +69,49 @@ export function StrategyWorkspace({ heading }: { heading?: string }) {
         style={{
           flex: 1,
           display: 'grid',
-          gridTemplateColumns: 'minmax(290px, 330px) minmax(0, 1fr) minmax(255px, 300px)',
+          // Four columns, and the chain gets a full-height one of its own.
+          // It was sharing a column and resolving to 256px — nine of 116 rows —
+          // which is what made the ladder unusable regardless of how it was
+          // sorted or scrolled. Reference data needs height more than anything
+          // else on this page.
+          gridTemplateColumns:
+            'minmax(240px, 280px) minmax(280px, 320px) minmax(0, 1fr) minmax(300px, 380px)',
           gap: '0.5rem',
           padding: '0.5rem',
           minHeight: 0,
         }}
       >
-        {/* Build */}
+        {/* Choose a structure */}
         <div className="stagger" style={{ ...column, overflowY: 'auto' }}>
           <StrategySelector />
+        </div>
+
+        {/* Compose the position: ticket first, then what it has built */}
+        <div className="stagger" style={{ ...column, overflowY: 'auto' }}>
+          <OptionTicket />
           <PositionLegs />
         </div>
 
-        {/* Read */}
+        {/* Read the result */}
         <div className="stagger" style={column}>
           <ProbabilityCurve />
-          {/* The matrix wants width — twelve date columns plus the price axis —
-              so it lives in the widest column. It scrolls internally rather
+          {/* The matrix wants width — a dozen date columns plus the price axis —
+              so it lives in the widest column and scrolls internally rather
               than forcing the page to scroll sideways. */}
-          <div style={{ flex: '0 0 34%', minHeight: 0, display: 'flex' }}>
+          <div style={{ flex: '0 0 40%', minHeight: 0, display: 'flex' }}>
             <PnLMatrix />
           </div>
-          <div style={{ flex: '0 0 32%', minHeight: 0, display: 'flex' }}>
-            <OptionChain />
+          <div style={{ flex: '0 0 30%', minHeight: 0, display: 'flex' }}>
+            <StrategyMetrics />
           </div>
         </div>
 
-        {/* Assess */}
-        <div className="stagger" style={{ ...column, overflowY: 'auto' }}>
-          <StrategyMetrics />
-          <PayoffLadder />
+        {/* Reference: the chain, at full height, opened at the money */}
+        <div className="stagger" style={column}>
+          <OptionChain />
+          <div style={{ flex: '0 0 34%', minHeight: 0, display: 'flex' }}>
+            <PayoffLadder />
+          </div>
         </div>
       </main>
     </div>

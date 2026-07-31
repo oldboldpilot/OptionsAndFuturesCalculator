@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useCalculatorStore, type ChainStrike } from '../store/useCalculatorStore';
 
 type SideFilter = 'both' | 'calls' | 'puts';
@@ -22,29 +22,57 @@ const pct = (v: number) => (Number.isFinite(v) && v > 0 ? `${(v * 100).toFixed(1
 export function OptionChain() {
   const {
     chainStrikes, chainExpirations, selectedExpiration, chainStatus, chainError,
-    setSelectedExpiration, loadChain, addLeg,
+    setSelectedExpiration, loadChain, setTicket,
   } = useCalculatorStore();
 
   const [side, setSide] = useState<SideFilter>('both');
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+  const atmRef = useRef<HTMLTableRowElement | null>(null);
 
   useEffect(() => {
     if (chainStatus === 'idle') loadChain();
   }, [chainStatus, loadChain]);
 
-  const dte = chainExpirations.find((e) => e.date === selectedExpiration)?.dte ?? 0;
+  /**
+   * Open the chain at the money.
+   *
+   * The ladder runs 116 strikes deep and the at-the-money row sits near the
+   * middle of it — measured at row 63, 1715px down, while the scroll position
+   * stayed at 0. So the chain opened on the lowest strikes: deep in-the-money
+   * calls and puts worth nothing, which is the part of the ladder nobody
+   * trades. Every strike was present and none of the useful ones were on
+   * screen.
+   *
+   * Centring rather than scrolling-into-view keeps a band of strikes either
+   * side visible, which is how the ladder is actually read.
+   */
+  useEffect(() => {
+    if (chainStatus !== 'ready') return;
+    const body = bodyRef.current;
+    const atm = atmRef.current;
+    if (!body || !atm) return;
+    body.scrollTop = Math.max(0, atm.offsetTop - body.clientHeight / 2 + atm.offsetHeight / 2);
+  }, [chainStatus, selectedExpiration, chainStrikes.length, side]);
 
-  function add(row: ChainStrike, type: 'CALL' | 'PUT', action: 'BUY' | 'SELL') {
+  /**
+   * Load a quote into the ticket. Deliberately not an append.
+   *
+   * Clicking used to add the leg outright, fixing strike, premium, quantity and
+   * IV at whatever the row held — so a row with no quote contributed a free
+   * option, and none of the four could be adjusted afterwards. Landing in the
+   * ticket keeps the click as fast while leaving every field editable.
+   */
+  function load(row: ChainStrike, type: 'CALL' | 'PUT', action: 'BUY' | 'SELL') {
     const q = type === 'CALL' ? row.call : row.put;
     // Buying lifts the ask, selling hits the bid — the executable price, not a midpoint.
-    addLeg({
-      instrument_type: 'INSTRUMENT_EQUITY_OPTION',
+    const px = action === 'BUY' ? q.ask : q.bid;
+    setTicket({
       action,
-      option_type: type,
-      strike_price: row.strike,
-      premium: action === 'BUY' ? q.ask : q.bid,
-      quantity: 1,
-      expiration_days: dte,
-      implied_volatility: q.iv,
+      optionType: type,
+      expiration: selectedExpiration,
+      strike: row.strike,
+      premium: px > 0 ? px : null,
+      impliedVolatility: q.iv > 0 ? q.iv : null,
     });
   }
 
@@ -53,8 +81,8 @@ export function OptionChain() {
 
   const actions = (row: ChainStrike, type: 'CALL' | 'PUT') => (
     <td style={{ whiteSpace: 'nowrap', textAlign: 'center' }}>
-      <button className="btn btn-buy" style={{ padding: '0 0.3125rem' }} onClick={() => add(row, type, 'BUY')} title={`Buy ${type}`}>B</button>{' '}
-      <button className="btn btn-sell" style={{ padding: '0 0.3125rem' }} onClick={() => add(row, type, 'SELL')} title={`Sell ${type}`}>S</button>
+      <button className="btn btn-buy" style={{ padding: '0 0.3125rem' }} onClick={() => load(row, type, 'BUY')} title={`Buy ${type}`}>B</button>{' '}
+      <button className="btn btn-sell" style={{ padding: '0 0.3125rem' }} onClick={() => load(row, type, 'SELL')} title={`Sell ${type}`}>S</button>
     </td>
   );
 
@@ -98,7 +126,7 @@ export function OptionChain() {
         </div>
       </div>
 
-      <div className="panel-body panel-body--flush" style={{ flex: 1 }}>
+      <div className="panel-body panel-body--flush" style={{ flex: 1, overflowY: 'auto' }} ref={bodyRef}>
         {chainStatus === 'loading' || chainStatus === 'idle' ? (
           <div style={{ padding: '0.5rem', display: 'flex', flexDirection: 'column', gap: '3px' }}>
             {Array.from({ length: 9 }, (_, i) => (
@@ -147,7 +175,20 @@ export function OptionChain() {
             </thead>
             <tbody>
               {chainStrikes.map((row) => (
-                <tr key={row.strike} style={row.isAtm ? { background: 'var(--color-atm-tint)' } : undefined}>
+                <tr
+                  key={row.strike}
+                  ref={row.isAtm ? atmRef : undefined}
+                  style={
+                    row.isAtm
+                      ? {
+                          background: 'var(--color-atm-tint)',
+                          // The spot line: the money is a boundary in the
+                          // ladder, so draw it as one.
+                          boxShadow: 'inset 0 1px 0 var(--color-accent), inset 0 -1px 0 var(--color-accent)',
+                        }
+                      : undefined
+                  }
+                >
                   {showCalls && (
                     <>
                       <td>{int(row.call.openInterest)}</td>

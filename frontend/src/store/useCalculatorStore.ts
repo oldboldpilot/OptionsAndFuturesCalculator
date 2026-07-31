@@ -154,6 +154,27 @@ export interface ChainExpiration {
 
 export type ChainStatus = 'idle' | 'loading' | 'ready' | 'error';
 
+/**
+ * The order ticket — a leg being composed, before it joins the position.
+ *
+ * Previously a chain click appended a leg immediately, with strike, premium,
+ * quantity and IV fixed at whatever the row happened to hold. That made the
+ * 116-row ladder the only way to express an option and left three of those
+ * four values uneditable. The ticket makes the option a form: the chain fills
+ * it in, and every field stays editable before it is committed.
+ */
+export interface TicketDraft {
+  action: 'BUY' | 'SELL';
+  optionType: 'CALL' | 'PUT';
+  /** Expiration date, ISO-8601. Empty until a chain is loaded. */
+  expiration: string;
+  strike: number | null;
+  /** Per-share price. Null means "not quoted" — never silently zero. */
+  premium: number | null;
+  quantity: number;
+  impliedVolatility: number | null;
+}
+
 interface CalculatorState {
   symbol: string;
   assetClass: 'EQUITY' | 'FUTURES' | 'CRYPTO';
@@ -174,6 +195,8 @@ interface CalculatorState {
   chainStatus: ChainStatus;
   chainError: string | null;
 
+  ticket: TicketDraft;
+
   setSymbol: (symbol: string, spotPrice?: number, assetClass?: 'EQUITY' | 'FUTURES' | 'CRYPTO') => void;
   addLeg: (leg: Omit<Leg, 'id'>) => void;
   removeLeg: (id: string) => void;
@@ -185,6 +208,8 @@ interface CalculatorState {
   loadRiskFreeRate: () => Promise<void>;
   loadChain: (expiration?: string) => void;
   setSelectedExpiration: (date: string) => void;
+  setTicket: (patch: Partial<TicketDraft>) => void;
+  commitTicket: () => void;
 
   saveStrategy: (name: string, symbol: string) => Promise<void>;
   loadStrategies: () => Promise<void>;
@@ -268,6 +293,19 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
   selectedExpiration: '',
   chainStatus: 'idle',
   chainError: null,
+
+  // Zero is not a price. The ticket starts empty and the chain fills it in;
+  // committing with a null premium is refused rather than defaulted, because a
+  // free option is the one thing the payoff maths cannot recover from.
+  ticket: {
+    action: 'BUY',
+    optionType: 'CALL',
+    expiration: '',
+    strike: null,
+    premium: null,
+    quantity: 1,
+    impliedVolatility: null,
+  },
 
   setSymbol: (symbolInput, customPrice, customAssetClass) => {
     const sym = symbolInput.trim().toUpperCase();
@@ -407,6 +445,40 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
     });
 
     return rateRequest;
+  },
+
+  setTicket: (patch) => set((st) => ({ ticket: { ...st.ticket, ...patch } })),
+
+  /**
+   * Move the ticket into the position.
+   *
+   * Refuses rather than substituting: an option with no strike cannot be
+   * priced, and one with no premium is implicitly free, which silently makes
+   * every payoff figure wrong. Both were possible before, because a chain row
+   * with no quote appended a leg carrying zeros.
+   */
+  commitTicket: () => {
+    const t = get().ticket;
+    if (t.strike === null || t.strike <= 0) {
+      set({ error: 'Pick a strike before adding the leg.' });
+      return;
+    }
+    if (t.premium === null || t.premium <= 0) {
+      set({ error: 'This contract has no quoted price. Enter the price you would pay or receive.' });
+      return;
+    }
+    const dte = get().chainExpirations.find((e) => e.date === t.expiration)?.dte ?? 0;
+    get().addLeg({
+      instrument_type: 'INSTRUMENT_EQUITY_OPTION',
+      action: t.action,
+      option_type: t.optionType,
+      strike_price: t.strike,
+      premium: t.premium,
+      quantity: t.quantity > 0 ? t.quantity : 1,
+      expiration_days: dte,
+      implied_volatility: t.impliedVolatility ?? undefined,
+    });
+    set({ error: null });
   },
 
   setSelectedExpiration: (date) => {
