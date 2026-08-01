@@ -1,7 +1,21 @@
 #!/bin/bash
 #
-# Container entrypoint: the C++ engine on :50051 with Envoy translating
-# gRPC-Web in front of it on :8080.
+# Container entrypoint: the C++ engine on :50051 with Envoy in front of it.
+#
+# Envoy presents the engine three ways, because no single one reaches every
+# caller:
+#
+#   :8080               gRPC-Web -- browsers (the frontend)
+#   :8080               JSON     -- server-side callers with no proto toolchain
+#   :GRPC_NATIVE_PORT   native gRPC, behind a Railway TCP proxy (opt-in)
+#
+# The third exists because Railway's HTTP edge terminates HTTP/2 and speaks
+# HTTP/1.1 to the container, so HTTP/2 trailers are dropped. gRPC carries its
+# status ENTIRELY in trailers, including on success, so a native gRPC call
+# through :8080 returns the right answer and then hangs waiting for a
+# `grpc-status` that no longer exists; the client reports "Stream removed",
+# which reads like the backend crashed. Railway's documented answer is their TCP
+# proxy, which forwards bytes without interpreting HTTP, so trailers survive.
 #
 # If either process dies the container must exit so the platform restarts it —
 # an Envoy still answering health checks while the engine is dead is worse than
@@ -15,12 +29,104 @@ if [[ -z "${ALPACA_API_KEY:-}" || -z "${ALPACA_API_SECRET:-}" ]]; then
     echo "         Quote and chain requests will fail with NotConfigured." >&2
 fi
 
+# ---------------------------------------------------------------------------
+# Assemble the Envoy configuration.
+#
+# Copied rather than edited in place, so every restart starts from the
+# checked-in file. Appending to /etc/envoy/envoy.yaml directly would accumulate
+# another listener on each restart and then fail to bind.
+# ---------------------------------------------------------------------------
+ENVOY_CONFIG=/tmp/envoy.runtime.yaml
+cp /etc/envoy/envoy.yaml "${ENVOY_CONFIG}"
+
+if [[ -n "${GRPC_NATIVE_PORT:-}" ]]; then
+    TLS_BLOCK=""
+
+    if [[ -n "${GRPC_TLS_CERT:-}" && -n "${GRPC_TLS_KEY:-}" ]]; then
+        # Certificate material arrives as environment content rather than as a
+        # mounted file because Railway has no file mounts for secrets.
+        mkdir -p /etc/envoy/tls
+        printf '%s' "${GRPC_TLS_CERT}" > /etc/envoy/tls/tls.crt
+        printf '%s' "${GRPC_TLS_KEY}"  > /etc/envoy/tls/tls.key
+        chmod 600 /etc/envoy/tls/tls.key
+        TLS_BLOCK=$(cat <<'TLSEOF'
+          transport_socket:
+            name: envoy.transport_sockets.tls
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+              common_tls_context:
+                # gRPC clients select HTTP/2 by ALPN. Without advertising h2
+                # they negotiate http/1.1 and fail in a way that looks like a
+                # protocol bug rather than a missing advertisement.
+                alpn_protocols: ["h2"]
+                tls_certificates:
+                  - certificate_chain: { filename: /etc/envoy/tls/tls.crt }
+                    private_key: { filename: /etc/envoy/tls/tls.key }
+TLSEOF
+)
+        echo "Native gRPC on :${GRPC_NATIVE_PORT} with TLS."
+    elif [[ "${GRPC_ALLOW_PLAINTEXT:-}" == "1" ]]; then
+        # Deliberately loud. A Railway TCP proxy is reachable from the public
+        # internet, and this endpoint authenticates with an API key sent as a
+        # header: in plaintext that key is readable by anything on the path, and
+        # it is long-lived, so one capture stays valid until somebody notices.
+        echo "WARNING: native gRPC on :${GRPC_NATIVE_PORT} is PLAINTEXT." >&2
+        echo "         API keys will cross the network unencrypted. Use this" >&2
+        echo "         only where the port is genuinely private." >&2
+    else
+        # Fail closed. Silently downgrading to plaintext is how a development
+        # convenience becomes a production credential leak.
+        echo "FATAL: GRPC_NATIVE_PORT is set but no TLS material was provided." >&2
+        echo "       Set GRPC_TLS_CERT and GRPC_TLS_KEY (PEM contents), or set" >&2
+        echo "       GRPC_ALLOW_PLAINTEXT=1 if this port is genuinely private." >&2
+        exit 1
+    fi
+
+    cat >> "${ENVOY_CONFIG}" <<NATIVEEOF
+    - name: listener_grpc_native
+      address:
+        socket_address: { address: 0.0.0.0, port_value: ${GRPC_NATIVE_PORT} }
+      filter_chains:
+        -
+${TLS_BLOCK}
+          filters:
+          - name: envoy.filters.network.http_connection_manager
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+              # http2 rather than auto: this listener exists to carry native
+              # gRPC, which is HTTP/2 only. Accepting HTTP/1.1 here would let a
+              # misconfigured client connect and then fail obscurely.
+              codec_type: http2
+              stat_prefix: grpc_native
+              route_config:
+                name: native_route
+                virtual_hosts:
+                  - name: native_service
+                    domains: ["*"]
+                    routes:
+                      - match: { prefix: "/" }
+                        route:
+                          cluster: backend_grpc_service
+                          max_stream_duration:
+                            grpc_timeout_header_max: 0s
+              http_filters:
+              # No grpc_web filter and no transcoder: this path is native gRPC
+              # end to end, so the response passes through with its trailers
+              # intact, which is the entire reason this listener exists.
+              - name: envoy.filters.http.router
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+NATIVEEOF
+else
+    echo "Native gRPC listener disabled (GRPC_NATIVE_PORT unset)."
+fi
+
 echo "Starting OptionsCalculatorEngine on :50051..."
 /app/calculator_engine &
 BACKEND_PID=$!
 
 echo "Starting Envoy on :8080..."
-envoy -c /etc/envoy/envoy.yaml --log-level "${ENVOY_LOG_LEVEL:-info}" &
+envoy -c "${ENVOY_CONFIG}" --log-level "${ENVOY_LOG_LEVEL:-info}" &
 ENVOY_PID=$!
 
 terminate() {

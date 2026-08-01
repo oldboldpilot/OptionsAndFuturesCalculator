@@ -146,6 +146,29 @@ add_custom_command(
     DEPENDS ${FINANCE_PROTO_FILE}
 )
 
+# One descriptor set covering BOTH contracts, for Envoy's gRPC-JSON transcoder.
+#
+# Envoy resolves method names, field names and types from this at runtime, which
+# is what lets a caller POST JSON without holding a .proto or running codegen.
+# It is generated from the same files the C++ stubs are generated from, so the
+# REST surface cannot describe a method the engine does not serve -- the usual
+# failure of a hand-maintained REST gateway.
+#
+# --include_imports is required: without it the descriptor references types it
+# does not contain, and Envoy rejects the whole configuration at startup.
+set(PROTO_DESCRIPTOR "${PROTO_GEN_DIR}/api_descriptor.pb")
+add_custom_command(
+    OUTPUT ${PROTO_DESCRIPTOR}
+    COMMAND $<TARGET_FILE:protoc>
+    ARGS --include_imports
+         --descriptor_set_out=${PROTO_DESCRIPTOR}
+         -I${CMAKE_CURRENT_SOURCE_DIR}/proto
+         ${PROTO_FILE} ${FINANCE_PROTO_FILE}
+    DEPENDS ${PROTO_FILE} ${FINANCE_PROTO_FILE}
+    COMMENT "Generating proto descriptor set for Envoy JSON transcoding"
+)
+add_custom_target(proto_descriptor ALL DEPENDS ${PROTO_DESCRIPTOR})
+
 add_library(proto_lib STATIC
     "${PROTO_GEN_DIR}/calculator.pb.cc"
     "${PROTO_GEN_DIR}/calculator.grpc.pb.cc"

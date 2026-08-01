@@ -165,6 +165,12 @@ COPY --from=builder /src/build/lib/              /app/lib/
 COPY backend/envoy.yaml /etc/envoy/envoy.yaml
 COPY backend/start.sh   /app/start.sh
 
+# The descriptor set Envoy's JSON transcoder resolves methods and types from.
+# Taken from the builder rather than committed, so it is regenerated from the
+# .proto files on every build and cannot fall out of step with the stubs the
+# engine was compiled against.
+COPY --from=builder /src/build/generated/api_descriptor.pb /etc/envoy/api_descriptor.pb
+
 USER root
 RUN chmod +x /app/start.sh /app/calculator_engine /app/smoke_client
 

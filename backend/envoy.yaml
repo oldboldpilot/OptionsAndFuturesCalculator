@@ -3,8 +3,46 @@ admin:
   address:
     socket_address: { address: 0.0.0.0, port_value: 9901 }
 
+# NOTE ON KEY ORDER: `clusters` is declared before `listeners` deliberately.
+# start.sh appends the native-gRPC listener to the END of this file when that
+# endpoint is switched on, so `listeners` has to be the last key. Envoy does not
+# care about the order of these two; a future edit that swaps them back would
+# silently produce an invalid config the moment the native endpoint is enabled.
 static_resources:
+  clusters:
+    - name: backend_grpc_service
+      connect_timeout: 0.25s
+      type: logical_dns
+      http2_protocol_options: {}
+      lb_policy: round_robin
+      load_assignment:
+        cluster_name: backend_grpc_service
+        endpoints:
+          - lb_endpoints:
+            - endpoint:
+                address:
+                  socket_address:
+                    address: 127.0.0.1
+                    port_value: 50051
+
   listeners:
+    # ------------------------------------------------------------------------
+    # :8080 -- the HTTP endpoint, reached through Railway's edge proxy.
+    #
+    # This port carries gRPC-Web (browsers) and JSON (server-side callers who do
+    # not want a proto toolchain). It deliberately does NOT carry native gRPC,
+    # and cannot: Railway's edge terminates HTTP/2 and speaks HTTP/1.1 to the
+    # container, so HTTP/2 trailers never arrive. A native gRPC call over this
+    # path returns the correct response body and then hangs waiting for a
+    # `grpc-status` that was dropped in transit -- the client reports "Stream
+    # removed", which reads like the backend crashed rather than like a proxy
+    # limitation. Verified by differential test: identical request, identical
+    # Envoy config, `grpc-status: 0` present locally and absent through Railway.
+    #
+    # gRPC-Web and JSON both work here precisely because neither needs trailers:
+    # gRPC-Web encodes them into the response body, and JSON has none.
+    # Native gRPC is served on its own listener at the bottom of this file.
+    # ------------------------------------------------------------------------
     - name: listener_0
       address:
         socket_address: { address: 0.0.0.0, port_value: 8080 }
@@ -49,7 +87,7 @@ static_resources:
                             google_re2: {}
                             regex: ".*"
                       allow_methods: GET, PUT, DELETE, POST, OPTIONS
-                      allow_headers: keep-alive,user-agent,cache-control,content-type,content-transfer-encoding,custom-header-1,x-accept-content-transfer-encoding,x-accept-response-streaming,x-user-agent,x-grpc-web,grpc-timeout
+                      allow_headers: keep-alive,user-agent,cache-control,content-type,content-transfer-encoding,custom-header-1,x-accept-content-transfer-encoding,x-accept-response-streaming,x-user-agent,x-grpc-web,grpc-timeout,x-api-key,authorization
                       max_age: "1728000"
                       expose_headers: custom-header-1,grpc-status,grpc-message
               http_filters:
@@ -76,6 +114,33 @@ static_resources:
                         header:
                           key: x-local-rate-limit
                           value: 'true'
+                # JSON in, JSON out, against the SAME methods the gRPC services
+                # expose. The descriptor is generated from the same .proto files
+                # the C++ stubs come from, so this surface cannot drift into
+                # describing a method the engine does not serve -- the usual
+                # failure of a hand-written REST gateway.
+                #
+                # It sits ahead of grpc_web because it only claims requests whose
+                # content-type is JSON; a gRPC-Web request passes through it
+                # untouched.
+                #
+                # Authentication and per-key limits are unaffected: this filter
+                # rewrites the ENCODING, not the headers, so `x-api-key` reaches
+                # the engine exactly as it does over gRPC and is metered the same.
+                - name: envoy.filters.http.grpc_json_transcoder
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.filters.http.grpc_json_transcoder.v3.GrpcJsonTranscoder
+                    proto_descriptor: /etc/envoy/api_descriptor.pb
+                    services:
+                      - calculator.OptionsCalculator
+                      - sensen.finance.Finance
+                    auto_mapping: true
+                    # Without this a refusal arrives as an empty body with a
+                    # header the caller has to know to look for. With it, a
+                    # quota refusal is a JSON object saying so.
+                    convert_grpc_status: true
+                    print_options:
+                      always_print_primitive_fields: true
                 - name: envoy.filters.http.grpc_web
                   typed_config:
                     "@type": type.googleapis.com/envoy.extensions.filters.http.grpc_web.v3.GrpcWeb
@@ -86,18 +151,5 @@ static_resources:
                   typed_config:
                     "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
 
-  clusters:
-    - name: backend_grpc_service
-      connect_timeout: 0.25s
-      type: logical_dns
-      http2_protocol_options: {}
-      lb_policy: round_robin
-      load_assignment:
-        cluster_name: backend_grpc_service
-        endpoints:
-          - lb_endpoints:
-            - endpoint:
-                address:
-                  socket_address:
-                    address: 127.0.0.1
-                    port_value: 50051
+    # start.sh appends the native-gRPC listener below this line when
+    # GRPC_NATIVE_PORT is set. Keep `listeners` as the final key in this file.
