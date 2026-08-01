@@ -98,7 +98,23 @@ set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -stdlib=libc++")
 set(gRPC_INSTALL OFF CACHE BOOL "" FORCE)
 set(protobuf_INSTALL OFF CACHE BOOL "" FORCE)
 set(ABSL_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
-set(ENABLE_PARALLEL_STL OFF CACHE BOOL "" FORCE)
+# ON, and it has to be: this is the switch that decides whether TBB is built
+# from source at all. sensen guards its FetchContent TBB block with
+# `if(ENABLE_PARALLEL_STL)` (sensen/CMakeLists.txt:708), so forcing this OFF --
+# as this line used to -- leaves `find_package(TBB)` as the only way TBB can
+# ever be found. That was survivable while everything here was libstdc++ and the
+# builder installed libtbb-dev. It is not survivable now: the builder
+# deliberately does not install libtbb-dev (a distro TBB is libstdc++-built and
+# would silently half-link into a libc++ binary), so with this OFF the container
+# has no TBB from either mechanism and configure dies at the sensen_slim TBB
+# check below with "neither TBB::tbb nor TBB_LIB is defined".
+#
+# That failure did not reproduce on the machine this migration was done on,
+# because that host happens to carry a from-source oneTBB at
+# /usr/local/lib64/cmake/TBB which the find_package probe picked up. The
+# container carries neither, which is the only environment whose answer counts.
+# Found by building the image; it is not visible from the local build.
+set(ENABLE_PARALLEL_STL ON CACHE BOOL "" FORCE)
 
 # A note on TBB, because it is the one dependency in this binary whose standard
 # library can be wrong without anything saying so, and because the obvious fix

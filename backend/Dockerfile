@@ -99,12 +99,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 ARG MODEL_URL
 ARG MODEL_SHA256
+# Declared so the ${MODEL_TOKEN:-} fallback below can actually see a
+# --build-arg. Without this ARG the variable is simply unset inside the stage
+# and the fallback silently does nothing, which is how the first version of
+# this failed: the error said "supply a token" while ignoring the one supplied.
+ARG MODEL_TOKEN
 
 # /model/strategy-assistant.gguf is the one place this filename is spelled
 # out; the runtime stage's COPY --from=model and its MODEL_PATH both refer
 # back to this same path rather than re-deriving it, so the three cannot
 # drift apart.
-RUN set -eu; \
+# `--mount=type=secret` is what actually makes the secret appear at
+# /run/secrets/model_token. Passing `--secret id=model_token,...` on the build
+# command line alone is NOT enough -- both BuildKit and podman require the RUN
+# that consumes a secret to declare it, and without this line the file simply
+# never exists, the token check falls through, and the fetch 401s against a
+# private repository while the error text insists a token was needed.
+# `required=false` keeps a public MODEL_URL (and a plain MODEL_TOKEN build-arg)
+# working on builders that pass no secret at all.
+RUN --mount=type=secret,id=model_token,required=false \
+    set -eu; \
     mkdir -p /model; \
     if [ -z "${MODEL_URL}" ]; then \
         echo "MODEL_URL not set -- building without calculator.assistant's model."; \
@@ -116,7 +130,25 @@ RUN set -eu; \
             exit 1; \
         fi; \
         echo "Fetching model from MODEL_URL (checksum will be verified before it is used for anything)..."; \
-        wget --tries=3 --timeout=60 -qO /model/strategy-assistant.gguf "${MODEL_URL}"; \
+        AUTH_HEADER=""; \
+        if [ -f /run/secrets/model_token ]; then \
+            AUTH_HEADER="Authorization: Bearer $(cat /run/secrets/model_token)"; \
+            echo "Using the bearer token mounted at /run/secrets/model_token."; \
+        elif [ -n "${MODEL_TOKEN:-}" ]; then \
+            AUTH_HEADER="Authorization: Bearer ${MODEL_TOKEN}"; \
+            echo "Using MODEL_TOKEN from the build environment."; \
+        fi; \
+        if [ -n "${AUTH_HEADER}" ]; then \
+            wget --tries=3 --timeout=60 --header="${AUTH_HEADER}" \
+                 -qO /model/strategy-assistant.gguf "${MODEL_URL}"; \
+        else \
+            wget --tries=3 --timeout=60 \
+                 -qO /model/strategy-assistant.gguf "${MODEL_URL}"; \
+        fi || { \
+            echo "FATAL: could not fetch MODEL_URL." >&2; \
+            echo "If the model lives in a PRIVATE repository this is almost certainly a 401: wget sends no credentials by default. Supply a token either as a BuildKit secret (--secret id=model_token,env=HF_TOKEN, which never enters the image or its history) or, failing that, as a MODEL_TOKEN build argument. A public MODEL_URL needs neither." >&2; \
+            exit 1; \
+        }; \
         if ! echo "${MODEL_SHA256}  /model/strategy-assistant.gguf" | sha256sum -c -; then \
             echo "FATAL: downloaded model failed sha256 verification against MODEL_SHA256." >&2; \
             echo "This means the bytes at MODEL_URL do not match what was expected -- a truncated download, a URL that now serves something else, or a stale checksum. Refusing to ship it rather than gamble that a corrupt GGUF happens to still work." >&2; \
