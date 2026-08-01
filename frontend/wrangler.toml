@@ -1,0 +1,26 @@
+# Static-assets Worker for the calculator UI.
+#
+# The site is a Next.js static export (`output: "export"` in next.config.ts), so
+# there is no server to run -- `out/` is the whole application and Workers serves
+# it from the edge. There is deliberately no `main` script: adding one would put
+# a Worker invocation in front of every asset request, which costs latency and
+# money to do what the assets binding already does for free.
+#
+# This replaces the Cloudflare Pages project. The custom domain is NOT declared
+# here: `routes` would claim optionsandfuturescalculator.com away from Pages the
+# moment this deploys, cutting the live site over with no way to compare the two
+# first. Deploy to workers.dev, check it, then attach the domain deliberately.
+name = "optionsandfuturescalculator"
+compatibility_date = "2026-07-31"
+
+[assets]
+directory = "./out"
+
+# The export writes 404.html; without this a missing path returns Workers' own
+# bare 404 instead of the site's.
+not_found_handling = "404-page"
+
+# Serves /calculator for out/calculator.html, matching how the Pages project
+# behaved. Without it those URLs 404 and every internal link breaks -- the
+# failure would look like a broken build rather than a serving setting.
+html_handling = "auto-trailing-slash"
