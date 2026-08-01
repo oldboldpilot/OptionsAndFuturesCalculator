@@ -27,6 +27,11 @@ export interface Env {
   PRICE_ANNUAL: string;
   SITE_URL: string;
   TRIAL_DAYS: string;
+  // Optional: when both are set, the subscription tier is also written onto the
+  // Supabase account. Absent, the licence path alone still works -- which is
+  // deliberate, because it keeps billing functioning during a Supabase outage.
+  SUPABASE_URL: string;
+  SUPABASE_SERVICE_ROLE_KEY: string;
 }
 
 /**
@@ -169,6 +174,71 @@ async function handleLicence(url: URL, env: Env, origin: string | null): Promise
 // POST /webhook
 // ---------------------------------------------------------------------------
 
+/**
+ * Writes the subscription tier onto the customer's Supabase account.
+ *
+ * `app_metadata` and not `user_metadata`. Supabase copies both into the access
+ * token, but only the service role key can write `app_metadata`, whereas
+ * `user_metadata` is self-serve from the browser -- which would make the tier a
+ * free upgrade button. The engine reads `app_metadata.tier` for exactly this
+ * reason, and the database refuses the same write a second way: `profiles` has
+ * no UPDATE policy for `authenticated`.
+ *
+ * Returns false when Supabase is not configured or the account does not exist
+ * yet. Neither is an error: someone can pay before they create an account, and
+ * the licence emailed to them works regardless. This is an ADDITIONAL grant
+ * path, not a replacement, so it must never fail the webhook -- a non-2xx makes
+ * Stripe retry and eventually disable the endpoint.
+ */
+async function setSupabaseTier(env: Env, email: string, tier: string): Promise<boolean> {
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY || !email) return false;
+
+  const headers = {
+    apikey: env.SUPABASE_SERVICE_ROLE_KEY,
+    Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+    'Content-Type': 'application/json',
+  };
+  const base = env.SUPABASE_URL.replace(/\/+$/, '');
+
+  try {
+    const lookup = await fetch(
+      `${base}/auth/v1/admin/users?filter=${encodeURIComponent(email)}`,
+      { headers },
+    );
+    if (!lookup.ok) {
+      console.error(`supabase user lookup failed: ${lookup.status}`);
+      return false;
+    }
+    const payload = (await lookup.json()) as { users?: Array<{ id: string; email: string }> };
+
+    // The filter is a substring match, so it can return accounts that merely
+    // CONTAIN this address. Granting Pro to the wrong account on a fuzzy match
+    // is the one mistake here that costs money, so the address is compared
+    // exactly, case-insensitively, rather than trusting the first row.
+    const target = (payload.users ?? []).find(
+      (u) => u.email?.toLowerCase() === email.toLowerCase(),
+    );
+    if (!target) return false;
+
+    const update = await fetch(`${base}/auth/v1/admin/users/${target.id}`, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({ app_metadata: { tier } }),
+    });
+    if (!update.ok) {
+      console.error(`supabase tier write failed: ${update.status}`);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    // The webhook must still return 200. Stripe retries on failure and disables
+    // the endpoint after repeated ones, so a Supabase outage must not cascade
+    // into losing billing events altogether.
+    console.error('supabase tier write threw', err);
+    return false;
+  }
+}
+
 async function handleWebhook(req: Request, env: Env): Promise<Response> {
   const body = await req.text();
   const sig = req.headers.get('Stripe-Signature');
@@ -184,6 +254,11 @@ async function handleWebhook(req: Request, env: Env): Promise<Response> {
     'checkout.session.completed',
     'customer.subscription.created',
     'customer.subscription.updated',
+    // Added with the Supabase path. A licence needs no cancellation event --
+    // it simply stops being reissued and expires. A tier written onto an
+    // account does NOT expire, so without this a cancelled customer keeps Pro
+    // forever.
+    'customer.subscription.deleted',
   ];
   // 200 on events we do not handle: a non-2xx makes Stripe retry with backoff
   // and eventually disable the endpoint, so "not interested" must not look
@@ -194,11 +269,24 @@ async function handleWebhook(req: Request, env: Env): Promise<Response> {
   const customerId = String(obj.customer ?? '');
   if (!customerId) return new Response('no customer', { status: 200 });
 
-  // A cancelled or unpaid subscription simply stops being reissued. There is
-  // nothing to revoke -- the outstanding licence expires on its own, which is
-  // the behaviour a customer who paid for the month is owed.
+  const email =
+    obj.customer_details?.email ?? obj.customer_email ?? (await customerEmail(env, customerId));
+
+  // A cancelled or unpaid subscription stops having a licence reissued -- the
+  // outstanding one expires on its own, which is what a customer who paid for
+  // the month is owed. The Supabase tier is different: it is stored, not
+  // signed, so it has no expiry and must be actively taken back.
+  //
+  // The access token keeps its old claim until it refreshes, so a downgrade
+  // bites within GOTRUE_JWT_EXP (one hour), not instantly. That is the
+  // deliberate trade for verifying tokens locally instead of calling Supabase
+  // on every request.
   const status = obj.status ?? 'active';
-  if (['canceled', 'unpaid', 'incomplete_expired'].includes(status)) {
+  if (
+    event.type === 'customer.subscription.deleted' ||
+    ['canceled', 'unpaid', 'incomplete_expired'].includes(status)
+  ) {
+    if (email) await setSupabaseTier(env, email, 'free');
     return new Response('not reissuing', { status: 200 });
   }
 
@@ -209,8 +297,25 @@ async function handleWebhook(req: Request, env: Env): Promise<Response> {
     periodEndEpoch: periodEnd,
   });
 
-  const email = obj.customer_details?.email ?? obj.customer_email ?? (await customerEmail(env, customerId));
-  if (email) await sendLicenceEmail(env, email, licence);
+  // Two grant paths, deliberately both.
+  //
+  // The account tier is what makes Pro work on the website itself: the user
+  // signs in, their access token carries app_metadata.tier, and the engine
+  // reads it. Nothing to paste, and it follows them to any device they sign in
+  // on.
+  //
+  // The emailed licence is the fallback for the case the tier cannot cover --
+  // someone who paid before creating an account, or whose email on Stripe does
+  // not match one. Without it that customer has paid and has no way in.
+  if (email) {
+    const granted = await setSupabaseTier(env, email, 'pro');
+    if (!granted) {
+      console.log(`no Supabase account for ${email}; the emailed licence is their way in`);
+    }
+    await sendLicenceEmail(env, email, licence);
+  } else {
+    console.error(`subscription ${customerId} has no email; cannot grant Pro`);
+  }
 
   return new Response('ok', { status: 200 });
 }

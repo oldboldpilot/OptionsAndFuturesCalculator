@@ -2,6 +2,7 @@
 
 import React, { useState } from 'react';
 import { startCheckout } from '../lib/licence';
+import { AuthUI } from './AuthUI';
 import { useProStatus } from '../lib/useProStatus';
 
 /**
@@ -86,6 +87,19 @@ export const ProPanel: React.FC = () => {
         <button onClick={() => setShowActivate((v) => !v)} style={linkBtn}>
           have a key?
         </button>
+      </div>
+
+      {/* Signing in is the PRIMARY way Pro arrives, not an afterthought. The
+          subscription writes the tier onto the account, so a subscriber who
+          signs in has Pro on every device with nothing to paste. The licence
+          key below is the fallback for someone who paid before they had an
+          account. Until now this component was never imported anywhere, so
+          there was no way to sign in at all. */}
+      <div style={{ marginTop: '0.5rem', paddingTop: '0.5rem', borderTop: '1px solid var(--color-line)' }}>
+        <div style={{ fontSize: 'var(--text-2xs)', color: 'var(--color-ink-400)', marginBottom: '0.375rem' }}>
+          Already subscribed? Sign in and Pro follows your account.
+        </div>
+        <AuthUI />
       </div>
 
       {showActivate && (
