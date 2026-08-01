@@ -1,0 +1,23 @@
+# Cloudflare Workers static-assets redirect rules. This file is copied verbatim
+# from public/ into out/ by the Next export, which is where Workers reads it.
+#
+# The sitemap lives at exactly one URL, /sitemap.xml, and is served as
+# application/xml. Every other spelling of it used to fall through to the SPA
+# 404, which answers with text/html -- so anyone who reached the sitemap by a
+# near-miss got an HTML error page and a reasonable conclusion that the sitemap
+# was not XML. The file was always fine; the neighbouring URLs were not.
+#
+# /sitemap.xml/ is the one that bites without being typed. `html_handling =
+# "auto-trailing-slash"` in wrangler.toml adds a trailing slash when resolving
+# extensionless routes, and several validators and crawlers normalise URLs the
+# same way, so the slashed form gets requested by things nobody pointed at it.
+#
+# 301 rather than 302: these are permanent spellings of one canonical document,
+# and Search Console follows a permanent redirect to the target instead of
+# recording the requested URL as an error.
+/sitemap             /sitemap.xml    301
+/sitemap/            /sitemap.xml    301
+/sitemap.xml/        /sitemap.xml    301
+/sitemap_index.xml   /sitemap.xml    301
+/sitemap-index.xml   /sitemap.xml    301
+/sitemap.txt         /sitemap.xml    301

@@ -17,34 +17,45 @@ export const dynamic = 'force-static';
  * added to the app cannot go missing here. That drift is invisible: the pages
  * build and work, search traffic simply never arrives on them.
  */
+/*
+ * No `lastModified` anywhere, deliberately.
+ *
+ * It used to be `new Date()` evaluated at build time, which stamped all 29
+ * URLs with the instant of the build. Every deploy then told crawlers the
+ * entire site had just changed -- including deploys that touched one component,
+ * or only the backend. A lastmod that moves when the page did not is worse than
+ * no lastmod: Google discounts the signal for the whole file once it looks
+ * unreliable, so the churn costs the accurate entries too.
+ *
+ * mortgagefvcalculator.com, which is indexed and serving on this same AdSense
+ * account, omits lastmod entirely for the same reason. Matching it.
+ *
+ * If per-page dates are wanted later they have to come from real edit times --
+ * git's last-commit date for the file, not the clock at build.
+ */
 export default function sitemap(): MetadataRoute.Sitemap {
-  const now = new Date();
   const base = branding.canonicalUrl;
 
   return [
     {
       url: base,
-      lastModified: now,
-      changeFrequency: 'daily',
+      changeFrequency: 'weekly',
       priority: 1,
     },
     // The strategy pages are the substance of the site and the reason anyone
     // arrives from a search.
     ...STRATEGY_SLUGS.map((slug) => ({
       url: `${base}/calculator/${slug}`,
-      lastModified: now,
       changeFrequency: 'weekly' as const,
       priority: 0.8,
     })),
     {
       url: `${base}/privacy`,
-      lastModified: now,
       changeFrequency: 'yearly',
       priority: 0.3,
     },
     {
       url: `${base}/terms`,
-      lastModified: now,
       changeFrequency: 'yearly',
       priority: 0.3,
     },
