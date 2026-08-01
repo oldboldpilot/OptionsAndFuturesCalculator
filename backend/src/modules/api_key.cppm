@@ -159,6 +159,36 @@ class KeyRegistry {
 /** Generates a new key, `pk_live_`/`sk_live_` + 256 bits of CSPRNG base64url. */
 [[nodiscard]] auto generate_key(KeyType type) -> std::string;
 
+/**
+ * HMAC-SHA512 of `message` under `secret`, truncated to 256 bits, base64url.
+ *
+ * Truncation is deliberate and safe: HMAC's security is bounded by the
+ * narrower of the key and the output, and 256 bits is far beyond forgeable.
+ * It halves the token length, which matters when a human has to paste it.
+ */
+[[nodiscard]] auto hmac_sha512_b64(std::string_view secret, std::string_view message)
+    -> std::string;
+
+/**
+ * Verifies a signed subscription licence and fills `out` on success.
+ *
+ * A licence is `lk_live_<payload>.<signature>`, where payload is base64url JSON
+ * carrying the Stripe customer, the tier and an expiry. It is SIGNED rather
+ * than stored, which is what keeps the engine stateless: there is no table of
+ * issued licences to query, cache or invalidate, and a licence can be minted by
+ * the billing webhook without the engine being told about it.
+ *
+ * The trade is that revocation is by expiry rather than immediate. That suits
+ * subscriptions -- the licence is issued to the end of the paid period and
+ * reissued on renewal, so a cancellation stops the next issuance rather than
+ * reaching back to kill the current one. A customer who has paid for the month
+ * keeps the month, which is also what they are owed.
+ *
+ * Requires LICENCE_SIGNING_KEY. Without it no licence verifies, which is the
+ * safe direction: an unset secret must not mean "accept anything".
+ */
+[[nodiscard]] auto verify_licence(std::string_view token, Identity& out) -> bool;
+
 /** Human-readable name for an outcome, for logs. */
 [[nodiscard]] auto to_string(Outcome outcome) noexcept -> std::string_view;
 

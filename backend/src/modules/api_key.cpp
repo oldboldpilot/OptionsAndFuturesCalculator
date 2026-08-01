@@ -13,6 +13,7 @@ module;
 #include <grpcpp/grpcpp.h>
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
+#include <openssl/hmac.h>
 #include <openssl/rand.h>
 
 module api_key;
@@ -167,6 +168,121 @@ auto generate_key(KeyType type) -> std::string {
     body.resize(kBodyLength);
 
     return std::string{type == KeyType::Secret ? kSecretPrefix : kPublishablePrefix} + body;
+}
+
+namespace {
+
+constexpr std::string_view kLicencePrefix = "lk_live_";
+
+[[nodiscard]] auto b64url_encode(std::string_view raw) -> std::string {
+    static constexpr std::string_view kA =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    std::string out;
+    out.reserve(((raw.size() + 2) / 3) * 4);
+    std::size_t i = 0;
+    for (; i + 2 < raw.size(); i += 3) {
+        const std::uint32_t c = (static_cast<unsigned char>(raw[i]) << 16) |
+                                (static_cast<unsigned char>(raw[i + 1]) << 8) |
+                                static_cast<unsigned char>(raw[i + 2]);
+        out.push_back(kA[(c >> 18) & 0x3F]);
+        out.push_back(kA[(c >> 12) & 0x3F]);
+        out.push_back(kA[(c >> 6) & 0x3F]);
+        out.push_back(kA[c & 0x3F]);
+    }
+    if (i + 1 == raw.size()) {
+        const std::uint32_t c = static_cast<unsigned char>(raw[i]) << 16;
+        out.push_back(kA[(c >> 18) & 0x3F]);
+        out.push_back(kA[(c >> 12) & 0x3F]);
+    } else if (i + 2 == raw.size()) {
+        const std::uint32_t c = (static_cast<unsigned char>(raw[i]) << 16) |
+                                (static_cast<unsigned char>(raw[i + 1]) << 8);
+        out.push_back(kA[(c >> 18) & 0x3F]);
+        out.push_back(kA[(c >> 12) & 0x3F]);
+        out.push_back(kA[(c >> 6) & 0x3F]);
+    }
+    return out;
+}
+
+[[nodiscard]] auto b64url_decode(std::string_view in) -> std::string {
+    auto val = [](char c) -> int {
+        if (c >= 'A' && c <= 'Z') return c - 'A';
+        if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+        if (c >= '0' && c <= '9') return c - '0' + 52;
+        if (c == '-') return 62;
+        if (c == '_') return 63;
+        return -1;
+    };
+    std::string out;
+    std::uint32_t buf = 0;
+    int bits = 0;
+    for (const char c : in) {
+        const int v = val(c);
+        if (v < 0) return {};  // reject rather than skip: this is a signature input
+        buf = (buf << 6) | static_cast<std::uint32_t>(v);
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out.push_back(static_cast<char>((buf >> bits) & 0xFF));
+        }
+    }
+    return out;
+}
+
+}  // namespace
+
+auto hmac_sha512_b64(std::string_view secret, std::string_view message) -> std::string {
+    std::array<unsigned char, EVP_MAX_MD_SIZE> mac{};
+    unsigned int mac_len = 0;
+    if (HMAC(EVP_sha512(), secret.data(), static_cast<int>(secret.size()),
+             reinterpret_cast<const unsigned char*>(message.data()), message.size(), mac.data(),
+             &mac_len) == nullptr) {
+        return {};
+    }
+    // Truncated to 256 bits: HMAC's strength is bounded by the narrower of key
+    // and output, and 256 bits is not forgeable. Halving the length matters
+    // because a person has to paste this.
+    return b64url_encode(std::string_view{reinterpret_cast<const char*>(mac.data()), 32});
+}
+
+auto verify_licence(std::string_view token, Identity& out) -> bool {
+    const auto secret = env_or("LICENCE_SIGNING_KEY", "");
+    // An unset secret must not mean "accept anything". Fail closed.
+    if (secret.empty()) return false;
+    if (!token.starts_with(kLicencePrefix)) return false;
+
+    const auto body = token.substr(kLicencePrefix.size());
+    const auto dot = body.rfind('.');
+    if (dot == std::string_view::npos || dot == 0 || dot + 1 >= body.size()) return false;
+
+    const auto payload_b64 = body.substr(0, dot);
+    const auto signature = body.substr(dot + 1);
+
+    // Signature is checked BEFORE the payload is parsed, so untrusted JSON never
+    // reaches the parser on an unauthenticated path.
+    const auto expected = hmac_sha512_b64(secret, payload_b64);
+    if (expected.empty() || !constant_time_equals(expected, signature)) return false;
+
+    const auto payload = b64url_decode(payload_b64);
+    if (payload.empty()) return false;
+
+    auto parsed = fastjson::parse(payload);
+    if (!parsed || !parsed->is_object()) return false;
+    const auto& obj = *parsed;
+
+    if (!obj.contains("t") || !obj["t"].is_string()) return false;
+    if (!obj.contains("e") || !obj["e"].is_number()) return false;
+
+    const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                         std::chrono::system_clock::now().time_since_epoch())
+                         .count();
+    if (static_cast<double>(now) > obj["e"].as_number()) return false;  // expired
+
+    out.tier = std::string{obj["t"].as_string()};
+    out.type = KeyType::Publishable;
+    out.authenticated = true;
+    out.id = (obj.contains("s") && obj["s"].is_string()) ? std::string{obj["s"].as_string()}
+                                                         : std::string{"licence"};
+    return true;
 }
 
 auto to_string(Outcome outcome) noexcept -> std::string_view {
@@ -360,6 +476,31 @@ class KeyRegistry::Impl {
     [[nodiscard]] auto check(std::string_view key, std::string_view origin,
                              std::string_view service) const -> AuthResult {
         AuthResult r;
+
+        // A subscription licence is SIGNED, not registered, so it is checked
+        // before anything else -- including before the registry is consulted at
+        // all, because there is nothing to look it up in. This is what lets the
+        // billing webhook mint a Pro licence without the engine being
+        // redeployed or told about it.
+        //
+        // It also has to come before the `enabled_` short-circuit below.
+        // Licences and API keys are independent mechanisms: subscriptions must
+        // work whether or not any partner API keys happen to be registered, and
+        // the reverse. Ordering these the other way round would have made Pro
+        // silently unavailable until an unrelated variable was set.
+        if (key.starts_with(kLicencePrefix)) {
+            if (verify_licence(key, r.identity)) {
+                r.outcome = Outcome::Ok;
+                return r;
+            }
+            // Not distinguishing "bad signature" from "expired" on the wire:
+            // both mean "get a fresh licence", and separating them would tell
+            // someone forging one which half they got wrong.
+            r.outcome = Outcome::Unknown;
+            r.detail = "this subscription licence is not valid or has expired";
+            return r;
+        }
+
         if (!enabled_) {
             r.outcome = Outcome::Ok;
             r.identity.authenticated = false;
@@ -484,8 +625,12 @@ auto KeyRegistry::check(std::string_view presented_key, std::string_view origin,
 
 auto KeyRegistry::authenticate(const grpc::ServerContext& ctx, std::string_view service,
                                std::string_view method, Identity& out) -> grpc::Status {
-    if (!impl_->enabled_) return grpc::Status::OK;
-
+    // Deliberately NOT short-circuiting on `enabled_` here. A subscription
+    // licence is verified by signature and needs no registry, so returning
+    // early when no API keys happen to be configured would make Pro
+    // unavailable for a reason entirely unrelated to subscriptions. The
+    // no-keys-configured case is handled inside check(), which returns an
+    // unauthenticated identity rather than a refusal.
     std::string key;
     std::string origin;
     const auto& md = ctx.client_metadata();
