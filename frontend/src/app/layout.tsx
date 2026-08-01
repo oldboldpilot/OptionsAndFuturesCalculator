@@ -1,20 +1,38 @@
 import type { Metadata } from "next";
-import { Open_Sans, IBM_Plex_Mono } from "next/font/google";
+import { Fraunces, Inter, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 
-// Open Sans is what mortgagecalculator.org sets, and the reference palette was
-// sampled from the same page. Plex Mono carries figures only: a strike ladder
-// and a P&L grid need fixed advance widths to line up column to column, which
-// no proportional face gives.
-const openSans = Open_Sans({
-  variable: "--font-open-sans",
+// The three faces mortgagefvcalculator.com sets, so the two products read as
+// one family rather than two tools that happen to share an owner.
+//
+// Inter for interface text, JetBrains Mono for figures — a strike ladder and a
+// P&L grid need fixed advance widths to line up column to column, which no
+// proportional face gives. Fraunces is the display serif, and it earns its
+// place by being used sparingly: headings and the spot price, nothing dense.
+const inter = Inter({
+  variable: "--font-inter",
+  weight: ["400", "600", "700"],
   subsets: ["latin"],
   display: "swap",
 });
 
-const plexMono = IBM_Plex_Mono({
-  variable: "--font-plex-mono",
+const jetbrainsMono = JetBrains_Mono({
+  variable: "--font-jetbrains-mono",
   weight: ["400", "500", "600"],
+  subsets: ["latin"],
+  display: "swap",
+});
+
+// Variable optical size, exactly as the source loads it: Fraunces adjusts its
+// contrast and detail to the size it is set at, so one axis covers a page
+// heading and a 17px price without either looking like the other scaled.
+// `weight` is omitted rather than pinned to 600/700: next/font rejects an
+// explicit weight list alongside `axes`, because naming axes is what selects
+// the variable font in the first place. The full weight range ships and CSS
+// picks from it, which is also how the source site loads this face.
+const fraunces = Fraunces({
+  variable: "--font-fraunces",
+  axes: ["opsz"],
   subsets: ["latin"],
   display: "swap",
 });
@@ -77,7 +95,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className={`${openSans.variable} ${plexMono.variable}`}>
+    <html lang="en" className={`${inter.variable} ${jetbrainsMono.variable} ${fraunces.variable}`}>
       <head>
         {/*
           Applies the saved theme before first paint. Without this the page

@@ -16,57 +16,83 @@
    ========================================================================== */
 
 @theme {
-  /* --- Surfaces: lifted blue-slate, layered by elevation --- */
-  --color-base-900: #1a1f2c;   /* app background            */
-  --color-base-800: #222839;   /* panel background          */
-  --color-base-700: #2b3244;   /* raised / header row       */
-  --color-base-600: #353d52;   /* hover, input background   */
-  --color-base-500: #414a61;   /* active / pressed          */
+  /* --- Surfaces --------------------------------------------------------
+     The blue-slate ladder from mortgagefvcalculator.com's dark theme, hue
+     250 throughout. Each step is one of that site's semantic tokens rather
+     than an interpolation, so the two products sit on identical ground:
 
-  /* --- Borders: low-alpha white reads correctly on any surface --- */
-  --color-line-strong: rgba(255, 255, 255, 0.18);
-  --color-line: rgba(255, 255, 255, 0.10);
+       base-900  oklch(16%  .015 250)   --background
+       base-800  oklch(21%  .02  250)   --card
+       base-700  oklch(24%  .02  250)   --muted
+       base-600  oklch(26%  .02  250)   --secondary
+       base-500  oklch(34%  .02  250)   one step above --border, for pressed
+     ------------------------------------------------------------------- */
+  --color-base-900: #080e14;   /* app background            */
+  --color-base-800: #111921;   /* panel background          */
+  --color-base-700: #182029;   /* raised / header row       */
+  --color-base-600: #1d252d;   /* hover, input background   */
+  --color-base-500: #303942;   /* active / pressed          */
+
+  /* Borders. `line` is the source's own --border, oklch(30% .02 250); the
+     softer step stays alpha so it blends over whichever surface it lands on. */
+  --color-line-strong: #3b434d;
+  --color-line: #262f38;
   --color-line-soft: rgba(255, 255, 255, 0.055);
 
-  /* --- Text hierarchy --- */
-  --color-ink-100: #f2f5fa;    /* primary values, headings  */
-  --color-ink-200: #c3cbdb;    /* body                      */
-  --color-ink-300: #909aaf;    /* labels, column headers    */
-  --color-ink-400: #69738a;    /* disabled, hints           */
+  /* --- Text hierarchy --------------------------------------------------
+     Warm greys (hue 85), which is what makes the source's dark theme read as
+     paper-under-lamplight rather than as a cold terminal. Cool ink on cool
+     slate is the thing that would flatten it. */
+  --color-ink-100: #f5f1ea;    /* primary values, headings  */
+  --color-ink-200: #d1cdc5;    /* body                      */
+  --color-ink-300: #a49e91;    /* labels, column headers    */
+  --color-ink-400: #777165;    /* disabled, hints           */
 
-  /* --- Semantic P&L --- */
-  --color-profit: #2ec4b6;
-  --color-profit-dim: #1d8377;
-  --color-loss: #f4645f;
-  --color-loss-dim: #b03e3a;
-  --color-flat: #78829a;
+  /* --- Semantic P&L ----------------------------------------------------
+     Profit IS the brand, oklch(72% .14 165) — the same green the source uses
+     for its primary action and its first chart series. Loss is its
+     --destructive. Borrowing the brand for profit is deliberate: on a payoff
+     chart the green line is the subject of the page, so the identity colour
+     and the "this made money" colour should not be competing hues. */
+  --color-profit: #2dc08e;
+  --color-profit-dim: #1a7a58;
+  --color-loss: #f04c55;
+  --color-loss-dim: #a3262e;
+  --color-flat: #777165;
 
   /* Raw channels, for building rgba() ramps in the P&L grid */
-  --rgb-profit: 46, 196, 182;
-  --rgb-loss: 244, 100, 95;
+  --rgb-profit: 45, 192, 142;
+  --rgb-loss: 240, 76, 85;
 
-  /* --- Accents --- */
-  --color-accent: #7aa2ff;
-  --color-accent-dim: #4c7dff;
-  --color-violet: #a78bfa;
-  --color-cyan: #38bdf8;
-  --color-warn: #f0b429;
+  /* --- Accents ---------------------------------------------------------
+     Accent is the brand. The remaining three follow the source's chart ramp
+     (hues 235/285/85) so a multi-series plot stays in one system. */
+  --color-accent: #2dc08e;
+  --color-accent-dim: #1f9a70;
+  --color-violet: #9794e0;
+  --color-cyan: #57afe0;
+  --color-warn: #e0af3b;
 
   /* --- Option-side tints --- */
-  --color-call-tint: rgba(46, 196, 182, 0.08);
-  --color-put-tint: rgba(244, 100, 95, 0.08);
-  --color-atm-tint: rgba(122, 162, 255, 0.13);
+  --color-call-tint: rgba(45, 192, 142, 0.08);
+  --color-put-tint: rgba(240, 76, 85, 0.08);
+  --color-atm-tint: rgba(45, 192, 142, 0.13);
 
   /* --- Elevation --- */
-  --shadow-panel: 0 1px 2px rgba(0, 0, 0, 0.22), 0 6px 18px -8px rgba(0, 0, 0, 0.5);
-  --shadow-pop: 0 8px 28px -6px rgba(0, 0, 0, 0.55);
-  --sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0) 42%);
+  --shadow-panel: 0 1px 2px rgba(0, 0, 0, 0.30), 0 6px 18px -8px rgba(0, 0, 0, 0.6);
+  --shadow-pop: 0 8px 28px -6px rgba(0, 0, 0, 0.65);
+  --sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0) 42%);
 
-  /* --- Type --- */
-  --font-sans: var(--font-open-sans), "Open Sans", Helvetica, Arial, sans-serif;
-  /* Figures only. Open Sans sets prose; columns of numbers need fixed advance
+  /* --- Type ------------------------------------------------------------
+     The three faces mortgagefvcalculator.com sets. Fraunces is a display
+     face and is kept to headings and the spot price: set at 11px in a strike
+     ladder its optical-size contrast becomes noise, which is the opposite of
+     what a dense grid needs. */
+  --font-sans: var(--font-inter), "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-display: var(--font-fraunces), "Fraunces", ui-serif, Georgia, serif;
+  /* Figures only. Inter sets prose; columns of numbers need fixed advance
      widths or the strike ladder will not line up. */
-  --font-mono: var(--font-plex-mono), ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --font-mono: var(--font-jetbrains-mono), "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
 
   /* Dense scale — a trading grid lives between 11px and 13px */
   --text-2xs: 0.75rem;   /* 11px — table cells, dense labels */
@@ -102,44 +128,50 @@
    yield no provider publishes. Measured values never wear it.
    ------------------------------------------------------------------------- */
 :root[data-theme="light"] {
-  --color-base-900: #f7f6f3;   /* warm paper ground */
-  --color-base-800: #ffffff;   /* cards            */
-  --color-base-700: #faf9f7;   /* banded rows      */
-  --color-base-600: #f1efea;   /* table heads      */
-  --color-base-500: #e4e1da;
+  /* The source's light theme: a warm off-white ground at hue 85 with pure
+     white cards on top of it. That pairing is what makes a card read as
+     lifted without needing a border to say so — white on warm paper has
+     contrast, white on grey does not. */
+  --color-base-900: #fdfaf4;   /* warm paper ground, --background */
+  --color-base-800: #ffffff;   /* cards, --card                   */
+  --color-base-700: #f9f6f1;   /* banded rows                     */
+  --color-base-600: #f1eee7;   /* table heads, --secondary        */
+  --color-base-500: #e5e1d9;
 
-  --color-line-strong: rgba(22, 24, 29, 0.18);
-  --color-line: rgba(22, 24, 29, 0.09);
-  --color-line-soft: rgba(22, 24, 29, 0.05);
+  --color-line-strong: #cbc7be;
+  --color-line: #dad7d0;       /* --border  */
+  --color-line-soft: #e1ded7;  /* --input   */
 
-  --color-ink-100: #16181d;
-  --color-ink-200: #2b3038;
-  --color-ink-300: #5b6472;
-  --color-ink-400: #8b93a1;
+  --color-ink-100: #0b121a;    /* --foreground       */
+  --color-ink-200: #262f38;
+  --color-ink-300: #454e58;    /* --muted-foreground */
+  --color-ink-400: #747b83;
 
-  --color-profit: #0e9f6e;
-  --color-profit-dim: #0a7a54;
-  --color-loss: #d64545;
-  --color-loss-dim: #ab3232;
-  --color-flat: #8b93a1;
+  /* Same reasoning as the dark theme: profit is the brand,
+     oklch(52% .14 165). Darker here because it has to hold against paper. */
+  --color-profit: #008154;
+  --color-profit-dim: #00603e;
+  --color-loss: #cc2827;
+  --color-loss-dim: #9c1e1d;
+  --color-flat: #747b83;
 
-  --rgb-profit: 14, 159, 110;
-  --rgb-loss: 214, 69, 69;
+  --rgb-profit: 0, 129, 84;
+  --rgb-loss: 204, 40, 39;
 
   /* One accent, doing real work: section rules, ATM, focus, the primary action. */
-  --color-accent: #2f5bd8;
-  --color-accent-dim: #1f43a8;
-  --color-violet: #6d5bd8;
-  --color-cyan: #2f8bd8;
-  --color-warn: #c77700;      /* assumptions only */
+  --color-accent: #008154;
+  --color-accent-dim: #00603e;
+  --color-violet: #584fa3;
+  --color-cyan: #006c98;
+  --color-warn: #a96b00;      /* assumptions only */
 
-  --color-call-tint: rgba(14, 159, 110, 0.055);
-  --color-put-tint: rgba(214, 69, 69, 0.05);
-  --color-atm-tint: rgba(47, 91, 216, 0.09);
+  --color-call-tint: rgba(0, 129, 84, 0.055);
+  --color-put-tint: rgba(204, 40, 39, 0.05);
+  --color-atm-tint: rgba(0, 129, 84, 0.09);
 
   /* Real elevation. A hairline box is a diagram of a panel; a shadow is one. */
-  --shadow-panel: 0 1px 2px rgba(22, 24, 29, 0.04), 0 4px 12px -4px rgba(22, 24, 29, 0.10);
-  --shadow-pop: 0 12px 32px -8px rgba(22, 24, 29, 0.22);
+  --shadow-panel: 0 1px 2px rgba(11, 18, 26, 0.04), 0 4px 12px -4px rgba(11, 18, 26, 0.10);
+  --shadow-pop: 0 12px 32px -8px rgba(11, 18, 26, 0.22);
   --sheen: none;
 }
 
@@ -160,10 +192,13 @@ body {
 
 body {
   /* A flat fill would read as a void at this size. Two very wide, very low
-     opacity radials give the background depth without becoming decoration. */
+     opacity radials give the background depth without becoming decoration.
+     Both are now the brand green rather than the old blue and violet — two
+     unrelated hues washing the ground was what made the previous theme read
+     as "a dark UI" instead of as this product. */
   background:
-    radial-gradient(1100px 620px at 12% -12%, rgba(122, 162, 255, 0.10), transparent 62%),
-    radial-gradient(900px 520px at 92% 4%, rgba(167, 139, 250, 0.09), transparent 60%),
+    radial-gradient(1100px 620px at 12% -12%, rgba(45, 192, 142, 0.08), transparent 62%),
+    radial-gradient(900px 520px at 92% 4%, rgba(45, 192, 142, 0.05), transparent 60%),
     var(--color-base-900);
   background-attachment: fixed;
   color: var(--color-ink-200);

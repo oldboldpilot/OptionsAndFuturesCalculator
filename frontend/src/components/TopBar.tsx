@@ -131,9 +131,20 @@ export function TopBar() {
       }}
     >
       <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.375rem' }}>
+        {/*
+          The one place the display serif is used.
+
+          Fraunces belongs on the ticker and nowhere else in this layout: it is
+          the single identity-carrying text element on screen, it is set large
+          enough for the optical-size axis to mean something, and it is a word
+          rather than a figure. Everything adjacent to it — the price, the
+          strikes, the Greeks — is a number that must hold a fixed advance
+          width, which is exactly what a display serif does not do.
+        */}
         <span
           style={{
-            fontSize: 'var(--text-base)',
+            fontFamily: 'var(--font-display)',
+            fontSize: 'var(--text-lg)',
             fontWeight: 700,
             color: 'var(--color-ink-100)',
             letterSpacing: '-0.01em',
