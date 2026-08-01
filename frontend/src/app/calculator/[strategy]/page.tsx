@@ -1,6 +1,7 @@
 import React from 'react';
 import { Metadata } from 'next';
 import StrategyWorkspace from '../../../components/StrategyWorkspace';
+import AdSlot from '@/components/AdSlot';
 import { branding } from '@/config/branding';
 import { StrategyStructuredData } from '@/components/StructuredData';
 
@@ -90,6 +91,21 @@ export default async function StrategyCalculatorPage({ params }: Props) {
         description={`Model the profit, loss and Greeks of ${/^[aeiou]/i.test(strategyName) ? 'an' : 'a'} ${strategyName} strategy on live market data.`}
       />
       <StrategyWorkspace heading={`${strategyName} Calculator`} />
+      {/*
+        In-article unit, on the strategy pages rather than in the root layout.
+
+        These are the pages search sends people to, and they are the only ones
+        that read as an article about one subject. The home page already carries
+        the multiplex grid; stacking a second manual unit there would put two ad
+        blocks in a row under the workspace.
+
+        Below the workspace, never above it: this format sizes itself on arrival,
+        and anything that changes height above a strike ladder moves the buy and
+        sell buttons under the cursor.
+      */}
+      <div style={{ maxWidth: '78rem', margin: '0 auto', padding: '0 1rem 2rem' }}>
+        <AdSlot size="in-article" label="Sponsored" />
+      </div>
     </>
   );
 }

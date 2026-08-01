@@ -171,9 +171,6 @@ def make_extraction(rng: random.Random, strategies: list[dict]) -> dict:
     name = rng.choice(ALIASES.get(s["id"], [s["name"].lower()]))
     sym_txt = phrase_symbol(rng, sym, cls)
     dte_txt, dte = phrase_dte(rng)
-    qty = rng.choices([1, 2, 3, 5, 10], [0.6, 0.15, 0.1, 0.1, 0.05])[0]
-    qty_txt = "" if qty == 1 else rng.choice([f"{qty} contracts ", f"{qty}x ", f"{qty} lots "])
-
     templates = [
         "{q}{n} on {s} {d}",
         "show me {a} {n} on {s}, {d}",
@@ -184,7 +181,27 @@ def make_extraction(rng: random.Random, strategies: list[dict]) -> dict:
         "pull up {a} {n} on {s} at {d}",
         "{n} {s} {d} please",
     ]
-    user = rng.choice(templates).format(
+    template = rng.choice(templates)
+
+    # The template is chosen BEFORE the quantity, and a quantity other than 1 is
+    # only drawn when the template can actually say it.
+    #
+    # Five of the eight templates have no {q}. Sampling qty first and labelling
+    # it regardless -- which is what this did -- put a number in the answer that
+    # appears nowhere in the question, so 5/8 * 0.4 = 25% of rows asked the model
+    # to recover a digit that was never shown to it. Not a hard example: an
+    # impossible one. It taught the model to guess on quantity, and the guessing
+    # leaked into the other fields, since one wrong field fails the whole object.
+    #
+    # The measured cost was exactly the predicted 25%: quantity accuracy came in
+    # at 74.7% on a run where the model had correctly learned to answer 1.
+    if "{q}" in template:
+        qty = rng.choices([1, 2, 3, 5, 10], [0.6, 0.15, 0.1, 0.1, 0.05])[0]
+    else:
+        qty = 1
+    qty_txt = "" if qty == 1 else rng.choice([f"{qty} contracts ", f"{qty}x ", f"{qty} lots "])
+
+    user = template.format(
         q=qty_txt, n=name, s=sym_txt, d=dte_txt,
         a=rng.choice(["a", "an"]) if name[0] in "aeiou" else "a",
     )

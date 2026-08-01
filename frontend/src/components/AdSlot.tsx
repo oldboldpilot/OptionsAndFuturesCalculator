@@ -21,7 +21,7 @@ import { usePathname } from 'next/navigation';
 
 const CLIENT = 'ca-pub-3669553016263703';
 
-type AdSize = 'leaderboard' | 'rectangle' | 'multiplex';
+type AdSize = 'leaderboard' | 'rectangle' | 'multiplex' | 'in-article';
 
 /**
  * Slot ids come from the AdSense dashboard, one per unit created there. They
@@ -39,6 +39,8 @@ const SLOTS: Record<AdSize, string | undefined> = {
   // canonicalUrl pointing at another domain. The slot id is not a secret; it is
   // visible in the page source of every site that runs ads.
   multiplex: process.env.NEXT_PUBLIC_ADSENSE_SLOT_MULTIPLEX || '7620187871',
+  // Also a real, issued unit — same reasoning as multiplex above.
+  'in-article': process.env.NEXT_PUBLIC_ADSENSE_SLOT_IN_ARTICLE || '6395570263',
 };
 
 declare global {
@@ -60,7 +62,7 @@ export function AdSlot({
   // whose reserved space must match what will occupy it.
   const dims =
     size === 'leaderboard' ? { width: 728, height: 90 }
-    : size === 'multiplex' ? { width: 0, height: 0 }
+    : size === 'multiplex' || size === 'in-article' ? { width: 0, height: 0 }
     : { width: 300, height: 250 };
 
   const slot = SLOTS[size];
@@ -97,17 +99,24 @@ export function AdSlot({
   // Multiplex must not be clamped: `maxWidth: 0` would collapse it to nothing,
   // and a fixed height would crop the recommendation grid it exists to show. It
   // is the one format here that legitimately sizes itself.
-  const isFluid = size === 'multiplex';
+  const isFluid = size === 'multiplex' || size === 'in-article';
   // Multiplex (autorelaxed) renders a GRID of recommendation cards, not a
   // banner. 200px reserved roughly one row and cropped the rest, so the unit had
   // nowhere to put what it serves. `clamp` scales the reservation with the
   // viewport instead of pinning one number: tall enough for two rows of cards on
   // a desktop, not so tall it becomes a void on a phone. The unit still grows
   // past this if it needs to -- min-height reserves, it does not cap.
+  //
+  // In-article is fluid too, but it is ONE native ad rather than a grid, so it
+  // gets its own smaller reservation. Giving it the multiplex figure would leave
+  // a void under it on every strategy page -- the two formats are both "fluid"
+  // and are not the same size.
+  const fluidHeight =
+    size === 'multiplex' ? 'clamp(320px, 46vw, 640px)' : 'clamp(250px, 28vw, 400px)';
   const frame: React.CSSProperties = {
     width: '100%',
     maxWidth: isFluid ? '100%' : dims.width,
-    minHeight: isFluid ? 'clamp(320px, 46vw, 640px)' : dims.height,
+    minHeight: isFluid ? fluidHeight : dims.height,
     margin: '0 auto',
     flex: 'none',
   };
@@ -120,7 +129,7 @@ export function AdSlot({
         aria-label={label}
         style={{
           ...frame,
-          height: isFluid ? 'clamp(320px, 46vw, 640px)' : dims.height,
+          height: isFluid ? fluidHeight : dims.height,
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
@@ -178,7 +187,8 @@ export function AdSlot({
           className="adsbygoogle"
           style={
             isFluid
-              ? { display: 'block', position: 'relative', zIndex: 1 }
+              ? { display: 'block', textAlign: 'center',
+                  position: 'relative', zIndex: 1 }
               : { display: 'block', width: '100%', height: dims.height,
                   position: 'relative', zIndex: 1 }
           }
@@ -187,9 +197,18 @@ export function AdSlot({
           data-ad-format={
             size === 'leaderboard' ? 'horizontal'
             : size === 'multiplex' ? 'autorelaxed'
+            : size === 'in-article' ? 'fluid'
             : 'rectangle'
           }
-          data-full-width-responsive="true"
+          // Only in-article carries a layout. AdSense reads data-ad-layout to
+          // pick the native template, and the attribute is meaningless on the
+          // other formats -- setting it there would describe a unit that is not
+          // what the dashboard issued.
+          {...(size === 'in-article' ? { 'data-ad-layout': 'in-article' } : {})}
+          // Fixed-size units only. Google's own in-article and multiplex
+          // snippets omit this, and both formats already size themselves to the
+          // container -- the attribute has nothing to widen.
+          {...(isFluid ? {} : { 'data-full-width-responsive': 'true' })}
         />
       )}
     </aside>
