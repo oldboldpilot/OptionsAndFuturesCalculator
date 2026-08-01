@@ -29,3 +29,7 @@ workers/*/.wrangler/
 # and name into the history as build cache -- not a credential, but machine
 # state that differs per developer and conflicts on every deploy.
 .wrangler/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
