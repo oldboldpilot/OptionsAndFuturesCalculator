@@ -77,6 +77,12 @@ struct KeyRecord {
     std::vector<std::string> scopes;
     std::string expires;  // empty = never
     bool enabled = true;
+
+    // Limits written on the key itself. See Identity::has_limits for why the
+    // flag exists rather than treating zero as "unset".
+    bool has_limits = false;
+    std::int64_t requests_per_minute = 0;
+    double compute_units_per_hour = 0.0;
 };
 
 /**
@@ -494,6 +500,30 @@ class KeyRegistry::Impl {
                                            : std::string{"publishable"};
             rec.type = (type_s == "secret") ? KeyType::Secret : KeyType::Publishable;
 
+            // Limits on the key itself. Either axis may be given alone: a
+            // customer capped on request rate but not on compute is a normal
+            // arrangement, and so is the reverse.
+            if (spec.contains("requests_per_minute") && spec["requests_per_minute"].is_number()) {
+                rec.requests_per_minute =
+                    static_cast<std::int64_t>(spec["requests_per_minute"].as_number());
+                rec.has_limits = true;
+            }
+            if (spec.contains("compute_units_per_hour") &&
+                spec["compute_units_per_hour"].is_number()) {
+                rec.compute_units_per_hour = spec["compute_units_per_hour"].as_number();
+                rec.has_limits = true;
+            }
+            if (rec.has_limits && rec.requests_per_minute <= 0 &&
+                rec.compute_units_per_hour <= 0.0) {
+                // Both axes present and both zero. Zero means unlimited, so this
+                // key is uncapped -- which is a legitimate thing to issue and a
+                // catastrophic thing to do by accident, hence a log line rather
+                // than a silent acceptance.
+                log.error("API key '{}' specifies limits of zero on both axes -- it is UNLIMITED. "
+                          "Omit the fields to fall back to its tier instead",
+                          rec.id);
+            }
+
             if (spec.contains("expires") && spec["expires"].is_string()) {
                 rec.expires = std::string{spec["expires"].as_string()};
             }
@@ -630,6 +660,9 @@ class KeyRegistry::Impl {
         r.identity.id = found->id;
         r.identity.tier = found->tier;
         r.identity.type = found->type;
+        r.identity.has_limits = found->has_limits;
+        r.identity.requests_per_minute = found->requests_per_minute;
+        r.identity.compute_units_per_hour = found->compute_units_per_hour;
 
         if (!found->enabled) {
             r.outcome = Outcome::Revoked;

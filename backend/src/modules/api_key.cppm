@@ -67,6 +67,26 @@ struct Identity {
     std::string tier;                      // selects quota limits
     KeyType type = KeyType::Publishable;
     bool authenticated = false;
+
+    /**
+     * Limits carried by the KEY itself, overriding whatever its tier says.
+     *
+     * A tier is the right unit when many customers share a shape ("free",
+     * "business"). It is the wrong unit for the case this API is actually being
+     * handed off for: one customer who negotiated one number. Expressing that
+     * through tiers means inventing a tier per customer in QUOTA_POLICY and
+     * hoping the name stays in agreement with the one in FINANCE_API_KEYS --
+     * two variables, no cross-check, and a typo silently downgrades them to the
+     * anonymous allowance.
+     *
+     * `has_limits` distinguishes "not specified" from "specified as zero",
+     * because zero already means UNLIMITED on both axes. Without the flag, a
+     * key that omitted its limits would be indistinguishable from one granted
+     * unlimited access -- the most expensive possible way to be wrong.
+     */
+    bool has_limits = false;
+    std::int64_t requests_per_minute = 0;
+    double compute_units_per_hour = 0.0;
 };
 
 /** The outcome of one authentication attempt. */

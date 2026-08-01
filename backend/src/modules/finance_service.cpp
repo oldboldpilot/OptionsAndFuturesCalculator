@@ -166,9 +166,12 @@ template <typename T>
             !_a.ok()) {                                                          \
             return _a;                                                           \
         }                                                                        \
+        ::options_calculator::quota::TierLimits _lim{_id.requests_per_minute,     \
+                                                    _id.compute_units_per_hour}; \
         if (auto _q = ::options_calculator::quota::QuotaEnforcer::instance()      \
                           .admit_identity(_id.id, _id.tier, (method_name),        \
-                                          (cost));                                \
+                                          (cost),                                 \
+                                          _id.has_limits ? &_lim : nullptr);      \
             !_q.ok()) {                                                          \
             return _q;                                                           \
         }                                                                        \

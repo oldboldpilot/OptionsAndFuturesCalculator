@@ -233,9 +233,15 @@ class QuotaEnforcer::Impl {
      * able to mint fresh allowance by varying what it sends.
      */
     [[nodiscard]] auto charge(std::string_view caller_id, std::string_view tier_name,
-                              double compute_units) -> Decision {
+                              double compute_units,
+                              const TierLimits* explicit_limits = nullptr) -> Decision {
         Decision d;
-        if (!enabled_) {
+        // Limits written on the key are metered whether or not QUOTA_POLICY is
+        // set. The enforcer being "off" means no POLICY was configured; it must
+        // not also mean that a limit someone deliberately attached to an issued
+        // key is discarded. That would be a limit that exists in the operator's
+        // notes and nowhere in the running process.
+        if (!enabled_ && explicit_limits == nullptr) {
             d.allowed = true;
             return d;
         }
@@ -249,8 +255,12 @@ class QuotaEnforcer::Impl {
         // renamed must not become unlimited access.
         const std::string tier =
             tier_name.empty() ? anonymous_tier_ : std::string{tier_name};
-        const auto lim = limits_for_tier(tier);
-        d.tier = tier;
+        const auto lim = (explicit_limits != nullptr) ? *explicit_limits : limits_for_tier(tier);
+        // Reported as the key's own tier name with a marker, so a refusal names
+        // something the operator can actually go and look at. Saying "business"
+        // when the number came from the key rather than from the business tier
+        // would send them to the wrong file.
+        d.tier = (explicit_limits != nullptr) ? (tier + " (per-key)") : tier;
 
         const auto now = Clock::now();
         const std::string id = caller_id.empty() ? std::string{"~anonymous"} : std::string{caller_id};
@@ -398,9 +408,10 @@ auto QuotaEnforcer::admit(const grpc::ServerContext& ctx, std::string_view metho
 }
 
 auto QuotaEnforcer::admit_identity(std::string_view caller_id, std::string_view tier,
-                                   std::string_view method, double compute_units) -> grpc::Status {
-    if (!impl_->enabled_) return grpc::Status::OK;
-    const auto d = impl_->charge(caller_id, tier, compute_units);
+                                   std::string_view method, double compute_units,
+                                   const TierLimits* explicit_limits) -> grpc::Status {
+    if (!impl_->enabled_ && explicit_limits == nullptr) return grpc::Status::OK;
+    const auto d = impl_->charge(caller_id, tier, compute_units, explicit_limits);
     if (d.allowed) return grpc::Status::OK;
     return to_status(d, method);
 }

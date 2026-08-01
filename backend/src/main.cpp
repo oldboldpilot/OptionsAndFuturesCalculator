@@ -1,6 +1,7 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <grpcpp/grpcpp.h>
 
 
@@ -64,8 +65,19 @@ auto RunServer() -> void {
     server->Wait();
 }
 
+// Defined in issue_key.cpp. Declared rather than imported because main.cpp is a
+// plain translation unit, and this is the only thing it needs from that file.
+auto IssueKeyMain(int argc, char** argv) -> int;
+
 auto main(int argc, char** argv) -> int {
     try {
+        // Key minting lives in the SERVER binary so it necessarily uses the same
+        // hashing and the same key format as the verification path. A separate
+        // tool could drift, and the symptom of that drift would be a customer
+        // whose brand-new key is rejected as a forgery.
+        if (argc > 1 && std::string_view{argv[1]} == "issue-key") {
+            return IssueKeyMain(argc, argv);
+        }
         RunServer();
         return 0;
     } catch (const std::exception& e) {

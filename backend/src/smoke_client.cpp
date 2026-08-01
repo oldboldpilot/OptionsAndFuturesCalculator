@@ -1105,6 +1105,23 @@ auto check_quota(sensen::finance::Finance::Stub& stub) -> bool {
         return stub.ComputePayment(ctx.get(), req, &res).error_code();
     };
 
+    // Everything below probes the ANONYMOUS bucket, which requires unkeyed
+    // calls to reach the quota at all. With FINANCE_REQUIRE_KEY=enforce they
+    // are refused a layer earlier as UNAUTHENTICATED and never do -- so in the
+    // configuration this service is meant to ship in (auth enforced AND quotas
+    // configured) these assertions cannot hold, and failing here would report a
+    // defect that is really just the two layers doing their jobs in order.
+    //
+    // Detected by probing rather than by reading FINANCE_REQUIRE_KEY, because
+    // the variable describes the CLIENT's environment and the mode that matters
+    // belongs to the server, which may be a different machine entirely.
+    if (call(nullptr) == grpc::StatusCode::UNAUTHENTICATED) {
+        std::cout << "Quota    anonymous bucket unreachable -- auth refuses unkeyed calls first "
+                     "(this is the intended production posture); per-key limits are checked "
+                     "separately\n";
+        return true;
+    }
+
     // Spend until refused. A tier that never refuses is not a limit, and a
     // bounded loop keeps a misconfigured (huge) tier from hanging the gate.
     int allowed = 0;
@@ -1279,6 +1296,82 @@ auto check_auth(sensen::finance::Finance::Stub& stub) -> bool {
 }
 
 /**
+ * The limit written on an individual key, which is what a business is sold.
+ *
+ * This is the check that matters most commercially: the number in the contract
+ * has to be the number the engine enforces. It asserts the ceiling is real
+ * (calls stop being served) AND that it is the RIGHT ceiling (they stop at
+ * roughly the figure on the key, not at some tier default the key was silently
+ * falling back to). A limit that refuses at the wrong number is as much a
+ * billing defect as one that never refuses at all.
+ *
+ * SMOKE_KEY_LIMIT_KEY is a key issued with a known --rpm; SMOKE_KEY_LIMIT_RPM
+ * is that figure. Skipped when unset.
+ */
+auto check_key_limit(sensen::finance::Finance::Stub& stub) -> bool {
+    const char* key = std::getenv("SMOKE_KEY_LIMIT_KEY");
+    const char* rpm_s = std::getenv("SMOKE_KEY_LIMIT_RPM");
+    if (key == nullptr || *key == '\0' || rpm_s == nullptr || *rpm_s == '\0') {
+        std::cout << "Key cap  not configured (SMOKE_KEY_LIMIT_KEY unset) -- not exercised\n";
+        return true;
+    }
+    const int expected = std::atoi(rpm_s);
+    if (expected <= 0) {
+        std::cerr << "SMOKE_KEY_LIMIT_RPM must be a positive number\n";
+        return false;
+    }
+
+    const auto call = [&stub, key]() -> grpc::StatusCode {
+        sensen::finance::PaymentRequest req;
+        req.set_rate("0.005");
+        req.set_periods(360);
+        req.set_present_value("300000");
+        sensen::finance::DecimalResponse res;
+        auto ctx = make_anonymous_context();
+        ctx->AddMetadata("x-api-key", key);
+        return stub.ComputePayment(ctx.get(), req, &res).error_code();
+    };
+
+    // Bounded well above the expected figure: if the key is NOT being metered
+    // by its own limit, this must terminate and report that, not spin.
+    const int ceiling = expected * 4 + 20;
+    int allowed = 0;
+    bool refused = false;
+    for (int i = 0; i < ceiling; ++i) {
+        const auto code = call();
+        if (code == grpc::StatusCode::RESOURCE_EXHAUSTED) {
+            refused = true;
+            break;
+        }
+        if (code != grpc::StatusCode::OK) {
+            std::cerr << "per-key limit probe got an unexpected status "
+                      << static_cast<int>(code) << " after " << allowed << " calls\n";
+            return false;
+        }
+        ++allowed;
+    }
+
+    if (!refused) {
+        std::cerr << "a key issued with " << expected << " requests/minute served " << allowed
+                  << " calls without refusing -- its limit is not being applied\n";
+        return false;
+    }
+
+    // The bucket refills continuously, so a run that takes a measurable slice of
+    // a minute legitimately serves slightly more than the capacity. Allow that,
+    // but not the order-of-magnitude difference that would mean a DIFFERENT
+    // limit (a tier default) was in force.
+    if (allowed < expected || allowed > expected * 2) {
+        std::cerr << "a key issued with " << expected << " requests/minute refused after "
+                  << allowed << " calls -- the enforced ceiling is not the one on the key\n";
+        return false;
+    }
+    std::cout << "Key cap  a key issued with " << expected << " requests/minute refused after "
+              << allowed << " calls\n";
+    return true;
+}
+
+/**
  * The Pro gate, checked where it actually has to hold.
  *
  * The point of this check is that the gate is SERVER-SIDE. The frontend is a
@@ -1359,7 +1452,16 @@ auto main(int argc, char** argv) -> int {
     std::cout << "Smoke test against " << target << " for " << symbol << " [suite: " << suite
               << "]\n\n";
 
-    auto channel = grpc::CreateChannel(target, grpc::InsecureChannelCredentials());
+    // TLS when SMOKE_TLS is set, so this gate can be pointed at the deployed
+    // service and not only at a local build. Verifying production is the only
+    // way to exercise the parts that depend on credentials the repository does
+    // not hold -- live market data among them -- and a gate that can only run
+    // against localhost cannot answer "is the thing customers call working".
+    const char* tls = std::getenv("SMOKE_TLS");
+    const bool use_tls = tls != nullptr && *tls != '\0' && std::string_view{tls} != "0";
+    auto channel = use_tls ? grpc::CreateChannel(target, grpc::SslCredentials({}))
+                           : grpc::CreateChannel(target, grpc::InsecureChannelCredentials());
+    if (use_tls) std::cout << "Transport: TLS\n";
 
     if (suite == "pro") {
         // A supplied spot, not a fetched one: the gate refuses before any
@@ -1376,6 +1478,7 @@ auto main(int argc, char** argv) -> int {
         if (!check_finance(*finance_only)) return 1;
         if (!check_auth(*finance_only)) return 1;
         if (!check_quota(*finance_only)) return 1;
+        if (!check_key_limit(*finance_only)) return 1;
         std::cout << "\nThe financial library's answers satisfy their independent identities, "
                      "and authentication refuses every way in it is supposed to.\n";
         return 0;
@@ -1420,6 +1523,7 @@ auto main(int argc, char** argv) -> int {
     // Last, because it deliberately exhausts an allowance -- anything after it
     // would be refused for reasons that have nothing to do with what it tests.
     if (!check_quota(*finance)) return 1;
+    if (!check_key_limit(*finance)) return 1;
 
     std::cout << "\nCalculator RPCs returned live data; the financial library's answers "
                  "satisfy their independent identities.\n";

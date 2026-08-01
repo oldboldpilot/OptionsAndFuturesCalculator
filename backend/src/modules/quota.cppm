@@ -88,10 +88,17 @@ class QuotaEnforcer {
      *
      * `caller_id` is the key's human label, never the key. An empty id means an
      * unauthenticated caller and shares the single anonymous bucket.
+     *
+     * `explicit_limits`, when non-null, are the limits written on the KEY and
+     * override its tier entirely. They are also honoured when QUOTA_POLICY is
+     * unset and the enforcer is otherwise off -- which is the whole point.
+     * Issuing a key that names a rate and then having it silently ignored
+     * because a second, unrelated environment variable was empty is the failure
+     * this parameter exists to prevent.
      */
     [[nodiscard]] auto admit_identity(std::string_view caller_id, std::string_view tier,
-                                      std::string_view method, double compute_units)
-        -> grpc::Status;
+                                      std::string_view method, double compute_units,
+                                      const TierLimits* explicit_limits = nullptr) -> grpc::Status;
 
     /** The same check without the gRPC types, for tests and diagnostics. */
     [[nodiscard]] auto admit_caller(std::string_view api_key, std::string_view method,
