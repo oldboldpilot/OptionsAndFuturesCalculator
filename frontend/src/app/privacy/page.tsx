@@ -121,7 +121,9 @@ export default function PrivacyPage() {
 
       <H2>Changes</H2>
       <P>
-        Material changes will be reflected in the date at the top of this page.
+        Material changes will be reflected in the date at the top of this page. This site is operated
+        by Knobugsoft LLC, which is the data controller for the purposes of UK and EU data
+        protection law.
       </P>
     </LegalPage>
   );

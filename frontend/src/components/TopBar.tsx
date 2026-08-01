@@ -191,6 +191,65 @@ export function TopBar() {
       </form>
 
       {/*
+        Quick-select, and specifically the reason the futures half of this
+        product was invisible.
+
+        The only way to reach a futures symbol was to already know that typing
+        "ES" would work: the input is free text with no suggestions, and every
+        futures strategy in the selector was refused until a futures symbol was
+        loaded. So a visitor saw an options calculator with a permanently greyed
+        Futures tab and no way in. These pills are the affordance that was
+        missing -- the futures roots are named, so the term structure panel and
+        the futures strategies become reachable by clicking rather than by
+        guessing.
+
+        The class is passed explicitly rather than inferred from the ticker
+        because the root alone is ambiguous: ES is both the E-mini S&P future
+        and Eversource Energy, and resolving it by guess is what previously put
+        a utility's share price on an index future.
+      */}
+      <div
+        style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}
+        aria-label="Quick symbol select"
+      >
+        {([
+          { label: 'Equities', cls: 'EQUITY' as const, syms: ['SPY', 'QQQ', 'NVDA', 'AAPL', 'TSLA'] },
+          { label: 'Futures', cls: 'FUTURES' as const, syms: ['ES', 'NQ', 'CL', 'GC', 'ZB'] },
+        ]).map((group) => (
+          <div key={group.label} style={{ display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
+            <span
+              style={{
+                fontSize: 'var(--text-2xs)',
+                color: 'var(--color-ink-400)',
+                textTransform: 'uppercase',
+                letterSpacing: '0.05em',
+              }}
+            >
+              {group.label}
+            </span>
+            {group.syms.map((sym) => (
+              <button
+                key={sym}
+                type="button"
+                onClick={() => setSymbol(sym, undefined, group.cls)}
+                aria-pressed={symbol === sym}
+                title={`${sym} — ${group.cls === 'FUTURES' ? 'futures root' : 'equity'}`}
+                className="chip"
+                style={{
+                  cursor: 'pointer',
+                  border: symbol === sym ? '1px solid var(--color-accent)' : '1px solid var(--color-line)',
+                  color: symbol === sym ? 'var(--color-accent)' : 'var(--color-ink-300)',
+                  background: 'transparent',
+                }}
+              >
+                {sym}
+              </button>
+            ))}
+          </div>
+        ))}
+      </div>
+
+      {/*
         The risk-free rate and its provenance. It was a hardcoded 0.05 that
         still fed every engine request and the distribution's drift; it is now
         measured, and the chip says whether the number on screen is an

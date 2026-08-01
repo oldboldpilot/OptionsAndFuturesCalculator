@@ -178,23 +178,75 @@ export default function RootLayout({
         */}
         <footer
           style={{
-            display: 'flex',
-            flexWrap: 'wrap',
-            gap: '1.25rem',
-            justifyContent: 'center',
-            padding: '1.25rem 1rem 1.5rem',
             borderTop: '1px solid var(--color-line)',
+            padding: '1.5rem 1.25rem 2rem',
             fontSize: '0.75rem',
+            lineHeight: 1.6,
             color: 'var(--color-ink-400)',
           }}
         >
-          <span>© {new Date().getFullYear()} Options &amp; Futures Calculator</span>
-          <a href="/privacy" style={{ color: 'inherit' }}>Privacy</a>
-          <a href="/terms" style={{ color: 'inherit' }}>Terms</a>
-          <a href="mailto:hello@optionsandfuturescalculator.com" style={{ color: 'inherit' }}>
-            Contact
-          </a>
-          <span>Not investment advice. Market data may be delayed.</span>
+          <div
+            style={{
+              maxWidth: '60rem',
+              margin: '0 auto',
+              display: 'flex',
+              flexWrap: 'wrap',
+              gap: '0.75rem 1.25rem',
+              alignItems: 'baseline',
+              justifyContent: 'space-between',
+            }}
+          >
+            <span>
+              © {new Date().getFullYear()} <strong style={{ color: 'var(--color-ink-300)' }}>Knobugsoft LLC</strong>.
+              All rights reserved.
+            </span>
+            <nav style={{ display: 'flex', flexWrap: 'wrap', gap: '1.25rem' }}>
+              <a href="/privacy" style={{ color: 'inherit' }}>Privacy</a>
+              <a href="/terms" style={{ color: 'inherit' }}>Terms</a>
+              <a href="mailto:hello@optionsandfuturescalculator.com" style={{ color: 'inherit' }}>Contact</a>
+            </nav>
+          </div>
+
+          {/*
+            The disclaimer is the substantive part of this footer, not filler.
+
+            This tool prices real instruments off live data and someone can act
+            on a number it shows, so the limits have to be stated where they are
+            read rather than only behind a link. The specific claims are the
+            ones that matter for a derivatives calculator: it is not advice, the
+            data may be stale, model outputs are estimates, and losses on short
+            and leveraged positions are not bounded by what you put in.
+          */}
+          <div
+            style={{
+              maxWidth: '60rem',
+              margin: '1rem auto 0',
+              paddingTop: '1rem',
+              borderTop: '1px solid var(--color-line)',
+              color: 'var(--color-ink-500, var(--color-ink-400))',
+            }}
+          >
+            <p style={{ margin: '0 0 0.5rem' }}>
+              <strong style={{ color: 'var(--color-ink-300)' }}>Not investment advice.</strong>{' '}
+              Options &amp; Futures Calculator is an educational and analytical tool. Nothing here is
+              a recommendation, solicitation, or offer to buy or sell any security, futures contract
+              or other instrument, and nothing here is tax, legal or accounting advice.
+            </p>
+            <p style={{ margin: '0 0 0.5rem' }}>
+              <strong style={{ color: 'var(--color-ink-300)' }}>Trading risk.</strong> Options and
+              futures carry substantial risk and are not suitable for every investor. Short and
+              leveraged positions can lose more than the amount originally invested. Past
+              performance and modelled results do not indicate future results.
+            </p>
+            <p style={{ margin: 0 }}>
+              <strong style={{ color: 'var(--color-ink-300)' }}>Data and models.</strong> Market data
+              is supplied by third parties, may be delayed or inaccurate, and is provided without
+              warranty. Greeks, implied volatility and probabilities are model estimates that rest on
+              assumptions which do not hold exactly in real markets. Figures shown exclude
+              commissions, fees, financing and assignment risk. Knobugsoft LLC accepts no liability
+              for any loss arising from use of this site. Verify independently before trading.
+            </p>
+          </div>
         </footer>
       </body>
     </html>

@@ -236,6 +236,7 @@ export const StrategySelector: React.FC = () => {
   const {
     addLeg, clearLegs, spotPrice,
     chainStrikes, chainExpirations, selectedExpiration, chainStatus,
+    futuresCurve, assetClass,
   } = useCalculatorStore();
 
   // Only the flag is needed here -- the panel below owns the rest of the
@@ -256,15 +257,38 @@ export const StrategySelector: React.FC = () => {
   const def = STRATEGIES.find((s) => s.id === selected);
   const dte = chainExpirations.find((e) => e.date === selectedExpiration)?.dte ?? 0;
 
-  /** Why Apply is unavailable, or null when it is ready. */
+  /**
+   * Why Apply is unavailable, or null when it is ready.
+   *
+   * Futures used to be refused outright with "no provider supplies a term
+   * structure yet". That stopped being true when the curve was wired up, but
+   * the guard stayed -- so every futures strategy in the catalogue was
+   * permanently unavailable while the panel beside it displayed the very curve
+   * the message said did not exist. The gate now asks the store.
+   */
   const blocker = useMemo(() => {
     if (!def) return 'Select a strategy';
+
+    if (def.category === 'Futures') {
+      if (assetClass !== 'FUTURES') {
+        return 'Select a futures symbol first — ES, NQ, CL, GC or ZB';
+      }
+      if (futuresCurve.length === 0) {
+        return chainStatus === 'loading' ? 'Loading the term structure' : 'No term structure for this symbol';
+      }
+      // A calendar or inter-commodity spread needs two contracts to sit
+      // between; with only the front month listed there is no spread to take.
+      if (def.multiExpiry && futuresCurve.length < 2) {
+        return 'Needs two listed contracts — only the front month is quoted';
+      }
+      return null;
+    }
+
     if (def.multiExpiry) return 'Needs two expiries — add these legs from two chains';
-    if (def.category === 'Futures') return 'Needs a futures term structure, which no provider supplies yet';
     if (spotPrice <= 0) return 'Awaiting quote';
     if (chainStatus !== 'ready') return 'Awaiting option chain';
     return null;
-  }, [def, spotPrice, chainStatus]);
+  }, [def, spotPrice, chainStatus, assetClass, futuresCurve.length]);
 
   /**
    * Builds the position from live chain quotes: nearest listed strike to the
@@ -275,17 +299,32 @@ export const StrategySelector: React.FC = () => {
   function apply() {
     if (!def || blocker) return;
     clearLegs();
+    // Walks the curve as futures legs are consumed, so a calendar spread gets
+    // two different delivery months rather than the same one twice.
+    let futuresLegIndex = 0;
 
     for (const t of def.legs) {
       if (t.type === 'STOCK' || t.type === 'FUTURE') {
+        // A futures leg is priced at the FORWARD for its delivery month, not at
+        // spot. Using spot for both legs of a calendar spread would value the
+        // spread at exactly zero -- the basis between the two contracts is the
+        // entire position. Legs are taken in order from the curve, so the first
+        // futures leg is the front month and the second the next listed one.
+        const isFuture = t.type === 'FUTURE';
+        const contract = isFuture ? futuresCurve[futuresLegIndex] : undefined;
+        if (isFuture) futuresLegIndex += 1;
+
+        const price = contract ? contract.futuresPrice : spotPrice;
+        if (isFuture && !contract) continue;  // never synthesise a leg (spec 3.4)
+
         addLeg({
           instrument_type: t.type === 'STOCK' ? 'INSTRUMENT_EQUITY_SPOT' : 'INSTRUMENT_FUTURES_SPOT',
           action: t.action,
           option_type: t.type,
-          strike_price: spotPrice,
-          premium: spotPrice,
+          strike_price: price,
+          premium: price,
           quantity: t.quantity ?? 1,
-          expiration_days: dte,
+          expiration_days: contract ? contract.daysToExpiry : dte,
         });
         continue;
       }
@@ -467,7 +506,16 @@ export const StrategySelector: React.FC = () => {
             onClick={apply}
             disabled={blocker !== null}
           >
-            {blocker ?? `Apply at ${selectedExpiration} (${dte}d)`}
+            {blocker ??
+              (def?.category === 'Futures'
+                // A futures position has no option expiry to name; the label
+                // read "Apply at  (0d)" because it was reaching for a chain
+                // this symbol does not have. Name the delivery month instead,
+                // which is the equivalent fact for a futures leg.
+                ? `Apply on ${futuresCurve[0]?.code ?? 'front month'}${
+                    def.multiExpiry && futuresCurve[1] ? ` / ${futuresCurve[1].code}` : ''
+                  }`
+                : `Apply at ${selectedExpiration} (${dte}d)`)}
           </button>
         </div>
       )}

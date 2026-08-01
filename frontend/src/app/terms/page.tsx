@@ -83,7 +83,7 @@ export default function TermsPage() {
       <H2>Changes</H2>
       <P>
         We may update these terms; the date above reflects the last change. Continued use after a
-        change means you accept it.
+        change means you accept it. This site is operated by Knobugsoft LLC.
       </P>
 
       <H2>Contact</H2>
