@@ -40,6 +40,7 @@ const fraunces = Fraunces({
 import { branding } from "@/config/branding";
 import { SiteStructuredData } from "@/components/StructuredData";
 import AdSlot from "@/components/AdSlot";
+import SponsoredBrokers from "@/components/SponsoredBrokers";
 
 export async function generateMetadata(): Promise<Metadata> {
   return {
@@ -76,7 +77,10 @@ export async function generateMetadata(): Promise<Metadata> {
       card: "summary_large_image",
       title: branding.appName,
       description: branding.description,
-      creator: branding.twitterHandle,
+      // Spread, so an unset handle emits no `creator` key at all. Passing an
+      // empty string would render <meta name="twitter:creator" content=""/>,
+      // which is a malformed tag rather than an absent one.
+      ...(branding.twitterHandle ? { creator: branding.twitterHandle } : {}),
       images: [branding.ogImageUrl],
     },
     robots: {
@@ -210,6 +214,18 @@ export default function RootLayout({
       <body>
         <div id="root-container">
           {children}
+        </div>
+        {/*
+          Broker links, served by this site rather than by Google.
+
+          Above the multiplex deliberately. This module always renders; the
+          AdSense unit below it renders only once Google approves the site and
+          has something to fill it with. Putting the reliable block first means
+          the page never opens with an empty reserved box as its first thing
+          after the workspace.
+        */}
+        <div style={{ maxWidth: '78rem', margin: '0 auto', padding: '1.25rem 1.25rem 0' }}>
+          <SponsoredBrokers />
         </div>
         {/*
           Multiplex (autorelaxed) unit — a grid of content recommendations.

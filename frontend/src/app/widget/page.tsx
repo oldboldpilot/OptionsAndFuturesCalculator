@@ -59,7 +59,12 @@ function WidgetContent() {
         <span style={{ fontSize: 'var(--text-base)', fontWeight: 600, color: 'var(--color-ink-100)' }}>
           Strategy Modeler
         </span>
-        <span className="chip">Powered by sensen</span>
+        {/*
+          Was "Powered by sensen". This widget is embedded on other people's
+          sites, so it is the most externally visible surface here, and the name
+          of an internal engine means nothing to anyone reading it there.
+        */}
+        <span className="chip">Live market data</span>
       </div>
 
       <div

@@ -36,6 +36,13 @@ export const branding: BrandingConfig = {
   // context. Relative, it was being resolved against the BUILD host -- which
   // shipped `http://localhost:3000/og-image.png` to production.
   ogImageUrl: process.env.NEXT_PUBLIC_OG_IMAGE_URL || `${SITE_URL}/og-image.png`,
-  twitterHandle: process.env.NEXT_PUBLIC_TWITTER_HANDLE || "@Sensen",
+  // Empty rather than "@Sensen", which is what this defaulted to. That handle
+  // named an internal project, not this site, and it shipped on every page as
+  // <meta name="twitter:creator">, publicly attributing the site to an account
+  // that has nothing to do with it. Omitting the tag is correct when there is
+  // no account to credit; a wrong handle is worse than an absent one, because
+  // the card renders someone else's name under this site's content.
+  // Set NEXT_PUBLIC_TWITTER_HANDLE once a real account exists.
+  twitterHandle: process.env.NEXT_PUBLIC_TWITTER_HANDLE || "",
   canonicalUrl: process.env.NEXT_PUBLIC_CANONICAL_URL || SITE_URL,
 };

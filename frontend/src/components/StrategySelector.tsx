@@ -21,13 +21,16 @@ interface StrategyDef {
   category: Category;
   description: string;
   legs: LegTemplate[];
-  /**
-   * The `sensen::OptionStrategyBuilder` preset (or `sensen::financial` free
-   * function) that backs this structure, where one exists. Entries without a
-   * preset are assembled through the generic `add_leg` path — both are real,
-   * but it is worth knowing which is which.
+  /*
+   * There was a `sensen?: string` here naming the internal C++ builder preset
+   * behind each structure. It is gone because it was DATA, not a comment: it
+   * shipped in the JS bundle and was readable in view-source on every page,
+   * which is the same leak as the chip that used to render it. Comments are
+   * stripped by the bundler; object fields are not.
+   *
+   * The engine mapping still exists on the server, which is the only place it
+   * is needed — the client sends a strategy id and the engine resolves it.
    */
-  sensen?: string;
   /** Needs legs at two different expiries; the single-chain builder can't apply it. */
   multiExpiry?: boolean;
 }
@@ -49,10 +52,10 @@ const STRATEGIES: StrategyDef[] = [
     description: 'Unlimited upside, premium at risk.',
     legs: [{ action: 'BUY', type: 'CALL', moneyness: 1.0 }] },
   { id: 'bull_call_spread', name: 'Bull Call Spread', category: 'Bullish',
-    description: 'Debit spread. Capped risk and reward.', sensen: 'bull_call_spread',
+    description: 'Debit spread. Capped risk and reward.',
     legs: [{ action: 'BUY', type: 'CALL', moneyness: 1.0 }, { action: 'SELL', type: 'CALL', moneyness: 1.05 }] },
   { id: 'bull_put_spread', name: 'Bull Put Spread', category: 'Bullish',
-    description: 'Credit spread. Profits if price holds above the short put.', sensen: 'bull_put_spread',
+    description: 'Credit spread. Profits if price holds above the short put.',
     legs: [{ action: 'SELL', type: 'PUT', moneyness: 1.0 }, { action: 'BUY', type: 'PUT', moneyness: 0.95 }] },
   { id: 'call_backspread', name: 'Call Ratio Backspread', category: 'Bullish',
     description: 'Short one near call against two further calls. Long convexity.',
@@ -76,10 +79,10 @@ const STRATEGIES: StrategyDef[] = [
     description: 'Defined risk downside exposure.',
     legs: [{ action: 'BUY', type: 'PUT', moneyness: 1.0 }] },
   { id: 'bear_put_spread', name: 'Bear Put Spread', category: 'Bearish',
-    description: 'Debit spread. Capped risk and reward.', sensen: 'bear_put_spread',
+    description: 'Debit spread. Capped risk and reward.',
     legs: [{ action: 'BUY', type: 'PUT', moneyness: 1.0 }, { action: 'SELL', type: 'PUT', moneyness: 0.95 }] },
   { id: 'bear_call_spread', name: 'Bear Call Spread', category: 'Bearish',
-    description: 'Credit spread. Profits if price stays below the short call.', sensen: 'bear_call_spread',
+    description: 'Credit spread. Profits if price stays below the short call.',
     legs: [{ action: 'SELL', type: 'CALL', moneyness: 1.0 }, { action: 'BUY', type: 'CALL', moneyness: 1.05 }] },
   { id: 'put_backspread', name: 'Put Ratio Backspread', category: 'Bearish',
     description: 'Short one near put against two lower puts. Long crash risk.',
@@ -96,23 +99,23 @@ const STRATEGIES: StrategyDef[] = [
 
   /* ---------------------------------- Neutral --------------------------- */
   { id: 'iron_condor', name: 'Iron Condor', category: 'Neutral',
-    description: 'Two credit spreads. Profits from low realised volatility.', sensen: 'iron_condor',
+    description: 'Two credit spreads. Profits from low realised volatility.',
     legs: [{ action: 'BUY', type: 'PUT', moneyness: 0.90 }, { action: 'SELL', type: 'PUT', moneyness: 0.95 },
            { action: 'SELL', type: 'CALL', moneyness: 1.05 }, { action: 'BUY', type: 'CALL', moneyness: 1.10 }] },
   { id: 'condor', name: 'Condor (all calls)', category: 'Neutral',
-    description: 'Four-strike call condor with a flat profit plateau.', sensen: 'condor',
+    description: 'Four-strike call condor with a flat profit plateau.',
     legs: [{ action: 'BUY', type: 'CALL', moneyness: 0.92 }, { action: 'SELL', type: 'CALL', moneyness: 0.97 },
            { action: 'SELL', type: 'CALL', moneyness: 1.03 }, { action: 'BUY', type: 'CALL', moneyness: 1.08 }] },
   { id: 'call_butterfly', name: 'Call Butterfly', category: 'Neutral',
-    description: 'Targets a price pin at expiry. Cheap, low probability.', sensen: 'butterfly_spread',
+    description: 'Targets a price pin at expiry. Cheap, low probability.',
     legs: [{ action: 'BUY', type: 'CALL', moneyness: 0.95 }, { action: 'SELL', type: 'CALL', moneyness: 1.0, quantity: 2 },
            { action: 'BUY', type: 'CALL', moneyness: 1.05 }] },
   { id: 'put_butterfly', name: 'Put Butterfly', category: 'Neutral',
-    description: 'Same payoff shape as the call butterfly, built from puts.', sensen: 'butterfly_spread',
+    description: 'Same payoff shape as the call butterfly, built from puts.',
     legs: [{ action: 'BUY', type: 'PUT', moneyness: 0.95 }, { action: 'SELL', type: 'PUT', moneyness: 1.0, quantity: 2 },
            { action: 'BUY', type: 'PUT', moneyness: 1.05 }] },
   { id: 'iron_butterfly', name: 'Iron Butterfly', category: 'Neutral',
-    description: 'Short straddle with protective wings. Higher credit than a condor.', sensen: 'iron_butterfly',
+    description: 'Short straddle with protective wings. Higher credit than a condor.',
     legs: [{ action: 'BUY', type: 'PUT', moneyness: 0.95 }, { action: 'SELL', type: 'PUT', moneyness: 1.0 },
            { action: 'SELL', type: 'CALL', moneyness: 1.0 }, { action: 'BUY', type: 'CALL', moneyness: 1.05 }] },
   { id: 'broken_wing_butterfly', name: 'Broken-Wing Butterfly', category: 'Neutral',
@@ -120,10 +123,10 @@ const STRATEGIES: StrategyDef[] = [
     legs: [{ action: 'BUY', type: 'CALL', moneyness: 0.97 }, { action: 'SELL', type: 'CALL', moneyness: 1.02, quantity: 2 },
            { action: 'BUY', type: 'CALL', moneyness: 1.12 }] },
   { id: 'short_straddle', name: 'Short Straddle', category: 'Neutral',
-    description: 'Maximum premium, unlimited risk both ways.', sensen: 'straddle',
+    description: 'Maximum premium, unlimited risk both ways.',
     legs: [{ action: 'SELL', type: 'CALL', moneyness: 1.0 }, { action: 'SELL', type: 'PUT', moneyness: 1.0 }] },
   { id: 'short_strangle', name: 'Short Strangle', category: 'Neutral',
-    description: 'Wider profit zone than a short straddle, less credit.', sensen: 'strangle',
+    description: 'Wider profit zone than a short straddle, less credit.',
     legs: [{ action: 'SELL', type: 'CALL', moneyness: 1.05 }, { action: 'SELL', type: 'PUT', moneyness: 0.95 }] },
   { id: 'jade_lizard', name: 'Jade Lizard', category: 'Neutral',
     description: 'Short put plus short call spread, sized to have no upside risk.',
@@ -136,10 +139,10 @@ const STRATEGIES: StrategyDef[] = [
 
   /* --------------------------------- Volatility ------------------------- */
   { id: 'long_straddle', name: 'Long Straddle', category: 'Volatility',
-    description: 'Profits from a large move either way.', sensen: 'straddle',
+    description: 'Profits from a large move either way.',
     legs: [{ action: 'BUY', type: 'CALL', moneyness: 1.0 }, { action: 'BUY', type: 'PUT', moneyness: 1.0 }] },
   { id: 'long_strangle', name: 'Long Strangle', category: 'Volatility',
-    description: 'Cheaper than a straddle, needs a larger move.', sensen: 'strangle',
+    description: 'Cheaper than a straddle, needs a larger move.',
     legs: [{ action: 'BUY', type: 'CALL', moneyness: 1.05 }, { action: 'BUY', type: 'PUT', moneyness: 0.95 }] },
   { id: 'reverse_iron_condor', name: 'Reverse Iron Condor', category: 'Volatility',
     description: 'Debit structure that pays on a breakout past either wing.',
@@ -167,16 +170,16 @@ const STRATEGIES: StrategyDef[] = [
 
   /* ------------------------------ Income & Hedge ------------------------ */
   { id: 'covered_call', name: 'Covered Call', category: 'Income & Hedge',
-    description: 'Long stock with a short call written against it.', sensen: 'covered_call',
+    description: 'Long stock with a short call written against it.',
     legs: [{ action: 'BUY', type: 'STOCK', moneyness: null }, { action: 'SELL', type: 'CALL', moneyness: 1.05 }] },
   { id: 'cash_secured_put', name: 'Cash-Secured Put', category: 'Income & Hedge',
     description: 'Sell a put you are willing to be assigned on.',
     legs: [{ action: 'SELL', type: 'PUT', moneyness: 0.95 }] },
   { id: 'protective_put', name: 'Protective Put', category: 'Income & Hedge',
-    description: 'Long stock with a put as insurance.', sensen: 'protective_put',
+    description: 'Long stock with a put as insurance.',
     legs: [{ action: 'BUY', type: 'STOCK', moneyness: null }, { action: 'BUY', type: 'PUT', moneyness: 0.95 }] },
   { id: 'collar', name: 'Collar', category: 'Income & Hedge',
-    description: 'Protective put financed by a covered call.', sensen: 'collar',
+    description: 'Protective put financed by a covered call.',
     legs: [{ action: 'BUY', type: 'STOCK', moneyness: null }, { action: 'BUY', type: 'PUT', moneyness: 0.95 },
            { action: 'SELL', type: 'CALL', moneyness: 1.05 }] },
   { id: 'pmcc', name: "Poor Man's Covered Call", category: 'Income & Hedge', multiExpiry: true,
@@ -191,18 +194,18 @@ const STRATEGIES: StrategyDef[] = [
     description: 'Directional short futures position.',
     legs: [{ action: 'SELL', type: 'FUTURE', moneyness: null }] },
   { id: 'futures_calendar', name: 'Futures Calendar Spread', category: 'Futures', multiExpiry: true,
-    description: 'Inter-month spread along the term structure.', sensen: 'FuturesStrategyBuilder::calendar_spread',
+    description: 'Inter-month spread along the term structure.',
     legs: [{ action: 'BUY', type: 'FUTURE', moneyness: null }, { action: 'SELL', type: 'FUTURE', moneyness: null }] },
   { id: 'crack_321', name: '3-2-1 Crack Spread', category: 'Futures',
-    description: 'Three crude against two gasoline and one heating oil.', sensen: 'calculate_crack_spread_321',
+    description: 'Three crude against two gasoline and one heating oil.',
     legs: [{ action: 'BUY', type: 'FUTURE', moneyness: null, quantity: 3 },
            { action: 'SELL', type: 'FUTURE', moneyness: null, quantity: 2 },
            { action: 'SELL', type: 'FUTURE', moneyness: null }] },
   { id: 'spark_spread', name: 'Spark Spread', category: 'Futures',
-    description: 'Power against gas at a given heat rate.', sensen: 'calculate_spark_spread',
+    description: 'Power against gas at a given heat rate.',
     legs: [{ action: 'SELL', type: 'FUTURE', moneyness: null }, { action: 'BUY', type: 'FUTURE', moneyness: null }] },
   { id: 'crush_spread', name: 'Soybean Crush Spread', category: 'Futures',
-    description: 'Beans against oil and meal.', sensen: 'calculate_crush_spread',
+    description: 'Beans against oil and meal.',
     legs: [{ action: 'BUY', type: 'FUTURE', moneyness: null }, { action: 'SELL', type: 'FUTURE', moneyness: null },
            { action: 'SELL', type: 'FUTURE', moneyness: null }] },
   { id: 'cash_and_carry', name: 'Cash & Carry / Basis', category: 'Futures',
@@ -212,7 +215,7 @@ const STRATEGIES: StrategyDef[] = [
     description: 'Long futures hedged with a short out-of-the-money future option.',
     legs: [{ action: 'BUY', type: 'FUTURE', moneyness: null }, { action: 'SELL', type: 'CALL', moneyness: 1.05 }] },
   { id: 'min_variance_hedge', name: 'Minimum-Variance Hedge', category: 'Futures',
-    description: 'Short futures sized by the beta hedge ratio.', sensen: 'calculate_hedge_ratio',
+    description: 'Short futures sized by the beta hedge ratio.',
     legs: [{ action: 'BUY', type: 'STOCK', moneyness: null }, { action: 'SELL', type: 'FUTURE', moneyness: null }] },
 ];
 
@@ -493,11 +496,15 @@ export const StrategySelector: React.FC = () => {
                 {previewStrike(t)}
               </span>
             ))}
-            {def.sensen && (
-              <span className="chip chip-accent" title={`Backed by sensen::${def.sensen}`}>
-                sensen preset
-              </span>
-            )}
+            {/*
+              No "sensen preset" chip here any more. It rendered the name of an
+              internal C++ builder to the reader -- "sensen preset", with the
+              symbol itself in the tooltip -- which tells a trader nothing about
+              the position and leaks the shape of the engine behind the site.
+              The `sensen` field is kept on the strategy records below because it
+              documents which engine preset backs each entry, which is worth
+              having in source. It is not worth putting on screen.
+            */}
           </div>
 
           <button
