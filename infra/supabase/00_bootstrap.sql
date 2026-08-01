@@ -4,12 +4,41 @@
 -- public.profiles and public.saved_strategies. It adds only what GoTrue and
 -- PostgREST need; it does not touch the application tables.
 --
---   psql "$DATABASE_URL" -f infra/supabase/00_bootstrap.sql
+--   psql "$DATABASE_URL" \
+--     -v authenticator_password="$AUTHENTICATOR_PASSWORD" \
+--     -v auth_admin_password="$AUTH_ADMIN_PASSWORD" \
+--     -f infra/supabase/00_bootstrap.sql
+--
+-- Passwords are REQUIRED arguments, and the script refuses to run without
+-- them. They were placeholders in the first draft, with a note in the README
+-- to change them before running -- which is the kind of control that fails
+-- silently, and fails badly here: `authenticator` is a LOGIN role (it is the
+-- account PostgREST connects as) and this Postgres is published on a public
+-- TCP proxy. A placeholder left in place is remote database access, not a
+-- local untidiness.
 --
 -- Supabase's own installer assumes an empty database and creates one. This
 -- database is not empty, and the app schema in it is the thing we are keeping,
 -- so the roles and schemas are declared here explicitly rather than by running
 -- an installer that would expect to own the whole instance.
+
+\set ON_ERROR_STOP on
+
+-- Refuse to run without the passwords, rather than defaulting to something.
+-- A default here would be a known credential on an internet-reachable LOGIN
+-- role, and the failure mode is silent: everything works, and it works for
+-- everyone.
+\if :{?authenticator_password}
+\else
+\echo 'FATAL: -v authenticator_password=... is required'
+\quit
+\endif
+
+\if :{?auth_admin_password}
+\else
+\echo 'FATAL: -v auth_admin_password=... is required'
+\quit
+\endif
 
 -- ---------------------------------------------------------------------------
 -- Roles
@@ -32,14 +61,24 @@ BEGIN
     -- user themselves must not be able to write.
     CREATE ROLE service_role NOLOGIN NOINHERIT BYPASSRLS;
   END IF;
+  -- Created WITHOUT a password here, then set below. psql does not interpolate
+  -- its variables inside a dollar-quoted block, so :'authenticator_password'
+  -- would be written to the role literally -- a password of exactly that
+  -- string, which is worse than the placeholder it replaced.
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'authenticator') THEN
-    CREATE ROLE authenticator NOINHERIT LOGIN PASSWORD 'CHANGE_ME_AUTHENTICATOR';
+    CREATE ROLE authenticator NOINHERIT LOGIN;
   END IF;
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'supabase_auth_admin') THEN
-    CREATE ROLE supabase_auth_admin NOINHERIT CREATEROLE LOGIN PASSWORD 'CHANGE_ME_AUTH_ADMIN';
+    CREATE ROLE supabase_auth_admin NOINHERIT CREATEROLE LOGIN;
   END IF;
 END
 $$;
+
+-- Outside the block, where psql substitution actually happens. ALTER rather
+-- than CREATE so re-running the script rotates the password instead of failing
+-- on a role that already exists.
+ALTER ROLE authenticator PASSWORD :'authenticator_password';
+ALTER ROLE supabase_auth_admin PASSWORD :'auth_admin_password';
 
 GRANT anon, authenticated, service_role TO authenticator;
 

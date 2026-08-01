@@ -23,8 +23,21 @@ at all.
 ## 1. Prepare the database
 
 ```bash
-psql "$DATABASE_URL" -f infra/supabase/00_bootstrap.sql
+psql "$DATABASE_URL" \
+  -v authenticator_password="$AUTHENTICATOR_PASSWORD" \
+  -v auth_admin_password="$AUTH_ADMIN_PASSWORD" \
+  -f infra/supabase/00_bootstrap.sql
 ```
+
+Both passwords are **required** and the script refuses to run without them,
+creating nothing. They are not defaulted, because `authenticator` is a LOGIN
+role — the account PostgREST connects as — and this Postgres is published on a
+public TCP proxy. A placeholder left unchanged would be remote database access
+from the internet, and the failure would be silent: everything works, and it
+works for everyone.
+
+Generate them with `openssl rand -base64 32` and keep them in `config/.env`.
+Re-running the script rotates them rather than failing.
 
 This adds the `auth` schema, the four Supabase roles, `auth.uid()`, and — the
 part that matters most — **row-level security on `profiles` and
@@ -40,8 +53,20 @@ Note there is deliberately **no update policy on `profiles`** for
 billing webhook, holding the service role key (which is `BYPASSRLS`), writes
 it.
 
-Change the two `CHANGE_ME_` passwords in the bootstrap file before running it,
-and use them in the connection strings below.
+Use the same two passwords in the connection strings below.
+
+Verified against a throwaway Postgres, not asserted:
+
+```
+no password variables          refused, zero roles created
+with passwords                 roles created, only LOGIN roles carry one
+authenticator can sign in      yes, with the supplied password
+user A reads own strategies    own + public only
+user A reads B's profile       empty
+user upgrades own tier         ERROR: permission denied for table profiles
+anon reads strategies          the public one only
+re-run                         idempotent, rotates the passwords
+```
 
 ## 2. Deploy the services
 
