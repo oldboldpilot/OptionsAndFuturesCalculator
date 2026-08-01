@@ -1,0 +1,79 @@
+_format_version: "2.1"
+_transform: true
+
+# Kong is what makes the stack look like one Supabase URL.
+#
+# supabase-js expects a single origin serving /auth/v1 and /rest/v1. GoTrue and
+# PostgREST are separate processes that each answer at their own root, so
+# something has to present them as one host and strip the prefix. That is the
+# whole job here.
+
+services:
+  # ------------------------------------------------------------------------
+  # GoTrue — sign-up, sign-in, token refresh.
+  # ------------------------------------------------------------------------
+  - name: auth-v1
+    url: http://${GOTRUE_HOST}:9999/
+    routes:
+      - name: auth-v1-route
+        strip_path: true
+        paths:
+          - /auth/v1/
+    plugins:
+      - name: cors
+        config:
+          # Narrow, not "*". This origin is the only place the app is served
+          # from, and an open policy here would let any site drive sign-in
+          # against our auth server and read the session it gets back.
+          origins:
+            - https://optionsandfuturescalculator.com
+            - https://www.optionsandfuturescalculator.com
+          credentials: true
+          headers:
+            - Accept
+            - Authorization
+            - Content-Type
+            - apikey
+            - x-client-info
+
+  # ------------------------------------------------------------------------
+  # PostgREST — the tables, under RLS.
+  # ------------------------------------------------------------------------
+  - name: rest-v1
+    url: http://${POSTGREST_HOST}:3000/
+    routes:
+      - name: rest-v1-route
+        strip_path: true
+        paths:
+          - /rest/v1/
+    plugins:
+      - name: cors
+        config:
+          origins:
+            - https://optionsandfuturescalculator.com
+            - https://www.optionsandfuturescalculator.com
+          credentials: true
+          headers:
+            - Accept
+            - Authorization
+            - Content-Type
+            - apikey
+            - Prefer
+            - x-client-info
+      # key-auth requires the anon (or service_role) key on every REST call.
+      # It is NOT authorisation -- the anon key is public and ships in the
+      # browser. It is a coarse filter that keeps unkeyed traffic off the
+      # database; what actually protects rows is RLS.
+      - name: key-auth
+        config:
+          hide_credentials: false
+          key_names:
+            - apikey
+
+consumers:
+  - username: anon
+    keyauth_credentials:
+      - key: ${SUPABASE_ANON_KEY}
+  - username: service_role
+    keyauth_credentials:
+      - key: ${SUPABASE_SERVICE_ROLE_KEY}
