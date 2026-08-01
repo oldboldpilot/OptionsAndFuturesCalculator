@@ -7,15 +7,22 @@ Follows the current Unsloth recipe for this model
 FULL fine-tuning with quantization-aware training rather than LoRA:
 
     FastLanguageModel.from_pretrained(..., full_finetuning=True,
-                                      qat_scheme="int8-int4")
+                                      qat_scheme="int8")
 
 QAT is the load-bearing choice here, not an optimisation. The model is destined
-for CPU inference in the sensen service, so it will run with int4 linear weights
-and int8 dynamically quantized activations whatever we do. Training with those
-in the loop means the deployed model is what was trained, instead of a bf16
-model degraded at the end -- and at 0.6B there is little headroom to absorb that
-degradation. LoRA is skipped for the same reason the notebook skips it: at this
-size a full fine-tune fits comfortably and converges better.
+for CPU inference in the sensen service, so it will run quantized whatever we
+do. Training with the quantization in the loop means the deployed model is what
+was trained, instead of a bf16 model degraded at the end -- and at 0.6B there is
+little headroom to absorb that degradation. LoRA is skipped for the same reason
+the notebook skips it: at this size a full fine-tune fits comfortably and
+converges better.
+
+Scheme is "int8" (8-bit weights and activations) rather than the notebook's
+"int8-int4". int4 linear weights buy roughly half the memory again, which a
+0.6B model on a CPU service does not need, and they cost accuracy this task
+cannot spare: the output is a JSON object where one wrong token is a wrong
+strategy id, not a slightly worse paraphrase. Supported alternatives are int4,
+int8-int4, fp8-fp8 and fp8-int4.
 
     python3 train.py --data ../dataset/data --out /scratch/agents/param-agent
 """
@@ -36,7 +43,7 @@ from datasets import Dataset
 from trl import SFTConfig, SFTTrainer
 
 MODEL_ID = "unsloth/Qwen3-0.6B"
-QAT_SCHEME = "int8-int4"
+QAT_SCHEME = "int8"
 
 
 def load_jsonl(path: Path) -> list[dict]:
@@ -148,12 +155,74 @@ def main() -> None:
     print(f"peak GPU memory: {torch.cuda.max_memory_allocated()/1e9:.2f} GB")
 
     Path(args.out).mkdir(parents=True, exist_ok=True)
-    # Auto-detects the QAT model and performs the conversion.
-    model.save_pretrained_torchao(args.out, tokenizer=tokenizer)
-    print(f"saved -> {args.out}")
+
+    # Export is tried three ways, weakest assumption last, and a failure to
+    # export must never be silent: the previous version caught only
+    # RuntimeError, so when the second attempt raised something else the process
+    # died INSIDE this block. That left an output directory holding config.json
+    # and no weights at all -- which looks like a successful run, because the
+    # only thing that says otherwise is the train_meta.json a few lines below
+    # never appearing. The last run shipped exactly that, and the checkpoint the
+    # Trainer had written was the only reason nothing was lost.
+    #
+    # Root cause of the first two failures: Qwen3 ties lm_head to the input
+    # embeddings, so save_pretrained walks every tensor calling storage_ptr() to
+    # find duplicates -- and QAT weights are tensor SUBCLASSES with no plain
+    # storage behind them. safetensors demands a real pointer; these have none.
+    saved_by = None
+    errors: list[str] = []
+
+    def attempt(name: str, fn) -> bool:
+        nonlocal saved_by
+        if saved_by:
+            return True
+        try:
+            fn()
+            saved_by = name
+            print(f"saved ({name}) -> {args.out}")
+            return True
+        except Exception as e:                      # noqa: BLE001 - see below
+            # Deliberately broad. Each strategy fails in its own library with
+            # its own exception type, and the point of the chain is that ANY
+            # failure falls through to the next attempt rather than killing the
+            # run after 21 minutes of training.
+            errors.append(f"{name}: {type(e).__name__}: {e}")
+            print(f"  {name} failed: {type(e).__name__}: {e}")
+            return False
+
+    # 1. The intended path: auto-detects the QAT model and converts it.
+    attempt("torchao", lambda: model.save_pretrained_torchao(args.out, tokenizer=tokenizer))
+
+    # 2. Pickle instead of safetensors -- torch.save needs no storage pointer.
+    attempt("torch.save", lambda: model.save_pretrained(args.out, safe_serialization=False))
+
+    # 3. Last resort: materialise the tensors ourselves. `.data` on a QAT
+    #    subclass yields the plain dequantized tensor, and untying lm_head by
+    #    cloning removes the duplicate that started all of this.
+    def raw_state_dict() -> None:
+        flat = {}
+        for k, v in model.state_dict().items():
+            t = v.detach()
+            t = t.dequantize() if hasattr(t, "dequantize") else t
+            flat[k] = t.clone().contiguous().to(torch.bfloat16)
+        torch.save(flat, Path(args.out) / "pytorch_model.bin")
+        model.config.save_pretrained(args.out)
+
+    attempt("raw-state-dict", raw_state_dict)
+
+    if not saved_by:
+        # Do not write train_meta.json: an unexported run is a failed run, and
+        # the checkpoint directory is what has to be used instead.
+        raise RuntimeError(
+            "every export strategy failed; the Trainer checkpoints under "
+            f"{args.out} are the only usable weights.\n  " + "\n  ".join(errors)
+        )
+
+    tokenizer.save_pretrained(args.out)
 
     (Path(args.out) / "train_meta.json").write_text(json.dumps({
         "model": MODEL_ID, "qat_scheme": QAT_SCHEME, "seq_len": seq_len,
+        "saved_by": saved_by, "export_errors": errors,
         "steps": steps, "seconds": dt, "s_per_step": dt / steps,
         "peak_gpu_bytes": torch.cuda.max_memory_allocated(),
         "train_rows": len(train_rows),
