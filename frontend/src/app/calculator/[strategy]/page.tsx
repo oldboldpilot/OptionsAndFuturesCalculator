@@ -2,35 +2,9 @@ import React from 'react';
 import { Metadata } from 'next';
 import StrategyWorkspace from '../../../components/StrategyWorkspace';
 
-// List of strategies for SSG (Programmatic SEO)
-const STRATEGIES = [
-  'long-call',
-  'long-put',
-  'call-spread',
-  'put-spread',
-  'bull-put-spread',
-  'bear-call-spread',
-  'straddle',
-  'strangle',
-  'iron-condor',
-  'iron-butterfly',
-  'butterfly',
-  'condor',
-  'collar',
-  'covered-call',
-  'cash-secured-put',
-  'protective-put',
-  'jade-lizard',
-  'calendar-spread',
-  'diagonal-spread',
-  'risk-reversal',
-  'futures-spread',
-  'futures-outright',
-  'futures-calendar-spread',
-  'futures-intercommodity-spread',
-  'covered-futures-call',
-  'futures-basis-arbitrage',
-];
+// Shared with the sitemap, so the pages exported and the pages advertised to
+// crawlers cannot drift apart.
+import { STRATEGY_SLUGS as STRATEGIES } from '@/config/strategies';
 
 interface Props {
   params: Promise<{ strategy: string }>;

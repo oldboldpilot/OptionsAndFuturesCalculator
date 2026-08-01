@@ -41,6 +41,11 @@ import { branding } from "@/config/branding";
 
 export async function generateMetadata(): Promise<Metadata> {
   return {
+    // Without this Next resolves relative metadata URLs against the BUILD host,
+    // which shipped `og:image` as http://localhost:3000/og-image.png to
+    // production -- an unreachable, non-HTTPS image on every share and every
+    // crawl.
+    metadataBase: new URL(branding.canonicalUrl),
     title: {
       template: `%s | ${branding.appName}`,
       default: branding.appName,
@@ -143,6 +148,38 @@ export default function RootLayout({
         <div id="root-container">
           {children}
         </div>
+        {/*
+          Site-wide footer.
+
+          Present for a specific reason: /privacy and /terms have to be
+          REACHABLE, not merely to exist. A policy page nothing links to is not
+          found by a crawler following links, and an advertising or payment
+          reviewer checking whether this site discloses its cookie use will
+          conclude it does not. Both were 404 until now.
+
+          Kept out of the flow of the terminal itself so it cannot compete with
+          live prices for attention.
+        */}
+        <footer
+          style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: '1.25rem',
+            justifyContent: 'center',
+            padding: '1.25rem 1rem 1.5rem',
+            borderTop: '1px solid var(--color-line)',
+            fontSize: '0.75rem',
+            color: 'var(--color-ink-400)',
+          }}
+        >
+          <span>© {new Date().getFullYear()} Options &amp; Futures Calculator</span>
+          <a href="/privacy" style={{ color: 'inherit' }}>Privacy</a>
+          <a href="/terms" style={{ color: 'inherit' }}>Terms</a>
+          <a href="mailto:hello@optionsandfuturescalculator.com" style={{ color: 'inherit' }}>
+            Contact
+          </a>
+          <span>Not investment advice. Market data may be delayed.</span>
+        </footer>
       </body>
     </html>
   );
