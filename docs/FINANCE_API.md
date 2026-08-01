@@ -219,7 +219,131 @@ failure mode is a wrong number.
 
 ---
 
-## 8. Quotas
+## 8. Authentication
+
+**Off unless configured**, like quotas. With `FINANCE_API_KEYS` unset the
+service behaves exactly as it did before keys existed.
+
+### Two kinds of key
+
+| | Publishable `pk_live_…` | Secret `sk_live_…` |
+| --- | --- | --- |
+| Where it goes | Your web page — it is *meant* to be visible | Your server, never a browser |
+| Protected by | The origins you register + quota + revocation | Secrecy + quota + revocation |
+| If it leaks | Only works from your registered origins in a browser | Full access as you, until revoked |
+
+A publishable key is public by design. That is not a weakness to work around —
+it is what embedding means. Its security comes from **binding**, not secrecy:
+a browser sets `Origin` on cross-origin requests and cannot be made to lie
+about it by the page it is on, so a key lifted from your HTML and pasted into
+another site stops working there.
+
+A secret key sent **with** an `Origin` header is treated as leaked: refused
+outright and logged loudly, because nothing legitimate produces that
+combination.
+
+### Sending it
+
+```ts
+client.computePayment(req, { 'x-api-key': 'pk_live_…' }, cb);
+```
+
+```python
+stub.ComputePayment(req, metadata=[("x-api-key", "sk_live_…")])
+```
+
+### What refusal looks like
+
+`UNAUTHENTICATED` (status 16) means *we do not know who you are*:
+
+```
+no API key supplied (send it in the `x-api-key` header)
+malformed API key
+unrecognised API key
+this API key has been revoked
+this API key expired on 2027-01-01
+```
+
+`PERMISSION_DENIED` (status 7) means *we know who you are, and no*:
+
+```
+this API key is not registered for use from this site
+this API key is not entitled to the 'finance' service
+a secret key was presented from a browser; treat it as compromised and rotate
+it. Use a publishable key for browser traffic
+```
+
+The two are kept distinct deliberately. Collapsing them would send a customer
+with a scope problem off to check their key.
+
+### Issuing a key
+
+Keys are stored **hashed**. Generate one, hash it, keep the plaintext only long
+enough to hand it over:
+
+```bash
+KEY="pk_live_$(head -c 32 /dev/urandom | basenc --base64url | tr -d '=')"
+echo "give this to the customer: $KEY"
+printf '%s' "$KEY" | openssl dgst -sha512 -hex | awk '{print $2}'
+```
+
+SHA-512 rather than SHA-256 for margin, and because on 64-bit hardware it is
+also the faster of the two. Deliberately **not** Argon2 or bcrypt: those are
+slow on purpose to protect low-entropy *passwords*, whereas these keys carry 256
+bits of random entropy, so a work factor buys nothing and would put tens of
+milliseconds on every request. Comparison is constant-time.
+
+### Configuring
+
+```bash
+FINANCE_API_KEYS='{
+  "<sha512 hex of the key>": {
+    "id": "acme-risk",
+    "type": "publishable",
+    "tier": "partner",
+    "origins": ["https://acme.example", "https://*.acme.example"],
+    "scopes": ["finance"],
+    "expires": "2027-01-01",
+    "enabled": true
+  }
+}'
+```
+
+`origins` applies only to browser traffic — a server-side caller sends no
+`Origin`, so a secret key needs none. `expires` is optional. `enabled: false`
+revokes without deleting, which keeps the audit trail intelligible.
+
+The tier here is what quota meters against, so a key is configured **once**.
+`QUOTA_API_KEYS` is not needed alongside it, and should not be used — it holds
+keys in plaintext, which is the exposure hashing exists to remove.
+
+### Rolling it out
+
+`FINANCE_REQUIRE_KEY` stages the change, because a switch that starts refusing
+traffic must not be thrown blind:
+
+| Value | Behaviour |
+| --- | --- |
+| unset / `0` / `observe` | Everything served. Refusals logged as `would-deny`. |
+| `1` / `warn` | Everything served. `would-deny` logged at error level. |
+| `2` / `enforce` | Refusals are real. |
+
+Observe first, read the logs, and only then enforce. The log line names the key
+by its **label**, never the key itself:
+
+```
+auth would-deny: key=<none> method=ComputePayment origin=- outcome=no-key
+```
+
+The startup log states the posture, so "is auth on?" is answerable without
+sending traffic:
+
+```
+API key auth ENABLED: 3 keys, mode ENFORCE
+Max request size: 1048576 bytes
+```
+
+## 9. Quotas
 
 **Off unless configured.** With no policy set the service behaves exactly as it
 did before quotas existed. That is the only safe default for a mechanism that
@@ -321,11 +445,20 @@ limit. Moving to a shared store is the change to make before scaling out.
 Set `SMOKE_API_KEY` for `smoke_client` so the gate's own dozens of calls run on a
 generous tier instead of throttling themselves partway through.
 
-## 9. Operational notes
+## 10. Operational notes
 
-- **Quotas are not authentication.** An API key selects a tier; it grants no
-  privileges and protects no data. Everything here is readable by anyone with
-  the URL.
+- **Quotas are not authentication**, and the two are separate on purpose.
+  Quota answers "how much may this caller use"; §8 answers "who is this, and
+  may they call at all". Keeping them apart is what lets an unrecognised key be
+  a refusal without quota having to become an authentication system it was not
+  designed to be.
+- **There is no stored data to protect.** Every RPC is a pure calculation over
+  inputs the caller supplies; none reads from Postgres. Authentication here is
+  about *access and cost*, not confidentiality — and this note is the thing to
+  revisit the moment an RPC starts returning stored data.
+- **Requests are capped at 1 MiB**, below gRPC's 4 MiB default. The cap is at
+  the transport layer because the quota guard runs *after* deserialization: by
+  the time a call can be priced, its payload is already resident.
 - **No streaming.** Every RPC is unary.
 - **Shared with the calculator.** `calculator.OptionsCalculator` is on the same
   host and port. The two are independent contracts; a client needs only the

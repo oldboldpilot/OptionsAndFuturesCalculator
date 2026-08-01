@@ -20,6 +20,7 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <grpcpp/grpcpp.h>
 #include "calculator.pb.h"
@@ -1155,15 +1156,147 @@ auto check_quota(sensen::finance::Finance::Stub& stub) -> bool {
     return true;
 }
 
+/**
+ * Authentication, exercised against every way it is supposed to refuse.
+ *
+ * Checking that a valid key works proves almost nothing on its own -- an
+ * "authentication" layer that admits everything also admits the valid key. What
+ * makes this a gate is the refusals: each case below is a distinct way in, and
+ * a regression in any one of them would leave the API open in a way the happy
+ * path cannot reveal.
+ *
+ * Driven by environment so the gate carries no credentials of its own:
+ *
+ *   SMOKE_AUTH_PK      a valid publishable key
+ *   SMOKE_AUTH_SK      a valid secret key
+ *   SMOKE_AUTH_ORIGIN  an origin registered against SMOKE_AUTH_PK
+ */
+auto check_auth(sensen::finance::Finance::Stub& stub) -> bool {
+    const char* pk = std::getenv("SMOKE_AUTH_PK");
+    if (pk == nullptr || *pk == '\0') {
+        std::cout << "Auth     not configured (SMOKE_AUTH_PK unset) -- not exercised\n";
+        return true;
+    }
+    const char* sk = std::getenv("SMOKE_AUTH_SK");
+    const char* origin = std::getenv("SMOKE_AUTH_ORIGIN");
+
+    // ComputePayment is the cheapest RPC, so these calls test admission rather
+    // than incidentally testing the quota's compute budget.
+    const auto call = [&stub](const char* api_key, const char* org) -> grpc::StatusCode {
+        sensen::finance::PaymentRequest req;
+        req.set_rate("0.005");
+        req.set_periods(360);
+        req.set_present_value("300000");
+        sensen::finance::DecimalResponse res;
+        auto ctx = make_anonymous_context();
+        if (api_key != nullptr) ctx->AddMetadata("x-api-key", api_key);
+        if (org != nullptr) ctx->AddMetadata("origin", org);
+        return stub.ComputePayment(ctx.get(), req, &res).error_code();
+    };
+
+    // If a valid key is refused, auth is either off or misconfigured, and every
+    // refusal below would then "pass" for the wrong reason. Establish this
+    // first so the rest of the checks mean what they claim.
+    if (const auto code = call(pk, origin); code != grpc::StatusCode::OK) {
+        std::cerr << "a valid publishable key from its registered origin was refused (status "
+                  << static_cast<int>(code) << ") -- auth is misconfigured, so the refusal checks "
+                  << "below would pass vacuously\n";
+        return false;
+    }
+    std::cout << "Auth     a valid publishable key from its registered origin is admitted\n";
+
+    struct Case {
+        const char* what;
+        const char* key;
+        const char* origin;
+        grpc::StatusCode expect;
+    };
+    // pk_live_ + 43 base64url characters: correctly SHAPED but never issued, so
+    // it separates "rejected for looking wrong" from "rejected for being
+    // unknown". Without it, a shape check alone would look like authentication.
+    static constexpr const char* kWellFormedUnknown =
+        "pk_live_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+    const std::vector<Case> cases{
+        {"no key at all", nullptr, nullptr, grpc::StatusCode::UNAUTHENTICATED},
+        {"a malformed key", "not-a-key", nullptr, grpc::StatusCode::UNAUTHENTICATED},
+        {"a well-formed but unissued key", kWellFormedUnknown, nullptr,
+         grpc::StatusCode::UNAUTHENTICATED},
+    };
+
+    for (const auto& c : cases) {
+        if (const auto code = call(c.key, c.origin); code != c.expect) {
+            std::cerr << "expected " << c.what << " to be refused with status "
+                      << static_cast<int>(c.expect) << ", got " << static_cast<int>(code) << "\n";
+            return false;
+        }
+        std::cout << "         " << c.what << " is refused\n";
+    }
+
+    // Origin binding is the whole reason a publishable key can be public. If a
+    // key works from any site, it is just a password printed in the customer's
+    // HTML.
+    if (origin != nullptr && *origin != '\0') {
+        if (const auto code = call(pk, "https://not-registered.example");
+            code != grpc::StatusCode::PERMISSION_DENIED) {
+            std::cerr << "a publishable key worked from an unregistered origin (status "
+                      << static_cast<int>(code)
+                      << ") -- origin binding is not enforced, so the key is usable by any site "
+                         "that copies it out of the page\n";
+            return false;
+        }
+        std::cout << "         a publishable key is refused from an unregistered origin\n";
+    }
+
+    if (sk != nullptr && *sk != '\0') {
+        if (const auto code = call(sk, nullptr); code != grpc::StatusCode::OK) {
+            std::cerr << "a valid secret key was refused server-side (status "
+                      << static_cast<int>(code) << ")\n";
+            return false;
+        }
+        std::cout << "         a valid secret key is admitted server-side\n";
+
+        // A secret key arriving with an Origin header can only have got there
+        // by being pasted into client-side code. It is refused even though the
+        // key itself is valid, because serving it would normalise a leak.
+        if (const auto code = call(sk, "https://anywhere.example");
+            code != grpc::StatusCode::PERMISSION_DENIED) {
+            std::cerr << "a secret key presented from a browser was accepted (status "
+                      << static_cast<int>(code) << ") -- a leaked sk_ would keep working\n";
+            return false;
+        }
+        std::cout << "         a secret key presented from a browser is refused as leaked\n";
+    }
+
+    return true;
+}
+
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
     const std::string target = (argc > 1) ? argv[1] : "localhost:50051";
     const std::string symbol = (argc > 2) ? argv[2] : "SPY";
+    // Which suite to run: "all" (default), or "finance" for the parts that need
+    // no market data. The calculator checks assert on LIVE quotes, so they
+    // legitimately fail when the market is shut -- which would otherwise make
+    // it impossible to verify authentication on a Sunday.
+    const std::string suite = (argc > 3) ? argv[3] : "all";
 
-    std::cout << "Smoke test against " << target << " for " << symbol << "\n\n";
+    std::cout << "Smoke test against " << target << " for " << symbol << " [suite: " << suite
+              << "]\n\n";
 
     auto channel = grpc::CreateChannel(target, grpc::InsecureChannelCredentials());
+
+    if (suite == "finance") {
+        auto finance_only = sensen::finance::Finance::NewStub(channel);
+        if (!check_finance(*finance_only)) return 1;
+        if (!check_auth(*finance_only)) return 1;
+        if (!check_quota(*finance_only)) return 1;
+        std::cout << "\nThe financial library's answers satisfy their independent identities, "
+                     "and authentication refuses every way in it is supposed to.\n";
+        return 0;
+    }
+
     auto stub = calculator::OptionsCalculator::NewStub(channel);
 
     double spot = 0.0;
@@ -1194,6 +1327,11 @@ auto main(int argc, char** argv) -> int {
     // a separate contract, not a separate service to reach.
     auto finance = sensen::finance::Finance::NewStub(channel);
     if (!check_finance(*finance)) return 1;
+
+    // Before the quota check, because that one deliberately exhausts the
+    // anonymous allowance -- an auth refusal afterwards could not be told apart
+    // from a quota refusal.
+    if (!check_auth(*finance)) return 1;
 
     // Last, because it deliberately exhausts an allowance -- anything after it
     // would be refused for reasons that have nothing to do with what it tests.

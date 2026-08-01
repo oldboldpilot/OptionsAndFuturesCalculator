@@ -207,22 +207,6 @@ class QuotaEnforcer::Impl {
      * for one refusal.
      */
     [[nodiscard]] auto admit(std::string_view api_key, double compute_units) -> Decision {
-        Decision d;
-        if (!enabled_) {
-            d.allowed = true;
-            return d;
-        }
-        // A negative or non-finite cost would refund the bucket. Callers price
-        // their own calls, so this is a guard against a bug upstream, not
-        // against a hostile input.
-        if (!std::isfinite(compute_units) || compute_units < 0.0) compute_units = 1.0;
-
-        const auto tier = tier_for(api_key);
-        const auto lim = limits_for_tier(tier);
-        d.tier = tier;
-
-        const auto now = Clock::now();
-
         // The bucket is keyed on the key only when the key is RECOGNISED.
         //
         // Keying on whatever arrived in the header would make the limit
@@ -234,6 +218,42 @@ class QuotaEnforcer::Impl {
         const bool recognised = !api_key.empty() &&
                                 key_to_tier_.find(std::string{api_key}) != key_to_tier_.end();
         const std::string id = recognised ? std::string{api_key} : std::string{"~anonymous"};
+        return charge(id, tier_for(api_key), compute_units);
+    }
+
+    /**
+     * Charges an already-resolved caller.
+     *
+     * Split out from `admit` so an authenticated call can be metered against
+     * its verified identity rather than against the raw header -- the header
+     * path stays for the calculator service, which has no authentication.
+     *
+     * An empty `caller_id` collapses to the shared anonymous bucket for the
+     * same reason an unrecognised key does: an unidentified caller must not be
+     * able to mint fresh allowance by varying what it sends.
+     */
+    [[nodiscard]] auto charge(std::string_view caller_id, std::string_view tier_name,
+                              double compute_units) -> Decision {
+        Decision d;
+        if (!enabled_) {
+            d.allowed = true;
+            return d;
+        }
+        // A negative or non-finite cost would refund the bucket. Callers price
+        // their own calls, so this is a guard against a bug upstream, not
+        // against a hostile input.
+        if (!std::isfinite(compute_units) || compute_units < 0.0) compute_units = 1.0;
+
+        // A tier the policy does not define falls back to the anonymous limits
+        // rather than to no limit -- an entitlement naming a tier that was
+        // renamed must not become unlimited access.
+        const std::string tier =
+            tier_name.empty() ? anonymous_tier_ : std::string{tier_name};
+        const auto lim = limits_for_tier(tier);
+        d.tier = tier;
+
+        const auto now = Clock::now();
+        const std::string id = caller_id.empty() ? std::string{"~anonymous"} : std::string{caller_id};
 
         const std::lock_guard<std::mutex> lock(mu_);
         sweep_idle(now);
@@ -338,6 +358,29 @@ auto QuotaEnforcer::admit_caller(std::string_view api_key, std::string_view /*me
     return impl_->admit(api_key, compute_units);
 }
 
+namespace {
+
+/**
+ * Turns a refusal into the gRPC status a client should act on.
+ *
+ * RESOURCE_EXHAUSTED, not UNAVAILABLE: the call was understood and refused on
+ * policy, and it will keep being refused until the allowance returns.
+ * UNAVAILABLE invites the caller's gRPC library to retry immediately, which is
+ * precisely the wrong response.
+ */
+[[nodiscard]] auto to_status(const Decision& d, std::string_view method) -> grpc::Status {
+    std::string msg = "quota exceeded for tier '" + d.tier + "' on " + std::string(method) + " (" +
+                      d.reason + ")";
+    if (d.retry_after_seconds > 0) {
+        msg += "; retry in " + std::to_string(d.retry_after_seconds) + "s";
+    } else {
+        msg += "; this request cannot succeed at this tier regardless of waiting";
+    }
+    return grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, msg);
+}
+
+}  // namespace
+
 auto QuotaEnforcer::admit(const grpc::ServerContext& ctx, std::string_view method,
                           double compute_units) -> grpc::Status {
     if (!impl_->enabled_) return grpc::Status::OK;
@@ -351,19 +394,15 @@ auto QuotaEnforcer::admit(const grpc::ServerContext& ctx, std::string_view metho
 
     const auto d = impl_->admit(api_key, compute_units);
     if (d.allowed) return grpc::Status::OK;
+    return to_status(d, method);
+}
 
-    // RESOURCE_EXHAUSTED, not UNAVAILABLE: the call was understood and refused
-    // on policy, and it will keep being refused until the allowance returns.
-    // UNAVAILABLE invites the caller's gRPC library to retry immediately, which
-    // is precisely the wrong response.
-    std::string msg = "quota exceeded for tier '" + d.tier + "' on " + std::string(method) +
-                      " (" + d.reason + ")";
-    if (d.retry_after_seconds > 0) {
-        msg += "; retry in " + std::to_string(d.retry_after_seconds) + "s";
-    } else {
-        msg += "; this request cannot succeed at this tier regardless of waiting";
-    }
-    return grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, msg);
+auto QuotaEnforcer::admit_identity(std::string_view caller_id, std::string_view tier,
+                                   std::string_view method, double compute_units) -> grpc::Status {
+    if (!impl_->enabled_) return grpc::Status::OK;
+    const auto d = impl_->charge(caller_id, tier, compute_units);
+    if (d.allowed) return grpc::Status::OK;
+    return to_status(d, method);
 }
 
 // ---------------------------------------------------------------------------

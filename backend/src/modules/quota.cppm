@@ -76,6 +76,23 @@ class QuotaEnforcer {
     [[nodiscard]] auto admit(const grpc::ServerContext& ctx, std::string_view method,
                              double compute_units) -> grpc::Status;
 
+    /**
+     * Charges a call whose caller has ALREADY been authenticated.
+     *
+     * Preferred over `admit` wherever authentication runs, because it takes the
+     * tier from the verified identity instead of re-deriving it from the raw
+     * header. That is what lets the key registry own keys outright: without
+     * this, every key would have to be configured twice -- hashed in
+     * FINANCE_API_KEYS and again in PLAINTEXT in QUOTA_API_KEYS -- which would
+     * reintroduce the stored-credential exposure that hashing exists to remove.
+     *
+     * `caller_id` is the key's human label, never the key. An empty id means an
+     * unauthenticated caller and shares the single anonymous bucket.
+     */
+    [[nodiscard]] auto admit_identity(std::string_view caller_id, std::string_view tier,
+                                      std::string_view method, double compute_units)
+        -> grpc::Status;
+
     /** The same check without the gRPC types, for tests and diagnostics. */
     [[nodiscard]] auto admit_caller(std::string_view api_key, std::string_view method,
                                     double compute_units) -> Decision;

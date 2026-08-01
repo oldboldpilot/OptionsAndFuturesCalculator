@@ -20,6 +20,7 @@ import sensen.portfolio;
 import sensen.linear_algebra;
 import logger;
 import quota;
+import api_key;
 
 namespace options_calculator::finance {
 
@@ -142,10 +143,32 @@ template <typename T>
  * method name and the metadata, but not `paths`, `steps` or `term_months`, so
  * it could only ever charge every RPC the same.
  */
+/**
+ * The admission guard every finance RPC runs first: authenticate, then charge.
+ *
+ * The order is not arbitrary. Authentication is the cheaper check and the more
+ * decisive one, and it produces the identity that quota then meters against --
+ * charging first would spend an unauthenticated caller's allowance on a request
+ * that was going to be refused anyway, and would meter a verified partner
+ * against the shared anonymous bucket.
+ *
+ * It stays a macro, and stays at the top of each RPC, for the reason quota.cppm
+ * documents: a synchronous C++ server interceptor cannot return a Status to
+ * reject a call, and cannot see the deserialized request, so it could not price
+ * the work. One visible line per RPC is debuggable and greppable; an RPC that
+ * forgets it is a visible omission rather than an invisible hole.
+ */
 #define CHARGE(method_name, cost)                                                \
+    ::options_calculator::auth::Identity _id;                                    \
     do {                                                                         \
+        if (auto _a = ::options_calculator::auth::KeyRegistry::instance()         \
+                          .authenticate(*context, "finance", (method_name), _id); \
+            !_a.ok()) {                                                          \
+            return _a;                                                           \
+        }                                                                        \
         if (auto _q = ::options_calculator::quota::QuotaEnforcer::instance()      \
-                          .admit(*context, (method_name), (cost));                \
+                          .admit_identity(_id.id, _id.tier, (method_name),        \
+                                          (cost));                                \
             !_q.ok()) {                                                          \
             return _q;                                                           \
         }                                                                        \

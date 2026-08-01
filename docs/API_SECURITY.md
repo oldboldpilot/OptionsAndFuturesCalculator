@@ -75,9 +75,10 @@ Hashing addresses a different and much narrower set of vectors that remain:
 `/proc/self/environ` inside the container, a crash dump, and the Railway
 dashboard, where variables are readable by anyone with account access. It is
 worth doing anyway because it costs nothing and changes a property rather than
-adding a control: with SHA-256 at rest the stored form **is not a credential**,
+adding a control: with SHA-512 at rest the stored form **is not a credential**,
 so none of those vectors yield a working key even in principle. Constant-time
-comparison closes the timing oracle in the same change.
+comparison closes the timing oracle in the same change. See §4.2 for why
+SHA-512 and not SHA-256, and why deliberately not Argon2.
 
 **M1 — No message size cap.** Neither `SetMaxReceiveMessageSize` in the engine
 nor a body limit in Envoy. gRPC's implicit 4 MB default is the only thing
@@ -146,10 +147,60 @@ browser, and lets a customer tell at a glance which one they are pasting. Secret
 scanners (GitHub, GitLab) also key on prefixes, so a leaked `sk_live_` is more
 likely to be caught by someone else's tooling.
 
-Stored as `sha256(key)`. The plaintext exists only at issuance, in the
+Stored as `sha512(key)`. The plaintext exists only at issuance, in the
 customer's hands, and in the request being checked.
 
-### 4.2 Validation order
+### 4.2 Hashing at rest: SHA-512, and deliberately not a KDF
+
+**SHA-512, not SHA-256.** Both are already considered safe against a quantum
+adversary, so this is margin rather than rescue, and the reasoning should be
+stated plainly rather than waved at:
+
+- **Grover's algorithm** is the only quantum attack that applies to a hash
+  preimage, and it buys a *quadratic* speedup — not the exponential one Shor's
+  algorithm gives against RSA and elliptic curves. It takes SHA-256's preimage
+  cost from 2²⁵⁶ to 2¹²⁸, and SHA-512's from 2⁵¹² to 2²⁵⁶. 2¹²⁸ is already out
+  of reach of any physically plausible machine, so SHA-256 would not actually
+  fail here. SHA-512 simply leaves a margin that no foreseeable advance in
+  quantum computing narrows.
+- **SHA-512 is also faster.** It operates on 64-bit words in 1024-bit blocks
+  (80 rounds) where SHA-256 uses 32-bit words in 512-bit blocks (64 rounds), so
+  on any 64-bit CPU it moves roughly 1.3–1.5× more bytes per second. This is
+  the unusual case where the more conservative choice is also the cheaper one,
+  which is the whole reason it is worth taking.
+
+**What is genuinely quantum-vulnerable here is not the hash.** It is the TLS
+handshake at Railway's edge, which negotiates a classical elliptic-curve key
+exchange. That is the primitive Shor's algorithm actually breaks, and it is the
+one that carries "harvest now, decrypt later" risk for keys in transit.
+Hardening it is Railway's to do, not ours — worth tracking, and worth not
+confusing with this change, which does nothing for it.
+
+**Deliberately not Argon2, bcrypt or scrypt.** This is the part most often got
+backwards. Those are password hashes, and they are slow *on purpose* because
+human-chosen passwords carry perhaps 30–40 bits of entropy and the whole
+defence is making each offline guess expensive. Our keys carry **256 bits of
+random entropy**. Brute force is already infeasible by a margin no work factor
+can improve on, so a slow KDF would buy nothing — while costing something real:
+Argon2 at sane parameters is tens of milliseconds and hundreds of megabytes
+*per verification*, which on a request path is an denial-of-service vector we
+would be building ourselves. A fast hash is the correct choice for a
+high-entropy random token, and a slow one is correct for a password. The
+distinction is entropy, not fashion.
+
+**Comparison is constant-time** — `CRYPTO_memcmp`, never `==` or `memcmp`,
+whose early exit leaks how many leading bytes matched.
+
+No new dependency: `backend/CMakeLists.txt:315` already links
+`OpenSSL::Crypto` into `calculator_engine`. The EVP interface
+(`EVP_Digest` with `EVP_sha512()`) is used rather than the legacy `SHA512()`
+one-shot, which OpenSSL 3.0 deprecated and this build would warn on.
+
+*If algorithm diversity is later wanted, SHA3-512 is a drop-in via `EVP_sha3_512()`.
+That hedges a cryptanalytic break in the SHA-2 family — a classical risk, not a
+quantum one — at roughly half the throughput in software. Not worth it today.*
+
+### 4.3 Validation order
 
 Cheapest and most decisive first, so a bad request is refused before it costs
 anything:
@@ -170,12 +221,12 @@ anything:
 Step 3 is what keeps step 4 cheap under a probing attack: a malformed key never
 reaches the hash.
 
-### 4.3 Origin binding
+### 4.4 Origin binding
 
 Each key carries an allowlist:
 
 ```json
-"sha256:9f86d081…": {
+"sha512:ee26b0dd4af7e749aa1a8ee3c10ae9923f618980772e473f8819a5d4940e0db2…": {
   "id": "acme-risk",
   "type": "publishable",
   "tier": "partner",
@@ -192,20 +243,20 @@ quota.
 
 An empty `origins` list means no browser use — appropriate for secret keys.
 
-### 4.4 CORS follows the key
+### 4.5 CORS follows the key
 
 Envoy's blanket `.*` is replaced by the union of registered origins. The browser
 then refuses the response before the page can read it, which is a second,
 independent layer over the engine's own check.
 
-### 4.5 What our own frontend uses
+### 4.6 What our own frontend uses
 
 Its own publishable key, origin-locked to `optionsandfuturescalculator.com` and
 `*.pages.dev`. It is not a secret — it is visible in the bundle — and that is
 fine. Its purpose is to separate our traffic from everyone else's, which is what
 makes unfamiliar traffic *visible*.
 
-### 4.6 Audit
+### 4.7 Audit
 
 One structured line per call:
 
