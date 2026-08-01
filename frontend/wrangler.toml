@@ -6,12 +6,37 @@
 # a Worker invocation in front of every asset request, which costs latency and
 # money to do what the assets binding already does for free.
 #
-# This replaces the Cloudflare Pages project. The custom domain is NOT declared
-# here: `routes` would claim optionsandfuturescalculator.com away from Pages the
-# moment this deploys, cutting the live site over with no way to compare the two
-# first. Deploy to workers.dev, check it, then attach the domain deliberately.
+# This replaces the Cloudflare Pages project.
+#
+# The domains below were attached only AFTER the workers.dev deployment was
+# verified serving 31/31 routes and 14/14 referenced assets. That order matters:
+# attaching them first would have cut the live site over to an unverified build,
+# and this project has a history of chunk 404s that only appear once deployed.
+#
+# Immediately after deploy the same URL returned 200, 404, 200 within seconds --
+# edge colos catching up, not a missing file. It settled to 0/30 failures after
+# ~90s. Worth knowing before reading a fresh deploy's 404 as a broken build.
+#
+# `custom_domain = true` makes Cloudflare manage the DNS record for these names
+# itself. That is the opposite of the `api` record's requirement in CLAUDE.md,
+# which must stay un-proxied for Railway -- these are Cloudflare-terminated and
+# proxied, that one is not.
 name = "optionsandfuturescalculator"
 compatibility_date = "2026-07-31"
+
+# Kept on deliberately. Attaching `routes` turns this off by default, which
+# removes the one URL that can verify a build without touching the live domain.
+workers_dev = true
+
+# Attaching these required DELETING the zone's pre-existing CNAME records for
+# both names first. Cloudflare refuses with code 100117 while any "externally
+# managed" record exists, and detaching the domain from the Pages project does
+# NOT remove them -- doing only the detach takes the site down, because the
+# record still resolves while nothing is bound to serve it (a 522).
+routes = [
+  { pattern = "optionsandfuturescalculator.com", custom_domain = true },
+  { pattern = "www.optionsandfuturescalculator.com", custom_domain = true },
+]
 
 [assets]
 directory = "./out"
