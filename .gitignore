@@ -25,3 +25,7 @@ current-ui.png
 # Worker dependencies and local wrangler state
 workers/*/node_modules/
 workers/*/.wrangler/
+# The root .wrangler/ too. It was tracked, which put the Cloudflare account id
+# and name into the history as build cache -- not a credential, but machine
+# state that differs per developer and conflicts on every deploy.
+.wrangler/
