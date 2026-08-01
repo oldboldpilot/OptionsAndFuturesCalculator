@@ -123,14 +123,48 @@ export function AdSlot({
   }
 
   return (
-    <aside aria-label={label} style={frame}>
+    // `position: relative` so the label below can sit behind the <ins>.
+    <aside aria-label={label} style={{ ...frame, position: 'relative' }}>
+      {/*
+        The reserved space, labelled, BEHIND the ad.
+
+        An <ins> that AdSense has not filled has height 0 and renders nothing, so
+        the reserved box was a blank gap indistinguishable from a bug -- which is
+        exactly how it was reported. This layer means the space always shows what
+        it is; a filled ad paints over it, and an unfilled one still reads as a
+        slot rather than as a hole in the page.
+
+        aria-hidden because the <aside> is already labelled, and a screen reader
+        should not hear "Sponsored" twice.
+      */}
+      <span
+        aria-hidden="true"
+        style={{
+          position: 'absolute',
+          inset: 0,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          border: '1px dashed var(--color-line)',
+          borderRadius: 'var(--radius-sm)',
+          color: 'var(--color-ink-400)',
+          fontSize: 'var(--text-2xs)',
+          letterSpacing: '0.08em',
+          textTransform: 'uppercase',
+          pointerEvents: 'none',
+          zIndex: 0,
+        }}
+      >
+        {label}
+      </span>
       {mounted && (
         <ins
           className="adsbygoogle"
           style={
             isFluid
-              ? { display: 'block' }
-              : { display: 'block', width: '100%', height: dims.height }
+              ? { display: 'block', position: 'relative', zIndex: 1 }
+              : { display: 'block', width: '100%', height: dims.height,
+                  position: 'relative', zIndex: 1 }
           }
           data-ad-client={CLIENT}
           data-ad-slot={slot}
