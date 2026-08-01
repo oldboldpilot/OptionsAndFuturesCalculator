@@ -1271,6 +1271,73 @@ auto check_auth(sensen::finance::Finance::Stub& stub) -> bool {
     return true;
 }
 
+/**
+ * The Pro gate, checked where it actually has to hold.
+ *
+ * The point of this check is that the gate is SERVER-SIDE. The frontend is a
+ * static export, so any limit it applies runs on the user's own machine and the
+ * gRPC endpoint answers curl regardless. This calls the RPC directly, exactly
+ * as someone bypassing the UI would, and asserts both halves: single-leg stays
+ * free, multi-leg does not.
+ *
+ * Skipped unless PRO_GATE_MODE=enforce, because with the gate off "not refused"
+ * is the correct answer and asserting a refusal would fail for the right
+ * reason at the wrong time.
+ */
+auto check_pro_gate(calculator::OptionsCalculator::Stub& stub, const std::string& symbol,
+                    double spot) -> bool {
+    const char* mode = std::getenv("PRO_GATE_MODE");
+    const bool enforcing =
+        mode != nullptr && (std::string{mode} == "enforce" || std::string{mode} == "2");
+    if (!enforcing) {
+        std::cout << "Pro gate not enforcing (PRO_GATE_MODE not 'enforce') -- not exercised\n";
+        return true;
+    }
+
+    const auto call = [&](int legs) -> grpc::StatusCode {
+        calculator::StrategyRequest req;
+        req.set_underlying_symbol(symbol);
+        req.set_current_price(spot);
+        req.set_implied_volatility(0.20);
+        req.set_risk_free_rate(0.04);
+        for (int i = 0; i < legs; ++i) {
+            auto& leg = *req.add_legs();
+            leg.set_action(i % 2 == 0 ? calculator::Leg::BUY : calculator::Leg::SELL);
+            leg.set_type(i % 2 == 0 ? calculator::Leg::CALL : calculator::Leg::PUT);
+            // Strikes spread around spot so the legs form a real structure
+            // rather than four copies of the same contract.
+            leg.set_strike(spot * (0.95 + 0.025 * static_cast<double>(i)));
+            leg.set_expiration_days(30);
+            leg.set_quantity(1);
+            leg.set_premium(spot * 0.03);
+            // Zero IV means "not quoted" and the engine refuses, so a missing
+            // one here would look like the gate firing when it had not.
+            leg.set_implied_volatility(0.20);
+            leg.set_contract_multiplier(100.0);
+        }
+        calculator::StrategyResponse res;
+        const auto ctx = make_context();
+        return stub.CalculateStrategy(ctx.get(), req, &res).error_code();
+    };
+
+    if (const auto code = call(1); code != grpc::StatusCode::OK) {
+        std::cerr << "a SINGLE-leg strategy was refused (status " << static_cast<int>(code)
+                  << ") -- the free tier is broken, which is worse than the gate not working\n";
+        return false;
+    }
+    std::cout << "Pro gate single-leg call stays free\n";
+
+    if (const auto code = call(4); code != grpc::StatusCode::PERMISSION_DENIED) {
+        std::cerr << "a 4-leg strategy was computed without a Pro entitlement (status "
+                  << static_cast<int>(code)
+                  << ") -- the gate is not enforced server-side, so hiding it in the UI would "
+                     "protect nothing\n";
+        return false;
+    }
+    std::cout << "         a 4-leg strategy is refused without Pro\n";
+    return true;
+}
+
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
@@ -1286,6 +1353,16 @@ auto main(int argc, char** argv) -> int {
               << "]\n\n";
 
     auto channel = grpc::CreateChannel(target, grpc::InsecureChannelCredentials());
+
+    if (suite == "pro") {
+        // A supplied spot, not a fetched one: the gate refuses before any
+        // pricing happens, so this suite must not depend on the market being
+        // open to prove the gate holds.
+        auto calc = calculator::OptionsCalculator::NewStub(channel);
+        if (!check_pro_gate(*calc, symbol, 500.0)) return 1;
+        std::cout << "\nThe Pro gate holds at the RPC, which is where it has to hold.\n";
+        return 0;
+    }
 
     if (suite == "finance") {
         auto finance_only = sensen::finance::Finance::NewStub(channel);

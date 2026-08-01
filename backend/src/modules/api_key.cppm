@@ -162,4 +162,45 @@ class KeyRegistry {
 /** Human-readable name for an outcome, for logs. */
 [[nodiscard]] auto to_string(Outcome outcome) noexcept -> std::string_view;
 
+// ---------------------------------------------------------------------------
+// Entitlement
+//
+// Which paid features an identity may use. It lives here rather than in its own
+// module because `Identity` already carries the tier -- an entitlement is a
+// question ABOUT an identity, and splitting the two would mean a module that
+// exists to hold one predicate.
+//
+// The gate has to be SERVER-SIDE. The frontend is a static Cloudflare Pages
+// export: anything it enforces is enforced by code the user already has on
+// their machine, and the gRPC endpoint is reachable directly with curl. A
+// client-side check is a label, not a lock.
+// ---------------------------------------------------------------------------
+
+/**
+ * How strictly to apply the Pro gate.
+ *
+ * Off is the default and leaves every strategy free, exactly as before. The
+ * staged rollout matters more here than it does for authentication: switching
+ * this on turns a feature people already use into one they have to pay for, so
+ * it must not happen as a side effect of a deploy.
+ */
+enum class GateMode : std::uint8_t { Off, Warn, Enforce };
+
+/** Reads PRO_GATE_MODE. Unset means Off. */
+[[nodiscard]] auto pro_gate_mode() -> GateMode;
+
+/** Whether this identity carries a Pro entitlement. */
+[[nodiscard]] auto is_pro(const Identity& identity) noexcept -> bool;
+
+/**
+ * Decides whether a strategy of `leg_count` legs may be computed.
+ *
+ * Single-leg positions -- a plain long call or put -- stay free. Anything the
+ * caller had to combine (spreads, straddles, condors, butterflies) is the paid
+ * feature. Returns OK when allowed, PERMISSION_DENIED with an upgrade message
+ * when not, and always OK while the gate is Off or Warn.
+ */
+[[nodiscard]] auto check_strategy_entitlement(const Identity& identity, int leg_count)
+    -> grpc::Status;
+
 }  // namespace options_calculator::auth

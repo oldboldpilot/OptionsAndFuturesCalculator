@@ -25,6 +25,7 @@ module calculator_service;
 import sensen.options;
 import logger;
 import market_data;
+import api_key;
 
 import sgee.builder.fluent;
 import sgee.runtime.context;
@@ -857,7 +858,7 @@ public:
      * and bound to a reference on the first line, and no raw pointer appears
      * anywhere in the bodies. See the deviation register in the spec.
      */
-    auto CalculateStrategy(ServerContext*, const calculator::StrategyRequest* request,
+    auto CalculateStrategy(ServerContext* context, const calculator::StrategyRequest* request,
                            calculator::StrategyResponse* response) -> Status override {
         if (request == nullptr || response == nullptr) {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
@@ -867,6 +868,31 @@ public:
 
         auto& log = logger::Logger::getInstance();
         log.info("CalculateStrategy: {} with {} legs", req.underlying_symbol(), req.legs_size());
+
+        // The Pro gate, server-side and before any work is done.
+        //
+        // It has to be here rather than in the UI: the frontend is a static
+        // export, so a check there runs on the user's own machine, and this
+        // endpoint answers curl. Gating in the UI would hide the button, not
+        // the feature.
+        //
+        // Identity is resolved through the key registry, which returns an
+        // unauthenticated identity when no key is configured -- so with
+        // PRO_GATE_MODE unset this whole block is inert and every strategy
+        // stays free, which is the behaviour that exists today.
+        ::options_calculator::auth::Identity identity;
+        if (context != nullptr) {
+            if (auto s = ::options_calculator::auth::KeyRegistry::instance().authenticate(
+                    *context, "calculator", "CalculateStrategy", identity);
+                !s.ok()) {
+                return s;
+            }
+        }
+        if (auto s = ::options_calculator::auth::check_strategy_entitlement(identity,
+                                                                           req.legs_size());
+            !s.ok()) {
+            return s;
+        }
 
         if (!execution_engine_) {
             return Status(grpc::StatusCode::INTERNAL, "Execution engine not initialized");

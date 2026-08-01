@@ -184,6 +184,50 @@ auto to_string(Outcome outcome) noexcept -> std::string_view {
     return "unknown";
 }
 
+// ---------------------------------------------------------------------------
+// Entitlement
+// ---------------------------------------------------------------------------
+
+auto pro_gate_mode() -> GateMode {
+    const auto raw = env_or("PRO_GATE_MODE", "");
+    if (raw == "2" || raw == "enforce") return GateMode::Enforce;
+    if (raw == "1" || raw == "warn") return GateMode::Warn;
+    return GateMode::Off;
+}
+
+auto is_pro(const Identity& identity) noexcept -> bool {
+    // Tier names are policy, not code, so this compares against the two the
+    // database's own CHECK constraint allows (profiles.tier IN ('free','pro')).
+    // Keeping the vocabulary identical across the schema, the key registry and
+    // this check is what stops a subscription that says "pro" somewhere from
+    // meaning nothing here.
+    return identity.tier == "pro" || identity.tier == "partner";
+}
+
+auto check_strategy_entitlement(const Identity& identity, int leg_count) -> grpc::Status {
+    const auto mode = pro_gate_mode();
+    if (mode == GateMode::Off) return grpc::Status::OK;
+    if (leg_count <= 1) return grpc::Status::OK;
+    if (is_pro(identity)) return grpc::Status::OK;
+
+    auto& log = logger::Logger::getInstance();
+    const std::string who = identity.id.empty() ? "<anonymous>" : identity.id;
+
+    if (mode == GateMode::Warn) {
+        log.error("pro-gate would-deny: key={} legs={} tier={}", who, leg_count,
+                  identity.tier.empty() ? "free" : identity.tier);
+        return grpc::Status::OK;
+    }
+
+    log.info("pro-gate deny: key={} legs={} tier={}", who, leg_count,
+             identity.tier.empty() ? "free" : identity.tier);
+    return grpc::Status(
+        grpc::StatusCode::PERMISSION_DENIED,
+        "Multi-leg strategies are a Pro feature. Single-leg calls and puts remain free. "
+        "This position has " +
+            std::to_string(leg_count) + " legs.");
+}
+
 class KeyRegistry::Impl {
   public:
     Impl() { load(); }
