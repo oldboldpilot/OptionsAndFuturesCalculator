@@ -65,3 +65,15 @@ backend/sensen/docs
 **/*.sqlite
 **/perf.data*
 **/core.*
+
+# calculator.assistant.StrategyAssistant's fine-tuned Qwen3-0.6B GGUF
+# (Q8_0, ~639 MB) is fetched during the Docker BUILD from MODEL_URL, verified
+# against MODEL_SHA256, and baked into the image there (backend/Dockerfile's
+# `model` stage) -- it must never be present in this upload in the first
+# place. At ~2.4 MB/s upstream this single file is roughly ten times the
+# entire payload that already fails against `railway up`'s ~30 s deadline (see
+# this file's own comment above), so there is no size of "just this once"
+# that fits. Any .gguf found anywhere in the tree is excluded, not just an
+# expected path, because a model dropped in for local testing is exactly the
+# kind of file that is easy to forget is still sitting there at deploy time.
+**/*.gguf

@@ -11,14 +11,17 @@
  * Exits non-zero if any call fails or returns something that cannot be real
  * market data, so it works as a deploy gate.
  */
+#include <array>
 #include <chrono>
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -27,13 +30,22 @@
 #include "calculator.grpc.pb.h"
 #include "finance.pb.h"
 #include "finance.grpc.pb.h"
+#include "assistant.pb.h"
+#include "assistant.grpc.pb.h"
 
 namespace {
 
-/** A context with no identity. Used only where the anonymous tier is the point. */
-auto make_anonymous_context() -> std::unique_ptr<grpc::ClientContext> {
+/** A context with no identity. Used only where the anonymous tier is the point.
+ *
+ * Takes the deadline as a parameter, defaulted to the 30 seconds every
+ * existing check was written against, so every current call site is
+ * unaffected. The one caller that needs longer (the LLM assistant suite,
+ * see kAssistantDeadline below) passes it explicitly instead of this
+ * function growing a special case for one subsystem. */
+auto make_anonymous_context(std::chrono::seconds deadline = std::chrono::seconds{30})
+    -> std::unique_ptr<grpc::ClientContext> {
     auto ctx = std::make_unique<grpc::ClientContext>();
-    ctx->set_deadline(std::chrono::system_clock::now() + std::chrono::seconds{30});
+    ctx->set_deadline(std::chrono::system_clock::now() + deadline);
     return ctx;
 }
 
@@ -45,8 +57,9 @@ auto make_anonymous_context() -> std::unique_ptr<grpc::ClientContext> {
  * fail on quota rather than on anything they were written to test. A monitoring
  * client having its own key is also what a real deployment looks like.
  */
-auto make_context() -> std::unique_ptr<grpc::ClientContext> {
-    auto ctx = make_anonymous_context();
+auto make_context(std::chrono::seconds deadline = std::chrono::seconds{30})
+    -> std::unique_ptr<grpc::ClientContext> {
+    auto ctx = make_anonymous_context(deadline);
     if (const char* key = std::getenv("SMOKE_API_KEY"); key != nullptr && *key != '\0') {
         ctx->AddMetadata("x-api-key", key);
     }
@@ -59,6 +72,31 @@ auto make_context() -> std::unique_ptr<grpc::ClientContext> {
     }
     return ctx;
 }
+
+/**
+ * The deadline for every call the "llm" suite makes -- 120 seconds, four
+ * times the default, and it earns every extra second of it.
+ *
+ * The measured ground truth (~1.1s per extraction warm, ~34 tok/s) is not
+ * what this deadline has to cover. RegisterAssistantService constructs
+ * AssistantWorker -- which attempts to load a 639 MB GGUF off MODEL_PATH --
+ * BEFORE main.cpp calls BuildAndStart, so the gRPC port does not open until
+ * that load has already finished or failed. A smoke run launched right after
+ * a deploy, with nothing else gating it on a readiness probe, is therefore
+ * racing that entire startup critical path, not just one inference call:
+ * the client's connection attempt blocks until the port exists at all, and
+ * on a cold container filesystem that is dominated by disk I/O rather than
+ * inference. Reading 639 MB at a conservative 20 MB/s takes ~32s; at a
+ * pessimistic 10 MB/s (a cold, contended volume, which is the failure mode
+ * worth budgeting for) it is ~64s. Add a few more seconds for llama.cpp to
+ * parse the GGUF header, allocate the KV cache and build the compute graph,
+ * and the warm ~1.1s for the actual ParseStrategy call once the port is
+ * finally open, and the worst case this function is designed to survive is
+ * on the order of 70-80 seconds. 120s leaves real headroom above that
+ * without being so long that a genuinely hung assistant takes minutes to be
+ * reported as FAILED.
+ */
+constexpr std::chrono::seconds kAssistantDeadline{120};
 
 auto check_quote(calculator::OptionsCalculator::Stub& stub, const std::string& symbol,
                  double& spot_out) -> bool {
@@ -1076,6 +1114,218 @@ auto check_finance(sensen::finance::Finance::Stub& stub) -> bool {
 }
 
 /**
+ * The LLM-backed strategy assistant -- calculator.assistant.StrategyAssistant,
+ * a THIRD contract on this port, checked in the same spirit as check_finance:
+ * against invariants that hold independently of any particular answer, never
+ * against a string the model happened to produce.
+ *
+ * An LLM is not bit-deterministic the way a closed-form bond price is, so
+ * this function never asserts an exact `<params>` payload or an exact
+ * clarifying question. What it asserts on every call, regardless of which
+ * branch of the ParseResponse oneof comes back:
+ *
+ *   - the oneof is actually SET. OUTCOME_NOT_SET is impossible under the
+ *     server's own contract (interpret_model_output always populates one
+ *     branch before returning OK), so seeing it here is this service
+ *     failing to do its job, not the model phrasing something oddly.
+ *   - if `params` is the branch that came back, `strategy` names something
+ *     in the 47-entry catalogue CalculateStrategy actually knows how to
+ *     price, `expiration_days` and `quantity` sit inside the sane ranges
+ *     the service itself enforces, and the symbol is the one the utterance
+ *     actually named -- never a different, invented one.
+ *
+ * kKnownStrategyIds and the two numeric ranges below are a fixed mirror of
+ * strategy_catalogue.cppm's kCatalogue and assistant_service.cpp's own
+ * kMin/kMaxExpirationDays and kMin/kMaxQuantity constants -- duplicated here
+ * as reference data the same way check_finance writes out the PMT annuity
+ * formula independently of the engine that also implements it, not derived
+ * from anything this binary reads off the service at runtime. If the
+ * catalogue is regenerated (scripts/generate_strategy_catalogue.py), this
+ * list is regenerated with it.
+ */
+auto check_assistant(calculator::assistant::StrategyAssistant::Stub& stub) -> bool {
+    static constexpr std::array<std::string_view, 47> kKnownStrategyIds{{
+        "long_call", "bull_call_spread", "bull_put_spread", "call_backspread", "risk_reversal",
+        "synthetic_long", "call_ratio_spread", "bull_call_ladder", "long_put", "bear_put_spread",
+        "bear_call_spread", "put_backspread", "synthetic_short", "put_ratio_spread", "covered_put",
+        "iron_condor", "condor", "call_butterfly", "put_butterfly", "iron_butterfly",
+        "broken_wing_butterfly", "short_straddle", "short_strangle", "jade_lizard", "box_spread",
+        "long_straddle", "long_strangle", "reverse_iron_condor", "long_guts", "strip", "strap",
+        "calendar_spread", "diagonal_spread", "double_diagonal", "covered_call",
+        "cash_secured_put", "protective_put", "collar", "pmcc", "futures_long", "futures_short",
+        "futures_calendar", "spark_spread", "crush_spread", "cash_and_carry",
+        "covered_futures_call", "min_variance_hedge",
+    }};
+    constexpr std::int64_t kMinExpirationDays = 0;
+    constexpr std::int64_t kMaxExpirationDays = 3650;
+    constexpr std::int64_t kMinQuantity = 1;
+    constexpr std::int64_t kMaxQuantity = 100'000;
+    constexpr std::size_t kMaxClarificationLength = 400;
+
+    // Validates the invariants a StrategyParams must satisfy NO MATTER which
+    // prompt produced it. Shared between the positive and negative cases
+    // below so both hold the server to the identical bar.
+    const auto validate_params = [&](const calculator::assistant::StrategyParams& p,
+                                     const char* label) -> bool {
+        if (std::find(kKnownStrategyIds.begin(), kKnownStrategyIds.end(), p.strategy()) ==
+            kKnownStrategyIds.end()) {
+            std::cerr << label << ": strategy \"" << p.strategy()
+                      << "\" is not one of the 47 catalogued ids\n";
+            return false;
+        }
+        if (p.asset_class() != "EQUITY" && p.asset_class() != "FUTURES" &&
+            p.asset_class() != "CRYPTO") {
+            std::cerr << label << ": asset_class \"" << p.asset_class() << "\" is none of "
+                      << "EQUITY/FUTURES/CRYPTO\n";
+            return false;
+        }
+        if (p.expiration_days() < kMinExpirationDays || p.expiration_days() > kMaxExpirationDays) {
+            std::cerr << label << ": expiration_days " << p.expiration_days()
+                      << " is outside [" << kMinExpirationDays << ", " << kMaxExpirationDays
+                      << "]\n";
+            return false;
+        }
+        if (p.quantity() < kMinQuantity || p.quantity() > kMaxQuantity) {
+            std::cerr << label << ": quantity " << p.quantity() << " is outside ["
+                      << kMinQuantity << ", " << kMaxQuantity << "]\n";
+            return false;
+        }
+        return true;
+    };
+
+    // -- The positive case: a complete, unambiguous trade description ------
+    //
+    // Every fact CalculateStrategy needs is stated in plain language, so an
+    // honest assistant has no unstated variable left to ask about. A
+    // Clarification is still tolerated here (a model can reasonably want one
+    // more fact confirmed even when everything was supplied -- that is a
+    // quality question for a human reading transcripts, not something this
+    // function can adjudicate), but a Refusal is not: refusing a request
+    // this complete would be the assistant failing to do its job, not the
+    // assistant declining to guess.
+    calculator::assistant::ParseRequest positive;
+    positive.set_utterance("Buy a bull call spread on NVDA expiring in 30 days, 2 contracts.");
+    calculator::assistant::ParseResponse positive_res;
+    const auto positive_ctx = make_context(kAssistantDeadline);
+    const auto positive_status = stub.ParseStrategy(positive_ctx.get(), positive, &positive_res);
+    if (!positive_status.ok()) {
+        std::cerr << "ParseStrategy FAILED: " << positive_status.error_code() << " "
+                  << positive_status.error_message() << "\n";
+        return false;
+    }
+
+    // The model is an OPTIONAL subsystem: this container may legitimately
+    // run with no MODEL_PATH set (or a load that failed), and the service's
+    // own documented contract for that case is to degrade honestly rather
+    // than fabricate a parse -- exactly the Refusal(MODEL_UNAVAILABLE) the
+    // proto defines for it. Treating that as a SKIP rather than a FAIL is
+    // the only choice that is not itself dishonest: failing the whole gate
+    // over an optional model artifact this environment never claimed to
+    // ship would block every build that does not bundle 639 MB of weights,
+    // and silently passing without checking anything would let a genuinely
+    // broken assistant hide behind "well, it's optional". Printing exactly
+    // why it was skipped keeps it visible instead of silent.
+    if (positive_res.outcome_case() == calculator::assistant::ParseResponse::kRefusal &&
+        positive_res.refusal().reason() == calculator::assistant::Refusal::MODEL_UNAVAILABLE) {
+        std::cout << "StrategyAssistant  MODEL_PATH unset (or load failed) -- the assistant is "
+                     "correctly degraded rather than serving a guess. SKIPPING the \"llm\" suite: "
+                     "this is an optional subsystem, and no environment is guaranteed to carry "
+                     "the model artifact.\n";
+        return true;
+    }
+
+    switch (positive_res.outcome_case()) {
+        case calculator::assistant::ParseResponse::kParams: {
+            const auto& p = positive_res.params();
+            if (!validate_params(p, "positive case")) return false;
+            std::string upper_symbol = p.symbol();
+            std::transform(upper_symbol.begin(), upper_symbol.end(), upper_symbol.begin(),
+                          [](unsigned char c) { return std::toupper(c); });
+            if (upper_symbol != "NVDA") {
+                std::cerr << "positive case: symbol \"" << p.symbol() << "\" was not the NVDA "
+                          << "the utterance named -- the assistant invented a different one\n";
+                return false;
+            }
+            std::cout << "StrategyAssistant  \"" << positive.utterance() << "\"\n"
+                      << "  -> params  symbol=" << p.symbol() << "  asset_class="
+                      << p.asset_class() << "  strategy=" << p.strategy()
+                      << "  expiration_days=" << p.expiration_days()
+                      << "  quantity=" << p.quantity() << "\n";
+            break;
+        }
+        case calculator::assistant::ParseResponse::kClarification: {
+            const auto& q = positive_res.clarification().question();
+            if (q.empty() || q.size() > kMaxClarificationLength) {
+                std::cerr << "positive case: clarification question is empty or implausibly "
+                          << "long (" << q.size() << " chars)\n";
+                return false;
+            }
+            std::cout << "StrategyAssistant  \"" << positive.utterance() << "\"\n"
+                      << "  -> clarification (tolerated on a complete request): \"" << q
+                      << "\"\n";
+            break;
+        }
+        case calculator::assistant::ParseResponse::kRefusal:
+            std::cerr << "positive case: a complete, unambiguous trade description was refused "
+                      << "(reason " << positive_res.refusal().reason() << "): "
+                      << positive_res.refusal().message() << "\n";
+            return false;
+        default:
+            std::cerr << "ParseResponse.outcome was not set at all -- the oneof contract was "
+                      << "violated\n";
+            return false;
+    }
+
+    // -- The negative case: requests that must NEVER produce params --------
+    //
+    // This is the check that actually defends real-data-only policy on the
+    // intent side, per assistant.proto's own file banner: a guess dressed up
+    // as a parse is exactly as dishonest as a fabricated market quote. Two
+    // different failure shapes are covered so the check does not hinge on
+    // one prompt happening to land on the model's good side: something that
+    // was never about a trade at all, and something that names no symbol,
+    // strategy or expiration for the assistant to act on. Neither may EVER
+    // come back as StrategyParams; a Clarification or a Refusal (any reason)
+    // are both honest, acceptable answers to either one.
+    const std::vector<std::string> out_of_bounds{
+        "What's the weather like in Chicago tomorrow?",
+        "Can you make me some money?",
+    };
+    for (const auto& utterance : out_of_bounds) {
+        calculator::assistant::ParseRequest req;
+        req.set_utterance(utterance);
+        calculator::assistant::ParseResponse res;
+        const auto ctx = make_context(kAssistantDeadline);
+        const auto status = stub.ParseStrategy(ctx.get(), req, &res);
+        if (!status.ok()) {
+            std::cerr << "ParseStrategy FAILED on \"" << utterance << "\": "
+                      << status.error_code() << " " << status.error_message() << "\n";
+            return false;
+        }
+        if (res.outcome_case() == calculator::assistant::ParseResponse::kParams) {
+            std::cerr << "\"" << utterance << "\" produced StrategyParams (symbol="
+                      << res.params().symbol() << ", strategy=" << res.params().strategy()
+                      << ") -- this was never a well-specified trade request, and guessing one "
+                      << "is exactly the fabrication real-data-only policy forbids\n";
+            return false;
+        }
+        if (res.outcome_case() != calculator::assistant::ParseResponse::kClarification &&
+            res.outcome_case() != calculator::assistant::ParseResponse::kRefusal) {
+            std::cerr << "\"" << utterance << "\" produced neither params, clarification nor "
+                      << "refusal -- the oneof contract was violated\n";
+            return false;
+        }
+        std::cout << "  \"" << utterance << "\"  ->  correctly declined to guess ("
+                  << (res.outcome_case() == calculator::assistant::ParseResponse::kClarification
+                          ? "clarification"
+                          : "refusal")
+                  << ")\n";
+    }
+
+    return true;
+}
+
+/**
  * Quota enforcement, when a policy is configured.
  *
  * Skipped entirely when QUOTA_POLICY is unset, because the correct behaviour
@@ -1443,10 +1693,15 @@ auto check_pro_gate(calculator::OptionsCalculator::Stub& stub, const std::string
 auto main(int argc, char** argv) -> int {
     const std::string target = (argc > 1) ? argv[1] : "localhost:50051";
     const std::string symbol = (argc > 2) ? argv[2] : "SPY";
-    // Which suite to run: "all" (default), or "finance" for the parts that need
-    // no market data. The calculator checks assert on LIVE quotes, so they
-    // legitimately fail when the market is shut -- which would otherwise make
-    // it impossible to verify authentication on a Sunday.
+    // Which suite to run: "all" (default), "finance" for the parts that need
+    // no market data, or "llm" for the strategy assistant alone. The
+    // calculator checks assert on LIVE quotes, so they legitimately fail
+    // when the market is shut -- which would otherwise make it impossible to
+    // verify authentication on a Sunday. "llm" gets its own suite for a
+    // related but distinct reason: it is the one suite whose deadline needs
+    // to be minutes rather than seconds (see kAssistantDeadline), so a
+    // caller who only wants to verify the assistant should not have to pay
+    // that longer timeout budget on every other check by running "all".
     const std::string suite = (argc > 3) ? argv[3] : "all";
 
     std::cout << "Smoke test against " << target << " for " << symbol << " [suite: " << suite
@@ -1481,6 +1736,14 @@ auto main(int argc, char** argv) -> int {
         if (!check_key_limit(*finance_only)) return 1;
         std::cout << "\nThe financial library's answers satisfy their independent identities, "
                      "and authentication refuses every way in it is supposed to.\n";
+        return 0;
+    }
+
+    if (suite == "llm") {
+        auto assistant = calculator::assistant::StrategyAssistant::NewStub(channel);
+        if (!check_assistant(*assistant)) return 1;
+        std::cout << "\nThe strategy assistant either produced a well-formed, in-catalogue "
+                     "parse, or honestly declined to guess.\n";
         return 0;
     }
 
@@ -1525,7 +1788,16 @@ auto main(int argc, char** argv) -> int {
     if (!check_quota(*finance)) return 1;
     if (!check_key_limit(*finance)) return 1;
 
+    // The strategy assistant, on the same channel and port again -- a THIRD
+    // contract. Run last of all: it is optional (skips honestly when no
+    // model is loaded) and its deadline is minutes rather than seconds, so
+    // it should never sit ahead of checks that are neither in a normal "all"
+    // run.
+    auto assistant = calculator::assistant::StrategyAssistant::NewStub(channel);
+    if (!check_assistant(*assistant)) return 1;
+
     std::cout << "\nCalculator RPCs returned live data; the financial library's answers "
-                 "satisfy their independent identities.\n";
+                 "satisfy their independent identities; the strategy assistant either parsed "
+                 "in-catalogue or honestly declined to guess.\n";
     return 0;
 }

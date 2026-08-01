@@ -1,7 +1,31 @@
 cmake_minimum_required(VERSION 3.28)
 project(OptionsCalculatorEngine CXX)
+
+# SENSEN_NO_IMPORT_STD stays, and is orthogonal to the standard library this
+# binary uses. It selects sensen's HEADER path (utils/sensen_std.h) over
+# `import std;`, which is a question about the module system, not about libc++
+# versus libstdc++. Keeping it means no target in this tree needs a std.pcm, so
+# the whole BMI-compatibility class of failure -- a std module compiled with one
+# set of flags being rejected by a consumer compiled with another -- simply does
+# not arise. Moving to libc++ does not make `import std;` any more attractive;
+# it only removes the reason sensen could not use libc++ at all.
 add_compile_definitions(SENSEN_NO_IMPORT_STD)
-add_compile_definitions(_GLIBCXX_USE_TBB_PAR_BACKEND=0)
+
+# libc++ tags most of its inline, header-only functions with
+# __attribute__((__abi_tag__(<odr-signature>))) so that two objects built
+# against different libc++ configurations cannot silently share a definition.
+# The tag is part of the mangled name. That is exactly why this define has to be
+# set HERE, at the top level, rather than left to whoever happens to set it:
+# sensen/CMakeLists.txt:351 defines it unconditionally for everything in its own
+# directory scope, so fastjson and the logger get it, while proto_lib,
+# sensen_slim, calculator_engine, smoke_client, sgee and the whole FetchContent'd
+# gRPC subtree would not. Half a binary mangling std:: inline functions with an
+# ABI tag and half without is an ODR violation between objects that otherwise
+# look interchangeable -- the linker either fails on a symbol that plainly
+# should exist, or picks one definition arbitrarily and the mismatch survives to
+# runtime. Under libstdc++ this define was inert, which is why it was previously
+# safe to leave to sensen alone; that is no longer true.
+add_compile_definitions(_LIBCPP_NO_ABI_TAG)
 
 # Enforce C++23 (and prepare for C++26)
 set(CMAKE_CXX_STANDARD 23)
@@ -14,15 +38,107 @@ set(CMAKE_CXX_SCAN_FOR_MODULES ON)
 
 # Canonical build flags from config/cpp_details.txt
 # NO fast-math, NO native march
-set(CANONICAL_FLAGS "-fPIC -O3 -march=x86-64-v3 -mtune=generic -mavx -mavx2 -mfma -msse2 -msse3 -mssse3 -msse4.1 -msse4.2 -pthread -fstack-protector-strong -DNDEBUG -Wno-error=stringop-overflow -Wno-error=array-bounds -Wno-error=unused-variable -Wno-error=unused-parameter -Wno-error=unused-but-set-variable -Wno-error=pedantic -Wno-error=global-module -Wno-unknown-warning-option -fexperimental-library")
+#
+# -stdlib=libc++ is the standard library for this ENTIRE binary, which is what
+# sensen's own code policy (config/cpp_details.txt rule 50) has always required
+# and what this tree previously could not give it. It belongs in CANONICAL_FLAGS
+# rather than in an add_compile_options() call for a reason that is easy to get
+# wrong: CMAKE_CXX_FLAGS is what CMake's configure-time probes
+# (check_cxx_source_compiles, check_include_file_cxx, try_compile) are run with,
+# and add_compile_options() is not. Setting it here means every feature the
+# build detects is detected against the standard library the build will actually
+# use. Put it anywhere else and configure can conclude a header exists, or a
+# snippet compiles, under libstdc++ and then hand that answer to a libc++ build.
+#
+# It is also set BEFORE FetchContent_MakeAvailable(grpc) further down, which is
+# the whole mechanism by which gRPC, protobuf, abseil, re2 and upb are built
+# against libc++ too: CMAKE_CXX_FLAGS is inherited by every subdirectory added
+# after it, so those ~3000 translation units need no per-target treatment.
+#
+# The flag deliberately does NOT go into the C flags. c-ares and zlib are C, and
+# a C compilation has no standard library to select; clang would only warn that
+# the argument went unused.
+#
+# -fexperimental-library was already here and is now load-bearing rather than
+# inert: under libc++ it defines _LIBCPP_ENABLE_EXPERIMENTAL and links
+# libc++experimental. Because it sits in the same global CMAKE_CXX_FLAGS as
+# everything else, it is uniform across the C++23 side and the C++17 gRPC side,
+# which is what matters -- an experimental-library split across a link boundary
+# would be its own ABI hazard.
+#
+# _GLIBCXX_USE_TBB_PAR_BACKEND=0 used to be defined alongside these flags. It was
+# a libstdc++ macro, telling libstdc++'s parallel algorithms not to route through
+# TBB; with libstdc++ out of the picture it names nothing and has been dropped
+# rather than left as a define that only looks meaningful.
+set(CANONICAL_FLAGS "-stdlib=libc++ -fPIC -O3 -march=x86-64-v3 -mtune=generic -mavx -mavx2 -mfma -msse2 -msse3 -mssse3 -msse4.1 -msse4.2 -pthread -fstack-protector-strong -DNDEBUG -Wno-error=stringop-overflow -Wno-error=array-bounds -Wno-error=unused-variable -Wno-error=unused-parameter -Wno-error=unused-but-set-variable -Wno-error=pedantic -Wno-error=global-module -Wno-unknown-warning-option -fexperimental-library")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${CANONICAL_FLAGS}")
-set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS}")
-set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS}")
+
+# The linker needs to be told as well, and separately: -stdlib= is a driver
+# option, and the driver only puts -lc++ (and the libc++abi it depends on) on the
+# link line if it sees the flag at LINK time. Compiling every object against
+# libc++ headers and then linking without it produces a link against libstdc++
+# that fails on std::__1:: symbols nothing defines.
+#
+# -lc++abi is NOT listed explicitly. It does not need to be: libc++.so.1 carries
+# libc++abi.so.1 as its own DT_NEEDED, so the dynamic linker pulls it in
+# transitively -- verified directly by linking a trivial program with nothing but
+# -stdlib=libc++ and reading its NEEDED list. Naming it by hand is how a build
+# ends up ordering it wrongly on a static link.
+#
+# No -L or -Wl,-rpath to a libc++ directory either, deliberately. sensen's own
+# CMakeLists auto-detects a libc++ lib path and bakes an rpath to it, which is
+# right for a library that may be installed next to an unusual toolchain and
+# wrong here: an absolute host path baked into the engine is a path that does not
+# exist inside the deploy container. The toolchain's own default search path
+# resolves libc++ in both places, and the container carries its libc++ the same
+# way it already carries everything else the binary needs.
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -stdlib=libc++")
+set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -stdlib=libc++")
 
 set(gRPC_INSTALL OFF CACHE BOOL "" FORCE)
 set(protobuf_INSTALL OFF CACHE BOOL "" FORCE)
 set(ABSL_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
 set(ENABLE_PARALLEL_STL OFF CACHE BOOL "" FORCE)
+
+# A note on TBB, because it is the one dependency in this binary whose standard
+# library can be wrong without anything saying so, and because the obvious fix
+# for it is wrong.
+#
+# The engine must link the oneTBB built FROM SOURCE in this build tree (pinned
+# v2022.3.0, compiled with CANONICAL_FLAGS and therefore with libc++), never a
+# prebuilt system copy. A distro-packaged TBB is compiled against libstdc++, and
+# the parts of TBB this tree uses -- parallel_for, blocked_range, task_arena,
+# task_group, all confined to sensen/src/parallel.cpp so no importer's BMI ever
+# carries a tbb:: type -- are header templates instantiated in our own
+# translation units. That means a libstdc++ TBB does not fail to link against a
+# libc++ binary. It links, it starts, and the two halves quietly disagree about
+# the layout of every std:: type that crosses between them.
+#
+# Setting CMAKE_DISABLE_FIND_PACKAGE_TBB here looks like the way to guarantee
+# that and IS NOT -- it was tried and it made the link strictly worse. sensen
+# probes with `find_package(TBB QUIET GLOBAL)` (sensen/CMakeLists.txt:1090) and,
+# only when that probe fails, falls through to a bare
+# `find_library(TBB_LIB NAMES tbb ...)` (sensen/CMakeLists.txt:1093). Disabling
+# the find_package therefore does not remove a system TBB from consideration; it
+# demotes the search to the cruder of the two mechanisms, which found
+# /usr/local/lib64/libtbb.so and put that shared object on calculator_engine's
+# link line next to the from-source libtbb.a -- exactly the mixture the setting
+# was meant to prevent, where before there had been only the static archive.
+# Verified by diffing the generated link line against the pre-change build.
+#
+# So the guarantee is not made here, because it cannot be made here. It is made
+# by not having a prebuilt TBB present for either mechanism to find: backend/
+# Dockerfile's builder stage deliberately does not install libtbb-dev (there is a
+# comment on that apt list saying so and why), which is what leaves the pinned
+# FetchContent copy as the only TBB in the image.
+#
+# On a developer machine this is NOT guaranteed, and that difference is real
+# rather than theoretical -- a host that happens to have a system oneTBB
+# installed can still have it found by the find_package probe. It was verified by
+# hand on the host this migration was done on that the generated link line for
+# calculator_engine names only the from-source archive. `ldd` on the built engine
+# is the standing check: a libtbb.so.12 in NEEDED is this going wrong, and it is
+# the only symptom there will be.
 
 # TLS provider: system OpenSSL for every target in the build.
 #
@@ -99,10 +215,25 @@ set(FETCHCONTENT_QUIET OFF)
 # occurrence with another patch is unbounded; building it as its own authors do
 # is not.
 #
-# Safe to mix: both sides use the same libstdc++, and Abseil's ABI-significant
-# split is pre-C++17 vs C++17-and-later, so 17 and 23 agree on the aliases
-# (string_view, optional, variant) that cross the boundary. This is also the
-# ordinary arrangement for any distro-packaged gRPC.
+# Safe to mix, and it stays safe now that both sides are libc++ rather than
+# libstdc++. The property that matters is unchanged: Abseil's ABI-significant
+# split is pre-C++17 vs C++17-and-later, and its options header
+# (third_party/abseil-cpp/absl/base/options.h) sets ABSL_OPTION_USE_STD_STRING_VIEW,
+# _OPTIONAL, _VARIANT and _ANY to 2 -- "alias the std:: type when the language
+# level provides it". Both C++17 and C++23 provide all four, so absl::string_view
+# is std::string_view on both sides of the boundary and the aliases agree.
+# libc++ itself does not change the layout of std::string, std::vector or
+# std::string_view with the -std level, so the dialect split costs nothing here.
+# This is also the ordinary arrangement for any distro-packaged gRPC.
+#
+# The reason for pinning gRPC to C++17 was never about the standard library
+# either, so moving to libc++ does not retire it: gRPC 1.62 is a 2024 codebase
+# being compiled against a standard published after it, and building it as its
+# own authors do avoids an unbounded sequence of one-off patches. The particular
+# C++23 failure named above (std::bind_front's result no longer converting to
+# std::function) was diagnosed against libstdc++ 14 and may well not reproduce
+# under libc++ -- but "may well not" is not a reason to move a working
+# dependency onto a dialect its authors never test.
 #
 # Side benefit: C++17 targets are not scanned for modules, so the global
 # CXX_SCAN_FOR_MODULES no longer walks ~3000 gRPC sources looking for imports
@@ -146,7 +277,27 @@ add_custom_command(
     DEPENDS ${FINANCE_PROTO_FILE}
 )
 
-# One descriptor set covering BOTH contracts, for Envoy's gRPC-JSON transcoder.
+# The LLM-backed strategy assistant's contract: free-text trade descriptions
+# in, structured strategy parameters (or a clarifying question, or a refusal)
+# out. Kept separate from calculator.proto and finance.proto for the same
+# reason those two are separate from each other -- it speaks its own
+# vocabulary (utterances, clarifications, refusals) rather than either
+# calculator's strategies/legs or the financial library's numeric functions.
+# Same binary, same port, third contract.
+set(ASSISTANT_PROTO_FILE "${CMAKE_CURRENT_SOURCE_DIR}/proto/assistant.proto")
+
+add_custom_command(
+    OUTPUT "${PROTO_GEN_DIR}/assistant.pb.cc" "${PROTO_GEN_DIR}/assistant.pb.h" "${PROTO_GEN_DIR}/assistant.grpc.pb.cc" "${PROTO_GEN_DIR}/assistant.grpc.pb.h"
+    COMMAND $<TARGET_FILE:protoc>
+    ARGS --cpp_out=${PROTO_GEN_DIR}
+         --grpc_out=${PROTO_GEN_DIR}
+         --plugin=protoc-gen-grpc=$<TARGET_FILE:grpc_cpp_plugin>
+         -I${CMAKE_CURRENT_SOURCE_DIR}/proto
+         ${ASSISTANT_PROTO_FILE}
+    DEPENDS ${ASSISTANT_PROTO_FILE}
+)
+
+# One descriptor set covering ALL THREE contracts, for Envoy's gRPC-JSON transcoder.
 #
 # Envoy resolves method names, field names and types from this at runtime, which
 # is what lets a caller POST JSON without holding a .proto or running codegen.
@@ -163,8 +314,8 @@ add_custom_command(
     ARGS --include_imports
          --descriptor_set_out=${PROTO_DESCRIPTOR}
          -I${CMAKE_CURRENT_SOURCE_DIR}/proto
-         ${PROTO_FILE} ${FINANCE_PROTO_FILE}
-    DEPENDS ${PROTO_FILE} ${FINANCE_PROTO_FILE}
+         ${PROTO_FILE} ${FINANCE_PROTO_FILE} ${ASSISTANT_PROTO_FILE}
+    DEPENDS ${PROTO_FILE} ${FINANCE_PROTO_FILE} ${ASSISTANT_PROTO_FILE}
     COMMENT "Generating proto descriptor set for Envoy JSON transcoding"
 )
 add_custom_target(proto_descriptor ALL DEPENDS ${PROTO_DESCRIPTOR})
@@ -174,6 +325,8 @@ add_library(proto_lib STATIC
     "${PROTO_GEN_DIR}/calculator.grpc.pb.cc"
     "${PROTO_GEN_DIR}/finance.pb.cc"
     "${PROTO_GEN_DIR}/finance.grpc.pb.cc"
+    "${PROTO_GEN_DIR}/assistant.pb.cc"
+    "${PROTO_GEN_DIR}/assistant.grpc.pb.cc"
 )
 target_include_directories(proto_lib PUBLIC ${PROTO_GEN_DIR})
 target_link_libraries(proto_lib PUBLIC grpc++ libprotobuf)
@@ -188,16 +341,36 @@ set(BUILD_EXAMPLES OFF CACHE BOOL "Disable sensen examples" FORCE)
 # leaving this on fails configure outright inside the container.
 set(BUILD_BENCHMARKS OFF CACHE BOOL "Disable sensen benchmarks" FORCE)
 set(SKIP_CLANG_TIDY ON CACHE BOOL "Disable clang-tidy due to c++23 module scanning bugs" FORCE)
-# This binary is libstdc++ throughout -- gRPC, protobuf, httplib and SGEE are
-# all built that way, and SENSEN_NO_IMPORT_STD at the top of this file says so.
-# Standalone, sensen forces -stdlib=libc++ across its own directory scope, which
-# would leave the sensen subtree speaking libc++ while everything it links
-# against speaks libstdc++. That is not a preference to reconcile later: the two
-# disagree about the layout of std::string, so it is a link-time hazard even
-# where it compiles, and the compile errors it does produce
-# ("no viable conversion from 'std::__cxx11::basic_string<char>' to
-# 'std::string'") never mention the standard library at all.
-set(SENSEN_USE_LIBCXX OFF CACHE BOOL "Keep sensen on libstdc++ to match the rest of this binary" FORCE)
+# SENSEN_USE_LIBCXX is deliberately NOT forced here any more. It defaults ON in
+# sensen's own CMakeLists (sensen/CMakeLists.txt:541), and that default is now
+# the correct answer, so the right thing to do is stop overriding it.
+#
+# This line used to read `set(SENSEN_USE_LIBCXX OFF ... FORCE)`, and the reasoning
+# behind it was sound but pointed the wrong way. The symptom was real: sensen
+# forces -stdlib=libc++ across its own directory scope, so with everything else
+# on libstdc++ the sensen subtree spoke libc++ while its consumers did not, and
+# the errors that produced ("no viable conversion from
+# 'std::__cxx11::basic_string<char>' to 'std::string'", or the same sentence with
+# string_view on both sides) never mention the standard library at all. Two
+# std::strings with different layouts is not a preference to reconcile later.
+# The fix chosen at the time was to drag sensen down to libstdc++, because that
+# was the smaller edit. It was still the wrong direction: it made this tree
+# violate config/cpp_details.txt rule 50, which mandates
+# `-std=c++23 -stdlib=libc++` for every module and shared object sensen builds,
+# and it left the violation encoded as a FORCE that no amount of reading sensen's
+# policy would explain.
+#
+# What made the other direction possible is that nothing in this binary is
+# consumed prebuilt across a C++ ABI boundary. gRPC, protobuf, abseil, re2, upb,
+# oneTBB, fastjson, the logger and SGEE are all compiled from source inside this
+# build tree, so they follow CANONICAL_FLAGS onto libc++ without being asked.
+# What remains is C -- OpenSSL, zlib, jemalloc, liburing, brotli, systemd -- and
+# a C library has no standard library to disagree about. libpq and Z3 would have
+# been the two genuine blockers, since the engine would have to speak to them
+# through pqxx and z3++ respectively; neither is reachable from this binary at
+# all, because the only consumer of z3++ is gp_ara, which sensen_slim excludes,
+# and nothing here includes pqxx. `ldd` on the built engine confirms both: no
+# libpq, no libz3.
 add_subdirectory(sensen EXCLUDE_FROM_ALL)
 
 # --------------------------------------------------------------------------
@@ -241,9 +414,116 @@ add_subdirectory(sensen EXCLUDE_FROM_ALL)
 # only AVX-512 and host-tuning are given up, which no closure module uses.
 #
 # The other flags sensen_objects carries (SENSEN_HAS_AVX512F, HAS_LIBURING,
-# SENSEN_HAS_LIBPQ, _LIBCPP_NO_ABI_TAG and the mm_malloc suppressions) are
-# referenced by none of the eight files in the closure — verified by grep
-# before dropping them.
+# SENSEN_HAS_LIBPQ, _LIBCPP_NO_ABI_TAG and the mm_malloc suppressions) were
+# referenced by none of the eight files in the original (finance-only)
+# closure — verified by grep before dropping them. That grep was redone for
+# the llm_pipeline addendum below, against the full 68-module/73-file
+# closure, not assumed still true at the larger size: HAS_LIBURING and
+# SENSEN_HAS_LIBPQ are still referenced by none of the 73 files and stay
+# dropped.
+#
+# _LIBCPP_NO_ABI_TAG was in that dropped list too, on the grounds that it is a
+# libc++-only ABI-tag workaround and "sensen_slim never passes -stdlib=libc++,
+# so it would be inert here even if added". That premise has expired: this whole
+# binary is libc++ now, sensen_slim included. The define is therefore set once at
+# the very top of this file, in the top-level directory scope, so that it covers
+# sensen_slim and every other target here uniformly -- see the reasoning there.
+# It is not listed as a sensen_slim-specific compile definition because it must
+# NOT be one; a define that changes mangled names is only safe when nothing in
+# the binary disagrees about it.
+# SENSEN_HAS_AVX512F is NOT in that category any more: gguf_parser.cppm,
+# autograd.cppm, mxfp4.cppm, and k_quant_dequant.cppm all gate real code on
+# `#if defined(__AVX512F__) || defined(SENSEN_HAS_AVX512F)` — a per-function
+# `[[gnu::target("avx512f,...")]]`-attributed AVX-512 tier of sensen's own
+# runtime SIMD waterfall, selected at runtime by CPUID detection elsewhere,
+# not something that requires (or should get) a whole-TU -mavx512f flag. The
+# macro form only decides whether that tier's function bodies are compiled
+# at all; CANONICAL_FLAGS deliberately does not pass -mavx512f (config/
+# cpp_details.txt's x86-64-v3/generic baseline), so this changes nothing
+# about the resulting binary's minimum-CPU requirement. Confirmed by the
+# concrete symptom of leaving it out: gemm_kernels.cppm unconditionally
+# assumes (via its own `!defined(_MSC_VER) || defined(__clang__) ||
+# defined(__AVX512F__)` gate, true under any clang regardless of
+# SENSEN_HAS_AVX512F) that k_quant_dequant.cppm's AVX-512 dequantizer is
+# always visible under clang — without this define k_quant_dequant.cppm
+# compiles that function out, and gemm_kernels.cppm fails with "no member
+# named 'dequantize_q6_k_avx512_block' in namespace 'sensen::detail'". Set
+# from the SAME cached auto-detection result sensen's own CMakeLists already
+# computed (HAVE_AVX512F, a check_cxx_source_compiles() cache variable that
+# survives past the add_subdirectory(sensen ...) call above into this
+# scope) rather than re-running CPU-feature detection a second time.
+if(HAVE_AVX512F)
+    set(SENSEN_SLIM_NEEDS_AVX512F ON)
+endif()
+#
+# sensen.llm_pipeline addendum (in-process LLM inference RPC):
+#
+# The assistant RPC needs to run sensen's own LLM inference pipeline
+# in-process rather than shelling out, so `sensen.llm_pipeline` and its
+# transitive closure were added to the list below the same way the original
+# finance closure was derived: computed, not guessed, via
+#
+#     python3 scripts/sensen_module_closure.py --check
+#
+# `roots_from_our_sources()` in that script finds its roots by scanning
+# backend/src for literal `import sensen.*;` lines, so it cannot discover a
+# module that nothing in this tree imports yet. At the time this list was
+# written, `src/modules/assistant_service.cppm` — the consumer that will
+# `import sensen.llm_pipeline;` — did not exist (a parallel effort was
+# writing it concurrently). The closure was computed anyway by temporarily
+# dropping a throwaway TU containing only `import sensen.llm_pipeline;` into
+# backend/src, running the script to get its BFS answer, then deleting that
+# TU — the same transitive-closure algorithm the script always runs, just
+# given a root it could not yet find on its own. Once assistant_service.cppm
+# lands and genuinely imports sensen.llm_pipeline, `--check` will find this
+# root itself and should pass with the list below unchanged; until then,
+# `--check` legitimately reports this closure's files as EXTRA, which is
+# expected, not a sign of drift.
+#
+# The closure pulls in far more than "one inference module" because
+# sensen.llm_pipeline sits at the top of sensen's real LLM stack: it needs
+# the GGUF loader family (parser, mmap/safetensors/pytorch/onnx weight
+# loaders, k-quant dequantization), the transformer forward path (attention,
+# rotary embeddings, RMSNorm, the MoE/Qwen3.5 expert-routing layers, KV
+# cache), the trainable backbone used for LoRA/fine-tuning-aware inference,
+# and sensen's CPU/GPU dispatch plumbing (cpu_backend-adjacent modules,
+# autograd_cuda, cuda_backend, the Triton worker bridge). None of this is
+# optional for a working text-generation call; it is the same 68-module,
+# 73-file set the script computes for anyone who imports sensen.llm_pipeline,
+# not something inflated for this engine specifically.
+#
+# CUDA-conditional code, CPU-only build: SENSEN_HAS_CUDA is never defined in
+# this project (grep confirms no target anywhere passes it, and no CUDA
+# language is enabled for this CMake project). Several modules in this
+# closure have real CUDA code paths — cuda_backend.cppm, autograd_cuda.cppm,
+# secondary_stream_prepass.cppm, batched_paged_attention.cppm — but each one
+# was inspected, not assumed safe: every CUDA-only include, type, and
+# function body in those files sits behind `#ifdef SENSEN_HAS_CUDA` (with a
+# `#ifndef SENSEN_HAS_CUDA` no-op/error-returning stub section in
+# cuda_backend.cppm specifically), so with the macro undefined they compile
+# to their CPU-only surface and never reference a CUDA header or symbol. The
+# five `.cpp` files below (fp64_reference_simd.cpp, llama_model.cpp,
+# parallel.cpp, tokenizer_gpu.cpp, training_moe_impl.cpp) are module
+# IMPLEMENTATION units, not interfaces — each has a plain `module
+# sensen.x;` (no `export`) rather than `export module sensen.x;` — so they
+# are listed under PRIVATE as plain sources, mirroring how sensen's own
+# src/CMakeLists.txt treats them and how parallel.cpp was already handled
+# here before this addendum; FILE_SET CXX_MODULES is for interface units
+# only.
+#
+# Known limitation of scripts/sensen_module_closure.py's --check, not a
+# drift in this list: sensen.utils.logger lives at sensen/src/utils/logger.cppm
+# — the only closure module in a subdirectory of sensen/src — and the
+# script's listed-file regex (`\$\{SENSEN_SRC\}/([\w.]+\.(?:cppm|cpp))`) only
+# matches a bare filename directly after `${SENSEN_SRC}/`, so it never
+# recognizes a nested path either as `utils/logger.cppm` or as `logger.cppm`.
+# `--check` therefore reports `logger.cppm` as MISSING even though it is
+# present below, correctly pathed, and required by the closure. Verified by
+# hand: `sensen.utils.logger`'s only file is genuinely in the computed
+# closure, and grepping the raw regex against this file confirms it matches
+# neither spelling. Not fixed here since scripts/sensen_module_closure.py is
+# shared, documented tooling outside this edit's scope; flagged so a future
+# `--check` run isn't mistaken for real drift on this one entry.
 # --------------------------------------------------------------------------
 set(SENSEN_SRC "${CMAKE_CURRENT_SOURCE_DIR}/sensen/src")
 
@@ -251,20 +531,105 @@ add_library(sensen_slim STATIC)
 target_sources(sensen_slim
     PUBLIC
         FILE_SET CXX_MODULES BASE_DIRS "${SENSEN_SRC}" FILES
+            "${SENSEN_SRC}/activations.cppm"
+            "${SENSEN_SRC}/amx_operations.cppm"
+            "${SENSEN_SRC}/autograd.cppm"
+            "${SENSEN_SRC}/autograd_cuda.cppm"
+            "${SENSEN_SRC}/batched_paged_attention.cppm"
             "${SENSEN_SRC}/bigdecimal.cppm"
+            "${SENSEN_SRC}/context_parallel.cppm"
             "${SENSEN_SRC}/cpu_features.cppm"
+            "${SENSEN_SRC}/cuda_backend.cppm"
+            "${SENSEN_SRC}/diffusion_core.cppm"
+            "${SENSEN_SRC}/dlm.cppm"
+            "${SENSEN_SRC}/dual_chunk_attention.cppm"
+            "${SENSEN_SRC}/embedding.cppm"
             "${SENSEN_SRC}/financial.cppm"
             "${SENSEN_SRC}/float_types.cppm"
+            "${SENSEN_SRC}/fp64_reference.cppm"
+            "${SENSEN_SRC}/gemm_jit.cppm"
+            "${SENSEN_SRC}/gemm_kernels.cppm"
+            "${SENSEN_SRC}/gguf_parser.cppm"
+            "${SENSEN_SRC}/gguf_weight_loader.cppm"
+            "${SENSEN_SRC}/grammar.cppm"
+            "${SENSEN_SRC}/hybrid_attention.cppm"
+            "${SENSEN_SRC}/intrinsics.cppm"
+            "${SENSEN_SRC}/k_quant_dequant.cppm"
+            "${SENSEN_SRC}/kv_cache.cppm"
             "${SENSEN_SRC}/linear_algebra.cppm"
+            "${SENSEN_SRC}/llama_model.cppm"
+            "${SENSEN_SRC}/llama_model_kernels.cppm"
+            "${SENSEN_SRC}/llama_model_types.cppm"
+            "${SENSEN_SRC}/llm_interfaces.cppm"
+            "${SENSEN_SRC}/llm_pipeline.cppm"
+            "${SENSEN_SRC}/lora.cppm"
+            "${SENSEN_SRC}/memory.cppm"
+            "${SENSEN_SRC}/mmap_weight_loader.cppm"
+            "${SENSEN_SRC}/model_config.cppm"
+            "${SENSEN_SRC}/moe_layer.cppm"
+            "${SENSEN_SRC}/multi_head_attention.cppm"
+            "${SENSEN_SRC}/mxfp4.cppm"
+            "${SENSEN_SRC}/nvfp4.cppm"
+            "${SENSEN_SRC}/onnx_weight_loader.cppm"
             "${SENSEN_SRC}/options.cppm"
             "${SENSEN_SRC}/parallel.cppm"
             "${SENSEN_SRC}/portfolio.cppm"
+            "${SENSEN_SRC}/pytorch_weight_loader.cppm"
+            "${SENSEN_SRC}/qwen35moe.cppm"
+            "${SENSEN_SRC}/qwen35moe_serving_model.cppm"
+            "${SENSEN_SRC}/rms_norm.cppm"
+            "${SENSEN_SRC}/rotary_embedding.cppm"
+            "${SENSEN_SRC}/safetensors_weight_loader.cppm"
+            "${SENSEN_SRC}/secondary_stream_prepass.cppm"
+            "${SENSEN_SRC}/sharded_training.cppm"
+            "${SENSEN_SRC}/simd.cppm"
+            "${SENSEN_SRC}/tokenizer.cppm"
+            "${SENSEN_SRC}/trainable_backbone_model.cppm"
+            "${SENSEN_SRC}/training_amp.cppm"
+            "${SENSEN_SRC}/training_attention.cppm"
+            "${SENSEN_SRC}/training_autocast.cppm"
+            "${SENSEN_SRC}/training_cross_attention.cppm"
+            "${SENSEN_SRC}/training_gated_deltanet.cppm"
+            "${SENSEN_SRC}/training_moe.cppm"
+            "${SENSEN_SRC}/training_primitives.cppm"
+            "${SENSEN_SRC}/training_rope.cppm"
+            "${SENSEN_SRC}/training_transformer.cppm"
+            "${SENSEN_SRC}/transformer_block.cppm"
+            "${SENSEN_SRC}/triton_worker_bridge.cppm"
+            "${SENSEN_SRC}/utils/logger.cppm"
+            "${SENSEN_SRC}/weight_loader_factory.cppm"
+            "${SENSEN_SRC}/weight_loader_interface.cppm"
     PRIVATE
-        # Module implementation unit for sensen.parallel. It is a plain source,
-        # not a FILE_SET entry: it holds the <tbb/...> includes deliberately
-        # kept out of the interface so no importer's BMI carries tbb:: symbols
-        # (sensen/src/parallel.cppm:4-11).
+        # Module implementation units. Each is a plain source, not a FILE_SET
+        # entry, because each has a non-exported `module sensen.x;` purview
+        # rather than an interface's `export module sensen.x;` — CMake's
+        # module scanner still orders them correctly after their interface
+        # units from this list alone, without needing FILE_SET to say so.
+        #
+        # parallel.cpp holds the <tbb/...> includes deliberately kept out of
+        # sensen.parallel's interface so no importer's BMI carries tbb::
+        # symbols (sensen/src/parallel.cppm:4-11) — already present before
+        # this addendum, kept here unchanged.
         "${SENSEN_SRC}/parallel.cpp"
+        # fp64_reference_simd.cpp / llama_model.cpp / tokenizer_gpu.cpp /
+        # training_moe_impl.cpp are the out-of-line implementation units of
+        # sensen.fp64_reference, sensen.llama_model, sensen.tokenizer, and
+        # sensen.training_moe respectively — each keeps its own heavier
+        # includes and out-of-line definitions off its module's BMI, the
+        # same reason parallel.cpp is separate from parallel.cppm.
+        "${SENSEN_SRC}/fp64_reference_simd.cpp"
+        "${SENSEN_SRC}/llama_model.cpp"
+        "${SENSEN_SRC}/tokenizer_gpu.cpp"
+        "${SENSEN_SRC}/training_moe_impl.cpp"
+        # numa_bind.cpp is not the implementation unit of any module, which is
+        # why the closure script does not report it: it defines two plain
+        # `extern "C"` helpers (sensen_available_cpu_count,
+        # sensen_numa_bind_local_node) that gemm_kernels.cppm:108 and
+        # llama_model.cppm:52 DECLARE for themselves rather than import. A
+        # module-graph walk cannot see that edge, so the omission surfaces only
+        # at link time as two undefined references, well after everything has
+        # compiled cleanly.
+        "${SENSEN_SRC}/numa_bind.cpp"
 )
 
 set_target_properties(sensen_slim PROPERTIES
@@ -276,6 +641,38 @@ set_target_properties(sensen_slim PROPERTIES
 
 # sensen's sources include "utils/sensen_std.h" relative to its src root.
 target_include_directories(sensen_slim PUBLIC $<BUILD_INTERFACE:${SENSEN_SRC}>)
+
+# sensen.gemm_jit's global module fragment includes the vendored, header-only
+# xbyak (an x86 JIT assembler) unconditionally -- it is what backs its
+# runtime AVX-512 GEMM code generation. sensen_objects gets this same
+# directory via its own target_include_directories (SYSTEM PRIVATE
+# ${CMAKE_SOURCE_DIR}/external/xbyak in sensen/src/CMakeLists.txt); no other
+# file in this closure needs it, so it is added PRIVATE here, not PUBLIC.
+target_include_directories(sensen_slim SYSTEM PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/sensen/external/xbyak")
+
+# sensen.safetensors_weight_loader (pulled in by the llm_pipeline closure, for
+# reading safetensors-format checkpoint metadata) does `import fastjson;`.
+# calculator_engine and test_runner already list `fastjson` on their own
+# target_link_libraries lines, but that is not sufficient for C++23 module
+# scanning: sensen_slim is the target that actually contains the translation
+# unit doing the importing, so CMake's module dependency scanner needs a
+# target-level edge FROM sensen_slim TO fastjson to know fastjson's BMI must
+# be built first. Without it the two targets' modules are scanned/ordered
+# independently and a parallel build can reach safetensors_weight_loader.cppm
+# before fastjson's module interface has been compiled, failing with "module
+# 'fastjson' not found" (order-dependent, not a per-file syntax error).
+# PUBLIC because sensen_slim's own consumers keep linking fastjson too.
+target_link_libraries(sensen_slim PUBLIC fastjson)
+
+# See SENSEN_SLIM_NEEDS_AVX512F's derivation above: gguf_parser.cppm,
+# autograd.cppm, mxfp4.cppm, and k_quant_dequant.cppm gate a
+# [[gnu::target(...)]]-attributed AVX-512 SIMD-waterfall tier on this macro,
+# and gemm_kernels.cppm unconditionally calls into it under clang. PRIVATE:
+# it only affects which function bodies these sensen_slim TUs compile, not
+# sensen_slim's public interface.
+if(SENSEN_SLIM_NEEDS_AVX512F)
+    target_compile_definitions(sensen_slim PRIVATE SENSEN_HAS_AVX512F)
+endif()
 
 # TBB is configured by sensen's own CMakeLists, whether found on the system or
 # fetched. Only parallel.cpp needs it, but it is PUBLIC because consumers link
@@ -293,13 +690,26 @@ endif()
 #
 # SGEE's own standard is `import std;` against libc++, with std.pcm built from
 # libc++'s module sources — that is how it builds standalone and how it is
-# documented. This tree cannot use that: sensen is built against libstdc++ (see
-# SENSEN_NO_IMPORT_STD at the top of this file), and linking libc++ and libstdc++
-# into one binary is an ABI conflict rather than a matter of taste. So SGEE is
-# switched to its header-shim path here, which leaves the standard library
-# selection alone. The compiler is clang either way; only the standard library
-# and the std-module mechanism differ.
-set(SGEE_NO_IMPORT_STD ON CACHE BOOL "Build SGEE against libstdc++ via its header shim" FORCE)
+# documented. This setting keeps it on the header-shim half of that pair, and
+# the reason has changed even though the setting has not.
+#
+# It used to be here because the rest of the binary was libstdc++ and SGEE's
+# native path would have dragged libc++ in alongside it. That conflict is gone:
+# everything here is libc++ now, so SGEE's standard LIBRARY is no longer in
+# question — it follows CANONICAL_FLAGS onto libc++ like every other
+# subdirectory, whichever std mechanism it uses.
+#
+# What SGEE_NO_IMPORT_STD still selects is the std MODULE mechanism, and that is
+# a genuinely separate axis from the standard library. Leaving it ON keeps this
+# tree free of any std.pcm: nothing here has to build one, nothing has to agree
+# with anyone else's, and the whole class of BMI failures where a std module
+# compiled under one set of flags is rejected by a consumer compiled under
+# another cannot occur. sensen is held to the same choice by SENSEN_NO_IMPORT_STD
+# at the top of this file, so the two subprojects agree. Moving to libc++ makes
+# `import std;` possible; it does not make it necessary, and turning it on would
+# be a separate change with its own blast radius, not a tidy-up to fold into this
+# one.
+set(SGEE_NO_IMPORT_STD ON CACHE BOOL "Use SGEE's header shim rather than import std; the standard library is libc++ either way" FORCE)
 
 # SGEE needs the directory holding the logger BMI when a parent already provides
 # the `logger` target, and only this tree knows where that is. Previously this
@@ -333,8 +743,8 @@ add_subdirectory(external/SGEE sgee EXCLUDE_FROM_ALL)
 # add_subdirectory(nanobind EXCLUDE_FROM_ALL)
 
 # Core engine binary
-add_executable(calculator_engine src/main.cpp src/issue_key.cpp src/modules/calculator_service.cpp src/modules/finance_service.cpp src/modules/quota.cpp src/modules/api_key.cpp)
-target_sources(calculator_engine PUBLIC FILE_SET CXX_MODULES FILES src/modules/calculator_service.cppm src/modules/market_data.cppm src/modules/finance_service.cppm src/modules/quota.cppm src/modules/api_key.cppm)
+add_executable(calculator_engine src/main.cpp src/issue_key.cpp src/modules/calculator_service.cpp src/modules/finance_service.cpp src/modules/quota.cpp src/modules/api_key.cpp src/modules/assistant_service.cpp)
+target_sources(calculator_engine PUBLIC FILE_SET CXX_MODULES FILES src/modules/calculator_service.cppm src/modules/market_data.cppm src/modules/finance_service.cppm src/modules/quota.cppm src/modules/api_key.cppm src/modules/strategy_catalogue.cppm src/modules/assistant_service.cppm)
 target_link_libraries(calculator_engine PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto sgee)
 
 # Python Bindings via nanobind

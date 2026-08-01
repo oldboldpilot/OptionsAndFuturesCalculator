@@ -76,9 +76,20 @@ static_resources:
                       # this to a named prefix would silently strand whichever
                       # service was not listed -- as a 404 from Envoy, which
                       # looks like the backend is down rather than unrouted.
+                      # Explicit timeout, not left to Envoy's 15s route default.
+                      # calculator.assistant.StrategyAssistant runs a fine-tuned
+                      # Qwen3-0.6B on CPU: a warm call is roughly 1.1s, but a
+                      # cold model load stacked on a long generation can
+                      # legitimately run past 15s. That is not a hang -- it is
+                      # slow, correct work -- but the 15s default cannot tell
+                      # the difference, and an inherited timeout that kills a
+                      # valid request looks to the caller like the backend
+                      # crashed rather than like the deliberate policy decision
+                      # it actually is. 120s gives the model room to finish.
                       - match: { prefix: "/" }
                         route:
                           cluster: backend_grpc_service
+                          timeout: 120s
                           max_stream_duration:
                             grpc_timeout_header_max: 0s
                     cors:
@@ -147,6 +158,7 @@ static_resources:
                     services:
                       - calculator.OptionsCalculator
                       - sensen.finance.Finance
+                      - calculator.assistant.StrategyAssistant
                     auto_mapping: true
                     # Without this a refusal arrives as an empty body with a
                     # header the caller has to know to look for. With it, a

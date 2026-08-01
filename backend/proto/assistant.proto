@@ -1,0 +1,144 @@
+syntax = "proto3";
+
+package calculator.assistant;
+
+// ============================================================================
+// The LLM-backed strategy assistant, over gRPC.
+//
+// This contract is deliberately SEPARATE from calculator.proto and
+// finance.proto. Those speak in strategies, legs, payoff curves and closed-
+// form financial functions -- deterministic, auditable arithmetic. This one
+// wraps a fine-tuned language model that turns a trader's free-text utterance
+// ("bullish on NVDA into earnings, thirty days out") into the structured
+// parameters CalculateStrategy actually needs. The two must not be conflated:
+// nothing in this file computes a price, a Greek or a payoff, and nothing in
+// calculator.proto or finance.proto ever guesses at what a human meant.
+//
+// ---------------------------------------------------------------------------
+// ON THE oneof IN ParseResponse -- read this before adding a branch.
+//
+// A single ParseRequest can end in exactly three ways, and they are not
+// gradations of the same outcome:
+//
+//   1. The model understood the trade well enough to emit parameters.
+//   2. The model understood there IS a trade in there somewhere, but is
+//      missing one fact it cannot honestly default (which expiration? how
+//      many contracts?), so it asks a single clarifying question instead of
+//      guessing.
+//   3. The utterance cannot be turned into a trade at all -- an unsupported
+//      strategy, a symbol that resolves to nothing real, or a request that
+//      was never about a strategy in the first place -- and the honest
+//      response is a refusal, not a fabricated guess.
+//
+// Both (2) and (3) return gRPC status OK. This is deliberate, not an
+// oversight: a clarifying question is the model doing its job correctly, and
+// so is a refusal when the alternative would be inventing a symbol, a
+// strategy or an expiration that was never actually stated. Real-data-only is
+// binding project policy everywhere else in this codebase -- market quotes
+// are never fabricated -- and this contract extends the same discipline to
+// intent: a guess dressed up as a parse is exactly as dishonest as a
+// fabricated quote. If either branch were instead encoded as a gRPC error,
+// every well-behaved back-and-forth with a trader would register as a
+// failure in gRPC metrics, in Envoy's access logs and in the browser client's
+// error handling -- indistinguishable from the model actually being down.
+// The oneof keeps "succeeded, asked a question" and "succeeded, declined"
+// distinguishable from each other and from "the RPC itself failed", which is
+// the only case that should still surface as a gRPC error (an unreachable
+// inference backend, a malformed request, and so on).
+// ============================================================================
+
+service StrategyAssistant {
+  rpc ParseStrategy (ParseRequest) returns (ParseResponse);
+}
+
+message ParseRequest {
+  // The trader's own words, verbatim. Nothing here is pre-parsed or
+  // normalized before it reaches the model -- that normalization is the
+  // model's job, and doing it twice (once heuristically here, once inside
+  // the model) would let the two disagree about what the trader meant.
+  string utterance = 1;
+
+  // The single short question this service asked on the PRIOR turn, if any.
+  // Present only when this request is a trader's answer to a Clarification
+  // this same RPC returned a moment ago (e.g. the trader says "the second
+  // one" or "next Friday" in reply to "which expiration?"). Without it the
+  // model would have to re-derive missing context from a fragment that reads
+  // as nonsense in isolation. Deliberately just the one prior question --
+  // not a full conversation transcript -- because that is the only prior
+  // state ParseStrategy's own contract ever produces, and threading more
+  // than that would make this request carry session history that belongs to
+  // the client, not to a single-turn parse call.
+  string prior_clarification = 2;
+}
+
+message ParseResponse {
+  // Exactly one of these is set. See the file banner for why a clarifying
+  // question and a refusal are both successful outcomes of this RPC, and
+  // why encoding either as a gRPC error would misrepresent them as failures.
+  oneof outcome {
+    StrategyParams params = 1;
+    Clarification clarification = 2;
+    Refusal refusal = 3;
+  }
+}
+
+// The structured parameters the fine-tuned model was trained to emit inside
+// its own `<params>` JSON block. These fields are a verbatim mirror of that
+// schema -- same names, same types, same count -- and must NEVER drift from
+// it. Renaming or retyping a field here without retraining or re-prompting
+// the model produces a service that compiles cleanly and silently
+// misinterprets every response it decodes, which is worse than a build
+// failure because nothing here would catch it. If the model's schema
+// changes, this message changes to match; it is not free to evolve on its
+// own for stylistic reasons.
+message StrategyParams {
+  string symbol = 1;          // e.g. "NVDA", "ES" -- resolved, not fuzzy
+  string asset_class = 2;     // "EQUITY", "FUTURES", "CRYPTO"
+  string strategy = 3;        // one of the 48 catalogued strategy names
+  int32 expiration_days = 4;  // calendar days out, as the trader stated it
+  int32 quantity = 5;         // contracts/lots, not shares or notional
+}
+
+// The one short question the model needs answered before it can commit to a
+// StrategyParams. Kept to a single field on purpose: a multi-question
+// clarification would mean the model is guessing at more than one thing at
+// once, which is the same dishonesty a fabricated parameter would be, just
+// spread across more fields.
+message Clarification {
+  string question = 1;
+}
+
+// A machine-readable reason plus a human-readable message, because the two
+// serve different consumers. The UI shows `message` to the trader as-is; the
+// enum lets the calling code branch (e.g. offer a symbol search when the
+// reason is UNKNOWN_SYMBOL) without parsing English out of a string.
+message Refusal {
+  enum Reason {
+    // Proto3 requires a zero value; it is never a reason this service
+    // actually gives, only the value an uninitialized Refusal would carry.
+    REASON_UNSPECIFIED = 0;
+    // The trade description names a strategy outside the 48 this engine
+    // knows how to price. Inventing the nearest match would misrepresent
+    // structures the trader never asked for.
+    UNSUPPORTED_STRATEGY = 1;
+    // The symbol does not resolve to a real, tradeable instrument in any
+    // supported asset class -- including the case where a root ticker is
+    // genuinely ambiguous across asset classes (e.g. "ES" is both the E-mini
+    // S&P future and Eversource Energy stock) and the utterance gives no way
+    // to pick one. Guessing an asset class here would be fabricating market
+    // identity, which real-data-only policy forbids as firmly as fabricating
+    // a price.
+    UNKNOWN_SYMBOL = 2;
+    // The utterance was never about building an options or futures strategy
+    // in the first place.
+    OUT_OF_SCOPE = 3;
+    // The inference backend itself could not be reached or timed out. Not a
+    // gRPC error because the RPC to THIS service still completed correctly
+    // -- it is the model behind it that failed, and the caller needs that
+    // distinction to decide whether retrying is even worthwhile.
+    MODEL_UNAVAILABLE = 4;
+  }
+
+  Reason reason = 1;
+  string message = 2;
+}

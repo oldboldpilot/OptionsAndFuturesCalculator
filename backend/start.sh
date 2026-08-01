@@ -104,9 +104,19 @@ ${TLS_BLOCK}
                   - name: native_service
                     domains: ["*"]
                     routes:
+                      # Mirrors the timeout on the gRPC-Web listener in
+                      # envoy.yaml: Envoy's route default is 15s, and
+                      # calculator.assistant.StrategyAssistant (a fine-tuned
+                      # Qwen3-0.6B running on CPU) can legitimately exceed that
+                      # once a cold model load stacks on top of generation,
+                      # even though a warm call finishes in about 1.1s. The two
+                      # listeners must agree, or a native gRPC caller sees a
+                      # request that would have succeeded over gRPC-Web get
+                      # killed here instead, with no obvious reason why.
                       - match: { prefix: "/" }
                         route:
                           cluster: backend_grpc_service
+                          timeout: 120s
                           max_stream_duration:
                             grpc_timeout_header_max: 0s
               http_filters:

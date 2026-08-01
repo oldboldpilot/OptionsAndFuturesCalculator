@@ -7,6 +7,7 @@
 
 import calculator_service;
 import finance_service;
+import assistant_service;
 import api_key;
 
 namespace {
@@ -42,6 +43,16 @@ auto RunServer() -> void {
     // bond analytics does not have to know this application exists, and this
     // application does not have to grow a second deployment to offer them.
     options_calculator::finance::RegisterFinanceService(builder);
+
+    // The strategy assistant, third on the same port. Unlike the two above it
+    // is OPTIONAL: it needs a fine-tuned model on disk, named by MODEL_PATH, and
+    // an image may legitimately be built without one. Registration therefore
+    // never throws on a missing or unloadable model -- the service registers
+    // regardless and answers every call with a refusal saying it is
+    // unavailable. A calculator that stops serving payoff curves because an
+    // assistant could not find its weights would be trading the product for a
+    // feature, so the failure is reported per-call rather than at startup.
+    options_calculator::assistant::RegisterAssistantService(builder);
 
     std::unique_ptr<grpc::Server> server(builder.BuildAndStart());
 

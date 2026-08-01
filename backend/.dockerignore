@@ -6,3 +6,12 @@ tests/
 scripts/
 *.pyc
 __pycache__/
+
+# calculator.assistant.StrategyAssistant's model is fetched inside the build
+# (backend/Dockerfile's `model` stage) from MODEL_URL, never copied in from
+# the build context. If a .gguf were ever dropped under backend/ for local
+# testing, excluding it here keeps it from bloating the context sent to the
+# daemon and from ever reaching the builder stage through `COPY backend/
+# /src/backend/` -- which has no verification step of its own and would ship
+# whatever it found unchecked.
+**/*.gguf

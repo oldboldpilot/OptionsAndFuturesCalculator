@@ -33,3 +33,12 @@ workers/*/.wrangler/
 # Python bytecode
 __pycache__/
 *.py[cod]
+
+# calculator.assistant.StrategyAssistant's fine-tuned Qwen3-0.6B GGUF
+# (Q8_0, ~639 MB). It is fetched during the Docker build from MODEL_URL and
+# verified against MODEL_SHA256 (backend/Dockerfile's `model` stage) -- it is
+# never a repository artifact. A binary this size in git history is not
+# something a later commit can undo cheaply: every clone, and every future
+# clone, pays for it forever, unlike an ignored file that a stray local copy
+# never touches.
+**/*.gguf

@@ -479,4 +479,54 @@ auto cost_cash_flow(int entries) noexcept -> double {
     return 1.0 + std::max(0, entries) / 10.0;
 }
 
+// Every function above prices CPU work that shares the TBB pool with
+// everything else running on the engine -- it slows the pool down, but the
+// pool keeps serving other callers around it. LLM generation does not share
+// anything. The fine-tuned Qwen3-0.6B extraction model runs on a single
+// dedicated inference worker thread, decodes at roughly 34 tokens/sec on CPU,
+// and measured out at about 1.1 seconds of wall clock and 2.63 GB resident
+// (model weights plus KV cache) for one generation. For that entire 1.1
+// seconds, that ONE thread is unavailable to every other caller of this RPC,
+// full stop -- there is no queueing around it the way there is with a busy
+// but shared thread pool. A price that did not reflect that exclusivity would
+// let a single caller queue enough LLM calls to freeze the endpoint for
+// everyone else behind a single-threaded model, while their own
+// compute_units_per_hour ledger looked perfectly reasonable next to a caller
+// hammering ComputePayment.
+//
+// We price the two measured costs separately and add them, because they are
+// two independent ways this call is expensive:
+//
+//   - Wall-clock exclusivity: `max_tokens` bounds how many tokens the decode
+//     loop is allowed to produce, and at ~34 tokens/sec that converts directly
+//     to the number of seconds the worker thread is held hostage. A second of
+//     that exclusive hold is priced at 1,000 units -- three orders of
+//     magnitude above cost_default()'s single scalar op -- because unlike
+//     every function above, this one denies the pool outright rather than
+//     merely adding load to it.
+//   - Resident memory: 2.63 GB is charged flatly per generation, not
+//     per-token, because it is overwhelmingly the loaded model weights and KV
+//     cache rather than anything that grows meaningfully with a short
+//     extraction's output. No other cost function in this file carries a
+//     memory term, because none of them holds anything close to a rounding
+//     error of a gigabyte; this one does, for the whole call.
+//
+// `samples` multiplies both terms because each requested sample is another
+// full generation run sequentially on that same single worker thread --
+// asking for ten samples is not ten times the risk of one call, it is
+// literally ten times the exclusive hold and ten times the resident-memory
+// window. Guarded the same way as the functions above: non-positive inputs
+// clamp to zero rather than going negative or dividing by zero, and there is
+// deliberately no upper clamp -- a caller asking for an absurd sample count or
+// token ceiling should see an absurd price, not a silently capped one, so the
+// quota layer above can throttle it honestly.
+auto cost_llm_generate(int samples, int max_tokens) noexcept -> double {
+    const double n = std::max(0, samples);
+    const double tokens = std::max(0, max_tokens);
+    const double decode_seconds = tokens / 34.0;
+    const double time_units = decode_seconds * 1000.0;
+    const double memory_units = 2.63 * 500.0;
+    return 1.0 + n * (time_units + memory_units);
+}
+
 }  // namespace options_calculator::quota
