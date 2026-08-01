@@ -177,7 +177,7 @@ export default function RootLayout({
           because the same loader is already in <head> for Auto Ads, and loading
           it twice buys nothing.
         */}
-        <div style={{ maxWidth: '60rem', margin: '0 auto', padding: '1rem 1.25rem 0' }}>
+        <div style={{ maxWidth: '78rem', margin: '0 auto', padding: '1.25rem 1.25rem 0' }}>
           <AdSlot size="multiplex" label="Sponsored" />
         </div>
 

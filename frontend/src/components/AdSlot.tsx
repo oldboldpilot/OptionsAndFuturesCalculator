@@ -90,10 +90,16 @@ export function AdSlot({
   // and a fixed height would crop the recommendation grid it exists to show. It
   // is the one format here that legitimately sizes itself.
   const isFluid = size === 'multiplex';
+  // Multiplex (autorelaxed) renders a GRID of recommendation cards, not a
+  // banner. 200px reserved roughly one row and cropped the rest, so the unit had
+  // nowhere to put what it serves. `clamp` scales the reservation with the
+  // viewport instead of pinning one number: tall enough for two rows of cards on
+  // a desktop, not so tall it becomes a void on a phone. The unit still grows
+  // past this if it needs to -- min-height reserves, it does not cap.
   const frame: React.CSSProperties = {
     width: '100%',
     maxWidth: isFluid ? '100%' : dims.width,
-    minHeight: isFluid ? 200 : dims.height,
+    minHeight: isFluid ? 'clamp(320px, 46vw, 640px)' : dims.height,
     margin: '0 auto',
     flex: 'none',
   };
@@ -104,7 +110,7 @@ export function AdSlot({
         aria-label={label}
         style={{
           ...frame,
-          height: isFluid ? 200 : dims.height,
+          height: isFluid ? 'clamp(320px, 46vw, 640px)' : dims.height,
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
