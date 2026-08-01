@@ -2,6 +2,8 @@
 
 import React, { useMemo, useState } from 'react';
 import { useCalculatorStore, type ChainStrike } from '../store/useCalculatorStore';
+import { useProStatus } from '../lib/useProStatus';
+import { ProPanel } from './ProPanel';
 
 type Category = 'Bullish' | 'Bearish' | 'Neutral' | 'Volatility' | 'Income & Hedge' | 'Futures';
 
@@ -236,6 +238,11 @@ export const StrategySelector: React.FC = () => {
     chainStrikes, chainExpirations, selectedExpiration, chainStatus,
   } = useCalculatorStore();
 
+  // Only the flag is needed here -- the panel below owns the rest of the
+  // subscription UI. Both read the same store, so activating a licence in one
+  // updates the badges in the other.
+  const { pro } = useProStatus();
+
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
     // A search spans every category — with this many structures, forcing the
@@ -389,6 +396,29 @@ export const StrategySelector: React.FC = () => {
                   <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--color-ink-400)' }}>
                     {s.legs.length}L
                   </span>
+                  {/*
+                    Marked, not disabled. The strategy still selects and still
+                    builds its legs -- what the engine refuses is the
+                    calculation, and it says so in its own words. Blocking the
+                    click here would replace a specific server-side refusal with
+                    a vaguer client-side one, and would stop someone seeing the
+                    structure they are being asked to pay for.
+                  */}
+                  {s.legs.length > 1 && !pro && (
+                    <span
+                      title="Multi-leg strategies need Pro"
+                      style={{
+                        fontSize: 'var(--text-2xs)',
+                        fontWeight: 700,
+                        letterSpacing: '0.06em',
+                        padding: '0 0.1875rem',
+                        color: 'var(--color-accent)',
+                        border: '1px solid var(--color-accent)',
+                      }}
+                    >
+                      PRO
+                    </span>
+                  )}
                   {query && (
                     <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--color-ink-400)' }}>
                       · {s.category}
@@ -441,6 +471,14 @@ export const StrategySelector: React.FC = () => {
           </button>
         </div>
       )}
+
+      {/*
+        Last in the column, below the strategy detail. Subscription state is
+        something you check occasionally, not something you act on while
+        building a position, so it sits where it can be found rather than where
+        it interrupts.
+      */}
+      <ProPanel />
     </div>
   );
 };

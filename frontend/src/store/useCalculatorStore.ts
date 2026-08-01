@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { createClient } from '../lib/supabase/client';
+import { authMetadata } from '../lib/licence';
 import { OptionsCalculatorClient } from '../grpc/CalculatorServiceClientPb';
 import { StrategyRequest, Leg as ProtoLeg, QuoteRequest, ChainRequest, RiskFreeRateRequest } from '../grpc/calculator_pb';
 
@@ -389,7 +390,7 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
     // priced off a utility company that happens to share the ticker.
     req.setAssetClass(customAssetClass || classify(sym));
 
-    client.getMarketQuote(req, {}, (err, res) => {
+    client.getMarketQuote(req, authMetadata(), (err, res) => {
       // Same staleness guard loadChain applies below. Without it a response for
       // a symbol the user has already navigated away from still writes its
       // price, so the store shows the new symbol carrying the old symbol's
@@ -451,7 +452,7 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
     const client = new OptionsCalculatorClient(backendUrl);
 
     rateRequest = new Promise<void>((resolve) => {
-      client.getRiskFreeRate(new RiskFreeRateRequest(), {}, (err, res) => {
+      client.getRiskFreeRate(new RiskFreeRateRequest(), authMetadata(), (err, res) => {
         // A rate the user has already typed outranks a late arrival: it was an
         // explicit decision, and overwriting it would move a number out from
         // under the cursor.
@@ -552,7 +553,7 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
     req.setAssetClass(assetClass);
     if (wanted) req.setExpirationDate(wanted);
 
-    client.getMarketChain(req, {}, (err, res) => {
+    client.getMarketChain(req, authMetadata(), (err, res) => {
       // A response for a symbol the user has since navigated away from must be
       // discarded, not rendered.
       if (get().symbol !== symbol) return;
@@ -713,7 +714,7 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
         }),
       );
 
-      const res = await client.calculateStrategy(req, {});
+      const res = await client.calculateStrategy(req, authMetadata());
 
       const expiryCurve: CurvePoint[] = res.getPnlMatrixList().map((p) => ({
         price: p.getUnderlyingPrice(),

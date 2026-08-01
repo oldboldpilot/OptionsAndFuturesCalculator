@@ -1,0 +1,23 @@
+name = "ofc-billing"
+main = "src/index.ts"
+compatibility_date = "2026-07-01"
+
+# Non-secret configuration. Price IDs are public by design -- they appear in
+# the Checkout URL -- so they live here rather than as secrets, where they
+# would be invisible to anyone reviewing what this Worker is wired to.
+[vars]
+PRICE_MONTHLY = "price_1TzQrRAyhBEfaYPePu4y7NwO"
+PRICE_ANNUAL  = "price_1TzQrSAyhBEfaYPedT1iRZDi"
+SITE_URL      = "https://optionsandfuturescalculator.com"
+TRIAL_DAYS    = "7"
+
+# Secrets are NOT here. Set them with `wrangler secret put`, which stores them
+# encrypted in Cloudflare rather than in a file that travels with the repo:
+#
+#   wrangler secret put STRIPE_SECRET_KEY
+#   wrangler secret put STRIPE_WEBHOOK_SECRET
+#   wrangler secret put LICENCE_SIGNING_KEY
+#   wrangler secret put RESEND_API_KEY
+#
+# LICENCE_SIGNING_KEY must be the SAME value the engine has, or every licence
+# this Worker mints will fail verification there.
