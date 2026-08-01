@@ -20,7 +20,7 @@ import React, { useEffect, useRef, useState } from 'react';
 
 const CLIENT = 'ca-pub-3669553016263703';
 
-type AdSize = 'leaderboard' | 'rectangle';
+type AdSize = 'leaderboard' | 'rectangle' | 'multiplex';
 
 /**
  * Slot ids come from the AdSense dashboard, one per unit created there. They
@@ -33,6 +33,11 @@ type AdSize = 'leaderboard' | 'rectangle';
 const SLOTS: Record<AdSize, string | undefined> = {
   leaderboard: process.env.NEXT_PUBLIC_ADSENSE_SLOT_LEADERBOARD,
   rectangle: process.env.NEXT_PUBLIC_ADSENSE_SLOT_RECTANGLE,
+  // A real, issued unit, so it is a literal rather than an env var that a build
+  // without .env.local would silently drop -- the same failure that left
+  // canonicalUrl pointing at another domain. The slot id is not a secret; it is
+  // visible in the page source of every site that runs ads.
+  multiplex: process.env.NEXT_PUBLIC_ADSENSE_SLOT_MULTIPLEX || '7620187871',
 };
 
 declare global {
@@ -49,7 +54,13 @@ export function AdSlot({
   label?: string;
 }) {
   // IAB standard units, so the reserved box matches what will occupy it.
-  const dims = size === 'leaderboard' ? { width: 728, height: 90 } : { width: 300, height: 250 };
+  // Multiplex (autorelaxed) sizes itself to its container and grows to fit the
+  // recommendation grid, so it gets no fixed box. The other two are IAB units
+  // whose reserved space must match what will occupy it.
+  const dims =
+    size === 'leaderboard' ? { width: 728, height: 90 }
+    : size === 'multiplex' ? { width: 0, height: 0 }
+    : { width: 300, height: 250 };
 
   const slot = SLOTS[size];
   const pushed = useRef(false);
@@ -75,10 +86,14 @@ export function AdSlot({
     }
   }, [mounted, slot]);
 
+  // Multiplex must not be clamped: `maxWidth: 0` would collapse it to nothing,
+  // and a fixed height would crop the recommendation grid it exists to show. It
+  // is the one format here that legitimately sizes itself.
+  const isFluid = size === 'multiplex';
   const frame: React.CSSProperties = {
     width: '100%',
-    maxWidth: dims.width,
-    minHeight: dims.height,
+    maxWidth: isFluid ? '100%' : dims.width,
+    minHeight: isFluid ? 200 : dims.height,
     margin: '0 auto',
     flex: 'none',
   };
@@ -89,7 +104,7 @@ export function AdSlot({
         aria-label={label}
         style={{
           ...frame,
-          height: dims.height,
+          height: isFluid ? 200 : dims.height,
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
@@ -112,10 +127,18 @@ export function AdSlot({
       {mounted && (
         <ins
           className="adsbygoogle"
-          style={{ display: 'block', width: '100%', height: dims.height }}
+          style={
+            isFluid
+              ? { display: 'block' }
+              : { display: 'block', width: '100%', height: dims.height }
+          }
           data-ad-client={CLIENT}
           data-ad-slot={slot}
-          data-ad-format={size === 'leaderboard' ? 'horizontal' : 'rectangle'}
+          data-ad-format={
+            size === 'leaderboard' ? 'horizontal'
+            : size === 'multiplex' ? 'autorelaxed'
+            : 'rectangle'
+          }
           data-full-width-responsive="true"
         />
       )}

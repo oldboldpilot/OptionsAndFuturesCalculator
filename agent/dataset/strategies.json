@@ -1,0 +1,1120 @@
+[
+  {
+    "id": "long_call",
+    "name": "Long Call",
+    "category": "Bullish",
+    "description": "Unlimited upside, premium at risk.",
+    "multi_expiry": false,
+    "legs": [
+      {
+        "action": "BUY",
+        "type": "CALL",
+        "moneyness": 1.0,
+        "quantity": 1
+      }
+    ],
+    "leg_count": 1
+  },
+  {
+    "id": "bull_call_spread",
+    "name": "Bull Call Spread",
+    "category": "Bullish",
+    "description": "Debit spread. Capped risk and reward.",
+    "multi_expiry": false,
+    "legs": [
+      {
+        "action": "BUY",
+        "type": "CALL",
+        "moneyness": 1.0,
+        "quantity": 1
+      },
+      {
+        "action": "SELL",
+        "type": "CALL",
+        "moneyness": 1.05,
+        "quantity": 1
+      }
+    ],
+    "leg_count": 2
+  },
+  {
+    "id": "bull_put_spread",
+    "name": "Bull Put Spread",
+    "category": "Bullish",
+    "description": "Credit spread. Profits if price holds above the short put.",
+    "multi_expiry": false,
+    "legs": [
+      {
+        "action": "SELL",
+        "type": "PUT",
+        "moneyness": 1.0,
+        "quantity": 1
+      },
+      {
+        "action": "BUY",
+        "type": "PUT",
+        "moneyness": 0.95,
+        "quantity": 1
+      }
+    ],
+    "leg_count": 2
+  },
+  {
+    "id": "call_backspread",
+    "name": "Call Ratio Backspread",
+    "category": "Bullish",
+    "description": "Short one near call against two further calls. Long convexity.",
+    "multi_expiry": false,
+    "legs": [
+      {
+        "action": "SELL",
+        "type": "CALL",
+        "moneyness": 1.0,
+        "quantity": 1
+      },
+      {
+        "action": "BUY",
+        "type": "CALL",
+        "moneyness": 1.05,
+        "quantity": 2
+      }
+    ],
+    "leg_count": 2
+  },
+  {
+    "id": "risk_reversal",
+    "name": "Risk Reversal",
+    "category": "Bullish",
+    "description": "Short put funds a long call. Synthetic long with a gap.",
+    "multi_expiry": false,
+    "legs": [
+      {
+        "action": "SELL",
+        "type": "PUT",
+        "moneyness": 0.95,
+        "quantity": 1
+      },
+      {
+        "action": "BUY",
+        "type": "CALL",
+        "moneyness": 1.05,
+        "quantity": 1
+      }
+    ],
+    "leg_count": 2
+  },
+  {
+    "id": "synthetic_long",
+    "name": "Synthetic Long Stock",
+    "category": "Bullish",
+    "description": "Long call plus short put at one strike replicates the shares.",
+    "multi_expiry": false,
+    "legs": [
+      {
+        "action": "BUY",
+        "type": "CALL",
+        "moneyness": 1.0,
+        "quantity": 1
+      },
+      {
+        "action": "SELL",
+        "type": "PUT",
+        "moneyness": 1.0,
+        "quantity": 1
+      }
+    ],
+    "leg_count": 2
+  },
+  {
+    "id": "call_ratio_spread",
+    "name": "Call Ratio Spread",
+    "category": "Bullish",
+    "description": "One long call against two short. Naked risk above the wing.",
+    "multi_expiry": false,
+    "legs": [
+      {
+        "action": "BUY",
+        "type": "CALL",
+        "moneyness": 1.0,
+        "quantity": 1
+      },
+      {
+        "action": "SELL",
+        "type": "CALL",
+        "moneyness": 1.05,
+        "quantity": 2
+      }
+    ],
+    "leg_count": 2
+  },
+  {
+    "id": "bull_call_ladder",
+    "name": "Bull Call Ladder",
+    "category": "Bullish",
+    "description": "Spread financed by a second short call further out.",
+    "multi_expiry": false,
+    "legs": [
+      {
+        "action": "BUY",
+        "type": "CALL",
+        "moneyness": 1.0,
+        "quantity": 1
+      },
+      {
+        "action": "SELL",
+        "type": "CALL",
+        "moneyness": 1.05,
+        "quantity": 1
+      },
+      {
+        "action": "SELL",
+        "type": "CALL",
+        "moneyness": 1.1,
+        "quantity": 1
+      }
+    ],
+    "leg_count": 3
+  },
+  {
+    "id": "long_put",
+    "name": "Long Put",
+    "category": "Bearish",
+    "description": "Defined risk downside exposure.",
+    "multi_expiry": false,
+    "legs": [
+      {
+        "action": "BUY",
+        "type": "PUT",
+        "moneyness": 1.0,
+        "quantity": 1
+      }
+    ],
+    "leg_count": 1
+  },
+  {
+    "id": "bear_put_spread",
+    "name": "Bear Put Spread",
+    "category": "Bearish",
+    "description": "Debit spread. Capped risk and reward.",
+    "multi_expiry": false,
+    "legs": [
+      {
+        "action": "BUY",
+        "type": "PUT",
+        "moneyness": 1.0,
+        "quantity": 1
+      },
+      {
+        "action": "SELL",
+        "type": "PUT",
+        "moneyness": 0.95,
+        "quantity": 1
+      }
+    ],
+    "leg_count": 2
+  },
+  {
+    "id": "bear_call_spread",
+    "name": "Bear Call Spread",
+    "category": "Bearish",
+    "description": "Credit spread. Profits if price stays below the short call.",
+    "multi_expiry": false,
+    "legs": [
+      {
+        "action": "SELL",
+        "type": "CALL",
+        "moneyness": 1.0,
+        "quantity": 1
+      },
+      {
+        "action": "BUY",
+        "type": "CALL",
+        "moneyness": 1.05,
+        "quantity": 1
+      }
+    ],
+    "leg_count": 2
+  },
+  {
+    "id": "put_backspread",
+    "name": "Put Ratio Backspread",
+    "category": "Bearish",
+    "description": "Short one near put against two lower puts. Long crash risk.",
+    "multi_expiry": false,
+    "legs": [
+      {
+        "action": "SELL",
+        "type": "PUT",
+        "moneyness": 1.0,
+        "quantity": 1
+      },
+      {
+        "action": "BUY",
+        "type": "PUT",
+        "moneyness": 0.95,
+        "quantity": 2
+      }
+    ],
+    "leg_count": 2
+  },
+  {
+    "id": "synthetic_short",
+    "name": "Synthetic Short Stock",
+    "category": "Bearish",
+    "description": "Short call plus long put replicates a short position.",
+    "multi_expiry": false,
+    "legs": [
+      {
+        "action": "SELL",
+        "type": "CALL",
+        "moneyness": 1.0,
+        "quantity": 1
+      },
+      {
+        "action": "BUY",
+        "type": "PUT",
+        "moneyness": 1.0,
+        "quantity": 1
+      }
+    ],
+    "leg_count": 2
+  },
+  {
+    "id": "put_ratio_spread",
+    "name": "Put Ratio Spread",
+    "category": "Bearish",
+    "description": "One long put against two short. Naked risk below the wing.",
+    "multi_expiry": false,
+    "legs": [
+      {
+        "action": "BUY",
+        "type": "PUT",
+        "moneyness": 1.0,
+        "quantity": 1
+      },
+      {
+        "action": "SELL",
+        "type": "PUT",
+        "moneyness": 0.95,
+        "quantity": 2
+      }
+    ],
+    "leg_count": 2
+  },
+  {
+    "id": "covered_put",
+    "name": "Covered Put",
+    "category": "Bearish",
+    "description": "Short stock with a short put written against it.",
+    "multi_expiry": false,
+    "legs": [
+      {
+        "action": "SELL",
+        "type": "STOCK",
+        "moneyness": null,
+        "quantity": 1
+      },
+      {
+        "action": "SELL",
+        "type": "PUT",
+        "moneyness": 0.95,
+        "quantity": 1
+      }
+    ],
+    "leg_count": 2
+  },
+  {
+    "id": "iron_condor",
+    "name": "Iron Condor",
+    "category": "Neutral",
+    "description": "Two credit spreads. Profits from low realised volatility.",
+    "multi_expiry": false,
+    "legs": [
+      {
+        "action": "BUY",
+        "type": "PUT",
+        "moneyness": 0.9,
+        "quantity": 1
+      },
+      {
+        "action": "SELL",
+        "type": "PUT",
+        "moneyness": 0.95,
+        "quantity": 1
+      },
+      {
+        "action": "SELL",
+        "type": "CALL",
+        "moneyness": 1.05,
+        "quantity": 1
+      },
+      {
+        "action": "BUY",
+        "type": "CALL",
+        "moneyness": 1.1,
+        "quantity": 1
+      }
+    ],
+    "leg_count": 4
+  },
+  {
+    "id": "condor",
+    "name": "Condor (all calls)",
+    "category": "Neutral",
+    "description": "Four-strike call condor with a flat profit plateau.",
+    "multi_expiry": false,
+    "legs": [
+      {
+        "action": "BUY",
+        "type": "CALL",
+        "moneyness": 0.92,
+        "quantity": 1
+      },
+      {
+        "action": "SELL",
+        "type": "CALL",
+        "moneyness": 0.97,
+        "quantity": 1
+      },
+      {
+        "action": "SELL",
+        "type": "CALL",
+        "moneyness": 1.03,
+        "quantity": 1
+      },
+      {
+        "action": "BUY",
+        "type": "CALL",
+        "moneyness": 1.08,
+        "quantity": 1
+      }
+    ],
+    "leg_count": 4
+  },
+  {
+    "id": "call_butterfly",
+    "name": "Call Butterfly",
+    "category": "Neutral",
+    "description": "Targets a price pin at expiry. Cheap, low probability.",
+    "multi_expiry": false,
+    "legs": [
+      {
+        "action": "BUY",
+        "type": "CALL",
+        "moneyness": 0.95,
+        "quantity": 1
+      },
+      {
+        "action": "SELL",
+        "type": "CALL",
+        "moneyness": 1.0,
+        "quantity": 2
+      },
+      {
+        "action": "BUY",
+        "type": "CALL",
+        "moneyness": 1.05,
+        "quantity": 1
+      }
+    ],
+    "leg_count": 3
+  },
+  {
+    "id": "put_butterfly",
+    "name": "Put Butterfly",
+    "category": "Neutral",
+    "description": "Same payoff shape as the call butterfly, built from puts.",
+    "multi_expiry": false,
+    "legs": [
+      {
+        "action": "BUY",
+        "type": "PUT",
+        "moneyness": 0.95,
+        "quantity": 1
+      },
+      {
+        "action": "SELL",
+        "type": "PUT",
+        "moneyness": 1.0,
+        "quantity": 2
+      },
+      {
+        "action": "BUY",
+        "type": "PUT",
+        "moneyness": 1.05,
+        "quantity": 1
+      }
+    ],
+    "leg_count": 3
+  },
+  {
+    "id": "iron_butterfly",
+    "name": "Iron Butterfly",
+    "category": "Neutral",
+    "description": "Short straddle with protective wings. Higher credit than a condor.",
+    "multi_expiry": false,
+    "legs": [
+      {
+        "action": "BUY",
+        "type": "PUT",
+        "moneyness": 0.95,
+        "quantity": 1
+      },
+      {
+        "action": "SELL",
+        "type": "PUT",
+        "moneyness": 1.0,
+        "quantity": 1
+      },
+      {
+        "action": "SELL",
+        "type": "CALL",
+        "moneyness": 1.0,
+        "quantity": 1
+      },
+      {
+        "action": "BUY",
+        "type": "CALL",
+        "moneyness": 1.05,
+        "quantity": 1
+      }
+    ],
+    "leg_count": 4
+  },
+  {
+    "id": "broken_wing_butterfly",
+    "name": "Broken-Wing Butterfly",
+    "category": "Neutral",
+    "description": "Asymmetric wings remove risk on one side, add it on the other.",
+    "multi_expiry": false,
+    "legs": [
+      {
+        "action": "BUY",
+        "type": "CALL",
+        "moneyness": 0.97,
+        "quantity": 1
+      },
+      {
+        "action": "SELL",
+        "type": "CALL",
+        "moneyness": 1.02,
+        "quantity": 2
+      },
+      {
+        "action": "BUY",
+        "type": "CALL",
+        "moneyness": 1.12,
+        "quantity": 1
+      }
+    ],
+    "leg_count": 3
+  },
+  {
+    "id": "short_straddle",
+    "name": "Short Straddle",
+    "category": "Neutral",
+    "description": "Maximum premium, unlimited risk both ways.",
+    "multi_expiry": false,
+    "legs": [
+      {
+        "action": "SELL",
+        "type": "CALL",
+        "moneyness": 1.0,
+        "quantity": 1
+      },
+      {
+        "action": "SELL",
+        "type": "PUT",
+        "moneyness": 1.0,
+        "quantity": 1
+      }
+    ],
+    "leg_count": 2
+  },
+  {
+    "id": "short_strangle",
+    "name": "Short Strangle",
+    "category": "Neutral",
+    "description": "Wider profit zone than a short straddle, less credit.",
+    "multi_expiry": false,
+    "legs": [
+      {
+        "action": "SELL",
+        "type": "CALL",
+        "moneyness": 1.05,
+        "quantity": 1
+      },
+      {
+        "action": "SELL",
+        "type": "PUT",
+        "moneyness": 0.95,
+        "quantity": 1
+      }
+    ],
+    "leg_count": 2
+  },
+  {
+    "id": "jade_lizard",
+    "name": "Jade Lizard",
+    "category": "Neutral",
+    "description": "Short put plus short call spread, sized to have no upside risk.",
+    "multi_expiry": false,
+    "legs": [
+      {
+        "action": "SELL",
+        "type": "PUT",
+        "moneyness": 0.95,
+        "quantity": 1
+      },
+      {
+        "action": "SELL",
+        "type": "CALL",
+        "moneyness": 1.05,
+        "quantity": 1
+      },
+      {
+        "action": "BUY",
+        "type": "CALL",
+        "moneyness": 1.1,
+        "quantity": 1
+      }
+    ],
+    "leg_count": 3
+  },
+  {
+    "id": "box_spread",
+    "name": "Box Spread",
+    "category": "Neutral",
+    "description": "Synthetic long and short combined. A financing trade, not a directional one.",
+    "multi_expiry": false,
+    "legs": [
+      {
+        "action": "BUY",
+        "type": "CALL",
+        "moneyness": 0.95,
+        "quantity": 1
+      },
+      {
+        "action": "SELL",
+        "type": "PUT",
+        "moneyness": 0.95,
+        "quantity": 1
+      },
+      {
+        "action": "SELL",
+        "type": "CALL",
+        "moneyness": 1.05,
+        "quantity": 1
+      },
+      {
+        "action": "BUY",
+        "type": "PUT",
+        "moneyness": 1.05,
+        "quantity": 1
+      }
+    ],
+    "leg_count": 4
+  },
+  {
+    "id": "long_straddle",
+    "name": "Long Straddle",
+    "category": "Volatility",
+    "description": "Profits from a large move either way.",
+    "multi_expiry": false,
+    "legs": [
+      {
+        "action": "BUY",
+        "type": "CALL",
+        "moneyness": 1.0,
+        "quantity": 1
+      },
+      {
+        "action": "BUY",
+        "type": "PUT",
+        "moneyness": 1.0,
+        "quantity": 1
+      }
+    ],
+    "leg_count": 2
+  },
+  {
+    "id": "long_strangle",
+    "name": "Long Strangle",
+    "category": "Volatility",
+    "description": "Cheaper than a straddle, needs a larger move.",
+    "multi_expiry": false,
+    "legs": [
+      {
+        "action": "BUY",
+        "type": "CALL",
+        "moneyness": 1.05,
+        "quantity": 1
+      },
+      {
+        "action": "BUY",
+        "type": "PUT",
+        "moneyness": 0.95,
+        "quantity": 1
+      }
+    ],
+    "leg_count": 2
+  },
+  {
+    "id": "reverse_iron_condor",
+    "name": "Reverse Iron Condor",
+    "category": "Volatility",
+    "description": "Debit structure that pays on a breakout past either wing.",
+    "multi_expiry": false,
+    "legs": [
+      {
+        "action": "SELL",
+        "type": "PUT",
+        "moneyness": 0.9,
+        "quantity": 1
+      },
+      {
+        "action": "BUY",
+        "type": "PUT",
+        "moneyness": 0.95,
+        "quantity": 1
+      },
+      {
+        "action": "BUY",
+        "type": "CALL",
+        "moneyness": 1.05,
+        "quantity": 1
+      },
+      {
+        "action": "SELL",
+        "type": "CALL",
+        "moneyness": 1.1,
+        "quantity": 1
+      }
+    ],
+    "leg_count": 4
+  },
+  {
+    "id": "long_guts",
+    "name": "Long Guts",
+    "category": "Volatility",
+    "description": "Both legs in the money. High debit, high intrinsic value.",
+    "multi_expiry": false,
+    "legs": [
+      {
+        "action": "BUY",
+        "type": "CALL",
+        "moneyness": 0.95,
+        "quantity": 1
+      },
+      {
+        "action": "BUY",
+        "type": "PUT",
+        "moneyness": 1.05,
+        "quantity": 1
+      }
+    ],
+    "leg_count": 2
+  },
+  {
+    "id": "strip",
+    "name": "Strip",
+    "category": "Volatility",
+    "description": "Straddle weighted to the downside \u2014 two puts per call.",
+    "multi_expiry": false,
+    "legs": [
+      {
+        "action": "BUY",
+        "type": "CALL",
+        "moneyness": 1.0,
+        "quantity": 1
+      },
+      {
+        "action": "BUY",
+        "type": "PUT",
+        "moneyness": 1.0,
+        "quantity": 2
+      }
+    ],
+    "leg_count": 2
+  },
+  {
+    "id": "strap",
+    "name": "Strap",
+    "category": "Volatility",
+    "description": "Straddle weighted to the upside \u2014 two calls per put.",
+    "multi_expiry": false,
+    "legs": [
+      {
+        "action": "BUY",
+        "type": "CALL",
+        "moneyness": 1.0,
+        "quantity": 2
+      },
+      {
+        "action": "BUY",
+        "type": "PUT",
+        "moneyness": 1.0,
+        "quantity": 1
+      }
+    ],
+    "leg_count": 2
+  },
+  {
+    "id": "calendar_spread",
+    "name": "Calendar Spread",
+    "category": "Volatility",
+    "description": "Sell the near expiry, buy the far one at the same strike.",
+    "multi_expiry": true,
+    "legs": [
+      {
+        "action": "SELL",
+        "type": "CALL",
+        "moneyness": 1.0,
+        "quantity": 1
+      },
+      {
+        "action": "BUY",
+        "type": "CALL",
+        "moneyness": 1.0,
+        "quantity": 1
+      }
+    ],
+    "leg_count": 2
+  },
+  {
+    "id": "diagonal_spread",
+    "name": "Diagonal Spread",
+    "category": "Volatility",
+    "description": "Calendar with different strikes on each expiry.",
+    "multi_expiry": true,
+    "legs": [
+      {
+        "action": "SELL",
+        "type": "CALL",
+        "moneyness": 1.05,
+        "quantity": 1
+      },
+      {
+        "action": "BUY",
+        "type": "CALL",
+        "moneyness": 1.0,
+        "quantity": 1
+      }
+    ],
+    "leg_count": 2
+  },
+  {
+    "id": "double_diagonal",
+    "name": "Double Diagonal",
+    "category": "Volatility",
+    "description": "Diagonals on both sides. Long vega, short theta near the money.",
+    "multi_expiry": true,
+    "legs": [
+      {
+        "action": "SELL",
+        "type": "CALL",
+        "moneyness": 1.05,
+        "quantity": 1
+      },
+      {
+        "action": "BUY",
+        "type": "CALL",
+        "moneyness": 1.1,
+        "quantity": 1
+      },
+      {
+        "action": "SELL",
+        "type": "PUT",
+        "moneyness": 0.95,
+        "quantity": 1
+      },
+      {
+        "action": "BUY",
+        "type": "PUT",
+        "moneyness": 0.9,
+        "quantity": 1
+      }
+    ],
+    "leg_count": 4
+  },
+  {
+    "id": "covered_call",
+    "name": "Covered Call",
+    "category": "Income & Hedge",
+    "description": "Long stock with a short call written against it.",
+    "multi_expiry": false,
+    "legs": [
+      {
+        "action": "BUY",
+        "type": "STOCK",
+        "moneyness": null,
+        "quantity": 1
+      },
+      {
+        "action": "SELL",
+        "type": "CALL",
+        "moneyness": 1.05,
+        "quantity": 1
+      }
+    ],
+    "leg_count": 2
+  },
+  {
+    "id": "cash_secured_put",
+    "name": "Cash-Secured Put",
+    "category": "Income & Hedge",
+    "description": "Sell a put you are willing to be assigned on.",
+    "multi_expiry": false,
+    "legs": [
+      {
+        "action": "SELL",
+        "type": "PUT",
+        "moneyness": 0.95,
+        "quantity": 1
+      }
+    ],
+    "leg_count": 1
+  },
+  {
+    "id": "protective_put",
+    "name": "Protective Put",
+    "category": "Income & Hedge",
+    "description": "Long stock with a put as insurance.",
+    "multi_expiry": false,
+    "legs": [
+      {
+        "action": "BUY",
+        "type": "STOCK",
+        "moneyness": null,
+        "quantity": 1
+      },
+      {
+        "action": "BUY",
+        "type": "PUT",
+        "moneyness": 0.95,
+        "quantity": 1
+      }
+    ],
+    "leg_count": 2
+  },
+  {
+    "id": "collar",
+    "name": "Collar",
+    "category": "Income & Hedge",
+    "description": "Protective put financed by a covered call.",
+    "multi_expiry": false,
+    "legs": [
+      {
+        "action": "BUY",
+        "type": "STOCK",
+        "moneyness": null,
+        "quantity": 1
+      },
+      {
+        "action": "BUY",
+        "type": "PUT",
+        "moneyness": 0.95,
+        "quantity": 1
+      },
+      {
+        "action": "SELL",
+        "type": "CALL",
+        "moneyness": 1.05,
+        "quantity": 1
+      }
+    ],
+    "leg_count": 3
+  },
+  {
+    "id": "pmcc",
+    "name": "Poor Man's Covered Call",
+    "category": "Income & Hedge",
+    "description": "Deep ITM LEAP call stands in for the shares.",
+    "multi_expiry": true,
+    "legs": [
+      {
+        "action": "BUY",
+        "type": "CALL",
+        "moneyness": 0.8,
+        "quantity": 1
+      },
+      {
+        "action": "SELL",
+        "type": "CALL",
+        "moneyness": 1.05,
+        "quantity": 1
+      }
+    ],
+    "leg_count": 2
+  },
+  {
+    "id": "futures_long",
+    "name": "Futures Outright Long",
+    "category": "Futures",
+    "description": "Directional front-month futures position.",
+    "multi_expiry": false,
+    "legs": [
+      {
+        "action": "BUY",
+        "type": "FUTURE",
+        "moneyness": null,
+        "quantity": 1
+      }
+    ],
+    "leg_count": 1
+  },
+  {
+    "id": "futures_short",
+    "name": "Futures Outright Short",
+    "category": "Futures",
+    "description": "Directional short futures position.",
+    "multi_expiry": false,
+    "legs": [
+      {
+        "action": "SELL",
+        "type": "FUTURE",
+        "moneyness": null,
+        "quantity": 1
+      }
+    ],
+    "leg_count": 1
+  },
+  {
+    "id": "futures_calendar",
+    "name": "Futures Calendar Spread",
+    "category": "Futures",
+    "description": "Inter-month spread along the term structure.",
+    "multi_expiry": true,
+    "legs": [
+      {
+        "action": "BUY",
+        "type": "FUTURE",
+        "moneyness": null,
+        "quantity": 1
+      },
+      {
+        "action": "SELL",
+        "type": "FUTURE",
+        "moneyness": null,
+        "quantity": 1
+      }
+    ],
+    "leg_count": 2
+  },
+  {
+    "id": "spark_spread",
+    "name": "Spark Spread",
+    "category": "Futures",
+    "description": "Power against gas at a given heat rate.",
+    "multi_expiry": false,
+    "legs": [
+      {
+        "action": "SELL",
+        "type": "FUTURE",
+        "moneyness": null,
+        "quantity": 1
+      },
+      {
+        "action": "BUY",
+        "type": "FUTURE",
+        "moneyness": null,
+        "quantity": 1
+      }
+    ],
+    "leg_count": 2
+  },
+  {
+    "id": "crush_spread",
+    "name": "Soybean Crush Spread",
+    "category": "Futures",
+    "description": "Beans against oil and meal.",
+    "multi_expiry": false,
+    "legs": [
+      {
+        "action": "BUY",
+        "type": "FUTURE",
+        "moneyness": null,
+        "quantity": 1
+      },
+      {
+        "action": "SELL",
+        "type": "FUTURE",
+        "moneyness": null,
+        "quantity": 1
+      },
+      {
+        "action": "SELL",
+        "type": "FUTURE",
+        "moneyness": null,
+        "quantity": 1
+      }
+    ],
+    "leg_count": 3
+  },
+  {
+    "id": "cash_and_carry",
+    "name": "Cash & Carry / Basis",
+    "category": "Futures",
+    "description": "Long spot against short futures. Captures the carry.",
+    "multi_expiry": false,
+    "legs": [
+      {
+        "action": "BUY",
+        "type": "STOCK",
+        "moneyness": null,
+        "quantity": 1
+      },
+      {
+        "action": "SELL",
+        "type": "FUTURE",
+        "moneyness": null,
+        "quantity": 1
+      }
+    ],
+    "leg_count": 2
+  },
+  {
+    "id": "covered_futures_call",
+    "name": "Covered Futures Call (FOP)",
+    "category": "Futures",
+    "description": "Long futures hedged with a short out-of-the-money future option.",
+    "multi_expiry": false,
+    "legs": [
+      {
+        "action": "BUY",
+        "type": "FUTURE",
+        "moneyness": null,
+        "quantity": 1
+      },
+      {
+        "action": "SELL",
+        "type": "CALL",
+        "moneyness": 1.05,
+        "quantity": 1
+      }
+    ],
+    "leg_count": 2
+  },
+  {
+    "id": "min_variance_hedge",
+    "name": "Minimum-Variance Hedge",
+    "category": "Futures",
+    "description": "Short futures sized by the beta hedge ratio.",
+    "multi_expiry": false,
+    "legs": [
+      {
+        "action": "BUY",
+        "type": "STOCK",
+        "moneyness": null,
+        "quantity": 1
+      },
+      {
+        "action": "SELL",
+        "type": "FUTURE",
+        "moneyness": null,
+        "quantity": 1
+      }
+    ],
+    "leg_count": 2
+  }
+]

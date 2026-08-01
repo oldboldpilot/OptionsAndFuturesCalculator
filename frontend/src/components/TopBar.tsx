@@ -214,7 +214,14 @@ export function TopBar() {
       >
         {([
           { label: 'Equities', cls: 'EQUITY' as const, syms: ['SPY', 'QQQ', 'NVDA', 'AAPL', 'TSLA'] },
-          { label: 'Futures', cls: 'FUTURES' as const, syms: ['ES', 'NQ', 'CL', 'GC', 'ZB'] },
+          // Only the roots the data provider actually returns a curve for.
+          // Probing the live backend: ES and NQ return eight listed contracts
+          // each; RTY, YM, CL, NG, GC, SI, ZB and ZN return ZERO. Offering them
+          // is offering a dead end -- the user picks GC, the term structure
+          // panel says "no curve", and every futures strategy stays blocked
+          // with no indication that the symbol was the problem. Add a root here
+          // when its data starts arriving, not before.
+          { label: 'Futures', cls: 'FUTURES' as const, syms: ['ES', 'NQ'] },
         ]).map((group) => (
           <div key={group.label} style={{ display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
             <span

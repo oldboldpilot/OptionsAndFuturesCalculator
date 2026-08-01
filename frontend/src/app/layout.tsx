@@ -39,6 +39,7 @@ const fraunces = Fraunces({
 
 import { branding } from "@/config/branding";
 import { SiteStructuredData } from "@/components/StructuredData";
+import AdSlot from "@/components/AdSlot";
 
 export async function generateMetadata(): Promise<Metadata> {
   return {
@@ -164,6 +165,22 @@ export default function RootLayout({
         <div id="root-container">
           {children}
         </div>
+        {/*
+          Multiplex (autorelaxed) unit — a grid of content recommendations.
+
+          Placed here, after the workspace and above the footer, rather than
+          inside the terminal. Multiplex grows to fit its content, and anything
+          that changes height late must not sit above a strike ladder whose buy
+          and sell buttons would shift under the cursor.
+
+          Google's snippet repeats the loader <script>; it is not repeated here
+          because the same loader is already in <head> for Auto Ads, and loading
+          it twice buys nothing.
+        */}
+        <div style={{ maxWidth: '60rem', margin: '0 auto', padding: '1rem 1.25rem 0' }}>
+          <AdSlot size="multiplex" label="Sponsored" />
+        </div>
+
         {/*
           Site-wide footer.
 
