@@ -114,15 +114,28 @@ static_resources:
                         header:
                           key: x-local-rate-limit
                           value: 'true'
+                - name: envoy.filters.http.grpc_web
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.filters.http.grpc_web.v3.GrpcWeb
                 # JSON in, JSON out, against the SAME methods the gRPC services
                 # expose. The descriptor is generated from the same .proto files
                 # the C++ stubs come from, so this surface cannot drift into
                 # describing a method the engine does not serve -- the usual
                 # failure of a hand-written REST gateway.
                 #
-                # It sits ahead of grpc_web because it only claims requests whose
-                # content-type is JSON; a gRPC-Web request passes through it
-                # untouched.
+                # ORDER IS LOAD-BEARING: this MUST come after grpc_web.
+                #
+                # The transcoder passes through requests it recognises as gRPC by
+                # content-type -- and it recognises `application/grpc`, NOT
+                # `application/grpc-web+proto`. Placed ahead of grpc_web it sees
+                # the browser's content-type before grpc_web has rewritten it,
+                # concludes the body is JSON, and tries to parse binary protobuf
+                # as text: every gRPC-Web call fails with HTTP 400 "Encountered
+                # non UTF-8 code point". That is the entire frontend.
+                #
+                # After grpc_web, the body and content-type are already plain
+                # gRPC, so the transcoder passes them through and only claims
+                # genuine application/json.
                 #
                 # Authentication and per-key limits are unaffected: this filter
                 # rewrites the ENCODING, not the headers, so `x-api-key` reaches
@@ -141,9 +154,6 @@ static_resources:
                     convert_grpc_status: true
                     print_options:
                       always_print_primitive_fields: true
-                - name: envoy.filters.http.grpc_web
-                  typed_config:
-                    "@type": type.googleapis.com/envoy.extensions.filters.http.grpc_web.v3.GrpcWeb
                 - name: envoy.filters.http.cors
                   typed_config:
                     "@type": type.googleapis.com/envoy.extensions.filters.http.cors.v3.Cors
