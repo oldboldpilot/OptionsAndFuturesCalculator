@@ -38,6 +38,7 @@ const fraunces = Fraunces({
 });
 
 import { branding } from "@/config/branding";
+import { SiteStructuredData } from "@/components/StructuredData";
 
 export async function generateMetadata(): Promise<Metadata> {
   return {
@@ -119,6 +120,21 @@ export default function RootLayout({
               "document.documentElement.dataset.theme=t||'light'}catch(e){document.documentElement.dataset.theme='light'}",
           }}
         />
+        {/*
+          AdSense site verification.
+
+          Google looks for this meta tag to confirm the publisher who claims
+          this site is the one who owns the account. It is separate from the ad
+          loader below -- the loader requests ads, this asserts ownership -- and
+          it is the tag AdSense asks for when a site is stuck awaiting review.
+
+          The publisher id is not a secret: it is public in ads.txt by design.
+        */}
+        <meta name="google-adsense-account" content="ca-pub-3669553016263703" />
+
+        {/* What this site IS, in a vocabulary crawlers parse rather than infer. */}
+        <SiteStructuredData />
+
         {/*
           Google AdSense Auto Ads.
 

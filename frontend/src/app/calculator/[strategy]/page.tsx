@@ -1,6 +1,8 @@
 import React from 'react';
 import { Metadata } from 'next';
 import StrategyWorkspace from '../../../components/StrategyWorkspace';
+import { branding } from '@/config/branding';
+import { StrategyStructuredData } from '@/components/StructuredData';
 
 // Shared with the sitemap, so the pages exported and the pages advertised to
 // crawlers cannot drift apart.
@@ -20,19 +22,44 @@ export function generateStaticParams() {
 // Dynamically generate SEO Metadata for each strategy page
 export async function generateMetadata({ params }: Props): Promise<Metadata> {
   const resolvedParams = await params;
-  const strategyName = resolvedParams.strategy
+  const slug = resolvedParams.strategy;
+  const strategyName = slug
     .split('-')
     .map(word => word.charAt(0).toUpperCase() + word.slice(1))
     .join(' ');
 
+  // "for a Iron Condor" appeared verbatim in search results. The article has to
+  // agree with the sound of the next word, and these names are fixed and known.
+  const article = /^[aeiou]/i.test(strategyName) ? 'an' : 'a';
+
+  // Futures strategies were all described as "Options Calculator", which is
+  // both wrong and the single most important phrase on the page for matching
+  // what someone typed.
+  const isFutures = slug.startsWith('futures-') || slug === 'covered-futures-call';
+  // Most futures slugs already carry the word, and "Futures Outright Futures
+  // Calculator" is what naive concatenation produces. Only add the instrument
+  // where the name does not already say it.
+  const instrument = /futures/i.test(strategyName) ? '' : isFutures ? 'Futures ' : 'Options ';
+
   return {
-    title: `${strategyName} Options Calculator & Profit Visualizer`,
-    description: `Calculate maximum profit, loss, probability of profit and the full Greek profile for a ${strategyName}, priced from live option chain quotes.`,
+    title: `${strategyName} ${instrument}Calculator & Profit Visualizer`,
+    description: `Calculate maximum profit, loss, probability of profit and the full Greek profile for ${article} ${strategyName}, priced from live ${isFutures ? 'futures' : 'option chain'} quotes.`,
+    // Its OWN url. Inherited from the root layout, every one of these pages
+    // declared the HOMEPAGE as its canonical -- telling Google that all 26 are
+    // duplicates of `/` and that none should be indexed in its own right, which
+    // defeats the entire purpose of having per-strategy pages.
+    alternates: {
+      canonical: `${branding.canonicalUrl}/calculator/${slug}`,
+    },
     openGraph: {
-      title: `${strategyName} Calculator | Options & Futures`,
-      description: `Model the P&L and probability distribution of a ${strategyName} strategy.`,
-      images: [`/api/og?strategy=${resolvedParams.strategy}`],
-    }
+      title: `${strategyName} Calculator | ${branding.appName}`,
+      description: `Model the P&L and probability distribution of ${article} ${strategyName} strategy.`,
+      url: `${branding.canonicalUrl}/calculator/${slug}`,
+      // A STATIC image. This pointed at /api/og?strategy=..., a route handler --
+      // and `output: "export"` disables API routes, so every share and every
+      // crawl of these pages fetched a 404 for its preview image.
+      images: [branding.ogImageUrl],
+    },
   };
 }
 
@@ -51,5 +78,18 @@ export default async function StrategyCalculatorPage({ params }: Props) {
     .map(word => word.charAt(0).toUpperCase() + word.slice(1))
     .join(' ');
 
-  return <StrategyWorkspace heading={`${strategyName} Calculator`} />;
+  const isFutures =
+    resolvedParams.strategy.startsWith('futures-') ||
+    resolvedParams.strategy === 'covered-futures-call';
+
+  return (
+    <>
+      <StrategyStructuredData
+        slug={resolvedParams.strategy}
+        name={`${strategyName}${/futures/i.test(strategyName) ? '' : isFutures ? ' Futures' : ' Options'} Calculator`}
+        description={`Model the profit, loss and Greeks of ${/^[aeiou]/i.test(strategyName) ? 'an' : 'a'} ${strategyName} strategy on live market data.`}
+      />
+      <StrategyWorkspace heading={`${strategyName} Calculator`} />
+    </>
+  );
 }
