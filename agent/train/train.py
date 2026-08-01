@@ -26,11 +26,11 @@ int8-int4, fp8-fp8 and fp8-int4.
 
     python3 train.py --data ../dataset/data --out /scratch/agents/param-agent
 """
+
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import time
 from pathlib import Path
 
@@ -47,7 +47,7 @@ QAT_SCHEME = "int8"
 
 
 def load_jsonl(path: Path) -> list[dict]:
-    return [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
 def main() -> None:
@@ -58,27 +58,101 @@ def main() -> None:
     ap.add_argument("--epochs", type=float, default=2.0)
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--grad-accum", type=int, default=4)
-    ap.add_argument("--lr", type=float, default=5e-5)
+    # Default None so the method can pick its own: LoRA and full fine-tuning do
+    # not want the same learning rate, and silently giving one the other's is the
+    # easiest way to make a method look worse than it is.
+    ap.add_argument("--lr", type=float, default=None)
     ap.add_argument("--seed", type=int, default=3407)
+    ap.add_argument(
+        "--method",
+        choices=["qlora", "full"],
+        default="qlora",
+        help="qlora: 4-bit frozen base + LoRA adapters. " "full: full fine-tune with int8 QAT.",
+    )
+    # LoRA capacity. r=16 on a 0.6B model is generous for a task whose output is
+    # a five-field JSON object; it is here to be lowered if the adapter overfits,
+    # not raised.
+    ap.add_argument("--lora-r", type=int, default=16)
+    ap.add_argument("--lora-alpha", type=int, default=16)
+    ap.add_argument("--lora-dropout", type=float, default=0.0)
     # Profiling runs want a handful of steps, not a full epoch.
     ap.add_argument("--max-steps", type=int, default=-1)
-    ap.add_argument("--profile", action="store_true",
-                    help="Emit a torch profiler trace and NVTX ranges for nsys.")
+    ap.add_argument(
+        "--profile",
+        action="store_true",
+        help="Emit a torch profiler trace and NVTX ranges for nsys.",
+    )
     args = ap.parse_args()
+
+    qlora = args.method == "qlora"
+    # 2e-4 is the standard LoRA rate and ~4x the full fine-tuning rate. The
+    # adapters start at zero and are the only thing being trained, so they have
+    # to move much further per step than a full model whose weights are already
+    # in a good place -- 5e-5 on LoRA underfits and reads as "LoRA is worse".
+    if args.lr is None:
+        args.lr = 2e-4 if qlora else 5e-5
+    print(f"method={args.method}  lr={args.lr}")
 
     data = Path(args.data)
     train_rows = load_jsonl(data / "train.jsonl")
     val_rows = load_jsonl(data / "val.jsonl")
     print(f"train {len(train_rows)}  val {len(val_rows)}")
 
+    # QLoRA: the base weights are loaded in 4-bit and FROZEN, and the only
+    # trainable parameters are the low-rank adapters bolted onto the attention
+    # and MLP projections. That is what makes it cheap -- no optimizer state for
+    # 0.6B of weights, so the adamw_8bit moments that dominated peak memory in
+    # the full run (6.12 GB) mostly disappear.
+    #
+    # Note this changes what "quantized" means here. The full path used QAT: the
+    # quantization is simulated in the forward pass so the weights learn to
+    # tolerate it, and the exported model IS the trained model. QLoRA instead
+    # quantizes a base that is never updated, and the adapters train in bf16 on
+    # top. For CPU deployment the adapters get merged back into a 16-bit model
+    # and quantized afterwards, so the deployed weights are NOT the ones that
+    # were trained. On a task this narrow that is usually fine; it is a real
+    # difference and worth remembering if accuracy drops only after conversion.
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=MODEL_ID,
         max_seq_length=args.max_seq_length,
         dtype=torch.bfloat16,
-        load_in_4bit=False,
-        full_finetuning=True,
-        qat_scheme=QAT_SCHEME,
+        load_in_4bit=qlora,
+        full_finetuning=not qlora,
+        **({} if qlora else {"qat_scheme": QAT_SCHEME}),
     )
+
+    if qlora:
+        model = FastLanguageModel.get_peft_model(
+            model,
+            r=args.lora_r,
+            # All seven projections, not just q and v. Restricting LoRA to the
+            # attention projections leaves the MLP -- where most of the
+            # parameters and most of the task-specific behaviour live -- frozen.
+            target_modules=[
+                "q_proj",
+                "k_proj",
+                "v_proj",
+                "o_proj",
+                "gate_proj",
+                "up_proj",
+                "down_proj",
+            ],
+            lora_alpha=args.lora_alpha,
+            lora_dropout=args.lora_dropout,  # 0 is Unsloth's optimised path
+            bias="none",  # ditto
+            use_gradient_checkpointing="unsloth",
+            random_state=args.seed,
+            max_seq_length=args.max_seq_length,
+            use_rslora=False,
+        )
+        trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        total = sum(p.numel() for p in model.parameters())
+        print(
+            f"LoRA r={args.lora_r} alpha={args.lora_alpha}  "
+            f"trainable {trainable/1e6:.2f}M / {total/1e6:.1f}M "
+            f"({100*trainable/total:.2f}%)"
+        )
+
     tokenizer = get_chat_template(tokenizer, chat_template="qwen3")
 
     def to_text(rows: list[dict]) -> Dataset:
@@ -181,7 +255,7 @@ def main() -> None:
             saved_by = name
             print(f"saved ({name}) -> {args.out}")
             return True
-        except Exception as e:                      # noqa: BLE001 - see below
+        except Exception as e:  # noqa: BLE001 - see below
             # Deliberately broad. Each strategy fails in its own library with
             # its own exception type, and the point of the chain is that ANY
             # failure falls through to the next attempt rather than killing the
@@ -189,6 +263,24 @@ def main() -> None:
             errors.append(f"{name}: {type(e).__name__}: {e}")
             print(f"  {name} failed: {type(e).__name__}: {e}")
             return False
+
+    if qlora:
+        # Adapters first, and on their own. They are a few MB, they are the only
+        # thing training actually produced, and they save without touching the
+        # tied-lm_head problem at all. Saving them before attempting the merge
+        # means a merge failure costs a conversion step, not the run.
+        adapter_dir = Path(args.out) / "adapter"
+        model.save_pretrained(adapter_dir)
+        tokenizer.save_pretrained(adapter_dir)
+        print(f"saved LoRA adapter -> {adapter_dir}")
+
+        # Then a merged 16-bit model, which is what the CPU serving path needs:
+        # llama.cpp's GGUF converter reads a normal dense checkpoint, not a base
+        # plus adapters. save_pretrained_merged does the dequantize-and-fold.
+        attempt(
+            "merged_16bit",
+            lambda: model.save_pretrained_merged(args.out, tokenizer, save_method="merged_16bit"),
+        )
 
     # 1. The intended path: auto-detects the QAT model and converts it.
     attempt("torchao", lambda: model.save_pretrained_torchao(args.out, tokenizer=tokenizer))
@@ -220,13 +312,30 @@ def main() -> None:
 
     tokenizer.save_pretrained(args.out)
 
-    (Path(args.out) / "train_meta.json").write_text(json.dumps({
-        "model": MODEL_ID, "qat_scheme": QAT_SCHEME, "seq_len": seq_len,
-        "saved_by": saved_by, "export_errors": errors,
-        "steps": steps, "seconds": dt, "s_per_step": dt / steps,
-        "peak_gpu_bytes": torch.cuda.max_memory_allocated(),
-        "train_rows": len(train_rows),
-    }, indent=2))
+    (Path(args.out) / "train_meta.json").write_text(
+        json.dumps(
+            {
+                "model": MODEL_ID,
+                "method": args.method,
+                "qat_scheme": None if qlora else QAT_SCHEME,
+                "lora": (
+                    {"r": args.lora_r, "alpha": args.lora_alpha, "dropout": args.lora_dropout}
+                    if qlora
+                    else None
+                ),
+                "lr": args.lr,
+                "seq_len": seq_len,
+                "saved_by": saved_by,
+                "export_errors": errors,
+                "steps": steps,
+                "seconds": dt,
+                "s_per_step": dt / steps,
+                "peak_gpu_bytes": torch.cuda.max_memory_allocated(),
+                "train_rows": len(train_rows),
+            },
+            indent=2,
+        )
+    )
 
 
 if __name__ == "__main__":

@@ -454,7 +454,6 @@ def main() -> None:
                 fh.write(json.dumps(r) + "\n")
         print(f"  {p}  {len(part)} rows")
 
-    covered = {c[-1]["content"] for r in rows for c in [r["conversations"]]}
     ids_seen = set()
     for r in rows:
         for turn in r["conversations"]:
