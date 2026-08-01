@@ -84,7 +84,7 @@ RUN cmake -S /src/backend -B /src/build -G Ninja \
         -DCMAKE_CXX_FLAGS="${GCC_TOOLCHAIN_FLAGS}" \
         -DLIBCXX_MODULES_PATH=/usr/lib/llvm-${LLVM_VERSION}/share/libc++/v1 \
         -DCPP23_LOGGER_LIBCXX_MODULES_PATH=/usr/lib/llvm-${LLVM_VERSION}/share/libc++/v1 \
-    && cmake --build /src/build --target calculator_engine smoke_client
+    && cmake --build /src/build --target calculator_engine smoke_client proto_descriptor
 
 # --------------------------------------------------------------------------
 # Runtime
