@@ -114,7 +114,32 @@ set(ABSL_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
 # /usr/local/lib64/cmake/TBB which the find_package probe picked up. The
 # container carries neither, which is the only environment whose answer counts.
 # Found by building the image; it is not visible from the local build.
-set(ENABLE_PARALLEL_STL ON CACHE BOOL "" FORCE)
+#
+# It is decided by probing rather than hard-coded, because the right answer
+# differs between the container and a developer machine and getting it wrong
+# breaks one or the other. ON when no TBB is installed: sensen fetches and
+# builds one from source under our flags, which is what the container needs and
+# the only way it gets a TBB at all. OFF when a system TBB already exists:
+# turning it ON there makes FetchContent create TBB::tbb a second time and
+# configure dies with "add_library cannot create ALIAS target TBB::tbb because
+# another target with the same name already exists".
+#
+# The deploy configuration is the ON branch, and it is the one that matters:
+# backend/Dockerfile's builder deliberately installs no libtbb-dev, so the probe
+# finds nothing and TBB is built from source under libc++ exactly as intended.
+# The OFF branch exists so this still configures on a machine that happens to
+# carry a system oneTBB -- but note that such a host links a TBB whose standard
+# library was not chosen by this build, which is precisely why the container
+# does not have one. `ldd` on the engine is the standing check either way: a
+# libtbb.so.12 in NEEDED means a prebuilt copy won.
+find_package(TBB CONFIG QUIET)
+if(TBB_FOUND)
+    message(STATUS "System TBB found; leaving ENABLE_PARALLEL_STL OFF to avoid a duplicate TBB::tbb")
+    set(ENABLE_PARALLEL_STL OFF CACHE BOOL "" FORCE)
+else()
+    message(STATUS "No system TBB; enabling ENABLE_PARALLEL_STL so sensen builds one from source")
+    set(ENABLE_PARALLEL_STL ON CACHE BOOL "" FORCE)
+endif()
 
 # A note on TBB, because it is the one dependency in this binary whose standard
 # library can be wrong without anything saying so, and because the obvious fix
@@ -763,6 +788,7 @@ add_executable(calculator_engine src/main.cpp src/issue_key.cpp src/modules/calc
 target_sources(calculator_engine PUBLIC FILE_SET CXX_MODULES FILES src/modules/calculator_service.cppm src/modules/market_data.cppm src/modules/finance_service.cppm src/modules/quota.cppm src/modules/api_key.cppm src/modules/strategy_catalogue.cppm src/modules/assistant_service.cppm)
 target_link_libraries(calculator_engine PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto sgee)
 
+
 # Python Bindings via nanobind
 # nanobind_add_module(
 #     options_futures_engine
@@ -802,3 +828,230 @@ add_test(NAME CoreEngineTest COMMAND test_runner)
 # three RPCs; used as the deploy gate.
 add_executable(smoke_client src/smoke_client.cpp)
 target_link_libraries(smoke_client PRIVATE proto_lib)
+
+# assistant_load_probe: throwaway concurrency harness (see its source header).
+add_executable(assistant_load_probe src/assistant_load_probe.cpp)
+target_link_libraries(assistant_load_probe PRIVATE proto_lib)
+
+# --------------------------------------------------------------------------
+# llama.cpp / ggml -- upstream (ggml-org/llama.cpp), fetched and built inside
+# this tree to prove, in this exact build with this exact toolchain, that it
+# links and runs before anything here is asked to depend on it.
+#
+# This is the SECOND inference backend behind the assistant RPC's
+# InferenceBackend interface (backend/src/modules/assistant_service.cpp), not
+# a test fixture. sensen's own in-process stack -- import sensen.llm_pipeline;,
+# see the "sensen.llm_pipeline addendum" comment above sensen_slim -- remains
+# the production default, selected when ASSISTANT_BACKEND is unset. llama.cpp
+# is what ASSISTANT_BACKEND=llamacpp selects instead.
+#
+# WHY CARRY A SECOND ENGINE AT ALL, given the first one works: because the
+# first one's CPU inference path has already produced confidently wrong output
+# for this exact model once, and what established that the model, the
+# quantisation and the prompt were all fine -- and therefore that the defect
+# was in the caller -- was upstream llama.cpp decoding the same GGUF
+# correctly. A second, independently-implemented engine reachable by changing
+# one environment variable turns that class of incident from an outage into a
+# restart, and gives whoever is diagnosing the next one a reference answer
+# rather than a hypothesis.
+#
+# ENABLE_LLAMACPP_BACKEND defaults ON, and when it is ON the engine itself
+# links llama and is compiled with ASSISTANT_HAVE_LLAMACPP defined (see the
+# bottom of this block). The option exists so the dependency can be dropped
+# deliberately -- a configure with one fewer git clone -- and the service
+# handles that honestly at runtime: asking for ASSISTANT_BACKEND=llamacpp in a
+# binary built with this OFF logs that the build lacks the backend and leaves
+# the assistant unavailable, rather than silently answering with sensen.
+option(ENABLE_LLAMACPP_BACKEND "Fetch and build upstream llama.cpp (ggml-org/llama.cpp) as the selectable second assistant inference backend" ON)
+
+if(ENABLE_LLAMACPP_BACKEND)
+    # FetchContent over vendoring, for the same reason grpc's own FetchContent
+    # block above gives: llama.cpp is a fast-moving upstream project with its
+    # own CMake build already tuned for the kind of options this block needs
+    # to override (GGML_NATIVE, GGML_OPENMP, LLAMA_BUILD_*), and vendoring a
+    # copy into this repo would mean hand-tracking every upstream
+    # CMakeLists.txt change -- new source files, new options -- on every
+    # bump, which is exactly the maintenance burden FetchContent avoids.
+    #
+    # Pinning by GIT_TAG alone is not enough for a build that has to be
+    # reproducible from a bare clone months or years later: a tag is a
+    # mutable ref upstream can force-move (delete and re-push) without this
+    # repository's own history recording it. GIT_TAG accepts a commit hash
+    # directly, so the exact commit b6963 currently points to is pinned
+    # alongside the human-readable tag in this comment -- a future re-tag of
+    # b6963 upstream cannot silently change what this build fetches, only an
+    # edit to this line can.
+    FetchContent_Declare(
+        llamacpp
+        GIT_REPOSITORY https://github.com/ggml-org/llama.cpp.git
+        GIT_TAG 6db3d1ffe6d34e8becfe95cf2f109198a7154db3 # b6963
+    )
+
+    # Build llama.cpp/ggml at C++17, the standard its own CMakeLists.txt pins
+    # per-target (src/CMakeLists.txt: target_compile_features(llama PRIVATE
+    # cxx_std_17)) rather than at this project's global C++23 -- the same
+    # reasoning and the same mechanism as the SAVED_CXX_STANDARD save/restore
+    # around grpc's FetchContent_MakeAvailable above. It matters here for the
+    # same performance reason it mattered there: CMAKE_CXX_SCAN_FOR_MODULES
+    # is ON globally, and a C++20-or-later effective standard is what makes
+    # CMake's Ninja generator dependency-scan a target for `import`/`export
+    # module` at all. Saving/restoring around this call keeps ~200
+    # llama.cpp/ggml C++ sources -- none of which use C++20 modules -- out of
+    # that scan.
+    set(SAVED_CXX_STANDARD ${CMAKE_CXX_STANDARD})
+    set(CMAKE_CXX_STANDARD 17)
+
+    # llama.cpp's own top-level CMakeLists.txt calls `option(BUILD_SHARED_LIBS
+    # ...)` with a platform default that is ON on Linux (the non-EMSCRIPTEN,
+    # non-MINGW branch) -- left alone, fetching llama.cpp would silently
+    # start building libggml*.so/libllama.so as shared objects.
+    # BUILD_SHARED_LIBS is a CACHE variable, not a directory-scoped one: once
+    # llama.cpp's option() call creates it, it is visible for the rest of
+    # THIS configure run and, more importantly, to every add_library() call
+    # on the NEXT configure that reuses this build's CMakeCache.txt --
+    # including sensen's and gRPC's own, several of which do not specify
+    # STATIC/SHARED and rely on this same variable's default. Forcing it OFF
+    # here, matching the STATIC default every other target in this tree
+    # already gets from BUILD_SHARED_LIBS being simply unset, is what keeps a
+    # second, cached configure from silently changing what kind of library
+    # sensen or gRPC produce depending on whether llama.cpp's CMakeLists
+    # happened to run first that time. It also answers deliverable (2) on its
+    # own terms: llamacpp_probe links llama/ggml directly into its own
+    # executable, so a static archive needs no new shared object copied into
+    # backend/Dockerfile's runtime stage -- a libllama.so or libggml*.so
+    # would need exactly that, and the ldd-driven lib/-copy step in that
+    # Dockerfile only greps for libc++/libunwind entries today.
+    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+
+    # ggml/src static objects are linked into calculator_engine-adjacent
+    # executables the same way sensen_slim's are, and unlike sensen_slim (which
+    # sets POSITION_INDEPENDENT_CODE ON per target, sensen_slim above) llama.cpp
+    # only turns PIC on for itself `if (BUILD_SHARED_LIBS)` -- which is now
+    # forced OFF, so without this, ggml's plain-C sources (ggml.c,
+    # ggml-cpu.c, ...) would compile without -fPIC while lld links them into
+    # a PIE executable (Ubuntu 24.04 clang's default), which is a real link
+    # failure (`relocation R_X86_64_32 ... can not be used when making a PIE
+    # object`), not a hypothetical one. CANONICAL_FLAGS's own -fPIC only
+    # reaches CMAKE_CXX_FLAGS, never CMAKE_C_FLAGS (see that variable's
+    # comment at the top of this file), so ggml's C sources get no PIC from
+    # this project's own flags either. Setting the global CMake abstraction
+    # instead of hand-adding -fPIC to CMAKE_C_FLAGS is deliberate: it is a
+    # plain (non-CACHE) variable, so unlike BUILD_SHARED_LIBS above it does
+    # not persist into a future configure's CMakeCache.txt, and it is
+    # restored to its prior value immediately after this FetchContent call so
+    # it cannot leak into any target defined after this block.
+    set(SAVED_POSITION_INDEPENDENT_CODE ${CMAKE_POSITION_INDEPENDENT_CODE})
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
+    # GGML_NATIVE defaults ON upstream whenever the build is not
+    # cross-compiling (ggml/CMakeLists.txt's GGML_NATIVE_DEFAULT), and when ON
+    # it appends -march=native to every ggml/ggml-cpu compile
+    # (ggml/src/ggml-cpu/CMakeLists.txt: `if (GGML_NATIVE) list(APPEND
+    # ARCH_FLAGS -march=native)`). That is precisely the failure mode the long
+    # comment above sensen_slim (this file, ~line 445) already documents for
+    # sensen's own former -march=native: a binary tuned for whichever CPU
+    # happens to run the compiler -- the Railway BUILDER, not the host that
+    # runs the engine -- rather than the x86-64-v3/generic baseline
+    # config/cpp_details.txt requires for cross-host FP parity and
+    # durable-replay determinism. Forcing it OFF here applies the same fix to
+    # a second subproject for the same reason.
+    #
+    # This does not leave ggml untuned. With GGML_NATIVE off and this a
+    # native (non-cross) configure, ggml/CMakeLists.txt's own INS_ENB logic
+    # still defaults GGML_SSE42, GGML_AVX, GGML_AVX2, GGML_FMA, GGML_F16C and
+    # GGML_BMI2 all ON (GGML_AVX512 stays OFF regardless of GGML_NATIVE) --
+    # exactly the instruction-set floor the x86-64-v3 microarchitecture level
+    # names, applied through ggml's own explicit -m flags
+    # (ggml/src/ggml-cpu/CMakeLists.txt's ARCH_FLAGS list) rather than
+    # inherited from this project's CANONICAL_FLAGS, which never reaches
+    # ggml's plain-C sources (CANONICAL_FLAGS only sets CMAKE_CXX_FLAGS, not
+    # CMAKE_C_FLAGS -- see that variable's own comment above). Verified
+    # directly against this checkout's ggml/src/ggml-cpu/CMakeLists.txt
+    # rather than assumed from upstream documentation.
+    set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
+
+    # GGML_OPENMP defaults ON upstream and, when a system OpenMP is found,
+    # links libomp.so -- confirmed against the scratchpad prototype's own
+    # build_libcxx/CMakeCache.txt, which measured its 4.4x parallel-decode
+    # throughput figure with GGML_OPENMP=ON on this workstation, which
+    # happens to have libomp installed (LLVM 22's own libomp package).
+    # backend/Dockerfile's builder stage does not install libomp-*-dev, and
+    # ggml/src/ggml-cpu/CMakeLists.txt's find_package(OpenMP) is not
+    # REQUIRED, so a container configure would not fail outright -- it would
+    # silently fall back to GGML_OPENMP_ENABLED=OFF with a warning. That
+    # silent divergence is worse than an explicit choice: it means a
+    # developer's workstation build and a container build would run
+    # different ggml threading backends without either configure saying so
+    # in a way anyone would notice.
+    #
+    # Turned OFF here instead, deliberately, matching what the answer would
+    # be inside the container anyway, and matching how the rest of this
+    # binary already parallelizes: CANONICAL_FLAGS already carries -pthread
+    # globally, and sensen's own sensen.parallel module (see this file's TBB
+    # comments above) uses TBB, not OpenMP, for its CPU parallelism -- one
+    # fewer threading runtime this image has to carry, and one fewer .so for
+    # backend/Dockerfile's ldd-driven lib/-copy step to have to widen its
+    # grep for. Without OpenMP, ggml-cpu falls back to its own pthread-based
+    # threadpool -- the same code path llama_context_params's own
+    # n_threads/n_threads_batch (set directly by llamacpp_probe.cpp) already
+    # configure -- so no parallelism capability is actually lost; confirmed
+    # by building and running llamacpp_probe below with GGML_OPENMP off.
+    set(GGML_OPENMP OFF CACHE BOOL "" FORCE)
+
+    # Everything below disables upstream build products this project has no
+    # use for. llamacpp_probe links only against llama.h's plain C API; it
+    # needs neither llama.cpp's own example binaries, its test suite, its
+    # HTTP server, its CLI tools, nor its "common" helper library (whose only
+    # consumers are those examples/tools), and building any of them costs
+    # real configure/build time for output nothing here runs.
+    set(LLAMA_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(LLAMA_BUILD_SERVER OFF CACHE BOOL "" FORCE)
+    set(LLAMA_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+    set(LLAMA_BUILD_COMMON OFF CACHE BOOL "" FORCE)
+    # LLAMA_CURL defaults ON upstream and, unlike GGML_OPENMP above, its
+    # find_package(CURL) IS required when the option is on -- a missing
+    # libcurl-dev fails configure outright rather than degrading gracefully.
+    # This project's model is fetched and sha256-verified by
+    # backend/Dockerfile's own `model` stage before the engine ever runs (see
+    # that stage's comment); nothing needs llama.cpp's built-in "download a
+    # GGUF from a URL" convenience feature, so there is no reason for this
+    # build to depend on libcurl-dev being present at all.
+    set(LLAMA_CURL OFF CACHE BOOL "" FORCE)
+    # ccache speeds up a developer's repeat builds; it is not installed in
+    # the Railway builder image (backend/Dockerfile's apt-get list), and a
+    # CMake option silently probing for a tool the reproducible build does
+    # not promise to provide is the kind of environment-dependent branch
+    # CANONICAL_FLAGS's own comments (this file's top) already go out of
+    # their way to avoid elsewhere.
+    set(GGML_CCACHE OFF CACHE BOOL "" FORCE)
+
+    FetchContent_MakeAvailable(llamacpp)
+
+    set(CMAKE_CXX_STANDARD ${SAVED_CXX_STANDARD})
+    set(CMAKE_POSITION_INDEPENDENT_CODE ${SAVED_POSITION_INDEPENDENT_CODE})
+
+    # Standalone probe: proves llama.cpp links and runs in this build tree.
+    # Deliberately a single, dependency-free translation unit against
+    # llama.h's C API only -- no sensen, no proto, no grpc -- so a build or
+    # run failure here can only mean upstream llama.cpp itself, never an
+    # interaction with the rest of this codebase.
+    add_executable(llamacpp_probe src/llamacpp_probe.cpp)
+    target_link_libraries(llamacpp_probe PRIVATE llama)
+
+    # The engine itself. `calculator_engine` is declared far above this block,
+    # which is fine and is why the wiring is here rather than there: CMake
+    # resolves target_link_libraries/target_compile_definitions against a
+    # target that already exists, so keeping every llama.cpp-conditional line
+    # inside the one `if(ENABLE_LLAMACPP_BACKEND)` guard is what makes the
+    # OFF configuration provably complete -- there is no second place to
+    # remember to guard.
+    #
+    # ASSISTANT_HAVE_LLAMACPP is what assistant_service.cpp keys its
+    # `#include "llama.h"` and its whole LlamaCppBackend class off. It is
+    # PRIVATE because nothing else in this build includes that header, and
+    # because a define that changes which classes a translation unit declares
+    # must not leak to targets that were not compiled with it.
+    target_link_libraries(calculator_engine PRIVATE llama)
+    target_compile_definitions(calculator_engine PRIVATE ASSISTANT_HAVE_LLAMACPP)
+endif()

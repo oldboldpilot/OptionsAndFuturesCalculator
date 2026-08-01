@@ -137,6 +137,22 @@ message Refusal {
     // -- it is the model behind it that failed, and the caller needs that
     // distinction to decide whether retrying is even worthwhile.
     MODEL_UNAVAILABLE = 4;
+    // The MARKET DATA provider could not be reached, so the symbol the model
+    // produced could not be checked against a real instrument. The parse
+    // itself may well be perfect; what is missing is the evidence that its
+    // symbol exists, and real-data-only policy forbids passing an unverified
+    // symbol to the calculator on the assumption it is probably fine.
+    //
+    // This is deliberately NOT folded into MODEL_UNAVAILABLE, though both are
+    // "a backend we depend on is down". They demand different actions -- one
+    // means check the model, the other means check the market-data
+    // credentials -- and conflating them actively misleads. It did exactly
+    // that here: with no ALPACA_API_KEY set, a fully loaded and correctly
+    // generating assistant reported MODEL_UNAVAILABLE, and the smoke gate,
+    // which reads that code as "this environment ships no model", skipped the
+    // entire suite while announcing the model was absent. The assistant was
+    // working perfectly at the time.
+    DATA_UNAVAILABLE = 5;
   }
 
   Reason reason = 1;

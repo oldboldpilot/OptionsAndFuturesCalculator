@@ -282,6 +282,34 @@ COPY backend/ /src/backend/
 # cpp23-logger builds the `std` module from libc++'s own sources and only looks
 # in /usr/share/libc++/v1 and /usr/local. The LLVM apt packages install them
 # per-version instead, so the location has to be passed in explicitly.
+#
+# ENABLE_LLAMACPP_BACKEND is left at its CMakeLists default of ON, and that is
+# a deliberate cost this image pays rather than an oversight.
+#
+# It is ON because calculator_engine LINKS llama.cpp: it is the second
+# inference backend behind the assistant RPC, selected at runtime by
+# ASSISTANT_BACKEND=llamacpp (see the ENABLE_LLAMACPP_BACKEND block in
+# backend/CMakeLists.txt for why a second engine is carried at all). Turning
+# it off here would produce an image in which that environment variable does
+# nothing but log a build-configuration error -- which is honest, but useless
+# in exactly the incident the fallback exists for, because switching backends
+# would then require a rebuild and redeploy rather than a restart.
+#
+# What it costs: a ~167 MB git clone of github.com/ggml-org/llama.cpp at
+# CONFIGURE time (FetchContent_MakeAvailable runs during `cmake -S`, not
+# during the build), plus compiling ggml and llama, plus one more external
+# host this build needs to reach. The clone is pinned to an immutable commit
+# hash, so it is reproducible in the sense that matters -- the same bytes
+# every time -- but it does mean this build now fails if GitHub is
+# unreachable, which was not previously true. That is the trade: a build-time
+# dependency on one more host, in exchange for the runtime fallback being a
+# restart instead of a redeploy.
+#
+# No new runtime shared object is needed. BUILD_SHARED_LIBS is forced OFF for
+# the llama.cpp subtree and GGML_OPENMP is forced OFF, so ggml and llama link
+# statically into calculator_engine and pull in no libomp -- verified with
+# ldd on the locally built binary. The ldd-driven library-copy step in the
+# runtime stage below therefore needs no change.
 RUN cmake -S /src/backend -B /src/build -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_C_COMPILER=clang \
