@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useEffect, useRef, useState } from 'react';
+import { usePathname } from 'next/navigation';
 
 /**
  * An advertising unit that reserves its space before it fills it.
@@ -63,6 +64,13 @@ export function AdSlot({
     : { width: 300, height: 250 };
 
   const slot = SLOTS[size];
+  // /widget exists to be embedded in <iframe>s on other people's sites.
+  // AdSense policy forbids serving ads inside an iframe on pages Google has
+  // not authorized, and an ad inside a third-party embed would also attribute
+  // that site's traffic to this publisher id. No ad, and no placeholder box
+  // either — an embed should carry only the calculator.
+  const pathname = usePathname();
+  const isEmbed = pathname === '/widget' || pathname?.startsWith('/widget/');
   const pushed = useRef(false);
   // The <ins> is rendered only after mount. This is a static export served from
   // a CDN, so markup produced at build time must match the first client render;
@@ -72,7 +80,7 @@ export function AdSlot({
   useEffect(() => setMounted(true), []);
 
   useEffect(() => {
-    if (!mounted || !slot || pushed.current) return;
+    if (!mounted || !slot || isEmbed || pushed.current) return;
     // Guarded with a ref because React runs effects twice in development, and a
     // second push against an <ins> that already carries an ad throws
     // "All ins elements in the DOM with class=adsbygoogle already have ads".
@@ -84,7 +92,7 @@ export function AdSlot({
       // down with it. There is nothing to recover — the reserved box stays
       // empty, which is exactly what it looked like a moment earlier.
     }
-  }, [mounted, slot]);
+  }, [mounted, slot, isEmbed]);
 
   // Multiplex must not be clamped: `maxWidth: 0` would collapse it to nothing,
   // and a fixed height would crop the recommendation grid it exists to show. It
@@ -103,6 +111,8 @@ export function AdSlot({
     margin: '0 auto',
     flex: 'none',
   };
+
+  if (isEmbed) return null;
 
   if (!slot) {
     return (

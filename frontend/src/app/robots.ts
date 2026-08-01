@@ -8,7 +8,14 @@ export default function robots(): MetadataRoute.Robots {
     rules: {
       userAgent: '*',
       allow: '/',
-      disallow: ['/api/', '/admin/', '/_next/'],
+      // `/_next/` must NOT be disallowed. Every stylesheet and script chunk of
+      // this static export lives under /_next/static/, and Google's crawlers
+      // (Googlebot and the AdSense reviewer, Mediapartners-Google) obey
+      // robots.txt for page resources. Blocking it made the site render for
+      // review as bare unstyled HTML with no working application — indexing
+      // and the AdSense review both judge the page as users see it, and they
+      // cannot when the assets are forbidden.
+      disallow: ['/api/', '/admin/'],
     },
     sitemap: `${branding.canonicalUrl}/sitemap.xml`,
   };

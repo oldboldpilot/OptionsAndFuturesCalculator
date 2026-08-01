@@ -155,10 +155,56 @@ export default function RootLayout({
           The publisher id is not a secret — it is public in ads.txt by design,
           which is the whole point of ads.txt.
         */}
+        {/*
+          No ad requests on /widget. That page exists to be iframed into other
+          people's sites, and AdSense policy forbids serving ads inside frames
+          on pages Google has not authorized — Auto Ads would otherwise inject
+          units there because this loader is in the shared root layout.
+          `pauseAdRequests` is AdSense's own gate for exactly this: the loader
+          still loads, but makes no requests.
+
+          It does NOT run before the loader tag, and it cannot be made to.
+          Next hoists every external <script> in <head> above every inline one,
+          so the emitted order is loader-then-guard no matter what order they
+          are written in here — the theme script at the top of this head lands
+          after the loader too. Verified against the built widget.html.
+
+          The guard holds anyway, because the thing it has to beat is not the
+          loader's EXECUTION but Auto Ads' placement scan, which runs on DOM
+          ready. This inline script runs during head parsing, long before that.
+          Do not "fix" the ordering; it is not fixable and not the guarantee.
+        */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html:
+              "if(location.pathname==='/widget'||location.pathname.indexOf('/widget/')===0){(window.adsbygoogle=window.adsbygoogle||[]).pauseAdRequests=1}",
+          }}
+        />
         <script
           async
           src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-3669553016263703"
           crossOrigin="anonymous"
+        />
+        {/*
+          Page-level ads activation. Copied from mortgagefvcalculator.com, which
+          serves ads today on THIS SAME publisher id (pub-3669553016263703 — its
+          ads.txt is byte-identical to ours), and which had this push where we
+          had nothing. That site carries no <ins> at all: this one call is what
+          puts ads on the page there.
+
+          Loading adsbygoogle.js only makes the API available. It is this push
+          that asks for page-level placement. Auto Ads being enabled in the
+          dashboard and the loader being present are both necessary and, on the
+          evidence of the working site, together not sufficient.
+
+          Ordering is not a concern: the queue exists precisely so pushes can be
+          made before the loader executes, which is what `||[]` sets up.
+        */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html:
+              '(adsbygoogle=window.adsbygoogle||[]).push({google_ad_client:"ca-pub-3669553016263703",enable_page_level_ads:true});',
+          }}
         />
       </head>
       <body>
