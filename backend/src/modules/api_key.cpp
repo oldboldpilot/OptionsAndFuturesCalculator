@@ -244,6 +244,82 @@ auto hmac_sha512_b64(std::string_view secret, std::string_view message) -> std::
     return b64url_encode(std::string_view{reinterpret_cast<const char*>(mac.data()), 32});
 }
 
+auto verify_supabase_jwt(std::string_view token, Identity& out) -> bool {
+    const auto secret = env_or("SUPABASE_JWT_SECRET", "");
+    if (secret.empty()) return false;  // fail closed
+
+    // header.payload.signature
+    const auto dot1 = token.find('.');
+    if (dot1 == std::string_view::npos) return false;
+    const auto dot2 = token.find('.', dot1 + 1);
+    if (dot2 == std::string_view::npos) return false;
+    if (token.find('.', dot2 + 1) != std::string_view::npos) return false;  // extra segment
+
+    const auto signing_input = token.substr(0, dot2);
+    const auto header_b64 = token.substr(0, dot1);
+    const auto payload_b64 = token.substr(dot1 + 1, dot2 - dot1 - 1);
+    const auto signature = token.substr(dot2 + 1);
+    if (payload_b64.empty() || signature.empty()) return false;
+
+    // The algorithm is checked against what we will actually verify with,
+    // rather than being taken from the token. A JWT verifier that trusts the
+    // header's `alg` is the classic break: `{"alg":"none"}` asks to be accepted
+    // with no signature at all, and swapping RS256 for HS256 turns a public key
+    // into an HMAC secret. Only HS256 is accepted, because HS256 is the only
+    // thing self-hosted Supabase issues.
+    {
+        const auto header_json = b64url_decode(header_b64);
+        if (header_json.empty()) return false;
+        auto h = fastjson::parse(header_json);
+        if (!h || !h->is_object()) return false;
+        if (!h->contains("alg") || !(*h)["alg"].is_string()) return false;
+        if ((*h)["alg"].as_string() != "HS256") return false;
+    }
+
+    std::array<unsigned char, EVP_MAX_MD_SIZE> mac{};
+    unsigned int mac_len = 0;
+    if (HMAC(EVP_sha256(), secret.data(), static_cast<int>(secret.size()),
+             reinterpret_cast<const unsigned char*>(signing_input.data()), signing_input.size(),
+             mac.data(), &mac_len) == nullptr) {
+        return false;
+    }
+    const auto expected =
+        b64url_encode(std::string_view{reinterpret_cast<const char*>(mac.data()), mac_len});
+    // Signature first: the payload is untrusted JSON until this passes.
+    if (expected.empty() || !constant_time_equals(expected, signature)) return false;
+
+    const auto payload = b64url_decode(payload_b64);
+    if (payload.empty()) return false;
+    auto parsed = fastjson::parse(payload);
+    if (!parsed || !parsed->is_object()) return false;
+    const auto& obj = *parsed;
+
+    // An access token with no expiry is not something Supabase issues, and
+    // accepting one would mean a token that never stops working.
+    if (!obj.contains("exp") || !obj["exp"].is_number()) return false;
+    const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                         std::chrono::system_clock::now().time_since_epoch())
+                         .count();
+    if (static_cast<double>(now) > obj["exp"].as_number()) return false;
+
+    // Tier comes from app_metadata, which only the service role key can write.
+    // user_metadata is self-serve -- reading the tier from there would let any
+    // signed-in user grant themselves Pro with one API call.
+    out.tier = "free";
+    if (obj.contains("app_metadata") && obj["app_metadata"].is_object()) {
+        const auto& meta = obj["app_metadata"];
+        if (meta.contains("tier") && meta["tier"].is_string()) {
+            out.tier = std::string{meta["tier"].as_string()};
+        }
+    }
+
+    out.id = (obj.contains("sub") && obj["sub"].is_string()) ? std::string{obj["sub"].as_string()}
+                                                             : std::string{"supabase-user"};
+    out.type = KeyType::Publishable;
+    out.authenticated = true;
+    return true;
+}
+
 auto verify_licence(std::string_view token, Identity& out) -> bool {
     const auto secret = env_or("LICENCE_SIGNING_KEY", "");
     // An unset secret must not mean "accept anything". Fail closed.
@@ -640,6 +716,35 @@ auto KeyRegistry::authenticate(const grpc::ServerContext& ctx, std::string_view 
     }
     if (const auto it = md.find("origin"); it != md.end()) {
         origin.assign(it->second.data(), it->second.size());
+    }
+
+    // A signed-in user arrives as a Supabase access token in Authorization,
+    // which is where every Supabase client puts it by default -- so the browser
+    // needs no special handling to be recognised here.
+    //
+    // Checked BEFORE x-api-key so that a signed-in Pro subscriber is identified
+    // as themselves even on a page that also carries the site's own publishable
+    // key. Getting this the other way round would meter every subscriber
+    // against one shared key and hand them all the site's tier instead of their
+    // own.
+    if (const auto it = md.find("authorization"); it != md.end()) {
+        std::string_view bearer{it->second.data(), it->second.size()};
+        constexpr std::string_view kPrefix = "Bearer ";
+        if (bearer.size() > kPrefix.size() && bearer.starts_with(kPrefix)) {
+            const auto jwt = bearer.substr(kPrefix.size());
+            if (Identity id; verify_supabase_jwt(jwt, id)) {
+                out = id;
+                return grpc::Status::OK;
+            }
+            // An Authorization header that does not verify is not silently
+            // downgraded to anonymous: the caller believes they are signed in,
+            // and serving them at the free tier would look like the gate
+            // misfiring rather than like an expired session.
+            if (impl_->mode_ == Mode::Enforce) {
+                return grpc::Status(grpc::StatusCode::UNAUTHENTICATED,
+                                    "session token is invalid or has expired; sign in again");
+            }
+        }
     }
 
     auto r = impl_->check(key, origin, service);

@@ -50,6 +50,13 @@ auto make_context() -> std::unique_ptr<grpc::ClientContext> {
     if (const char* key = std::getenv("SMOKE_API_KEY"); key != nullptr && *key != '\0') {
         ctx->AddMetadata("x-api-key", key);
     }
+    // A Supabase access token, presented the way every Supabase client presents
+    // one. Separate from SMOKE_API_KEY so the two identity paths can be
+    // exercised independently -- and so a test can send both at once, which is
+    // what a signed-in user on a page carrying the site's own key actually does.
+    if (const char* jwt = std::getenv("SMOKE_BEARER"); jwt != nullptr && *jwt != '\0') {
+        ctx->AddMetadata("authorization", std::string{"Bearer "} + jwt);
+    }
     return ctx;
 }
 

@@ -189,6 +189,26 @@ class KeyRegistry {
  */
 [[nodiscard]] auto verify_licence(std::string_view token, Identity& out) -> bool;
 
+/**
+ * Verifies a Supabase-issued access token (HS256) and fills `out` on success.
+ *
+ * Self-hosted Supabase signs its access tokens with a single shared
+ * `JWT_SECRET` using HMAC-SHA256, so the engine can verify one without talking
+ * to Supabase at all. That matters here: a per-request call to the auth server
+ * would put a network hop on the hot path of every strategy calculation and
+ * make the engine unavailable whenever Supabase is.
+ *
+ * The subscription tier is read from `app_metadata.tier`. That claim is chosen
+ * because Supabase copies `app_metadata` into the access token automatically
+ * and it is writable ONLY with the service role key -- a user cannot set their
+ * own tier, whereas `user_metadata` is self-serve and would be a free upgrade
+ * button. The billing webhook writes it; the browser never can.
+ *
+ * Requires SUPABASE_JWT_SECRET. Without it nothing verifies, which is the safe
+ * direction: an unset secret must not read as "accept anything".
+ */
+[[nodiscard]] auto verify_supabase_jwt(std::string_view token, Identity& out) -> bool;
+
 /** Human-readable name for an outcome, for logs. */
 [[nodiscard]] auto to_string(Outcome outcome) noexcept -> std::string_view;
 
