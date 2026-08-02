@@ -290,6 +290,19 @@ async function handleWebhook(req: Request, env: Env): Promise<Response> {
     return new Response('not reissuing', { status: 200 });
   }
 
+  // past_due means a payment failed and Stripe is retrying, not that the
+  // customer left. Downgrading here would cut off someone whose card merely
+  // expired, so the stored tier stands. But we stop MINTING, because minting
+  // advances periodEndEpoch and would hand out a fresh month of entitlement
+  // paid for by a charge that never landed.
+  //
+  // The grace is bounded by Stripe, not open-ended: the retry schedule
+  // terminates in `canceled` or `unpaid`, both handled directly above, and the
+  // outstanding licence expires on its own meanwhile.
+  if (status === 'past_due') {
+    return new Response('past_due: grace, not reissuing', { status: 200 });
+  }
+
   const periodEnd = Number(obj.current_period_end ?? Math.floor(Date.now() / 1000) + 31 * 86400);
   const licence = await mintLicence(env.LICENCE_SIGNING_KEY, {
     customerId,

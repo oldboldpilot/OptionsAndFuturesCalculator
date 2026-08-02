@@ -59,8 +59,19 @@ wrangler secret put RESEND_API_KEY
 wrangler deploy
 
 # 3. Register the webhook in Stripe against <worker-url>/webhook, subscribing to
-#    checkout.session.completed, customer.subscription.created,
-#    customer.subscription.updated. Stripe then shows a signing secret.
+#    ALL FOUR of:
+#      checkout.session.completed
+#      customer.subscription.created
+#      customer.subscription.updated
+#      customer.subscription.deleted   <- do not omit this one
+#
+#    Stripe only delivers events you subscribe to. A licence needs no
+#    cancellation event because it expires on its own, but the Supabase tier is
+#    stored rather than signed and has no expiry -- so without the deleted
+#    event a cancelled subscriber keeps Pro indefinitely. The worker has always
+#    handled it; it just never arrives if it is not registered.
+#
+#    Stripe then shows a signing secret.
 wrangler secret put STRIPE_WEBHOOK_SECRET  # whsec_…
 wrangler deploy                            # again, so it picks the secret up
 ```
