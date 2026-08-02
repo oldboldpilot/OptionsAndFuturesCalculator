@@ -109,16 +109,30 @@ ARG MODEL_TOKEN
 # out; the runtime stage's COPY --from=model and its MODEL_PATH both refer
 # back to this same path rather than re-deriving it, so the three cannot
 # drift apart.
-# `--mount=type=secret` is what actually makes the secret appear at
-# /run/secrets/model_token. Passing `--secret id=model_token,...` on the build
-# command line alone is NOT enough -- both BuildKit and podman require the RUN
-# that consumes a secret to declare it, and without this line the file simply
-# never exists, the token check falls through, and the fetch 401s against a
-# private repository while the error text insists a token was needed.
-# `required=false` keeps a public MODEL_URL (and a plain MODEL_TOKEN build-arg)
-# working on builders that pass no secret at all.
-RUN --mount=type=secret,id=model_token,required=false \
-    set -eu; \
+# There is deliberately NO `--mount=type=secret` here, and it must not be added
+# back. Railway's Metal builder accepts only `type=cache` mounts and rejects the
+# whole Dockerfile outright on anything else:
+#
+#   dockerfile invalid: flag '--mount=type=secret,id=model_token,required=false'
+#   is missing a type=cache argument (other mount types are not supported)
+#
+# That failure is silent in the worst way -- the build never starts, the previous
+# container keeps serving, and `railway up` still exits 0. Five consecutive
+# deployments failed this way before anyone looked at the deployment list. A
+# local `docker build` will NOT catch it, because local BuildKit supports secret
+# mounts perfectly well; only the Railway builder rejects them.
+#
+# The token therefore arrives as the MODEL_TOKEN build argument. The
+# /run/secrets/model_token branch below is kept because it costs nothing and
+# still works under a builder that mounts one by some other means, but nothing
+# in this repository relies on it.
+#
+# Passing a credential as a build ARG normally risks leaking it into image
+# history. It does not here: this is a separate `model` stage, and the runtime
+# stage takes only `COPY --from=model /model/strategy-assistant.gguf`, so the
+# intermediate stage's metadata -- ARG values included -- never becomes part of
+# the published image.
+RUN set -eu; \
     mkdir -p /model; \
     if [ -z "${MODEL_URL}" ]; then \
         echo "MODEL_URL not set -- building without calculator.assistant's model."; \
