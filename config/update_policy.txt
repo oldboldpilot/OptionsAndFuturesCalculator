@@ -1,55 +1,90 @@
 # OptionsAndFuturesCalculator Update & Commit Policy
-# Last Updated: December 22, 2025
-remote repository is both in github and gitea(self-hosted, credentials stored in config/.env file) ,
-create the gitea repo if it does not exist already before pushing to it. Since you have the credentials and the 
-ssh login has been setup already.
+# Last Updated: August 2, 2026
+
+Remote repositories are both GitHub and Gitea (self-hosted; credentials in
+config/.env). Create the Gitea repo if it does not exist before pushing. Both
+remotes are already configured and SSH login is set up.
+
+This repository contains a vendored submodule, backend/sensen, which has its
+OWN update policy at backend/sensen/config/update_policy.txt and its own pair of
+remotes. A change touching sensen must satisfy BOTH policies, and sensen is
+pushed separately — a submodule pointer bump in this repo does not push sensen.
+
+## Scope
+
+This policy covers everything in the repository:
+
+- backend/  — C++23 engine serving three gRPC services (calculator.OptionsCalculator,
+              sensen.finance.Finance, calculator.assistant.StrategyAssistant)
+              behind Envoy, deployed to Railway as a container
+- frontend/ — Next.js static export deployed to Cloudflare Pages
+- workers/  — Cloudflare Workers (billing: Stripe checkout, licence minting,
+              Supabase tier writes)
+- backend/sensen — vendored inference/finance library (see its own policy)
 
 ## Pre-Commit Checklist
-All this applies only to code that is used by the python bot in python_big_brother_analytics_bot folder and any C++ python bindings and supporting code for the python bot. 
+
 1. **Build Verification**
-   - Compile with clang-tidy and clang-format
-   - Zero warnings, zero errors required
-   - Command: `SKIP_CLANG_TIDY=1 ninja -C build bigbrother`
+   - Backend: `cmake -G Ninja -B backend/build -S backend && ninja -C backend/build`
+     Zero warnings, zero errors. The canonical toolchain is clang 22 with
+     libc++; do not mix stdlibs (see CLAUDE.md).
+   - Container build is the real gate for deployment, because three classes of
+     bug are invisible locally — private-model fetch credentials, BuildKit
+     secret mounts, and TBB availability:
+     `docker build -t options-backend backend/`
+   - Frontend: `cd frontend && npm run build` (also runs the type check)
+   - Workers: `cd workers/billing && npx tsc --noEmit && npx wrangler deploy --dry-run`
 
 2. **Test Suite**
-   - All tests must pass before pushing
-   - Command: `ctest --test-dir build`
-   - Review code for adherence to coding standards
+   - `ctest --test-dir backend/build` — all tests must pass
+   - `backend/build/smoke_client` — verifies the finance surface against
+     independent identities (put-call parity, price/yield inversion, schedule
+     closure, closed-form annuity), NOT against figures the engine produced
+     earlier. Set SMOKE_PRO_LICENCE / SMOKE_PRO_BEARER so the Pro gate is
+     exercised in BOTH directions; a gate proven only to refuse is
+     indistinguishable from one that refuses the paying customer.
+   - Note: native gRPC does not survive the Railway ingress. Do not treat a
+     smoke_client failure against api.optionsandfuturescalculator.com as a
+     service outage — verify production through the browser path or railway logs.
+   - Frontend: verify the static export contains no secret material before
+     deploying (grep the build output for sk_live_/rk_live_/whsec_/service-role
+     patterns). The frontend is public by construction.
 
-3. **Documentation Updates** (Required for every push)
-   - Move all json files in the root for backtests to a backtests/ folder for better organization
-   - Move all log files in the root to logs/ folder for better organization
-   - Move all .md files in the root to docs/ folder for better organization (later instructions will specify more after the files have been moved how they should be organized inside the docs/ folder)
-   - Update docs/QUICKSTART.md (if changes affect setup/use)
-   - Update ai/CLAUDE.md (technical changes)
-   - Update CLAUDE.md (root quick reference)
-   - Sync .github/copilot-instructions.md with CLAUDE.md
-   - Sync ai/gemini.md with CLAUDE.md
-   - Update docs/INDEX.md (if new/removed docs)
-   - Update docs/PRD.md (status, test counts)
-   - Update docs/ROADMAP.md (progress)
-   - Update README.md (user-facing changes)
-   - move all markdown's in root folder except README.md and QUICKSTART.md to docs/ folder for general documentation
-   - reorganise the root folder moving stray documents,.json,.txt,.log files and reorganize. Check dependencies and adjust to make sure nothign is broken
-   so that when you move the files everything still works as expected
-   - Move all markdown except README and QUICKSTART docs to docs/ folder for python bot documentation
-   - Organise the docs/ folder into subfolders by topic:
-     - docs/api/ for API documentation
-     - docs/guides/ for user guides and tutorials
-     - docs/architecture/ for system architecture and design docs
-     - docs/release_notes/ for changelogs and release notes
-     - docs/technical/ for deep technical dives
-     - docs/meeting_notes/ for meeting minutes and notes
-     - docs/other/ for miscellaneous documentation
-     - Organise and update docs/INDEX.md to reflect this new structure
-     - Ensure all links in docs/INDEX.md are valid and up to date
-     - Ensure all links and reference in the documentation point to the correct locations after reorganization
-     - Other general documentation improvements as needed, and following best practices for technical writing
-     - Follow the same process for the root README.md,QUICKSTART and INDEX if it contains sections that fit into these categories
-     - Arrange the root docs into a docs/ folder if applicable in the same way as above for the python bot documentation
+3. **Documentation Updates** (required for every push)
+   - Update CLAUDE.md — architecture, gRPC surface, deployment, DNS, and any
+     operational constraint that is not otherwise represented in the repository
+   - Update docs/INDEX.md if documents were added or removed, and verify every
+     link in it still resolves
+   - Update docs/PRD_OPTIONS_AND_FUTURES_CALCULATOR.md (status, scope changes)
+   - Update the relevant API document when a service contract changes:
+     docs/FINANCE_API.md, docs/BUSINESS_API.md, docs/API_SECURITY.md
+   - Update backend/docs/ for engine-internal facilities (e.g. TENSOR_OBSERVER.md)
+   - Update workers/billing/README.md when the billing flow or its required
+     Stripe webhook events change
+   - Keep documentation organised by topic under docs/:
+       docs/api/, docs/guides/, docs/architecture/, docs/release_notes/,
+       docs/technical/, docs/session_logs/, docs/other/
+   - Record what was measured, not what was expected. Where a prediction turned
+     out wrong, keep the wrong prediction next to what replaced it — that is
+     usually the most useful part of the record.
 
 4. **Session State**
-   - Save session state to docs/session_logs/
+   - Save a session log to docs/session_logs/ named
+     session_YYYY-MM-DD_<topic>.md
+
+## Secrets
+
+- config/.env is gitignored and MUST stay that way. It is synced to the NAS, not
+  to any git remote.
+- Zero hardcoded secrets anywhere in tracked files; credentials come from the
+  environment only.
+- Never print a credential value. Redact remote URLs containing credentials
+  before showing them: sed -E 's#//[^@]*@#//<redacted>@#'
+- config/.env is read by tooling as line-oriented KEY=VALUE. Do not paste
+  multi-line shell examples into it — a pasted curl snippet once put a live
+  Cloudflare token on a continuation line, where a naive parser surfaced it.
+- The AdSense publisher id and ad slot ids are NOT secrets.
+- Stripe publishable (pk_live_) and Supabase anon keys are designed to be public.
 
 ## Authorship Policy (MANDATORY)
 
@@ -72,33 +107,47 @@ or rebasing the history to remove AI attributions.
 
 ## Commit Message Format
 
-Commit messages must be:
-- Detailed and descriptive of the changes made
-- Follow conventional commits format (feat:, fix:, docs:, refactor:, etc.)
-- Include a summary of what changed and why
-- NO AI co-author attributions
+- Conventional commits (feat:, fix:, docs:, refactor:, chore:)
+- Say what changed and why. Where a bug is fixed, state the mechanism and how it
+  was found, not merely that it is fixed — the mechanism is what stops it
+  recurring.
+- State plainly what was left out and why, when scope was deliberately not
+  finished.
+- NO AI co-author attributions.
 
 Example:
+
 ```
-feat(module): Brief description of feature
+fix(backend): Stop casting a raw logit to a token id on CPU builds
 
-Detailed explanation of what changed:
-- Change 1
-- Change 2
-- Change 3
+GenerationConfig defaults compute_backend to AUTO, which the pipeline counted
+as a GPU request unconditionally. That enabled on_device_sampling, a contract
+only the CUDA decode block honours, so the CPU path cast logits[0] to a token
+id and emitted punctuation.
 
-Files modified:
-- file1.cpp
-- file2.cppm
+Fixed at source and independently in the service, so the fix does not depend on
+which sensen commit is pinned.
 ```
 
 ## Post-Commit Actions
 
-1. **Push to GitHub**
-   - Push to appropriate branch
-   - Verify CI/CD passes
+1. **Push to BOTH remotes**
+   - `git push origin master && git push gitea master`
+   - If backend/sensen changed, push sensen to its own two remotes as well, and
+     satisfy backend/sensen/config/update_policy.txt
 
 2. **Backup to NAS**
    - Run: `bash scripts/backup_to_nas.sh`
-   - Verify backup completed successfully
+   - Target: /home/muyiwa/PrimaryNAS/DataFolder/PycharmProjects/OptionsAndFuturesCalculator
+   - The script passes --no-links deliberately: the NAS is CIFS and cannot
+     create symlinks, so rsync reports "Operation not supported (95)" and exits
+     23 without it. An exit 23 from an ad-hoc rsync is usually this, not data
+     loss — verify file contents before assuming a failed transfer.
+   - config/.env IS included in the NAS backup by design.
 
+3. **Deploy** (when the change is user-facing)
+   - Frontend: `npx wrangler pages deploy frontend/out --project-name=optionsandfuturescalculator`
+     "Deployment complete" is not the gate — re-verify every referenced asset
+     actually resolves, and redeploy until clean.
+   - Backend: `railway up --detach` (project fearless-amazement,
+     service options-calculator-backend)
