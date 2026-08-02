@@ -509,6 +509,100 @@ auto cost_strategy_grid(int price_steps, int date_steps, int legs) noexcept -> d
     return 1.0 + (p * d * l) / 1000.0;
 }
 
+// ---------------------------------------------------------------------------
+// Market data cost model
+//
+// GetMarketQuote, GetRiskFreeRate and GetMarketChain are not priced by CPU --
+// they do almost none of it. What they spend is a round trip against an
+// external, rate-limited data vendor, and for two of the three that vendor
+// connection is the SAME one every caller of this service shares: AlpacaProvider
+// (market_data.cppm) holds one keep-alive httplib::Client per (thread, host),
+// and Alpaca applies its own upstream rate limit against it independent of
+// anything this process's quota tiers say. An unmetered caller here can
+// exhaust that shared upstream budget and degrade market data for every other
+// caller of this service, including callers who are correctly staying inside
+// their own compute-unit allowance -- that is the defect this section closes.
+//
+// The unit priced below is therefore the upstream HTTP call, not the response
+// it returns. That is a deliberate departure from cost_strategy_grid just
+// above, and from cost_option_tree/cost_monte_carlo further up: those price
+// CPU work whose volume is a genuine function of the request (more steps,
+// more paths, literally more arithmetic). A market-data request has no
+// equivalent knob. GetMarketChain's eventual strike and expiration counts are
+// decided server-side by Alpaca's own filtering, bounded by this codebase's
+// own query parameters (limit=1000 on the option-snapshot call, limit=10000
+// on the two contracts-registry calls; see market_data.cppm's
+// AlpacaProvider::chain and ::expirations) -- a wider result does not cost an
+// extra round trip against the shared connection, so pricing by
+// strikes-returned or expirations-returned would be a fabricated
+// proportionality dressed up as a measured one. What IS real and known before
+// the call is dispatched is how many upstream requests the branch about to
+// run will issue, so that is what is priced -- the same principle every other
+// function in this file follows, just applied to network calls instead of
+// arithmetic.
+//
+// One upstream call is priced at 5x cost_default(). That is enough for the
+// charge to read as a materially different KIND of expense than a scalar
+// compute op sharing the TBB pool -- which is the point, since the thing
+// being protected here (a third party's rate limit) has nothing to do with
+// this process's CPU -- while staying far short of what would make ordinary
+// UI browsing (a handful of quote lookups per symbol search, one chain fetch
+// per expiry click) visibly dent even the free tier's 3,600-unit hourly
+// budget: 720 quote-equivalent calls/hour (12/min) on the free tier alone,
+// before a single CalculateStrategy call is added to the ledger. The request-
+// rate axis (QUOTA_POLICY's requests_per_minute, unaffected by any of this)
+// is what caps raw call frequency; the compute-unit axis charged here exists,
+// as quota.cppm's own module comment says, to catch a caller staying inside
+// that rate but doing disproportionately expensive work -- which for these
+// three RPCs means hammering the shared connection repeatedly within the
+// hour rather than in one instantaneous burst.
+//
+// Cache-blind, deliberately. quote_cache and chain_cache in market_data.cppm
+// are each a 15-second TTL, so a caller re-polling the exact same symbol (and,
+// for a chain, the exact same expiration) pays for upstream work it mostly
+// does not do. That is accepted rather than corrected, for two reasons:
+//
+//   1. The attack this section defends against -- draining the shared Alpaca
+//      connection's own rate limit -- is executed by varying the symbol or
+//      expiration on every call, specifically because that guarantees a cache
+//      miss. Pricing for the miss prices the actual threat shape; a caller
+//      who cannot get a cache hit gains nothing by trying.
+//   2. Reporting real cache-hit status here would mean threading it out of
+//      market_data.cppm's fetch_quote/fetch_chain/fetch_risk_free_rate and
+//      charging AFTER the fetch runs. Every admission check in this file runs
+//      BEFORE the work it prices -- see CalculateStrategy in
+//      calculator_service.cpp pricing from the clamped grid before the SGEE
+//      pipeline executes -- specifically so a refusal costs a hash lookup,
+//      not the work being refused. Charging after the fetch would mean the
+//      one call that drains the last of a caller's budget still always
+//      succeeds, and the upstream request it made -- cache hit or not -- has
+//      already happened by the time RESOURCE_EXHAUSTED could be returned.
+//      That ordering guarantee is worth more than precise pricing of a
+//      well-behaved caller's cache hits, and the well-behaved caller pays for
+//      it in a small number of over-priced calls against a multi-thousand-
+//      unit hourly budget, not in being throttled.
+//
+// GetMarketQuote and GetRiskFreeRate are one round trip each and are priced
+// identically, even though only the former touches the specifically-shared
+// Alpaca connection: fetch_risk_free_rate hits home.treasury.gov, a distinct,
+// keyless, generously-cached (6h TTL) host with no connection contention from
+// this service's other RPCs. It is still an unauthenticated caller's ability
+// to make this process issue network requests on demand, and pricing it at a
+// different, invented discount from GetMarketQuote would be exactly the kind
+// of unmeasured proportionality this section otherwise avoids -- one upstream
+// call costs one upstream call.
+namespace {
+constexpr double kUpstreamCallCost = 5.0;
+}  // namespace
+
+auto cost_market_quote() noexcept -> double { return 1.0 + kUpstreamCallCost; }
+
+auto cost_risk_free_rate() noexcept -> double { return 1.0 + kUpstreamCallCost; }
+
+auto cost_market_chain(int upstream_calls) noexcept -> double {
+    return 1.0 + static_cast<double>(std::max(0, upstream_calls)) * kUpstreamCallCost;
+}
+
 // Every function above prices CPU work that shares the TBB pool with
 // everything else running on the engine -- it slows the pool down, but the
 // pool keeps serving other callers around it. LLM generation does not share

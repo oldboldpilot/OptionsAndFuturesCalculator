@@ -434,6 +434,44 @@ inline constexpr std::uint32_t kMaxPriceSteps = 500;   // UI default: 81
 inline constexpr std::uint32_t kMaxDateSteps = 180;    // UI default: 12
 inline constexpr std::uint64_t kMaxGridCells = 20000;  // UI default: 972
 
+/**
+ * Upper bound on how many legs a single StrategyRequest may carry.
+ *
+ * legs_size() is not folded into kMaxGridCells above, because it multiplies a
+ * different axis of the same work. That cap bounds price_steps * date_steps
+ * -- the shape of the P&L matrix -- and says nothing about how many legs are
+ * repriced in EVERY cell of it. cost_strategy_grid already multiplies its
+ * price by legs directly (p * d * l / 1000), and so does the actual work in
+ * action_expiry_curve, action_matrix and action_greeks, so an uncapped
+ * legs_size() multiplies both the charge and the real cost by whatever a raw
+ * gRPC caller puts in a repeated field -- unboundedly, since nothing here
+ * reads it before building the response.
+ *
+ * The richest structure the UI's own catalogue offers is 4 legs (iron_condor,
+ * condor, iron_butterfly, box_spread, reverse_iron_condor and
+ * double_diagonal all tie at 4 -- see frontend/src/components/
+ * StrategySelector.tsx's strategy list), so kMaxLegs is set at 5x that:
+ * enough headroom for a legitimate custom structure built directly against
+ * the API well beyond anything the catalogue ships (stacking two condors,
+ * say), while keeping the legs multiplier on both the cost formula and the
+ * per-cell work bounded to a small constant rather than to whatever a caller
+ * chooses to send.
+ *
+ * Rejected outright rather than clamped -- deliberately UNLIKE price_steps
+ * and date_steps above. Clamping a grid dimension changes the RESOLUTION of
+ * an answer to the question that was actually asked: a coarser payoff curve
+ * for the same position is still an answer about that position. Clamping
+ * legs_size() would change the QUESTION -- silently dropping legs past the
+ * cap prices a different structure than the one the caller specified, and
+ * returns it with nothing in the response to say a leg was discarded. That is
+ * exactly the failure action_initialize's own validation exists to prevent a
+ * few lines below ("Cannot price this position" rather than defaulting a
+ * missing spot or expiry): a wrong position confidently priced is worse than
+ * a request refused, because nothing about a truncated response looks
+ * incomplete.
+ */
+inline constexpr int kMaxLegs = 20;
+
 struct GridSteps {
     std::uint32_t price_steps;
     std::uint32_t date_steps;
@@ -820,6 +858,48 @@ using sgee::ExecutionResult;
     return {};
 }
 
+// --------------------------------------------------------------------------
+// Quota admission for the market-data RPCs
+//
+// GetMarketQuote, GetRiskFreeRate and GetMarketChain each reach a live
+// external feed through the ONE shared market-data connection -- see
+// market_data.cppm's client_for(), one keep-alive httplib::Client per
+// (thread, host) -- and until now none of them charged anything at all: no
+// admit_identity call, unlike every RPC in finance_service.cpp and unlike
+// CalculateStrategy below. An unmetered caller could hammer that shared
+// connection past the vendor's own upstream rate limit and degrade market
+// data for every other caller of this service, including callers correctly
+// staying inside their own compute budget -- anonymous callers all share one
+// site-wide bucket (quota.cppm's module comment), so there is no per-caller
+// isolation to fall back on.
+//
+// This reuses CalculateStrategy's own authenticate-then-charge shape exactly:
+// KeyRegistry::instance().authenticate() resolves an Identity (falling back
+// to the unauthenticated identity when no key is configured, which is what
+// makes this a no-op today with FINANCE_REQUIRE_KEY/PRO_GATE_MODE unset, same
+// as CalculateStrategy), then QuotaEnforcer::instance().admit_identity() with
+// the same TierLimits construction. Factored into one function because three
+// RPCs need the identical block and a third hand-copied instance is exactly
+// how a fourth new market-data RPC ends up forgetting it -- not because the
+// shape itself is anything other than what CalculateStrategy already does
+// inline, which is left untouched.
+[[nodiscard]] auto authorize_and_charge(ServerContext* context, std::string_view method,
+                                        double compute_units,
+                                        ::options_calculator::auth::Identity& identity) -> Status {
+    if (context != nullptr) {
+        if (auto s = ::options_calculator::auth::KeyRegistry::instance().authenticate(
+                *context, "calculator", method, identity);
+            !s.ok()) {
+            return s;
+        }
+    }
+    ::options_calculator::quota::TierLimits limits{identity.requests_per_minute,
+                                                   identity.compute_units_per_hour};
+    return ::options_calculator::quota::QuotaEnforcer::instance().admit_identity(
+        identity.id, identity.tier, method, compute_units,
+        identity.has_limits ? &limits : nullptr);
+}
+
 class CalculatorServiceImpl final : public calculator::OptionsCalculator::Service {
 private:
     std::shared_ptr<ActionRegistry> actions_;
@@ -923,6 +1003,18 @@ public:
         auto& log = logger::Logger::getInstance();
         log.info("CalculateStrategy: {} with {} legs", req.underlying_symbol(), req.legs_size());
 
+        // Refused outright, before authentication or quota even run -- an
+        // invalid request is invalid regardless of who is asking, and this
+        // check needs no identity to decide. See kMaxLegs above for why this
+        // is a rejection rather than the clamp price_steps/date_steps get
+        // below.
+        if (req.legs_size() > kMaxLegs) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "Too many legs (" + std::to_string(req.legs_size()) +
+                              "); this service prices at most " + std::to_string(kMaxLegs) +
+                              " legs in one request");
+        }
+
         // The Pro gate, server-side and before any work is done.
         //
         // It has to be here rather than in the UI: the frontend is a static
@@ -1013,7 +1105,7 @@ public:
      * structure resolved the proxy privately, which put a 7500 curve directly
      * above a 71 spot. Both were real quotes. Only one was the right instrument.
      */
-    auto GetMarketQuote(ServerContext*, const calculator::QuoteRequest* request,
+    auto GetMarketQuote(ServerContext* context, const calculator::QuoteRequest* request,
                         calculator::QuoteResponse* response) -> Status override {
         if (request == nullptr || response == nullptr) {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
@@ -1026,6 +1118,17 @@ public:
         const bool as_futures = (req.asset_class() == "FUTURES");
         log.info("GetMarketQuote: {} as {}", symbol,
                  req.asset_class().empty() ? "EQUITY (unstated)" : req.asset_class());
+
+        // See the "Quota admission for the market-data RPCs" comment above
+        // for why this exists and cost_market_quote's doc comment in
+        // quota.cppm for why it is priced as one upstream call.
+        ::options_calculator::auth::Identity identity;
+        if (auto s = authorize_and_charge(context, "GetMarketQuote",
+                                          ::options_calculator::quota::cost_market_quote(),
+                                          identity);
+            !s.ok()) {
+            return s;
+        }
 
         // What to actually ask the feed for, and what to scale its answer by.
         std::string quote_symbol = symbol;
@@ -1077,12 +1180,24 @@ public:
      * the rate is unavailable and lets the user supply one, labelled as an
      * assumption because that is what it is.
      */
-    auto GetRiskFreeRate(ServerContext*, const calculator::RiskFreeRateRequest* request,
+    auto GetRiskFreeRate(ServerContext* context, const calculator::RiskFreeRateRequest* request,
                          calculator::RiskFreeRateResponse* response) -> Status override {
         if (request == nullptr || response == nullptr) {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
         auto& log = logger::Logger::getInstance();
+
+        // See the "Quota admission for the market-data RPCs" comment above
+        // GetMarketQuote for why this exists and cost_risk_free_rate's doc
+        // comment in quota.cppm for why it is priced the same as one Alpaca
+        // quote even though this feed is Treasury, not Alpaca.
+        ::options_calculator::auth::Identity identity;
+        if (auto s = authorize_and_charge(context, "GetRiskFreeRate",
+                                          ::options_calculator::quota::cost_risk_free_rate(),
+                                          identity);
+            !s.ok()) {
+            return s;
+        }
 
         const auto rate = md::fetch_risk_free_rate();
         if (!rate) {
@@ -1232,7 +1347,7 @@ public:
      * emitted nine hardcoded futures months priced off a fixed 4.5% carry.
      * None of that was market data.
      */
-    auto GetMarketChain(ServerContext*, const calculator::ChainRequest* request,
+    auto GetMarketChain(ServerContext* context, const calculator::ChainRequest* request,
                         calculator::ChainResponse* response) -> Status override {
         if (request == nullptr || response == nullptr) {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
@@ -1243,6 +1358,25 @@ public:
         auto& log = logger::Logger::getInstance();
         const auto symbol = req.symbol();
         log.info("GetMarketChain: {} expiration='{}'", symbol, req.expiration_date());
+
+        // Upstream-call count for the branch this request is about to take,
+        // read off asset_class before any network call is made -- see
+        // cost_market_chain's doc comment in quota.cppm for exactly which
+        // calls each branch below issues.
+        int upstream_calls = 4;  // EQUITY: fetch_chain (quote, expirations, snapshot, open interest)
+        if (req.asset_class() == "FUTURES") {
+            upstream_calls = 2;  // build_term_structure: quote + risk-free rate
+        } else if (req.asset_class() == "CRYPTO") {
+            upstream_calls = 0;  // refused locally below, no network call at all
+        }
+
+        ::options_calculator::auth::Identity identity;
+        if (auto s = authorize_and_charge(
+                context, "GetMarketChain",
+                ::options_calculator::quota::cost_market_chain(upstream_calls), identity);
+            !s.ok()) {
+            return s;
+        }
 
         if (req.asset_class() == "FUTURES") {
             return build_term_structure(symbol, res);

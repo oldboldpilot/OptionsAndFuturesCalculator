@@ -152,4 +152,26 @@ class QuotaEnforcer {
 [[nodiscard]] auto cost_llm_generate(int samples, int max_tokens) noexcept -> double;
 [[nodiscard]] auto cost_strategy_grid(int price_steps, int date_steps, int legs) noexcept -> double;
 
+/**
+ * Prices GetMarketQuote and GetRiskFreeRate: one round trip each against an
+ * external market-data vendor.
+ *
+ * See the definition in quota.cpp for why these three market-data functions
+ * price the number of upstream HTTP calls a request makes rather than the
+ * size of what comes back, and why that price is charged whether or not the
+ * call is actually served from cache.
+ */
+[[nodiscard]] auto cost_market_quote() noexcept -> double;
+[[nodiscard]] auto cost_risk_free_rate() noexcept -> double;
+
+/**
+ * Prices GetMarketChain from the number of upstream calls the branch it is
+ * about to take will make -- 0 for the CRYPTO refusal, 2 for the FUTURES
+ * term structure (spot + risk-free rate), 4 for a listed EQUITY chain (spot,
+ * expirations, option snapshot, open interest). Computed by the caller from
+ * `asset_class` before any network call is dispatched, so the charge -- like
+ * every other one in this file -- happens before the work it prices.
+ */
+[[nodiscard]] auto cost_market_chain(int upstream_calls) noexcept -> double;
+
 }  // namespace options_calculator::quota
