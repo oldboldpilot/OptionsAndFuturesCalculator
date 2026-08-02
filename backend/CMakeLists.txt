@@ -592,11 +592,13 @@ target_sources(sensen_slim
             "${SENSEN_SRC}/gemm_kernels.cppm"
             "${SENSEN_SRC}/gguf_parser.cppm"
             "${SENSEN_SRC}/gguf_weight_loader.cppm"
+            "${SENSEN_SRC}/gp_ara_interfaces.cppm"
             "${SENSEN_SRC}/grammar.cppm"
             "${SENSEN_SRC}/hybrid_attention.cppm"
             "${SENSEN_SRC}/intrinsics.cppm"
             "${SENSEN_SRC}/k_quant_dequant.cppm"
             "${SENSEN_SRC}/kv_half.cppm"
+            "${SENSEN_SRC}/kv_q8.cppm"
             "${SENSEN_SRC}/kv_cache.cppm"
             "${SENSEN_SRC}/linear_algebra.cppm"
             "${SENSEN_SRC}/llama_model.cppm"
@@ -787,7 +789,7 @@ add_subdirectory(external/SGEE sgee EXCLUDE_FROM_ALL)
 
 # Core engine binary
 add_executable(calculator_engine src/main.cpp src/issue_key.cpp src/modules/calculator_service.cpp src/modules/finance_service.cpp src/modules/quota.cpp src/modules/api_key.cpp src/modules/assistant_service.cpp)
-target_sources(calculator_engine PUBLIC FILE_SET CXX_MODULES FILES src/modules/calculator_service.cppm src/modules/market_data.cppm src/modules/finance_service.cppm src/modules/quota.cppm src/modules/api_key.cppm src/modules/strategy_catalogue.cppm src/modules/assistant_service.cppm)
+target_sources(calculator_engine PUBLIC FILE_SET CXX_MODULES FILES src/modules/calculator_service.cppm src/modules/market_data.cppm src/modules/finance_service.cppm src/modules/quota.cppm src/modules/api_key.cppm src/modules/strategy_catalogue.cppm src/modules/assistant_verification.cppm src/modules/assistant_service.cppm)
 target_link_libraries(calculator_engine PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto sgee)
 
 
@@ -825,6 +827,29 @@ target_sources(test_runner
 target_link_libraries(test_runner PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto)
 
 add_test(NAME CoreEngineTest COMMAND test_runner)
+
+# GP-ARA mandatory verification stage for the strategy assistant
+# (assistant_verification.cppm). Deliberately proto- and gRPC-free (see that
+# module's own file banner) AND deliberately does NOT link sensen_slim: the
+# only sensen module this stage needs, sensen.gp_ara_interfaces, has zero
+# dependencies beyond std (no TBB, no CUDA backend, no Z3 -- see that
+# module's own imports), so it is compiled here directly as this target's
+# own FILE_SET source, the same way calculator_engine already compiles
+# strategy_catalogue.cppm as its own source rather than pulling it from a
+# library. This keeps the test buildable and independently runnable even
+# when unrelated modules elsewhere in the (large, actively-developed)
+# sensen_slim closure are mid-edit and momentarily non-building -- exactly
+# the situation this target was first built under.
+add_executable(test_assistant_verification tests/test_assistant_verification.cpp)
+target_sources(test_assistant_verification
+    PRIVATE
+    FILE_SET CXX_MODULES FILES
+        sensen/src/gp_ara_interfaces.cppm
+        src/modules/strategy_catalogue.cppm
+        src/modules/assistant_verification.cppm
+)
+
+add_test(NAME AssistantVerificationTest COMMAND test_assistant_verification)
 
 # End-to-end smoke client. Verifies a running engine returns live data on all
 # three RPCs; used as the deploy gate.
@@ -1093,6 +1118,12 @@ if(ENABLE_LLAMACPP_BACKEND)
     # bit. Links ggml for that second comparison.
     add_executable(kv_range_probe src/kv_range_probe.cpp)
     target_link_libraries(kv_range_probe PRIVATE ggml sensen_slim)
+
+    # 8-bit KV design measurement: per-channel vs per-token absmax structure of
+    # Kcur_rope / Vcur, outlier-channel persistence, skew, and simulated int8
+    # error under the candidate scale-granularity schemes.
+    add_executable(kv_gran_probe src/kv_gran_probe.cpp)
+    target_link_libraries(kv_gran_probe PRIVATE sensen_slim)
 
     # The engine itself. `calculator_engine` is declared far above this block,
     # which is fine and is why the wiring is here rather than there: CMake

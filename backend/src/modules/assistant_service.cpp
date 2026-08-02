@@ -3,6 +3,7 @@ module;
 #include <array>
 #include <cctype>
 #include <charconv>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
@@ -45,6 +46,7 @@ import quota;
 import api_key;
 import strategy_catalogue;
 import market_data;
+import assistant_verification;
 
 namespace options_calculator::assistant {
 
@@ -1486,6 +1488,32 @@ auto populate_clarification(calculator::assistant::ParseResponse& response, std:
 }
 
 // ---------------------------------------------------------------------------
+// GP-ARA mandatory verification stage
+// ---------------------------------------------------------------------------
+//
+// assistant_verification.cppm's `verify::ReasonCode` deliberately picks among
+// the SAME `Refusal::Reason` values the per-field checks above already use --
+// it invents nothing new on the wire. `ReasonCode::None` only ever
+// accompanies `Outcome::Proven`, which this function is never called for
+// (see the switch below); reaching it here would be this file's own bug, not
+// a verification-layer question, so it default-denies to OUT_OF_SCOPE rather
+// than emitting an unspecified reason.
+[[nodiscard]] auto map_verification_reason(::options_calculator::assistant::verify::ReasonCode reason)
+    -> calculator::assistant::Refusal_Reason {
+    using ::options_calculator::assistant::verify::ReasonCode;
+    switch (reason) {
+        case ReasonCode::UnsupportedStrategy:
+            return calculator::assistant::Refusal::UNSUPPORTED_STRATEGY;
+        case ReasonCode::UnknownSymbol:
+            return calculator::assistant::Refusal::UNKNOWN_SYMBOL;
+        case ReasonCode::OutOfScope:
+        case ReasonCode::None:
+            return calculator::assistant::Refusal::OUT_OF_SCOPE;
+    }
+    return calculator::assistant::Refusal::OUT_OF_SCOPE;
+}
+
+// ---------------------------------------------------------------------------
 // Live symbol validation
 // ---------------------------------------------------------------------------
 //
@@ -1695,6 +1723,16 @@ enum class SymbolProbeOutcome { Resolved, Unknown, AssetClassMismatch, ProviderU
  * Updating the proto comment was left out of this change because it was
  * scoped to this file; whoever next touches assistant.proto should reconcile
  * the two.
+ *
+ * Between the per-field checks above and `probe_symbol` below sits one more
+ * MANDATORY stage: `assistant_verification::verify_assistant_params`
+ * (GP-ARA). The per-field checks that precede it each look at one field in
+ * isolation and cannot catch a hallucination that is plausible field-by-
+ * field but self-contradictory as a whole; `probe_symbol` after it confirms
+ * a symbol is real against live data but has no opinion on, say, whether a
+ * futures-only strategy paired with a crypto symbol makes sense. See that
+ * call site's own comment for why it runs where it does, and
+ * assistant_verification.cppm's file banner for the full rule set.
  */
 auto validate_and_populate_params(std::string_view json_text,
                                    calculator::assistant::ParseResponse& response) -> void {
@@ -1768,11 +1806,67 @@ auto validate_and_populate_params(std::string_view json_text,
         return;
     }
 
+    // ------------------------------------------------------------------
+    // MANDATORY GP-ARA verification. Every field above this point was
+    // checked in ISOLATION -- well-formed on its own, never against each
+    // other. This is the gate that catches a hallucination that is
+    // plausible field-by-field but self-contradictory as a whole (a known
+    // futures root tagged asset_class=EQUITY, a futures-only strategy
+    // paired with a crypto symbol, a calendar spread asked to live inside
+    // one expiration_days field -- see assistant_verification.cppm's file
+    // banner for the full rule set and why it needs no SMT solver to
+    // decide them). It runs BEFORE the live market-data probe below,
+    // deliberately: a symbol/asset_class contradiction that a live equity
+    // lookup could paper over (crude oil's "CL" root also happens to be
+    // Colgate-Palmolive's real NYSE ticker) must never get the chance to
+    // resolve against the wrong market. Nothing computed here is network-
+    // dependent -- see the measured latency in test_assistant_verification.cpp,
+    // negligible next to the ~1.1s the model call itself costs -- so paying
+    // it before the network probe costs nothing extra on the refused path
+    // and saves a wasted round trip on it.
+    //
+    // The tri-state verdict is preserved end to end, never collapsed to a
+    // boolean: Proven falls through to the live probe below (the only path
+    // that can still reach `response.mutable_params()`); Unsafe and
+    // Indeterminate both refuse immediately, via the exact same
+    // `map_verification_reason()` -> `populate_refusal()` call, because
+    // treating "definitely contradictory" and "this verifier could not
+    // decide" identically at the response boundary is the correct,
+    // fail-closed default (see assistant_verification.cppm's own comment on
+    // why Indeterminate maps to a refusal here rather than a clarification:
+    // the one case that can produce it is a gap between this file's rule
+    // table and strategy_catalogue.cppm, not an ambiguity in what the
+    // trader said that a follow-up question could resolve).
+    const auto verification_start = std::chrono::steady_clock::now();
+    const auto verdict = ::options_calculator::assistant::verify::verify_assistant_params(
+        {.symbol = symbol,
+         .asset_class = asset_class,
+         .strategy = strategy,
+         .expiration_days = expiration_days,
+         .quantity = quantity});
+    const auto verification_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                      std::chrono::steady_clock::now() - verification_start)
+                                      .count();
+    logger::Logger::getInstance().debug(
+        "assistant: GP-ARA verification took {}us, outcome={}", verification_us,
+        verdict.outcome == ::options_calculator::assistant::verify::Outcome::Proven ? "Proven"
+        : verdict.outcome == ::options_calculator::assistant::verify::Outcome::Unsafe ? "Unsafe"
+                                                                                        : "Indeterminate");
+
+    if (verdict.outcome != ::options_calculator::assistant::verify::Outcome::Proven) {
+        populate_refusal(response, map_verification_reason(verdict.reason),
+                         verdict.message.empty()
+                             ? "The assistant's answer could not be verified."
+                             : verdict.message);
+        return;
+    }
+
     // Every check above this line is free (string comparisons, catalogue
-    // lookups); this one costs a network round trip, so it runs LAST -- a
-    // request that was always going to be refused for its strategy, its
-    // expiration or its quantity should not also pay for a live quote it
-    // will never use.
+    // lookups, and the GP-ARA cross-field verification above); this one
+    // costs a network round trip, so it runs LAST -- a request that was
+    // always going to be refused for its strategy, its expiration, its
+    // quantity, or a cross-field contradiction should not also pay for a
+    // live quote it will never use.
     switch (probe_symbol(symbol, asset_class)) {
         case SymbolProbeOutcome::Unknown:
             populate_refusal(response, calculator::assistant::Refusal::UNKNOWN_SYMBOL,
