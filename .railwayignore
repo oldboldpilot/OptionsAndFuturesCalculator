@@ -36,7 +36,6 @@ config
 # Large non-build subtrees inside the vendored engines.
 backend/external/SGEE/web-lsp
 backend/external/SGEE/vscode-extension
-backend/StochasticGraphExecutionEngine
 backend/BigBrotherAnalytics
 backend/sensen/external/CosyVoice
 backend/sensen/eval_samples
