@@ -35,6 +35,7 @@ deployments.
 | --- | --- | --- |
 | `calculator.OptionsCalculator` | `backend/proto/calculator.proto` | This application's own API — strategies, legs, payoff curves, market data |
 | `sensen.finance.Finance` | `backend/proto/finance.proto` | The general-purpose sensen financial library, exposed for reuse by other applications |
+| `calculator.assistant.StrategyAssistant` | `backend/proto/assistant.proto` | Natural-language strategy parsing, served by a fine-tuned Qwen3-0.6B running in-process |
 
 `sensen.finance.Finance` covers roughly fifty functions across sensen's
 `financial.cppm`, `options.cppm` and `portfolio.cppm`: time value of money,
@@ -55,6 +56,70 @@ Gate: `backend/src/smoke_client.cpp` (`check_finance`) verifies the answers
 against independent identities — put-call parity, price/yield inversion,
 schedule closure, and the closed-form annuity formula — not against figures the
 engine produced earlier.
+
+**Native gRPC does not survive the Railway ingress.** `smoke_client` against
+`api.optionsandfuturescalculator.com:443` fails with `Stream removed`, and no
+corresponding request appears in `railway logs` — only gRPC-Web reaches the
+container. Verify production through the browser path or the logs; the native
+smoke client works locally and against the Railway TCP proxy, not the custom
+domain.
+
+## Strategy assistant
+
+A fine-tuned Qwen3-0.6B (QLoRA, rank 16, 95.0% params exact-match) converts a
+plain-English request into calculator parameters. It runs **in-process**, Q8_0
+on CPU, fetched at image build time from a private HF repo with the checksum
+pinned — it cannot travel through `railway up`, which enforces an upload
+deadline that 62 MB already failed.
+
+Three things about it are load-bearing and easy to get wrong:
+
+1. **The model requires its training system prompt.** Without it, it reverts to
+   stock Qwen3 and emits no `<params>` block at all.
+2. **Qwen3 emits a `<think>` block on every response, including correct ones.**
+   The block being *empty* is the signal the system prompt took. Treating its
+   presence as failure rejects every valid answer.
+3. **`n_gpu_layers` must be 0 on a CPU build.** `GenerationConfig` defaults
+   `compute_backend` to `AUTO`, which sensen counted as a GPU request; that
+   enables `on_device_sampling`, a contract only the CUDA decode block honours,
+   and the CPU path then casts a raw float logit to a token id. Fixed upstream
+   in sensen and independently here, so it does not depend on the pinned commit.
+
+Concurrency comes from sensen's iteration-level scheduler, not threads —
+`generate()` cannot be called concurrently, because `FeedForwardNetwork` holds
+`mutable` scratch per instance rather than `thread_local`, so parallel calls
+corrupt hidden state silently. One owner thread, one fused `forwardBatch` per
+step, ~20 MiB marginal per user.
+
+Known limit: the training set restricts futures roots to `ES` and `NQ`, so
+commodity queries are out of distribution — the model answers `CND` for a crude
+crack spread, which is not an instrument. Symbol validation refuses that, and
+`crack_321` is gated out of the UI (the calculator prices it correctly; the
+assistant was never taught it).
+
+## Pro tier and quota
+
+Entitlement flows through Supabase `auth.users.app_metadata.tier` (never
+`user_metadata`, which is browser-writable) or a signed licence
+(`HMAC-SHA512[0:32]`, base64url). `PRO_GATE_MODE` is `warn` in production —
+observe-only, logging would-denies without denying — until a live checkout
+round trip is proven. `profiles.tier` is dead; nothing reads or writes it.
+
+`quota.cpp` collapses **every unkeyed caller into one shared `~anonymous`
+bucket**. A per-user-looking anonymous limit is therefore a site-wide limit; it
+is sized as what it is:
+
+| tier | req/min | compute-units/hr | scope |
+| --- | --- | --- | --- |
+| anonymous | 6000 | 120,000 | shared site-wide |
+| free | 120 | 3,600 | per caller |
+| pro | 600 | 240,000 | per caller |
+| partner | 2400 | 1,200,000 | per caller |
+
+`limits_for_tier()` silently falls back to the *anonymous* allowance for a tier
+it does not recognise while still labelling refusals with the requested tier.
+The live `QUOTA_POLICY` defines `pro`; the example in `docs/FINANCE_API.md` does
+not. Do not "fix" the live policy by copying the doc.
 
 ## Features & Capabilities
 

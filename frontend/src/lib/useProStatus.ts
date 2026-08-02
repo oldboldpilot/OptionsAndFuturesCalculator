@@ -3,6 +3,41 @@
 import { useEffect } from 'react';
 import { create } from 'zustand';
 import { claimLicence, clearLicence, isPro, loadLicence, saveLicence, type LicenceInfo } from './licence';
+import { createClient } from './supabase/client';
+
+/**
+ * Reads `app_metadata.tier` out of a Supabase access token WITHOUT verifying
+ * it -- the same trust boundary `readClaims` in licence.ts already uses for
+ * the licence key, and safe for the same reason: verifying an HS256
+ * signature needs the signing secret, and a secret shipped to a browser is
+ * not a secret. This is a UI label only, telling someone they should see a
+ * Pro badge before they build a strategy and get refused. It grants nothing:
+ * every gRPC call also carries this same token in `authorization`
+ * (see licence.ts authMetadata), and the engine independently re-derives the
+ * HMAC and reads the tier server-side before honouring anything gated. If
+ * this were spoofed client-side, the worst case is a badge the engine then
+ * refuses -- the engine decides, this function only labels.
+ */
+function decodeAccountTier(accessToken: string): string | null {
+  try {
+    const parts = accessToken.split('.');
+    if (parts.length !== 3) return null;
+    const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const padded = b64 + '='.repeat((4 - (b64.length % 4)) % 4);
+    const payload = JSON.parse(atob(padded)) as {
+      app_metadata?: { tier?: string };
+      exp?: number;
+    };
+    // An expired access token is not evidence of anything: Supabase refreshes
+    // access tokens well before they expire, so seeing one this stale here
+    // means the refresh loop stopped, not that the account's tier changed.
+    // Failing closed rather than trusting a stale claim.
+    if (typeof payload.exp === 'number' && payload.exp * 1000 < Date.now()) return null;
+    return payload.app_metadata?.tier ?? null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Pro status, held in ONE place.
@@ -22,6 +57,11 @@ import { claimLicence, clearLicence, isPro, loadLicence, saveLicence, type Licen
  */
 interface ProState {
   licence: LicenceInfo | null;
+  // Tier read off the signed-in account's own Supabase session, independent
+  // of any licence key. null covers "signed out", "token unparseable", and
+  // "no tier claim" alike -- all three mean the same thing here: don't show
+  // this account as Pro.
+  accountTier: string | null;
   claiming: boolean;
   error: string | null;
   initialised: boolean;
@@ -33,6 +73,7 @@ interface ProState {
 
 export const useProStore = create<ProState>((set, get) => ({
   licence: null,
+  accountTier: null,
   claiming: false,
   error: null,
   initialised: false,
@@ -42,6 +83,29 @@ export const useProStore = create<ProState>((set, get) => ({
     // exchange or clobber a licence just activated by hand.
     if (get().initialised) return;
     set({ initialised: true, licence: loadLicence() });
+
+    // Wrapped so a missing Supabase env var or an unreachable auth host
+    // degrades to "no account tier" instead of throwing -- the licence path
+    // above must keep working even when sign-in is not configured at all.
+    try {
+      const supabase = createClient();
+      supabase.auth.onAuthStateChange((_event, session) => {
+        set({ accountTier: session?.access_token ? decodeAccountTier(session.access_token) : null });
+      });
+      // onAuthStateChange's INITIAL_SESSION fires asynchronously on its own;
+      // priming with getSession() closes the brief window on first load
+      // where an already-signed-in visitor would otherwise flash "not Pro".
+      supabase.auth
+        .getSession()
+        .then(({ data }) => {
+          set({
+            accountTier: data.session?.access_token ? decodeAccountTier(data.session.access_token) : null,
+          });
+        })
+        .catch(() => set({ accountTier: null }));
+    } catch {
+      set({ accountTier: null });
+    }
 
     const params = new URLSearchParams(window.location.search);
     if (params.get('checkout') !== 'success') return;
@@ -97,5 +161,9 @@ export function useProStatus() {
     // per page load, not once per render or per subscribing component.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-  return { ...s, pro: isPro(s.licence) };
+  // Pro if either path says so: a licence key, or a signed-in account whose
+  // tier the billing webhook wrote onto app_metadata. Neither path can turn
+  // the other one off -- someone with a valid licence but a stale/no session
+  // stays Pro, and vice versa.
+  return { ...s, pro: isPro(s.licence) || s.accountTier === 'pro' };
 }

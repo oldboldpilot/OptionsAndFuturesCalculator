@@ -2,16 +2,55 @@
 
 @author Olumuyiwa Oluwasanmi
 
-Welcome to the documentation index for the Options & Futures Calculator.
+## Core
 
-## Core Documentation
-- [Root CLAUDE Guide](../CLAUDE.md)
-- [Product Requirements Document (PRD)](PRD_OPTIONS_AND_FUTURES_CALCULATOR.md)
+- [Root CLAUDE Guide](../CLAUDE.md) — architecture, gRPC surface, deployment, DNS
+- [Product Requirements Document](PRD_OPTIONS_AND_FUTURES_CALCULATOR.md)
 
-## Session Logs
-- [2026-07-26 Session Log](session_logs/2026-07-26_session_log.md)
+## API
 
-## System Architecture & Operations
-- **Frontend Infrastructure:** Hosted on Cloudflare Pages (`optionsandfuturescalculator.com`)
-- **Backend Infrastructure:** Hosted on Railway Container Services (`api.optionsandfuturescalculator.com`)
-- **Database Infrastructure:** PostgreSQL hosted on Railway (`postgres.railway.internal:5432`)
+- [Finance API](FINANCE_API.md) — the `sensen.finance.Finance` service: ~50 functions
+  across time value of money, mortgages, bonds, futures, options and portfolio
+  statistics. Note the `QUOTA_POLICY` example in this document omits the `pro`
+  tier; an unknown tier silently falls back to the *anonymous* allowance, so a
+  policy copied from here verbatim would under-serve paying subscribers.
+- [Business API](BUSINESS_API.md) — partner/commercial surface
+- [API Security](API_SECURITY.md) — threat model, key handling, quota enforcement
+
+## Architecture & operations
+
+- [Tensor observer](../backend/docs/TENSOR_OBSERVER.md) — runtime per-layer
+  inspection of the inference engine, attachable by environment variable to an
+  already-built release binary
+- [Billing worker](../workers/billing/README.md) — Stripe checkout, licence
+  minting, Supabase tier writes. **Register all four Stripe webhook events**; the
+  README currently lists three, and omitting
+  `customer.subscription.deleted` means Stripe never delivers it, so a cancelled
+  subscriber keeps Pro indefinitely.
+
+**Infrastructure**
+
+| Layer | Host | Domain |
+| --- | --- | --- |
+| Frontend | Cloudflare Pages | `optionsandfuturescalculator.com` |
+| Backend | Railway container (Envoy + C++23 engine) | `api.optionsandfuturescalculator.com` |
+| Database | Railway PostgreSQL | `postgres.railway.internal:5432` |
+| Billing | Cloudflare Worker | not yet deployed |
+
+Native gRPC does not currently survive the Railway ingress — `smoke_client`
+against `api.optionsandfuturescalculator.com:443` fails with `Stream removed`
+and no request reaches the container. Only gRPC-Web works from outside. Verify
+production behaviour through the browser path or `railway logs`, not the native
+smoke client.
+
+## Design specs
+
+- [OPC parity design (2026-07-26)](superpowers/specs/2026-07-26-opc-parity-design.md)
+
+## Session logs
+
+- [2026-08-01 — assistant, sensen performance, Pro tier](session_logs/session_2026-08-01_assistant_sensen_perf_and_pro.md)
+- [2026-07-30 — libc++ std module investigation](session_logs/2026-07-30_libcxx_std_module_investigation.md)
+- [2026-07-30 — calendar spread and matrix axis](session_logs/2026-07-30_calendar_spread_and_matrix_axis.md)
+- [2026-07-29](session_logs/2026-07-29_session_log.md)
+- [2026-07-26](session_logs/2026-07-26_session_log.md)

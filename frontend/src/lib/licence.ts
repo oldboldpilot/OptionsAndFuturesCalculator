@@ -14,8 +14,59 @@
  * one and gets refused.
  */
 
+import { createClient } from './supabase/client';
+
 const STORAGE_KEY = 'ofc.licence';
 const LICENCE_PREFIX = 'lk_live_';
+
+// The signed-in account's current access token, kept in memory so
+// `authMetadata()` below can stay synchronous -- it is called inline at four
+// gRPC call sites in useCalculatorStore that cannot await it. Supabase's own
+// APIs for reading the session (`getSession`, `onAuthStateChange`) are async,
+// so the token is fetched once in the background and every call after that
+// reads whatever is already cached, rather than each call site awaiting a
+// session lookup of its own.
+let cachedAccessToken: string | null = null;
+let authSubscribed = false;
+
+/**
+ * Registers the Supabase auth listener that keeps `cachedAccessToken`
+ * current, the first time anything needs it. Guarded by `authSubscribed` so
+ * re-importing this module (fast refresh, multiple bundle entries) does not
+ * register a second listener against the same session.
+ *
+ * Everything here is wrapped so a missing Supabase env var, an unreachable
+ * auth host, or a prerender pass all degrade to "no token" instead of
+ * throwing -- this module is on the path of every gRPC call, so the free
+ * tier has to keep working even when sign-in is not configured at all.
+ * Gating on `window` matters for the same reason: this file is imported
+ * during the static export build, where there is no browser session to read.
+ */
+function ensureAuthSubscription(): void {
+  if (typeof window === 'undefined' || authSubscribed) return;
+  authSubscribed = true;
+  try {
+    const supabase = createClient();
+    supabase.auth.onAuthStateChange((_event, session) => {
+      cachedAccessToken = session?.access_token ?? null;
+    });
+    // onAuthStateChange fires INITIAL_SESSION asynchronously on its own;
+    // priming with getSession() as well closes the brief window on first
+    // load where a call could otherwise see "signed out" when a session
+    // actually exists.
+    supabase.auth
+      .getSession()
+      .then(({ data }) => {
+        cachedAccessToken = data.session?.access_token ?? null;
+      })
+      .catch(() => {
+        cachedAccessToken = null;
+      });
+  } catch {
+    // No Supabase configuration, or the client threw constructing itself.
+    cachedAccessToken = null;
+  }
+}
 
 export interface LicenceInfo {
   token: string;
@@ -81,15 +132,26 @@ export function isPro(info: LicenceInfo | null): boolean {
 }
 
 /**
- * gRPC-Web metadata carrying the licence, or empty when there is none.
+ * gRPC-Web metadata carrying the licence and/or the signed-in session, or
+ * empty when there is neither.
+ *
+ * Both headers are sent when both are present: the engine deliberately checks
+ * `authorization` before `x-api-key` (backend/src/modules/api_key.cpp), so a
+ * signed-in Pro subscriber is identified as themselves even on a page that
+ * also carries the site's own publishable licence key -- dropping either
+ * header here would leave that check with nothing to prefer.
  *
  * Every call site passes this rather than `{}`, so a subscriber's identity
  * travels with every request instead of only the ones someone remembered to
- * wire up.
+ * wire up. Kept synchronous because it is called inline at those call sites.
  */
 export function authMetadata(): Record<string, string> {
+  ensureAuthSubscription();
+  const headers: Record<string, string> = {};
   const info = loadLicence();
-  return info ? { 'x-api-key': info.token } : {};
+  if (info) headers['x-api-key'] = info.token;
+  if (cachedAccessToken) headers['authorization'] = `Bearer ${cachedAccessToken}`;
+  return headers;
 }
 
 const BILLING_URL =

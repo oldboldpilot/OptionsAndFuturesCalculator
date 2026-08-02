@@ -33,6 +33,23 @@ interface StrategyDef {
    */
   /** Needs legs at two different expiries; the single-chain builder can't apply it. */
   multiExpiry?: boolean;
+  /**
+   * Hidden from the picker, deliberately and temporarily.
+   *
+   * This is NOT "the calculator cannot price it". The engine takes explicit
+   * legs and never sees a strategy id, so anything listed here prices
+   * correctly the moment it is shown. What it means is that the rest of the
+   * product does not yet agree that this structure exists: the assistant's
+   * training data and the backend catalogue are both generated from
+   * agent/dataset/strategies.json, which does not contain it, so asking the
+   * assistant for one in words gets an honest refusal for a structure the UI
+   * is visibly offering. Hiding it keeps those two surfaces telling the same
+   * story until the dataset catches up.
+   *
+   * To restore: delete the flag from the entry. Nothing else is required, and
+   * nothing about the pricing path changed while it was set.
+   */
+  gated?: boolean;
 }
 
 /**
@@ -196,7 +213,7 @@ const STRATEGIES: StrategyDef[] = [
   { id: 'futures_calendar', name: 'Futures Calendar Spread', category: 'Futures', multiExpiry: true,
     description: 'Inter-month spread along the term structure.',
     legs: [{ action: 'BUY', type: 'FUTURE', moneyness: null }, { action: 'SELL', type: 'FUTURE', moneyness: null }] },
-  { id: 'crack_321', name: '3-2-1 Crack Spread', category: 'Futures',
+  { id: 'crack_321', name: '3-2-1 Crack Spread', category: 'Futures', gated: true,
     description: 'Three crude against two gasoline and one heating oil.',
     legs: [{ action: 'BUY', type: 'FUTURE', moneyness: null, quantity: 3 },
            { action: 'SELL', type: 'FUTURE', moneyness: null, quantity: 2 },
@@ -251,9 +268,15 @@ export const StrategySelector: React.FC = () => {
     const q = query.trim().toLowerCase();
     // A search spans every category — with this many structures, forcing the
     // user to guess which bucket "jade lizard" lives in is hostile.
+    // `gated` is checked before anything else so a hidden structure cannot be
+    // reached by search either -- filtering it out of the category list alone
+    // would still surface it the moment someone typed its name, which is the
+    // exact path a user takes when they know the strategy exists.
     return STRATEGIES.filter((s) =>
-      q ? s.name.toLowerCase().includes(q) || s.description.toLowerCase().includes(q)
-        : s.category === category,
+      !s.gated && (
+        q ? s.name.toLowerCase().includes(q) || s.description.toLowerCase().includes(q)
+          : s.category === category
+      ),
     );
   }, [category, query]);
 
@@ -364,7 +387,10 @@ export const StrategySelector: React.FC = () => {
     <div className="panel" style={{ flex: 'none', maxHeight: '58vh' }}>
       <div className="panel-head">
         <span className="panel-title">Strategy</span>
-        <span className="chip">{STRATEGIES.length}</span>
+        {/* Counts what the user can actually pick, not what the array holds --
+            a gated entry that still incremented this would advertise a
+            structure the picker refuses to show. */}
+        <span className="chip">{STRATEGIES.filter((s) => !s.gated).length}</span>
       </div>
 
       <div style={{ padding: '0.4375rem 0.5rem 0', display: 'flex', flexDirection: 'column', gap: '0.375rem' }}>

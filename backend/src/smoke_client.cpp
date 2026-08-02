@@ -1622,17 +1622,26 @@ auto check_key_limit(sensen::finance::Finance::Stub& stub) -> bool {
 }
 
 /**
- * The Pro gate, checked where it actually has to hold.
+ * The Pro gate, checked where it actually has to hold, in BOTH directions.
  *
  * The point of this check is that the gate is SERVER-SIDE. The frontend is a
  * static export, so any limit it applies runs on the user's own machine and the
  * gRPC endpoint answers curl regardless. This calls the RPC directly, exactly
- * as someone bypassing the UI would, and asserts both halves: single-leg stays
- * free, multi-leg does not.
+ * as someone bypassing the UI would.
  *
- * Skipped unless PRO_GATE_MODE=enforce, because with the gate off "not refused"
- * is the correct answer and asserting a refusal would fail for the right
- * reason at the wrong time.
+ * A gate verified in one direction is not verified. "Anonymous is refused" is
+ * satisfied just as well by a gate that refuses EVERYONE -- including the
+ * subscriber who paid -- and that failure is strictly worse than the gate not
+ * existing, because it is indistinguishable from the site being broken. So
+ * three things are asserted, not one:
+ *
+ *   1. single-leg, anonymous            -> OK          (the free tier is intact)
+ *   2. multi-leg, anonymous             -> PERMISSION_DENIED
+ *   3. multi-leg, Pro credential        -> OK          (the paying customer gets in)
+ *
+ * Skipped unless PRO_GATE_MODE=enforce, because with the gate Off or Warn
+ * "not refused" is the correct answer and asserting a refusal would fail for
+ * the right reason at the wrong time.
  */
 auto check_pro_gate(calculator::OptionsCalculator::Stub& stub, const std::string& symbol,
                     double spot) -> bool {
@@ -1644,7 +1653,43 @@ auto check_pro_gate(calculator::OptionsCalculator::Stub& stub, const std::string
         return true;
     }
 
-    const auto call = [&](int legs) -> grpc::StatusCode {
+    // The two ways a Pro entitlement can arrive, kept separate on purpose.
+    //
+    // SMOKE_PRO_LICENCE is a signed subscription licence, the path a customer
+    // who pasted their key takes. SMOKE_PRO_BEARER is a Supabase access token,
+    // the path a signed-in subscriber takes -- the engine reads the tier from
+    // its `app_metadata.tier` claim. They are DIFFERENT code paths in
+    // KeyRegistry::authenticate, so proving one says nothing about the other,
+    // and whichever are supplied are exercised independently.
+    const char* pro_licence = std::getenv("SMOKE_PRO_LICENCE");
+    const char* pro_bearer = std::getenv("SMOKE_PRO_BEARER");
+    const bool have_licence = pro_licence != nullptr && *pro_licence != '\0';
+    const bool have_bearer = pro_bearer != nullptr && *pro_bearer != '\0';
+
+    // Deliberately fatal rather than skipped. Reporting "the gate holds" having
+    // only ever seen it refuse would be the most dangerous possible outcome of
+    // this check: it is exactly the evidence someone would cite before turning
+    // enforcement on, and it does not support that conclusion.
+    if (!have_licence && !have_bearer) {
+        std::cerr << "PRO_GATE_MODE=enforce but neither SMOKE_PRO_LICENCE nor SMOKE_PRO_BEARER "
+                     "is set, so the ALLOW direction cannot be exercised. A gate proven only to "
+                     "refuse is indistinguishable from one that refuses the paying customer too "
+                     "-- refusing to report a pass on half the evidence\n";
+        return false;
+    }
+
+    /**
+     * One CalculateStrategy call.
+     *
+     * `credential` is empty for the anonymous case, and that case must be
+     * genuinely anonymous: make_context() attaches SMOKE_API_KEY and
+     * SMOKE_BEARER, so using it here would silently hand the "anonymous" call
+     * whatever identity the environment happened to carry -- and a run with a
+     * Pro token in the environment would then report the gate as broken when
+     * it was working perfectly.
+     */
+    const auto call = [&](int legs, std::string_view header, std::string_view credential)
+        -> grpc::StatusCode {
         calculator::StrategyRequest req;
         req.set_underlying_symbol(symbol);
         req.set_current_price(spot);
@@ -1666,25 +1711,67 @@ auto check_pro_gate(calculator::OptionsCalculator::Stub& stub, const std::string
             leg.set_contract_multiplier(100.0);
         }
         calculator::StrategyResponse res;
-        const auto ctx = make_context();
+        const auto ctx = make_anonymous_context();
+        if (!header.empty()) ctx->AddMetadata(std::string{header}, std::string{credential});
         return stub.CalculateStrategy(ctx.get(), req, &res).error_code();
     };
 
-    if (const auto code = call(1); code != grpc::StatusCode::OK) {
-        std::cerr << "a SINGLE-leg strategy was refused (status " << static_cast<int>(code)
+    // --- Direction 1: the free tier still works, and works for a stranger. ---
+    if (const auto code = call(1, "", ""); code != grpc::StatusCode::OK) {
+        std::cerr << "a SINGLE-leg strategy was refused for an anonymous caller (status "
+                  << static_cast<int>(code)
                   << ") -- the free tier is broken, which is worse than the gate not working\n";
         return false;
     }
-    std::cout << "Pro gate single-leg call stays free\n";
+    std::cout << "Pro gate single-leg call stays free for an anonymous caller\n";
 
-    if (const auto code = call(4); code != grpc::StatusCode::PERMISSION_DENIED) {
+    // --- Direction 2: multi-leg is actually refused without an entitlement. ---
+    if (const auto code = call(4, "", ""); code != grpc::StatusCode::PERMISSION_DENIED) {
         std::cerr << "a 4-leg strategy was computed without a Pro entitlement (status "
                   << static_cast<int>(code)
                   << ") -- the gate is not enforced server-side, so hiding it in the UI would "
                      "protect nothing\n";
         return false;
     }
-    std::cout << "         a 4-leg strategy is refused without Pro\n";
+    std::cout << "         a 4-leg strategy is refused for an anonymous caller\n";
+
+    // --- Direction 3: the customer who paid gets what they paid for. ---
+    //
+    // Checked per credential rather than as "at least one worked", because the
+    // licence path and the JWT path fail for entirely different reasons -- a
+    // LICENCE_SIGNING_KEY that disagrees with the billing worker's, versus a
+    // SUPABASE_JWT_SECRET missing from the engine's environment -- and
+    // collapsing them would hide whichever one is broken behind the one that
+    // is not.
+    if (have_licence) {
+        if (const auto code = call(4, "x-api-key", pro_licence); code != grpc::StatusCode::OK) {
+            std::cerr << "a 4-leg strategy was REFUSED (status " << static_cast<int>(code)
+                      << ") to a caller holding a Pro subscription licence -- either the engine's "
+                         "LICENCE_SIGNING_KEY does not match the one the billing worker minted "
+                         "with, or the licence has expired. A subscriber is being denied what "
+                         "they paid for\n";
+            return false;
+        }
+        std::cout << "         a 4-leg strategy is ALLOWED with a Pro subscription licence\n";
+    } else {
+        std::cout << "         (SMOKE_PRO_LICENCE unset -- the licence path was not exercised)\n";
+    }
+
+    if (have_bearer) {
+        const auto bearer = std::string{"Bearer "} + pro_bearer;
+        if (const auto code = call(4, "authorization", bearer); code != grpc::StatusCode::OK) {
+            std::cerr << "a 4-leg strategy was REFUSED (status " << static_cast<int>(code)
+                      << ") to a signed-in caller whose access token should carry "
+                         "app_metadata.tier=pro -- either SUPABASE_JWT_SECRET is missing or wrong "
+                         "in the engine's environment, the token has expired, or the billing "
+                         "webhook never wrote the tier onto the account\n";
+            return false;
+        }
+        std::cout << "         a 4-leg strategy is ALLOWED for a signed-in Pro account\n";
+    } else {
+        std::cout << "         (SMOKE_PRO_BEARER unset -- the signed-in path was not exercised)\n";
+    }
+
     return true;
 }
 
@@ -1724,7 +1811,8 @@ auto main(int argc, char** argv) -> int {
         // open to prove the gate holds.
         auto calc = calculator::OptionsCalculator::NewStub(channel);
         if (!check_pro_gate(*calc, symbol, 500.0)) return 1;
-        std::cout << "\nThe Pro gate holds at the RPC, which is where it has to hold.\n";
+        std::cout << "\nThe Pro gate holds at the RPC, which is where it has to hold -- it "
+                     "refuses the stranger AND admits the subscriber.\n";
         return 0;
     }
 
