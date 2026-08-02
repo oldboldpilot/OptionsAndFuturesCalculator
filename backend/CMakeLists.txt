@@ -1125,6 +1125,14 @@ if(ENABLE_LLAMACPP_BACKEND)
     add_executable(kv_gran_probe src/kv_gran_probe.cpp)
     target_link_libraries(kv_gran_probe PRIVATE sensen_slim)
 
+    # Validates sensen.kv_q8's ACTUAL quantise_group_q8/dequantise_row_q8
+    # round trip (not a hand-rolled affine simulation) against REAL captured
+    # Kcur_rope/Vcur, in the real [n_tokens][dim] token-major layout with
+    # BLOCK_SIZE=16 -- the accuracy gate for the 8-bit KV cache work package,
+    # complementing test_kv_q8's synthetic unit gate on the math/edge cases.
+    add_executable(kv_q8_real_probe src/kv_q8_real_probe.cpp)
+    target_link_libraries(kv_q8_real_probe PRIVATE sensen_slim)
+
     # The engine itself. `calculator_engine` is declared far above this block,
     # which is fine and is why the wiring is here rather than there: CMake
     # resolves target_link_libraries/target_compile_definitions against a
