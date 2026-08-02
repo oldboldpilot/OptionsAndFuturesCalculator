@@ -8,7 +8,6 @@ module;
 #include <cstdint>
 #include <expected>
 #include <format>
-#include <future>
 #include <limits>
 #include <memory>
 #include <numeric>
@@ -32,7 +31,7 @@ import sgee.builder.fluent;
 import sgee.runtime.context;
 import sgee.runtime.interpreter;
 import sgee.runtime.action_registry;
-import sgee.runtime.pipeline;
+import sgee.core.blueprint;
 import sgee.core.types;
 
 namespace options_calculator::service {
@@ -481,7 +480,6 @@ struct ComputeContext {
     calculator::StrategyRequest request;
     calculator::StrategyResponse response;
     grpc::Status status{grpc::Status::OK};
-    std::shared_ptr<std::promise<void>> promise;
 
     double spot{0.0};
     double r{0.0};
@@ -495,7 +493,6 @@ struct ComputeContext {
     std::vector<double> expiry_pnl;
 };
 using Ctx = std::shared_ptr<ComputeContext>;
-using PipelineType = sgee::runtime::TransformedPipeline<Ctx, Ctx>;
 using ActionRegistry = sgee::runtime::ActionRegistry<Ctx>;
 
 // --------------------------------------------------------------------------
@@ -826,7 +823,7 @@ using sgee::ExecutionResult;
 class CalculatorServiceImpl final : public calculator::OptionsCalculator::Service {
 private:
     std::shared_ptr<ActionRegistry> actions_;
-    std::unique_ptr<PipelineType> execution_engine_;
+    std::shared_ptr<const sgee::GraphBlueprint> graph_;
 
 public:
     CalculatorServiceImpl() : actions_{std::make_shared<ActionRegistry>()} {
@@ -856,7 +853,7 @@ public:
             log.error("Failed to build SGEE graph: {}", graph_result.error());
             return;
         }
-        auto graph = graph_result.value();
+        graph_ = graph_result.value();
 
         /*
          * Bind each action by the ID the builder assigned, not by name.
@@ -877,53 +874,32 @@ public:
         }};
 
         for (const auto& [name, fn] : bindings) {
-            const auto id = graph->GetActionId(name);
+            const auto id = graph_->GetActionId(name);
             if (!id) {
                 log.error("Action '{}' is not present in the graph; refusing to start", name);
+                graph_.reset();
                 return;
             }
             actions_->RegisterById(*id, fn);
         }
 
-        auto actions = actions_;
-
-        auto builder = PipelineType::create()
-            .withTransform([graph, actions](const Ctx& ctx) -> Ctx {
-                sgee::runtime::EngineContext<Ctx> engine;
-                std::vector<Ctx> entities{ctx};
-                engine.Load(entities);
-
-                // Sequential: each request is a single entity, so batch
-                // parallelism buys nothing and the pipeline already runs
-                // requests concurrently across its worker pool.
-                sgee::runtime::Interpreter<Ctx> interpreter(
-                    graph, sgee::runtime::ParallelismLevel::Sequential, actions.get());
-                interpreter.Run(engine);
-                return ctx;
-            })
-            .withQueue(sgee::QueueType::FIFO)
-            .withBackpressure(sgee::BackpressurePolicy::Block)
-            .withAsync(sgee::AsyncConfig{
-                .workers = 16,
-                .batch_size = 1,
-                .poll_interval_ms = 1
-            })
-            .build();
-
-        if (builder) {
-            execution_engine_ = std::make_unique<PipelineType>(std::move(*builder));
-            execution_engine_->startWorkers([](Ctx& ctx) { ctx->promise->set_value(); });
-            log.info("SGEE pipeline initialized: 16 workers, {} registered actions", bindings.size());
-        } else {
-            log.error("Failed to build SGEE pipeline: {}", builder.error());
-        }
+        // No pipeline, no worker pool. CalculatorServiceImpl extends gRPC's
+        // SYNCHRONOUS service base and the server is built with no callback
+        // API and no SetSyncServerOption, so gRPC already gives every
+        // in-flight RPC its own thread -- computing the graph inline on that
+        // thread is already parallel across requests. The 16-worker pool this
+        // replaced computed nothing (TransformedPipeline::push() runs the
+        // interpreter INLINE before the context is ever enqueued; the workers
+        // only relayed a std::promise it had already fulfilled) and cost real
+        // latency getting there: nothing notifies a worker on enqueue, so
+        // pickup relied on a 1ms poll, roughly doubling the ~0.25ms the
+        // UI-default grid takes to compute.
+        log.info("SGEE graph initialized: {} registered actions; execution runs inline on the "
+                 "gRPC request thread",
+                 bindings.size());
     }
 
-    ~CalculatorServiceImpl() override {
-        if (execution_engine_) {
-            execution_engine_->stop();
-        }
-    }
+    ~CalculatorServiceImpl() override = default;
 
     /*
      * The three RPC signatures below are fixed by the protoc-generated base
@@ -993,22 +969,24 @@ public:
             return s;
         }
 
-        if (!execution_engine_) {
-            return Status(grpc::StatusCode::INTERNAL, "Execution engine not initialized");
+        if (!graph_) {
+            return Status(grpc::StatusCode::INTERNAL, "Execution graph not initialized");
         }
 
         auto ctx = std::make_shared<ComputeContext>();
         ctx->request = req;
-        ctx->promise = std::make_shared<std::promise<void>>();
-        auto future = ctx->promise->get_future();
 
-        if (!execution_engine_->push(ctx)) {
-            log.warn("Backpressure applied: execution queue full");
-            return Status(grpc::StatusCode::RESOURCE_EXHAUSTED,
-                          "Server is currently overloaded. Backpressure applied.");
-        }
+        // Inline, on this RPC's own thread -- see the comment in the
+        // constructor for why that is correct rather than a regression.
+        sgee::runtime::EngineContext<Ctx> engine;
+        std::vector<Ctx> entities{ctx};
+        engine.Load(entities);
 
-        future.wait();
+        // Sequential: each request is a single entity, so batch parallelism
+        // buys nothing.
+        sgee::runtime::Interpreter<Ctx> interpreter(
+            graph_, sgee::runtime::ParallelismLevel::Sequential, actions_.get());
+        interpreter.Run(engine);
 
         if (!ctx->status.ok()) return ctx->status;
 
