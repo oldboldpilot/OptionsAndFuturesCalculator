@@ -479,6 +479,36 @@ auto cost_cash_flow(int entries) noexcept -> double {
     return 1.0 + std::max(0, entries) / 10.0;
 }
 
+// CalculateStrategy builds a price x date P&L matrix, and every cell reprices
+// every leg: the dominant term is O(price_steps * date_steps * legs), the same
+// shape as cost_option_tree's O(steps^2) or cost_portfolio_optimize's O(n^3)
+// above -- work priced from the request's own arguments, normalised by 1000
+// like the other grid- and tree-shaped costs in this file. The two smaller
+// passes (the expiry curve, O(price_steps * legs), and the Greeks, O(legs))
+// are folded into the same product rather than priced separately, because
+// they are dominated by the matrix by at least a factor of date_steps and do
+// not change which caller gets throttled.
+//
+// This is the one grid-shaped cost function in this file whose caller ALSO
+// clamps the inputs before the engine ever sees them (see
+// calculator_service.cpp's kMaxPriceSteps/kMaxDateSteps) -- unlike
+// cost_llm_generate, which deliberately prices an absurd request rather than
+// capping it. The two are not in tension: the LLM generation worker is a
+// single exclusive thread with no queue behind it, so an absurd price is
+// itself the throttle. The strategy matrix runs on the same shared TBB pool
+// as every other CPU-priced RPC in this file, and a single caller allocating
+// an arbitrarily large response message degrades every other caller's
+// latency and the server's own memory long before that caller's own quota
+// bucket notices -- so here the clamp does the job the price alone cannot,
+// and the price exists to make repeated max-size requests cost what they
+// actually cost.
+auto cost_strategy_grid(int price_steps, int date_steps, int legs) noexcept -> double {
+    const double p = std::max(0, price_steps);
+    const double d = std::max(0, date_steps);
+    const double l = std::max(1, legs);
+    return 1.0 + (p * d * l) / 1000.0;
+}
+
 // Every function above prices CPU work that shares the TBB pool with
 // everything else running on the engine -- it slows the pool down, but the
 // pool keeps serving other callers around it. LLM generation does not share

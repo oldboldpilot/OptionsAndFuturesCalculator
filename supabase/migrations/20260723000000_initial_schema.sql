@@ -1,4 +1,20 @@
 -- Initial Schema for Options & Futures Calculator
+--
+-- SUPERSEDED -- do not apply. This and
+-- supabase/migrations/20260725025756_init_schema.sql both CREATE TABLE
+-- public.profiles as an "initial" migration; running both in sequence
+-- against a fresh database fails on the second with "relation already
+-- exists", so at most one of them was ever a real migration history. The
+-- other file is the one infra/supabase/00_bootstrap.sql's RLS policies were
+-- actually written against (matching column shapes, matching table names in
+-- its comments), which makes it the later, kept design; this file is the
+-- earlier draft. The extra tables defined only here --
+-- public.shared_permalinks and public.broker_lead_events -- are not queried
+-- by any code path in this repository (the one call site,
+-- frontend/src/components/BrokerRouter.tsx, has the Supabase call commented
+-- out), so nothing depends on this file surviving. Kept for history rather
+-- than deleted; its RLS is still hardened below in case anyone applies it
+-- directly despite this notice.
 
 -- Enable UUID generation
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
@@ -20,13 +36,17 @@ CREATE TABLE public.profiles (
 
 ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
 
-CREATE POLICY "Users can view own profile" 
-    ON public.profiles FOR SELECT 
+CREATE POLICY "Users can view own profile"
+    ON public.profiles FOR SELECT
     USING (auth.uid() = id);
 
-CREATE POLICY "Users can update own profile" 
-    ON public.profiles FOR UPDATE 
-    USING (auth.uid() = id);
+-- No update policy for `authenticated`, matching
+-- supabase/migrations/20260725025756_init_schema.sql and
+-- infra/supabase/00_bootstrap.sql: a `USING (auth.uid() = id)` policy with
+-- no WITH CHECK lets a caller who owns the row rewrite every OTHER column
+-- (here, `tier`) to anything they want, since Postgres only reuses USING as
+-- the implicit WITH CHECK for the column(s) USING itself references. Only
+-- the billing webhook, holding the service role key, writes `tier`.
 
 -- Function to automatically create a profile when a new user signs up
 CREATE OR REPLACE FUNCTION public.handle_new_user()
@@ -67,9 +87,10 @@ CREATE POLICY "Users can insert own strategies"
     ON public.saved_strategies FOR INSERT 
     WITH CHECK (auth.uid() = user_id);
 
-CREATE POLICY "Users can update own strategies" 
-    ON public.saved_strategies FOR UPDATE 
-    USING (auth.uid() = user_id);
+CREATE POLICY "Users can update own strategies"
+    ON public.saved_strategies FOR UPDATE
+    USING (auth.uid() = user_id)
+    WITH CHECK (auth.uid() = user_id);
 
 CREATE POLICY "Users can delete own strategies" 
     ON public.saved_strategies FOR DELETE 

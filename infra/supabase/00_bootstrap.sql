@@ -9,6 +9,21 @@
 --     -v auth_admin_password="$AUTH_ADMIN_PASSWORD" \
 --     -f infra/supabase/00_bootstrap.sql
 --
+-- NOT SAFE TO RUN YET, and not merely because nobody has run it. As of this
+-- writing the Railway Postgres has no `auth` schema and none of the roles
+-- below -- confirmed directly against the database, not inferred -- so the
+-- app tables in it are still the ones backend/migrations/01_init.sql
+-- created: `public.profiles.id` and `public.saved_strategies.user_id`
+-- reference `public.users(id)`, a self-rolled table, NOT `auth.users(id)`.
+-- The policies in this file compare `auth.uid()` -- the `sub` claim GoTrue
+-- puts on a JWT, keyed to `auth.users.id` -- against those columns. Running
+-- this file today would create the roles and turn RLS on, but every policy
+-- would compare against an id space GoTrue has never issued a token for, so
+-- `auth.uid() = id` would not match a real caller's own row -- RLS enabled,
+-- silently useless, and much harder to notice than RLS absent. A real
+-- migration of `public.users` rows into `auth.users` (and repointing the two
+-- foreign keys) has to happen first; it does not exist yet either.
+--
 -- Passwords are REQUIRED arguments, and the script refuses to run without
 -- them. They were placeholders in the first draft, with a note in the README
 -- to change them before running -- which is the kind of control that fails
@@ -116,9 +131,15 @@ DROP POLICY IF EXISTS profiles_self_read ON public.profiles;
 CREATE POLICY profiles_self_read ON public.profiles
   FOR SELECT USING (id = auth.uid());
 
--- Deliberately NO update policy for `authenticated`. A user must not be able to
--- set their own tier; only the billing webhook, holding the service role key,
--- writes that column.
+-- Deliberately NO update policy for `authenticated`. `profiles` carries no
+-- writable-by-the-user column at all -- no `tier` column exists here (it
+-- never belonged in this table: entitlement is decided from
+-- `auth.users.app_metadata.tier`, a JWT claim only the service role can set,
+-- not from a row a user could point RLS at). What remains
+-- (subscription_expires_at, stripe_customer_id) is billing-derived, so the
+-- billing webhook, holding the service role key, is the only writer, full
+-- stop -- see supabase/migrations/20260725025756_init_schema.sql for the
+-- table definition this file's policies assume.
 DROP POLICY IF EXISTS strategies_own ON public.saved_strategies;
 CREATE POLICY strategies_own ON public.saved_strategies
   FOR ALL USING (user_id = auth.uid()) WITH CHECK (user_id = auth.uid());

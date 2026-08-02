@@ -150,5 +150,6 @@ class QuotaEnforcer {
 [[nodiscard]] auto cost_margin_simulation(int days) noexcept -> double;
 [[nodiscard]] auto cost_cash_flow(int entries) noexcept -> double;
 [[nodiscard]] auto cost_llm_generate(int samples, int max_tokens) noexcept -> double;
+[[nodiscard]] auto cost_strategy_grid(int price_steps, int date_steps, int legs) noexcept -> double;
 
 }  // namespace options_calculator::quota

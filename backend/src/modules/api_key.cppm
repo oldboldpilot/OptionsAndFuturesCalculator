@@ -273,4 +273,28 @@ enum class GateMode : std::uint8_t { Off, Warn, Enforce };
 [[nodiscard]] auto check_strategy_entitlement(const Identity& identity, int leg_count)
     -> grpc::Status;
 
+/**
+ * Gates `calculator.assistant.StrategyAssistant/ParseStrategy` behind Pro,
+ * unconditionally -- no free-tier carve-out the way `check_strategy_entitlement`
+ * keeps single-leg calculator strategies free.
+ *
+ * The reason is cost asymmetry, not a judgment that natural-language parsing
+ * is inherently premium. `cost_llm_generate` prices one call at roughly 8,845
+ * compute units against `cost_default()`'s 1.0 -- comparable to a million-path
+ * Monte Carlo -- and the call holds the ONE dedicated inference worker
+ * exclusively for about 1.1s (`generate()` cannot run concurrently; see
+ * assistant_service.cpp). Against the shared anonymous budget (120,000
+ * compute-units/hour, `QUOTA_POLICY`), roughly 13-14 calls -- achievable in
+ * well under a minute, nowhere near the 6000 req/min rate limit -- exhaust
+ * the ENTIRE site's hourly compute allowance for every other anonymous caller
+ * of the calculator and finance services. A single-leg calculator call costs
+ * a handful of scalar ops and stays free for exactly that reason; this RPC
+ * has no equivalently cheap case to protect.
+ *
+ * Same Off/Warn/Enforce semantics as `check_strategy_entitlement`: OK while
+ * the gate is Off, OK-but-logged while Warn, PERMISSION_DENIED under Enforce
+ * for a non-Pro identity.
+ */
+[[nodiscard]] auto check_assistant_entitlement(const Identity& identity) -> grpc::Status;
+
 }  // namespace options_calculator::auth

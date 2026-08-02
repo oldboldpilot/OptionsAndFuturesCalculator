@@ -426,6 +426,29 @@ auto check_strategy_entitlement(const Identity& identity, int leg_count) -> grpc
             std::to_string(leg_count) + " legs.");
 }
 
+auto check_assistant_entitlement(const Identity& identity) -> grpc::Status {
+    const auto mode = pro_gate_mode();
+    if (mode == GateMode::Off) return grpc::Status::OK;
+    if (is_pro(identity)) return grpc::Status::OK;
+
+    auto& log = logger::Logger::getInstance();
+    const std::string who = identity.id.empty() ? "<anonymous>" : identity.id;
+
+    if (mode == GateMode::Warn) {
+        log.error("pro-gate would-deny: key={} rpc=ParseStrategy tier={}", who,
+                  identity.tier.empty() ? "free" : identity.tier);
+        return grpc::Status::OK;
+    }
+
+    log.info("pro-gate deny: key={} rpc=ParseStrategy tier={}", who,
+             identity.tier.empty() ? "free" : identity.tier);
+    return grpc::Status(
+        grpc::StatusCode::PERMISSION_DENIED,
+        "The natural-language strategy assistant is a Pro feature. The calculator itself "
+        "remains free -- build your strategy manually with the symbol and strategy "
+        "selectors, or upgrade for assisted parsing.");
+}
+
 class KeyRegistry::Impl {
   public:
     Impl() { load(); }

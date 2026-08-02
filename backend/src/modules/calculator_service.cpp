@@ -26,6 +26,7 @@ import sensen.options;
 import logger;
 import market_data;
 import api_key;
+import quota;
 
 import sgee.builder.fluent;
 import sgee.runtime.context;
@@ -397,6 +398,82 @@ struct RiskFigures {
 }
 
 // --------------------------------------------------------------------------
+// Grid sizing
+// --------------------------------------------------------------------------
+
+/**
+ * Upper bounds on the P&L matrix a caller can ask CalculateStrategy to build.
+ *
+ * The frontend never sets price_steps or date_steps -- every request that
+ * reaches this service from the UI carries zero on both (see
+ * useCalculatorStore.ts's buildStrategyRequest, which never calls
+ * setPriceSteps/setDateSteps), and action_initialize below turns zero into
+ * the defaults 81 and 12: a 972-cell matrix. A caller going directly at the
+ * gRPC surface, unauthenticated, can instead put anything a uint32 holds on
+ * either field. Every cell in the matrix reprices every leg
+ * (action_matrix, action_expiry_curve), so the work is
+ * O(price_steps * date_steps * legs) -- and until this guard existed, it ran
+ * uncharged and unbounded: a single request could allocate a
+ * hundred-megabyte response and burn the shared TBB pool for every other
+ * caller behind it, including every other anonymous caller sharing the one
+ * site-wide bucket quota.cpp documents.
+ *
+ * kMaxPriceSteps and kMaxDateSteps are each generous relative to what the UI
+ * itself ever asks for, so a legitimate API consumer wanting a finer grid
+ * than the UI's own resolution is not truncated to it. kMaxGridCells
+ * additionally bounds the PRODUCT: a per-dimension clamp alone would still
+ * wave through price_steps=20000, date_steps=1, which is exactly as
+ * expensive as a 200x100 grid and touches neither individual cap.
+ *
+ * The request degrades to the maximum rather than being refused -- a
+ * request this cheap to satisfy at the cap does not need a hard error, and
+ * an over-large date_steps or price_steps is far more likely to be a caller
+ * probing limits or integrating carelessly than an attack that a refusal
+ * would meaningfully deter.
+ */
+inline constexpr std::uint32_t kMaxPriceSteps = 500;   // UI default: 81
+inline constexpr std::uint32_t kMaxDateSteps = 180;    // UI default: 12
+inline constexpr std::uint64_t kMaxGridCells = 20000;  // UI default: 972
+
+struct GridSteps {
+    std::uint32_t price_steps;
+    std::uint32_t date_steps;
+};
+
+/**
+ * Resolves the requested (possibly zero, possibly absurd) grid dimensions
+ * into what the engine will actually build.
+ *
+ * Zero-substitution and clamping live in one place so CalculateStrategy can
+ * price the call from the SAME numbers action_initialize below will use to
+ * build it -- pricing an unclamped request would charge for work the engine
+ * was never going to do.
+ *
+ * When both dimensions are within their own caps but the product still
+ * exceeds kMaxGridCells, date_steps gives way rather than price_steps: the
+ * expiry P&L curve -- the strategy's headline payoff diagram -- is drawn
+ * from price_steps alone (action_expiry_curve), while date_steps only adds
+ * depth to the matrix behind it. Shrinking the less load-bearing axis keeps
+ * the primary payoff curve at full requested resolution.
+ */
+[[nodiscard]] auto resolve_grid_steps(std::uint32_t requested_price_steps,
+                                      std::uint32_t requested_date_steps) noexcept -> GridSteps {
+    std::uint32_t price_steps = requested_price_steps > 0 ? requested_price_steps : 81;
+    std::uint32_t date_steps = requested_date_steps > 0 ? requested_date_steps : 12;
+
+    price_steps = std::min(price_steps, kMaxPriceSteps);
+    date_steps = std::min(date_steps, kMaxDateSteps);
+
+    const std::uint64_t cells =
+        static_cast<std::uint64_t>(price_steps) * static_cast<std::uint64_t>(date_steps);
+    if (cells > kMaxGridCells) {
+        date_steps = static_cast<std::uint32_t>(
+            std::max<std::uint64_t>(1, kMaxGridCells / price_steps));
+    }
+    return {price_steps, date_steps};
+}
+
+// --------------------------------------------------------------------------
 // SGEE execution context
 // --------------------------------------------------------------------------
 
@@ -467,8 +544,9 @@ using sgee::ExecutionResult;
         return std::unexpected(sgee::ExecutionError::ActionFailed);
     }
 
-    ctx->date_steps = ctx->request.date_steps() > 0 ? ctx->request.date_steps() : 12;
-    ctx->price_steps = ctx->request.price_steps() > 0 ? ctx->request.price_steps() : 81;
+    const auto grid = resolve_grid_steps(ctx->request.price_steps(), ctx->request.date_steps());
+    ctx->price_steps = grid.price_steps;
+    ctx->date_steps = grid.date_steps;
 
     const double range =
         ctx->request.price_range_percent() > 0.0 ? ctx->request.price_range_percent() : 0.25;
@@ -890,6 +968,27 @@ public:
         }
         if (auto s = ::options_calculator::auth::check_strategy_entitlement(identity,
                                                                            req.legs_size());
+            !s.ok()) {
+            return s;
+        }
+
+        // Charged from the CLAMPED grid, not the requested one: the point of
+        // resolve_grid_steps is that the engine never builds more than this,
+        // so pricing the raw request would charge for work that was never
+        // going to happen. Priced after the Pro gate and before the request
+        // reaches the execution queue, matching the finance and assistant
+        // services' own admission order -- a call refused above never
+        // touches quota; a call that would exceed it is stopped here rather
+        // than after paying for the SGEE pipeline's own work.
+        const auto grid = resolve_grid_steps(req.price_steps(), req.date_steps());
+        ::options_calculator::quota::TierLimits strategy_limits{identity.requests_per_minute,
+                                                                 identity.compute_units_per_hour};
+        if (auto s = ::options_calculator::quota::QuotaEnforcer::instance().admit_identity(
+                identity.id, identity.tier, "CalculateStrategy",
+                ::options_calculator::quota::cost_strategy_grid(
+                    static_cast<int>(grid.price_steps), static_cast<int>(grid.date_steps),
+                    req.legs_size()),
+                identity.has_limits ? &strategy_limits : nullptr);
             !s.ok()) {
             return s;
         }

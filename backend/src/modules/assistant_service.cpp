@@ -98,6 +98,39 @@ constexpr std::size_t kMaxQueueDepth = 4;
  * refusal that says so plainly. */
 constexpr std::size_t kMaxClarificationLength = 400;
 
+/**
+ * Server-side caps on the two caller-supplied strings, checked BEFORE the
+ * prompt is assembled or the worker is touched.
+ *
+ * These exist because nothing else in this file bounds them. `kMaxNewTokens`
+ * bounds the OUTPUT the worker is asked to generate, and `cost_llm_generate`
+ * prices the call from that same constant -- but the call's actual cost also
+ * scales with how much the worker has to PREFILL, and prefill cost is a
+ * function of `utterance`/`prior_clarification` length, which a caller fully
+ * controls and which the price never accounts for. The one existing guard
+ * against an oversized prompt (`LlamaCppBackend::tokenise`'s
+ * `tokens.size() + kMaxNewTokens > n_ctx_per_seq_` check) belongs to the
+ * SELECTABLE llama.cpp backend, not the production default (`sensen`,
+ * `SensenBackend::admit`) -- which has no equivalent check at all, so an
+ * unbounded prompt there is free to consume the worker for however long
+ * prefill over that many tokens takes, still billed at the SAME
+ * `cost_llm_generate(1, kMaxNewTokens)` a one-line utterance costs.
+ *
+ * `kMaxUtteranceLength` is generous for what this RPC actually does --
+ * turning one trade description into five structured fields -- while still
+ * rejecting a multi-kilobyte payload that could only be padding, not a trade
+ * description. `kMaxPriorClarificationLength` reuses `kMaxClarificationLength`
+ * deliberately rather than picking its own number: `prior_clarification` is
+ * documented (assistant.proto) as always being a question THIS SERVICE itself
+ * asked on a prior turn, and this service never emits one longer than
+ * `kMaxClarificationLength` (see `interpret_model_output`) -- so any honest
+ * client can never legitimately send more than that, and a value beyond it is
+ * itself evidence the field is being misused (echoing the original utterance,
+ * or something adversarial) rather than a genuine reply to a prior question.
+ */
+constexpr std::size_t kMaxUtteranceLength = 1000;
+constexpr std::size_t kMaxPriorClarificationLength = kMaxClarificationLength;
+
 /** A ticker beyond this length is not a real symbol this product trades. */
 constexpr std::size_t kMaxSymbolLength = 15;
 
@@ -1907,6 +1940,37 @@ class StrategyAssistantImpl final : public calculator::assistant::StrategyAssist
         // the price and the real worst-case cost never drift apart.
         CHARGE("ParseStrategy", ::options_calculator::quota::cost_llm_generate(
                                      1, static_cast<int>(kMaxNewTokens)));
+
+        // Bound the two caller-controlled prompt inputs BEFORE they are
+        // concatenated into a prompt or reach the worker. Cheap string-length
+        // checks, charged the same as everything else per the CHARGE above --
+        // this is request-shape validation, the same class of failure
+        // finance_service.cpp reports as INVALID_ARGUMENT (e.g. "paths and
+        // steps must be positive"), not a Refusal: the request itself is
+        // malformed, independent of whether the trade it describes makes
+        // sense. See kMaxUtteranceLength's own doc comment for why this
+        // exists at all.
+        if (request->utterance().size() > kMaxUtteranceLength) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "utterance exceeds the " + std::to_string(kMaxUtteranceLength) +
+                              "-character limit for this RPC.");
+        }
+        if (request->prior_clarification().size() > kMaxPriorClarificationLength) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "prior_clarification exceeds the " +
+                              std::to_string(kMaxPriorClarificationLength) +
+                              "-character limit for this RPC.");
+        }
+
+        // The Pro gate, server-side and before any inference work -- same
+        // placement rationale as CalculateStrategy's own gate in
+        // calculator_service.cpp. `_id` is the identity CHARGE already
+        // resolved above; reusing it here means authentication runs exactly
+        // once per call. With PRO_GATE_MODE unset (Off) this is inert and
+        // ParseStrategy stays free, matching today's behaviour.
+        if (auto s = ::options_calculator::auth::check_assistant_entitlement(_id); !s.ok()) {
+            return s;
+        }
 
         auto& worker = AssistantWorker::instance();
         if (!worker.available()) {
