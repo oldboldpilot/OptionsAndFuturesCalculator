@@ -596,6 +596,7 @@ target_sources(sensen_slim
             "${SENSEN_SRC}/hybrid_attention.cppm"
             "${SENSEN_SRC}/intrinsics.cppm"
             "${SENSEN_SRC}/k_quant_dequant.cppm"
+            "${SENSEN_SRC}/kv_half.cppm"
             "${SENSEN_SRC}/kv_cache.cppm"
             "${SENSEN_SRC}/linear_algebra.cppm"
             "${SENSEN_SRC}/llama_model.cppm"
@@ -635,6 +636,7 @@ target_sources(sensen_slim
             "${SENSEN_SRC}/training_primitives.cppm"
             "${SENSEN_SRC}/training_rope.cppm"
             "${SENSEN_SRC}/training_transformer.cppm"
+            "${SENSEN_SRC}/tensor_observer.cppm"
             "${SENSEN_SRC}/transformer_block.cppm"
             "${SENSEN_SRC}/triton_worker_bridge.cppm"
             "${SENSEN_SRC}/utils/logger.cppm"
@@ -1038,6 +1040,59 @@ if(ENABLE_LLAMACPP_BACKEND)
     # interaction with the rest of this codebase.
     add_executable(llamacpp_probe src/llamacpp_probe.cpp)
     target_link_libraries(llamacpp_probe PRIVATE llama)
+
+    # THROWAWAY numeric-correctness audit harness (not product code). Loads the
+    # same GGUF through BOTH upstream llama.cpp and sensen's LlamaModel CPU path
+    # in one process and compares full-vocab logits token-for-token.
+    add_executable(numeric_audit_probe src/numeric_audit_probe.cpp)
+    target_link_libraries(numeric_audit_probe PRIVATE llama sensen_slim)
+
+    add_executable(gguf_requantize_probe src/gguf_requantize_probe.cpp)
+    target_link_libraries(gguf_requantize_probe PRIVATE llama)
+
+    add_executable(dequant_parity_probe src/dequant_parity_probe.cpp)
+    target_link_libraries(dequant_parity_probe PRIVATE llama sensen_slim)
+
+    add_executable(tokenizer_parity_probe src/tokenizer_parity_probe.cpp)
+    target_link_libraries(tokenizer_parity_probe PRIVATE llama sensen_slim)
+
+    # LAYER-BY-LAYER, PRIMITIVE-BY-PRIMITIVE parity harness. Drives both engines
+    # in one process on identical token ids and joins their intermediate tensors
+    # by name: llama.cpp through `llama_context_params::cb_eval`, sensen through
+    # `sensen::observe::setObserver` (sensen/src/tensor_observer.cppm). Links
+    # ggml directly as well as llama because it reads tensor payloads via
+    # ggml_backend_tensor_get / ggml_fp16_to_fp32.
+    add_executable(layer_parity_probe src/layer_parity_probe.cpp)
+    target_link_libraries(layer_parity_probe PRIVATE llama ggml sensen_slim)
+
+    # Cost of the tensor-observer hook. Deliberately does NOT link llama.cpp:
+    # it measures sensen alone, so reference-engine work cannot dilute the
+    # number. Used to justify shipping the hook always-on.
+    add_executable(observer_cost_probe src/observer_cost_probe.cpp)
+    target_link_libraries(observer_cost_probe PRIVATE sensen_slim)
+
+    # Long-context decode cost, prefill excluded. The KV cache is the only part
+    # of the per-token read stream that grows with position, so a fixed short
+    # prompt cannot measure a KV-width change at all; this sweeps the context
+    # length instead. Like observer_cost_probe it does NOT link llama.cpp --
+    # it is measuring this engine, not comparing two.
+    add_executable(kv_bench_probe src/kv_bench_probe.cpp)
+    target_link_libraries(kv_bench_probe PRIVATE sensen_slim)
+
+    # PAGED-vs-LINEAR KV equivalence. Both existing parity harnesses construct
+    # their session with KVCacheStrategy::FULL, so neither covers the paged
+    # kernel -- which is the one production runs, since AgentSession defaults to
+    # PAGED and assistant_service never overrides it. This closes that hole by
+    # transitivity: paged==linear here, linear==llama.cpp there.
+    add_executable(kv_equiv_probe src/kv_equiv_probe.cpp)
+    target_link_libraries(kv_equiv_probe PRIVATE sensen_slim)
+
+    # Does the KV cache need BF16's exponent range, or F16's mantissa? Measures
+    # the actual dynamic range of the tensors that enter the cache, and separately
+    # checks our f32->f16 narrowing against ggml's round-to-nearest-even bit for
+    # bit. Links ggml for that second comparison.
+    add_executable(kv_range_probe src/kv_range_probe.cpp)
+    target_link_libraries(kv_range_probe PRIVATE ggml sensen_slim)
 
     # The engine itself. `calculator_engine` is declared far above this block,
     # which is fine and is why the wiring is here rather than there: CMake

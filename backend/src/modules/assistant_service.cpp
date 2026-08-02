@@ -1295,14 +1295,30 @@ class AssistantWorker {
         // Per-sequence context window. The original 1024 was a guess that
         // happened to hold; this model's GGUF declares a trained context of
         // 40960, so 1024 was never a model limit, only an allocation choice.
-        // It is raised to 2048 -- comfortably more than the mandatory system
-        // prompt plus a user turn plus kMaxNewTokens, with headroom for a
-        // prior clarification turn -- rather than to the trained maximum,
-        // because the KV cache is allocated against this number for every
-        // concurrent slot and nothing this service sends comes close to
-        // needing more.
+        // It was then raised to 2048 against an F32 KV cache.
+        //
+        // The KV cache is now F16 (SENSEN_KV_DTYPE, default fp16), which halves
+        // the per-token cost from 224 KiB to 112 KiB:
+        //
+        //     2 (K and V) * 28 layers * 8 kv_heads * 128 head_dim * 2 bytes
+        //
+        // so 4096 tokens at F16 costs exactly what 2048 cost at F32 -- 448 MiB
+        // per slot, 1.75 GiB across the four concurrent slots. This raise is
+        // therefore free against a budget that was already accepted, which is
+        // the whole reason the KV width was worth halving.
+        //
+        // It stops at 4096 rather than the trained 40960 because the cache is
+        // sized per concurrent slot and nothing this service sends approaches
+        // even 2048 -- the system prompt plus a user turn plus kMaxNewTokens,
+        // with room for a prior clarification turn. 4096 is headroom, not a
+        // requirement; the measured cost of going further is linear and the
+        // justification for paying it does not exist yet.
+        //
+        // Note the ceiling is a cap, not an allocation: production runs the
+        // PAGED cache, which commits 16-token blocks on demand, so a short
+        // conversation's resident KV tracks its real length, not this number.
         const auto kv_max_seq_len =
-            static_cast<std::size_t>(env_positive_int("ASSISTANT_CONTEXT_TOKENS", 2048));
+            static_cast<std::size_t>(env_positive_int("ASSISTANT_CONTEXT_TOKENS", 4096));
 
         const std::string requested = env_string("ASSISTANT_BACKEND").value_or("sensen");
 
