@@ -259,12 +259,12 @@ namespace detail {
 
 constexpr std::array<AmbiguousRootInfo, 2> kAmbiguousRootDetails{
     {{.symbol = "ES",
-      .futures_label = "the E-mini S&P 500 futures contract",
-      .equity_label = "Eversource Energy, the NYSE utility stock",
+      .futures_label = "futures on the E-mini S&P 500",
+      .equity_label = "options on Eversource Energy, the NYSE utility",
       .equity_keyword = "eversource"},
      {.symbol = "CL",
-      .futures_label = "the WTI crude oil futures contract",
-      .equity_label = "Colgate-Palmolive, the NYSE consumer-goods stock",
+      .futures_label = "futures on WTI crude oil",
+      .equity_label = "options on Colgate-Palmolive, the NYSE consumer-goods company",
       .equity_keyword = "colgate"}}};
 
 [[nodiscard]] constexpr auto to_lower_char(char c) noexcept -> char {
@@ -332,10 +332,27 @@ constexpr std::string_view kMonthCodeLetters = "FGHJKMNQUVXZ";
 constexpr std::array<std::string_view, 5> kFuturesKeywords{"futures", "e-mini", "emini", "front month",
                                                             "front-month"};
 
-/** Words that are decisive on their own for the equity side. Matched as
- * substrings, so "share"/"stock"/"equity" alone already cover their plurals
- * ("shares"/"stocks"/"equities"). */
-constexpr std::array<std::string_view, 3> kEquityKeywords{"share", "stock", "equity"};
+/** Words that are decisive on their own for actually OWNING the equity --
+ * as opposed to an option on it. Matched as substrings, so
+ * "share"/"stock"/"equity" alone already cover their plurals
+ * ("shares"/"stocks"/"equities"). Kept separate from `kOptionsKeyword`
+ * below: the two answer different questions ("is the underlying an
+ * equity" versus "is this trade an option"), and an option can be written
+ * on either an equity OR a future -- see `detect_asset_class_signal`'s own
+ * comment for the precedence rule that split makes possible. */
+constexpr std::array<std::string_view, 3> kEquityOwnershipKeywords{"share", "stock", "equity"};
+
+/** The word this file's own clarification question now offers as the
+ * equity-side answer ("options on Eversource Energy...", see
+ * `kAmbiguousRootDetails` above). Matched as a substring, so "option"
+ * already covers "options". Deliberately NOT folded into
+ * `kEquityOwnershipKeywords`: options on futures are real
+ * (`covered_futures_call`, category "Futures" in strategy_catalogue.cppm,
+ * is an option written on a future, an FOP) -- so this word alone is never
+ * unconditionally equity, only equity when no futures signal accompanies
+ * it. See `detect_asset_class_signal`'s own comment for exactly how that
+ * precedence is applied. */
+constexpr std::string_view kOptionsKeyword = "option";
 
 }  // namespace detail
 
@@ -362,10 +379,29 @@ export [[nodiscard]] auto find_ambiguous_root_info(std::string_view symbol) -> c
  * second turn) the prior clarification question concatenated -- see
  * `assistant_service.cpp`'s call site. Using the SAME keyword scan on both
  * turns is what makes the round trip work without special-casing it: a
- * one-word reply to the clarification ("futures", "the stock", "Eversource")
+ * one-word reply to the clarification ("futures", "options", "Eversource")
  * IS itself a fresh utterance containing a decisive keyword, so it resolves
  * exactly like a first-turn utterance that happened to already answer the
  * question would.
+ *
+ * PRECEDENCE: futures beats a bare options signal. `kAmbiguousRootDetails`
+ * now offers "options on <the equity>" as the equity-side answer (see that
+ * table's own doc comment for why this file's earlier "the NYSE utility
+ * stock" wording was wrong for a calculator that never prices stock
+ * outright). That means "options" is no longer unconditionally an EQUITY
+ * word: this catalogue's `asset_class` names the UNDERLYING, and an option
+ * on a FUTURE is still FUTURES -- `covered_futures_call`
+ * (strategy_catalogue.cppm, category "Futures") is exactly that, an FOP.
+ * So "options on ES futures" carries both a futures signal and the options
+ * word at once, and under the old symmetric rule (both signals present ->
+ * None) it would ask forever, since it can never say only one side. Futures
+ * wins that specific conflict. This precedence is deliberately narrow,
+ * though: it fires only against the bare options word, not against an
+ * OWNERSHIP word ("shares"/"stock"/"equity", or the company name itself)
+ * contradicting a futures signal -- "shares of a futures contract" is not a
+ * real instrument either way, so that combination is left as a genuine,
+ * unresolvable contradiction and still falls through to the ask-again path
+ * below, exactly as it did before this change.
  */
 export [[nodiscard]] auto detect_asset_class_signal(std::string_view symbol, std::string_view context)
     -> AssetClassSignal {
@@ -382,13 +418,24 @@ export [[nodiscard]] auto detect_asset_class_signal(std::string_view symbol, std
         }
     }
 
-    bool equity_signal = detail::contains_ci(lower, info->equity_keyword);
-    for (const auto keyword : detail::kEquityKeywords) {
+    const bool options_signal = detail::contains_ci(lower, detail::kOptionsKeyword);
+
+    bool ownership_signal = detail::contains_ci(lower, info->equity_keyword);
+    for (const auto keyword : detail::kEquityOwnershipKeywords) {
         if (detail::contains_ci(lower, keyword)) {
-            equity_signal = true;
+            ownership_signal = true;
             break;
         }
     }
+
+    // The precedence rule (see the doc comment above): futures plus a bare
+    // options word, with no ownership word contradicting it, is FUTURES --
+    // an option on a future, not equity.
+    if (futures_signal && options_signal && !ownership_signal) {
+        return AssetClassSignal::Futures;
+    }
+
+    const bool equity_signal = options_signal || ownership_signal;
 
     // Both signals (contradictory) and neither signal (silent) are the same
     // "cannot honestly decide" outcome -- see AssetClassSignal::None's own

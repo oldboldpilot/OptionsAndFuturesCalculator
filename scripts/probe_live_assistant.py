@@ -191,11 +191,24 @@ CASES = [
     ("a second in-distribution request, different strategy",
      "Buy a bull call spread on NVDA expiring in 45 days, 2 contracts.", ""),
     ("AMBIGUOUS ROOT -- ES is both the E-mini S&P root and Eversource Energy. "
-     "Expect CLARIFICATION; a silent pick is the bug this fixed",
+     "Expect CLARIFICATION naming FUTURES first, options on the equity second "
+     "-- a silent pick, or the old 'the NYSE utility stock' wording, is the "
+     "bug this fixed",
      "Long ES, 30 days, 1 contract.", ""),
-    ("ROUND TRIP -- the same request with the clarification answered. Expect "
-     "PARAMS/FUTURES in ONE trip; the same question again would be a loop",
+    ("ROUND TRIP, futures answer -- the same request with the clarification "
+     "answered 'futures'. Expect PARAMS/FUTURES in ONE trip; the same "
+     "question again would be a loop",
      "Long ES, 30 days, 1 contract.", "futures"),
+    ("ROUND TRIP, options answer -- THE NEW CASE, and the one most likely to "
+     "be broken: answering the reframed question with 'options' must "
+     "resolve PARAMS/EQUITY in ONE trip, not loop back into the same "
+     "question",
+     "Long ES, 30 days, 1 contract.", "options"),
+    ("OPTIONS ON A FUTURE, first turn -- names both futures and options in "
+     "the same breath. covered_futures_call (an FOP) is category \"Futures\" "
+     "in strategy_catalogue.cppm, so this must resolve PARAMS/FUTURES "
+     "directly, never ask",
+     "I want options on ES futures, 30 days out, 1 contract.", ""),
     ("explicit futures wording -- must NOT ask, the user already said it",
      "Buy an E-mini ES futures outright, 30 days, 1 contract.", ""),
     ("explicit equity wording -- must NOT ask, and must resolve to EQUITY",
@@ -211,15 +224,16 @@ CASES = [
 ]
 
 print(f"target: {HOST}{SVC}\n")
-outcomes = []
+results = []  # (label, kind, detail)
 for label, utt, prior in CASES:
     kind, detail = describe(call(utt, prior))
-    outcomes.append(kind)
+    results.append((label, kind, detail))
     shown = utt if len(utt) <= 60 else f"{utt[:57]}... ({len(utt)} chars)"
     print(f"  {label}")
     print(f"    in  : {shown}")
     print(f"    out : {kind} | {detail}\n")
 
+outcomes = [kind for _, kind, _ in results]
 served = sum(1 for k in outcomes if k in ("PARAMS", "CLARIFICATION", "REFUSAL"))
 print(f"served (params/clarification/refusal, i.e. the model ran and the "
       f"contract held): {served}/{len(CASES)}")
@@ -228,3 +242,82 @@ if outcomes and outcomes[0] == "PARAMS":
 else:
     print(f"VERDICT: first in-distribution case returned {outcomes[0] if outcomes else 'nothing'} "
           f"-- expected PARAMS; investigate before trusting the rest")
+
+
+def field(detail, key):
+    """Pulls `key=value` out of a describe() PARAMS detail string, or None."""
+    for tok in detail.split():
+        if tok.startswith(key + "="):
+            return tok.split("=", 1)[1]
+    return None
+
+
+# --------------------------------------------------------------------------
+# Strict pass/fail gates for the futures-first reframe and the futures-over-
+# options precedence, keyed to the same CASES results above by label prefix
+# so a change in CASES ordering cannot silently point this at the wrong row.
+# --------------------------------------------------------------------------
+print("\n=== strict gates: futures-first wording, and futures-over-options precedence ===")
+
+
+def find_result(prefix):
+    for label, kind, detail in results:
+        if label.startswith(prefix):
+            return kind, detail
+    return None, None
+
+
+gates_passed, gates_total = 0, 0
+
+
+def gate(name, condition):
+    global gates_passed, gates_total
+    gates_total += 1
+    if condition:
+        gates_passed += 1
+        print(f"  PASS: {name}")
+    else:
+        print(f"  FAIL: {name}")
+
+
+kind, detail = find_result("AMBIGUOUS ROOT")
+futures_pos = detail.find("futures") if detail else -1
+options_pos = detail.find("options") if detail else -1
+gate("ambiguous ES clarification names FUTURES before options",
+     kind == "CLARIFICATION" and futures_pos != -1 and options_pos != -1 and
+     futures_pos < options_pos)
+gate("ambiguous ES clarification does not offer plain \"stock\" ownership",
+     kind == "CLARIFICATION" and detail is not None and "stock" not in detail)
+
+kind, detail = find_result("ROUND TRIP, futures answer")
+gate("answering \"futures\" resolves PARAMS/FUTURES in one trip",
+     kind == "PARAMS" and field(detail, "asset_class") == "FUTURES")
+
+kind, detail = find_result("ROUND TRIP, options answer")
+gate("answering \"options\" resolves PARAMS/EQUITY in one trip (the new case)",
+     kind == "PARAMS" and field(detail, "asset_class") == "EQUITY")
+
+kind, detail = find_result("OPTIONS ON A FUTURE")
+gate("\"options on ES futures\" resolves PARAMS/FUTURES, not EQUITY, in one trip",
+     kind == "PARAMS" and field(detail, "asset_class") == "FUTURES")
+
+kind, detail = find_result("explicit futures wording")
+gate("explicit E-mini wording still resolves PARAMS/FUTURES with no question",
+     kind == "PARAMS" and field(detail, "asset_class") == "FUTURES")
+
+kind, detail = find_result("explicit equity wording")
+gate("explicit shares wording still resolves PARAMS/EQUITY with no question",
+     kind == "PARAMS" and field(detail, "asset_class") == "EQUITY")
+
+kind, detail = find_result("CL + equity")
+gate("CL + equity still resolves PARAMS/EQUITY, not a refusal",
+     kind == "PARAMS" and field(detail, "asset_class") == "EQUITY")
+
+kind, detail = find_result("out-of-distribution commodity")
+gate("crack spread still refuses (not PARAMS)", kind != "PARAMS")
+
+kind, detail = find_result("oversized input")
+gate("oversized input still returns INVALID_ARGUMENT",
+     isinstance(kind, str) and "INVALID_ARGUMENT" in kind)
+
+print(f"\n=== strict gates: {gates_passed}/{gates_total} passed ===")

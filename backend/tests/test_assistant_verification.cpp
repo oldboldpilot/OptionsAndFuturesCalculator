@@ -263,6 +263,37 @@ auto main() -> int {
     expect_signal("CL", "Covered call on Colgate-Palmolive.", AssetClassSignal::Equity,
                   "naming \"Colgate\" is decisive for CL");
 
+    // The reframed clarification now offers "options on <the equity>" as its
+    // second answer (see build_ambiguity_clarification below) -- so a trader
+    // answering that question with the bare word "options" must resolve
+    // EQUITY in one trip, exactly as answering "futures" resolves FUTURES.
+    // This is the new case the task brief calls out as most likely to be
+    // broken: "options" was not previously in the equity keyword set at all.
+    expect_signal("ES", "options", AssetClassSignal::Equity,
+                  "answering \"options\" alone resolves EQUITY (answers the reframed clarification)");
+    expect_signal("CL", "I'll take the options.", AssetClassSignal::Equity,
+                  "\"options\" is decisive for CL's equity side too");
+
+    // But "options" is NOT unconditionally equity: options ON FUTURES are
+    // real (covered_futures_call, an FOP, category "Futures" in
+    // strategy_catalogue.cppm), so when a futures signal and the options
+    // word are BOTH present, futures must win -- otherwise "options on ES
+    // futures" would ask forever, since the old symmetric rule never lets
+    // both-signals-present resolve to either side.
+    expect_signal("ES", "I want options on ES futures.", AssetClassSignal::Futures,
+                  "\"options on ES futures\" resolves FUTURES (an FOP), not EQUITY, and does not loop");
+    expect_signal("CL", "Options on the CLZ26 contract.", AssetClassSignal::Futures,
+                  "an options word plus a real futures contract code still resolves FUTURES for CL");
+
+    // The precedence is narrow: it only overrides a bare OPTIONS word, never
+    // an ownership word ("shares"/"stock"/"equity", or the company name)
+    // contradicting a futures signal -- "shares of a futures contract" is
+    // not a real instrument on either reading, so that stays a genuine,
+    // unresolvable contradiction (None, i.e. still ask), exactly as before
+    // this change.
+    expect_signal("ES", "Buy shares of the ES futures contract.", AssetClassSignal::None,
+                  "an ownership word contradicting a futures signal still asks (precedence does not apply)");
+
     // A symbol that is not one of the genuinely ambiguous roots is never
     // routed through any of this -- SPY/NVDA/QQQ (and every other
     // in-distribution symbol) must come back None unconditionally, and
@@ -291,9 +322,40 @@ auto main() -> int {
                   "clarification names the futures reading (E-mini S&P 500)");
             check(question->find("long_put") != std::string::npos,
                   "clarification surfaces the strategy the model inferred (long_put)");
+
+            // The reframe this task ships: futures named FIRST, and the
+            // equity alternative reads as OPTIONS on the company, never as
+            // owning the shares outright (this product prices no stock).
+            const auto futures_pos = question->find("futures");
+            const auto options_pos = question->find("options");
+            check(futures_pos != std::string::npos, "clarification says \"futures\" at all");
+            check(options_pos != std::string::npos, "clarification says \"options\" at all");
+            check(futures_pos != std::string::npos && options_pos != std::string::npos &&
+                      futures_pos < options_pos,
+                  "\"futures\" is named before \"options\" in the clarification");
+            check(question->find("stock") == std::string::npos,
+                  "clarification never offers the equity side as owning \"stock\" -- this "
+                  "calculator prices no equity outright");
         }
         check(!build_ambiguity_clarification("SPY", "long_call").has_value(),
               "build_ambiguity_clarification(SPY, ...) is nullopt -- SPY is not ambiguous");
+    }
+
+    // Same futures-first, options-framed shape for CL's clarification.
+    {
+        const auto question = build_ambiguity_clarification("CL", "futures_long");
+        check(question.has_value(), "build_ambiguity_clarification(CL, ...) produces a question");
+        if (question.has_value()) {
+            check(question->find("Colgate") != std::string::npos,
+                  "clarification names the equity reading (Colgate-Palmolive)");
+            const auto futures_pos = question->find("futures");
+            const auto options_pos = question->find("options");
+            check(futures_pos != std::string::npos && options_pos != std::string::npos &&
+                      futures_pos < options_pos,
+                  "\"futures\" is named before \"options\" in CL's clarification too");
+            check(question->find("stock") == std::string::npos,
+                  "CL's clarification also never offers plain \"stock\" ownership");
+        }
     }
 
     std::printf("\n=== GP-ARA assistant verification: round trip -- an answered clarification "
