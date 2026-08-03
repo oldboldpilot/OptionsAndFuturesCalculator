@@ -1929,28 +1929,101 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
     // naming both concrete readings (never "please clarify"), skipping GP-ARA
     // and the network probe entirely for a request that is about to be asked
     // a question anyway.
+    //
+    // Built once, here, rather than only inside the `ambiguous` branch below:
+    // `is_unsupported_bare_direction_guess` immediately after this block needs
+    // the identical (utterance + prior_clarification) context for EVERY
+    // request, not only ambiguous-root ones, so it is computed unconditionally
+    // to serve both call sites from one string.
+    std::string disambiguation_context;
+    disambiguation_context.reserve(utterance.size() + prior_clarification.size() + 1);
+    disambiguation_context += utterance;
+    disambiguation_context += ' ';
+    disambiguation_context += prior_clarification;
+
     if (const auto* ambiguous = ::options_calculator::assistant::verify::find_ambiguous_root_info(symbol);
         ambiguous != nullptr) {
-        std::string disambiguation_context;
-        disambiguation_context.reserve(utterance.size() + prior_clarification.size() + 1);
-        disambiguation_context += utterance;
-        disambiguation_context += ' ';
-        disambiguation_context += prior_clarification;
-
         const auto signal =
             ::options_calculator::assistant::verify::detect_asset_class_signal(symbol, disambiguation_context);
         if (signal == ::options_calculator::assistant::verify::AssetClassSignal::None) {
-            const auto question =
-                ::options_calculator::assistant::verify::build_ambiguity_clarification(symbol, strategy);
-            populate_clarification(response, question.has_value()
-                                                  ? *question
-                                                  : "\"" + symbol + "\" is ambiguous between more than one "
-                                                        "asset class -- which did you mean?");
-            return;
+            // STEP 2 of the layering (utterance keywords -> GP-ARA constraint
+            // propagation -> ask): the trader's own words did not decide it,
+            // so before asking, see whether the STRATEGY does. A
+            // Futures-category strategy on an ambiguous root pins the asset
+            // class by elimination through the exact rule table
+            // `AssistantParamsDomain::translate()` already enforces
+            // everywhere else -- see `infer_ambiguous_root_asset_class`'s own
+            // doc comment (assistant_verification.cppm) for why this
+            // direction is sound, why the mirror-image EQUITY inference is
+            // deliberately NOT attempted (that is the exact "long_put" from
+            // "Long ES, 30 days, 1 contract." production defect this task
+            // shipped against), and why lexical support is required on top
+            // of the category constraint, not instead of it.
+            if (const auto inferred = ::options_calculator::assistant::verify::infer_ambiguous_root_asset_class(
+                    symbol, strategy, expiration_days, quantity, disambiguation_context);
+                inferred.has_value()) {
+                asset_class = *inferred;
+            } else {
+                // STEP 3: neither the trader's words nor the reasoner could
+                // settle it -- ask. Covers a genuine Unsafe (wrong category),
+                // an Indeterminate (uncategorised strategy), and missing
+                // lexical support alike; see that function's own comment for
+                // why collapsing all three to "ask" is correct specifically
+                // on THIS path (unlike the mandatory GP-ARA gate below, whose
+                // Indeterminate stays a flat refusal).
+                const auto question =
+                    ::options_calculator::assistant::verify::build_ambiguity_clarification(symbol, strategy);
+                populate_clarification(response, question.has_value()
+                                                      ? *question
+                                                      : "\"" + symbol + "\" is ambiguous between more than one "
+                                                            "asset class -- which did you mean?");
+                return;
+            }
+        } else {
+            asset_class = (signal == ::options_calculator::assistant::verify::AssetClassSignal::Futures)
+                              ? "FUTURES"
+                              : "EQUITY";
         }
-        asset_class = (signal == ::options_calculator::assistant::verify::AssetClassSignal::Futures)
-                          ? "FUTURES"
-                          : "EQUITY";
+    }
+
+    // ------------------------------------------------------------------
+    // General strategy-credibility gate: independent of whether `symbol` is
+    // an ambiguous root at all.
+    //
+    // Two live-observed defects share one shape: the model names one of the
+    // two "bare direction" ids it falls back to when it cannot actually tell
+    // what structure the trader described -- `long_call` or `long_put` --
+    // while the one word that distinguishes that id from every sibling
+    // ("call"/"put") appears nowhere in what the trader typed:
+    //
+    //   - "Long ES, 30 days, 1 contract." -> long_put. Nothing says "put".
+    //   - "Buy 100 shares of ES stock, Eversource, 30 days." -> long_call,
+    //     quantity=100. Buying shares is not a long call, and this
+    //     calculator prices no equity outright -- a share-purchase
+    //     utterance names no strategy in this catalogue at all.
+    //
+    // Both pass every per-field check above AND the mandatory GP-ARA gate
+    // below (each is internally consistent -- a real strategy, a real
+    // symbol, sane bounds) while being, in the ordinary sense, simply wrong.
+    // `is_unsupported_bare_direction_guess` is the narrow, general check for
+    // exactly this shape -- narrow (two of forty-seven ids, not a blanket
+    // lexical-support requirement over the whole catalogue, which would risk
+    // refusing genuine requests phrased descriptively rather than by name;
+    // see that function's own doc comment) and general (every symbol, not
+    // only the ambiguous-root pair) at once. Runs after the ambiguous-root
+    // block so that block's own, more specific clarification (naming both
+    // concrete asset-class readings) still wins for an ambiguous root that
+    // has not yet been resolved -- this check only ever fires once
+    // `asset_class` is already settled, one way or another.
+    if (::options_calculator::assistant::verify::is_unsupported_bare_direction_guess(strategy,
+                                                                                      disambiguation_context)) {
+        const std::string_view distinguishing_word = strategy == "long_call" ? "call" : "put";
+        populate_clarification(
+            response, "I read this as \"" + strategy + "\" for \"" + symbol +
+                          "\", but nothing in your request mentions a \"" + std::string{distinguishing_word} +
+                          "\" or any option at all -- could you say what you'd like to do (this calculator "
+                          "prices options and futures, not buying the underlying outright)?");
+        return;
     }
 
     // ------------------------------------------------------------------

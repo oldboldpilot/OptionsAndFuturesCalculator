@@ -466,6 +466,168 @@ auto main() -> int {
               "default-constructed VerificationVerdict is Indeterminate, not Proven (fail-closed default)");
     }
 
+    std::printf("\n=== GP-ARA assistant verification: lexical support "
+                "(is a strategy backed by anything the trader actually said?) ===\n");
+
+    using options_calculator::assistant::verify::is_unsupported_bare_direction_guess;
+    using options_calculator::assistant::verify::strategy_has_lexical_support;
+
+    // The production defect, verbatim: "long_put" from an utterance that
+    // never says "put". "long" is excluded as a generic direction token (it
+    // would otherwise trivially "support" long_put purely because the
+    // utterance says "Long"), so the only remaining, distinguishing token is
+    // "put", which is genuinely absent.
+    check(!strategy_has_lexical_support("long_put", "Long ES, 30 days, 1 contract."),
+          "long_put has NO lexical support in \"Long ES, 30 days, 1 contract.\" (the trap)");
+
+    // The second live defect: "long_call" from a request that only ever says
+    // "shares"/"stock" -- never "call" or "option".
+    check(!strategy_has_lexical_support("long_call", "Buy 100 shares of ES stock, Eversource, 30 days."),
+          "long_call has NO lexical support in a plain share-purchase request");
+
+    // A genuine options request must not be second-guessed: the word is
+    // right there.
+    check(strategy_has_lexical_support("long_call", "Buy a call on NVDA, 30 days, 1 contract."),
+          "long_call DOES have lexical support when the trader actually says \"call\"");
+    check(strategy_has_lexical_support("long_put", "I want a put on SPY, 30 days."),
+          "long_put DOES have lexical support when the trader actually says \"put\"");
+
+    // The strategy this task's gate 1 turns on: futures_long. Its
+    // distinguishing token is "futures" (not "long", which is generic), and
+    // the exact phrase from the task brief contains it.
+    check(strategy_has_lexical_support("futures_long", "Long ES futures outright, 30 days"),
+          "futures_long DOES have lexical support via the word \"futures\"");
+    check(!strategy_has_lexical_support("futures_long", "Long ES, 30 days, 1 contract."),
+          "futures_long has NO lexical support when the utterance never says \"futures\" (or any synonym)");
+
+    // Multi-token ids: ANY one distinguishing token is enough (a deliberately
+    // loose OR, not a strict AND over every token -- see this function's own
+    // doc comment for why demanding all of "bull"/"call"/"spread" would be
+    // too strict for genuine phrasing).
+    check(strategy_has_lexical_support("bull_call_spread", "Buy a bull call spread on NVDA, 45 days, 2 lots."),
+          "bull_call_spread has lexical support (all three tokens present, only one required)");
+    check(strategy_has_lexical_support("cash_and_carry", "Set up a cash and carry trade on CL, 30 days."),
+          "cash_and_carry has lexical support via \"cash\"/\"carry\" even though \"and\" is not required");
+
+    // is_unsupported_bare_direction_guess is narrowly scoped to long_call/
+    // long_put only -- every other strategy is inert to this specific check,
+    // regardless of lexical support, by design (see its own doc comment for
+    // why a blanket rule over all 47 ids is a regression risk this function
+    // does not take).
+    check(is_unsupported_bare_direction_guess("long_put", "Long ES, 30 days, 1 contract."),
+          "is_unsupported_bare_direction_guess flags long_put from the trap utterance");
+    check(is_unsupported_bare_direction_guess("long_call", "Buy 100 shares of ES stock, Eversource, 30 days."),
+          "is_unsupported_bare_direction_guess flags long_call from a plain share-purchase utterance");
+    check(!is_unsupported_bare_direction_guess("long_call", "Buy a call on NVDA, 30 days, 1 contract."),
+          "is_unsupported_bare_direction_guess does NOT flag a genuine long_call request");
+    check(!is_unsupported_bare_direction_guess("bull_call_spread", "Long ES, 30 days, 1 contract."),
+          "is_unsupported_bare_direction_guess never fires for a strategy outside its narrow scope");
+
+    // THE ROUND-TRIP CASE THIS ESCAPE HATCH EXISTS FOR: "Long ES, 30 days, 1
+    // contract." asks futures-vs-equity; the trader answers "options"
+    // (confirmed live: assistant_service.cpp concatenates utterance + " " +
+    // prior_clarification, and the model then answers with strategy=long_put,
+    // asset_class=EQUITY -- never having said "put" on EITHER turn). This
+    // MUST NOT be flagged, or the task's own gate 3 ("answering that
+    // clarification still resolves in one trip") would regress into a second,
+    // needless question after the trader already answered once.
+    check(!is_unsupported_bare_direction_guess("long_put", "Long ES, 30 days, 1 contract. options"),
+          "is_unsupported_bare_direction_guess does NOT re-ask the round-trip \"options\" answer, even "
+          "though \"put\" itself never appears -- a bare options word is accepted as its own escape hatch");
+
+    // But the escape hatch is narrow: it is specifically the word "option"/
+    // "options", not any old word. A share-purchase utterance mentioning
+    // neither "call"/"put" NOR "option" must still be flagged -- confirms the
+    // escape hatch did not quietly swallow the second live defect.
+    check(is_unsupported_bare_direction_guess("long_call", "Buy 100 shares of ES stock, Eversource, 30 days."),
+          "the bare-options escape hatch does not rescue the shares -> long_call defect "
+          "(no \"option\" word present either)");
+
+    std::printf("\n=== GP-ARA assistant verification: GP-ARA constraint propagation "
+                "(infer_ambiguous_root_asset_class) ===\n");
+
+    using options_calculator::assistant::verify::infer_ambiguous_root_asset_class;
+
+    // GATE 1 (the task brief's own example): a Futures-category strategy on
+    // an ambiguous root, with the trader's own words undecided by
+    // `detect_asset_class_signal` alone in principle -- but the strategy's
+    // OWN category, checked through the exact same mandatory
+    // `verify_assistant_params` rule table used everywhere else, pins the
+    // asset class to FUTURES by elimination, and the utterance also carries
+    // lexical support ("futures"). Must resolve, not ask.
+    {
+        const auto inferred =
+            infer_ambiguous_root_asset_class("ES", "futures_long", 30, 1, "Long ES futures outright, 30 days");
+        check(inferred.has_value() && *inferred == "FUTURES",
+              "Futures-category strategy (futures_long) on ambiguous root ES resolves to FUTURES by reasoning");
+    }
+
+    // GATE 2 / THE TRAP (must NOT infer): the production defect, verbatim.
+    // long_put is an options-category strategy -- the WEAK, untrustworthy
+    // direction this function deliberately never attempts (see its own
+    // section banner) -- so this must be nullopt regardless of lexical
+    // support, and IS nullopt here for two independent reasons at once
+    // (wrong category, AND no lexical support either).
+    {
+        const auto inferred =
+            infer_ambiguous_root_asset_class("ES", "long_put", 30, 1, "Long ES, 30 days, 1 contract.");
+        check(!inferred.has_value(),
+              "long_put (options-category, no lexical support) on ambiguous root ES is NOT inferred -- falls "
+              "through to asking, exactly as the task brief requires");
+    }
+
+    // A Futures-category strategy that structurally CANNOT be this
+    // candidate: futures_calendar is multi_expiry, so `verify_assistant_params`
+    // is Unsafe for it under ANY asset_class, FUTURES included. Confirms the
+    // category constraint alone is not enough -- the full mandatory gate
+    // must also pass.
+    {
+        const auto inferred = infer_ambiguous_root_asset_class(
+            "ES", "futures_calendar", 60, 1, "Long ES futures calendar spread, near and far months.");
+        check(!inferred.has_value(),
+              "futures_calendar (multi_expiry) on ambiguous root ES is NOT inferred, even though its category "
+              "is Futures and the wording is decisive -- a single expiration_days field still cannot carry it");
+    }
+
+    // THE SECOND GATE IN ACTION: a Futures-category strategy that is
+    // structurally sound as a FUTURES candidate, but has no lexical support
+    // at all in the utterance. This is a case where the category constraint
+    // ALONE would have inferred FUTURES correctly -- but the lexical-support
+    // gate declines anyway, choosing to ask rather than trust a Futures-
+    // category guess with nothing in the trader's own words behind it. This
+    // is the legitimate "reasoning gets it right but we still ask" outcome
+    // the task brief explicitly permits, not a shortfall.
+    {
+        const auto inferred =
+            infer_ambiguous_root_asset_class("ES", "futures_long", 30, 1, "Long ES, 30 days, 1 contract.");
+        check(!inferred.has_value(),
+              "futures_long on ambiguous root ES is NOT inferred when the utterance has no lexical support for "
+              "it at all -- category alone is not sufficient; legitimate 'ask anyway' outcome");
+    }
+
+    // crack_321 is Futures-category in the frontend's own list but is gated
+    // out of the assistant entirely (strategy_catalogue.cppm / the assistant
+    // blocklist) -- must never be inferred into a silent FUTURES answer.
+    {
+        const auto inferred =
+            infer_ambiguous_root_asset_class("CL", "crack_321", 45, 1, "3-2-1 crack spread futures on crude, 45 days.");
+        check(!inferred.has_value(), "crack_321 is never inferred -- the assistant blocklist still applies");
+    }
+
+    // A symbol that is not ambiguous at all: `infer_ambiguous_root_asset_class`
+    // itself does not gate on ambiguity (that is `assistant_service.cpp`'s
+    // job, only calling this inside the `find_ambiguous_root_info != nullptr`
+    // branch) -- but proving it still resolves a genuine Futures request
+    // confirms the underlying mechanism is exactly `verify_assistant_params`
+    // and nothing symbol-specific.
+    {
+        const auto inferred =
+            infer_ambiguous_root_asset_class("GC", "futures_long", 45, 3, "Long GC futures, 45 days, 3 contracts.");
+        check(inferred.has_value() && *inferred == "FUTURES",
+              "infer_ambiguous_root_asset_class also resolves a non-ambiguous root's Futures-category strategy "
+              "(the caller is what restricts this to ambiguous roots, not this function)");
+    }
+
     std::printf("\n=== GP-ARA assistant verification: measured latency ===\n");
     {
         const AssistantParamsInput kSample{.symbol = "SPY",

@@ -27,6 +27,47 @@ that broke:
 A Clarification is a legitimate outcome, not a failure: the model is trained to
 ask rather than guess, and `ES` is deliberately ambiguous (E-mini S&P root and
 Eversource Energy), so a clarification there is the CORRECT answer.
+
+ALSO COVERS (added alongside GP-ARA constraint propagation for ambiguous-root
+disambiguation, backend/src/modules/assistant_verification.cppm):
+
+  4. GP-ARA constraint propagation: given an ambiguous root AND a
+     Futures-category strategy the trader's own words did not decisively
+     name as futures, the reasoner now settles it anyway by elimination
+     through the SAME category-vs-asset_class rule
+     `AssistantParamsDomain::translate()` already enforces everywhere else --
+     see "GP-ARA CONSTRAINT PROPAGATION" below. It deliberately never
+     attempts the mirror image (inferring EQUITY from an options-category
+     strategy) -- that direction is the model's known "default when
+     confused", and the ambiguous-ES case above (`long_put` from an
+     utterance that never says "put") stays a Clarification for exactly that
+     reason, unchanged.
+
+  5. A general strategy-credibility gate, independent of any ambiguous root:
+     `long_call`/`long_put` -- the two "bare direction" ids the fine-tune
+     falls back to when confused -- are no longer trusted silently if the
+     word that actually distinguishes them ("call"/"put") never appears in
+     the request. Two live-observed defects motivated this: "Long ES, 30
+     days, 1 contract." -> long_put (no "put" anywhere), and "Buy 100 shares
+     of ES stock, Eversource, 30 days." -> long_call, quantity=100 (buying
+     shares is not a long call, and this calculator prices no equity
+     outright). Both now produce a Clarification instead of silently
+     type-checking through. This DELIBERATELY changes the expected outcome
+     of two cases below that previously resolved silently ("explicit equity
+     wording" and "CL + equity") -- see their own comments.
+
+IMPORTANT CAVEAT ON WHAT THIS SCRIPT CAN PROVE RIGHT NOW: cases 4 and 5 above
+depend on backend code added in this change. This script talks to whatever is
+CURRENTLY DEPLOYED behind HOST -- if that container has not been rebuilt and
+redeployed since, every gate below that depends on the new reasoning will
+report the OLD behaviour (this is expected, not a bug in the gate). The
+mechanism itself is proven at the unit level instead, directly, in
+backend/tests/test_assistant_verification.cpp
+(`infer_ambiguous_root_asset_class`, `strategy_has_lexical_support`,
+`is_unsupported_bare_direction_guess`) -- run those with
+`ctest -R AssistantVerificationTest` after building. Re-run THIS script only
+after `railway up`/redeploying to get a live signal on gates 4/5 specifically;
+until then treat their PASS/FAIL here as informative, not authoritative.
 """
 
 import base64
@@ -211,10 +252,29 @@ CASES = [
      "I want options on ES futures, 30 days out, 1 contract.", ""),
     ("explicit futures wording -- must NOT ask, the user already said it",
      "Buy an E-mini ES futures outright, 30 days, 1 contract.", ""),
-    ("explicit equity wording -- must NOT ask, and must resolve to EQUITY",
+    ("GP-ARA CONSTRAINT PROPAGATION -- the task brief's own example. A "
+     "Futures-category strategy (futures_long) on the ambiguous ES root. "
+     "NOTE: this exact phrase also contains the word \"futures\", which is "
+     "independently decisive at the cheaper utterance-keyword step -- so a "
+     "PASS here confirms no regression but does NOT by itself prove the NEW "
+     "reasoning path fired; that is proven at the unit level instead "
+     "(infer_ambiguous_root_asset_class in test_assistant_verification.cpp), "
+     "where the utterance keyword is withheld on purpose. Expect PARAMS/"
+     "FUTURES, no question, either way",
+     "Long ES futures outright, 30 days", ""),
+    ("explicit equity wording -- CHANGED by the new bare-direction-guess gate: "
+     "the model reads this as long_call, quantity=100, but buying shares is "
+     "not a long call and this calculator prices no equity outright, so this "
+     "now expects CLARIFICATION rather than a silent PARAMS/EQUITY. Requires "
+     "the redeployed backend; against the pre-existing deployment this will "
+     "still show the OLD behaviour (PARAMS)",
      "Buy 100 shares of ES stock, Eversource, 30 days.", ""),
-    ("CL + equity -- previously REFUSED outright as a contradiction, so a "
-     "legitimate Colgate-Palmolive trade was turned away. Must not refuse now",
+    ("CL + equity -- previously REFUSED outright as a contradiction (fixed "
+     "earlier: a legitimate Colgate-Palmolive trade must not be refused for "
+     "sharing a root with the CL futures contract). ALSO now expects "
+     "CLARIFICATION rather than silent PARAMS, for the same bare-direction-"
+     "guess reason as the case above (the model reads this as long_call too) "
+     "-- requires the redeployed backend",
      "Buy 100 shares of Colgate-Palmolive stock, CL, 30 days.", ""),
     ("out-of-distribution commodity -- the model answers CND, which is not an "
      "instrument; verification must catch it",
@@ -305,13 +365,31 @@ kind, detail = find_result("explicit futures wording")
 gate("explicit E-mini wording still resolves PARAMS/FUTURES with no question",
      kind == "PARAMS" and field(detail, "asset_class") == "FUTURES")
 
+# GP-ARA constraint propagation (task gate 1). See the CASES comment: this
+# exact phrase also contains "futures", independently decisive at the
+# keyword step, so this gate alone cannot distinguish "the old keyword step
+# handled it" from "the new reasoning path handled it" -- it only proves no
+# regression. The reasoning path itself is exercised without that shortcut in
+# test_assistant_verification.cpp.
+kind, detail = find_result("GP-ARA CONSTRAINT PROPAGATION")
+gate("Futures-category strategy on ambiguous root resolves PARAMS/FUTURES, no question "
+     "(regression check only -- see comment; the new-path-specific proof is unit-level)",
+     kind == "PARAMS" and field(detail, "asset_class") == "FUTURES")
+
+# CHANGED by the new bare-direction-guess gate (is_unsupported_bare_direction_guess):
+# the model reads both of these as long_call/quantity=100, which is not a
+# valid reading of "buy N shares" (this calculator prices no equity
+# outright), so both now expect CLARIFICATION rather than a silent PARAMS.
+# Requires the redeployed backend -- see the module docstring's caveat.
 kind, detail = find_result("explicit equity wording")
-gate("explicit shares wording still resolves PARAMS/EQUITY with no question",
-     kind == "PARAMS" and field(detail, "asset_class") == "EQUITY")
+gate("explicit shares wording now asks (long_call has no lexical support for a share purchase) "
+     "-- requires redeploy, see docstring",
+     kind == "CLARIFICATION")
 
 kind, detail = find_result("CL + equity")
-gate("CL + equity still resolves PARAMS/EQUITY, not a refusal",
-     kind == "PARAMS" and field(detail, "asset_class") == "EQUITY")
+gate("CL + equity now asks for the same reason (long_call has no lexical support) "
+     "-- requires redeploy, see docstring",
+     kind == "CLARIFICATION")
 
 kind, detail = find_result("out-of-distribution commodity")
 gate("crack spread still refuses (not PARAMS)", kind != "PARAMS")

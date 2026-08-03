@@ -861,4 +861,230 @@ export [[nodiscard]] auto verify_assistant_params(const AssistantParamsInput& in
     return verdict;
 }
 
+// ---------------------------------------------------------------------------
+// Lexical support: does the trader's own text back up the strategy the model
+// named at all?
+//
+// WHY THIS EXISTS: `translate()` above is deliberately blind to the
+// utterance -- its whole contract is "closed-form comparison over five short
+// strings/ints" (file banner), and it must stay that way, because
+// `verify_assistant_params` already has callers/tests (this file's own
+// `test_assistant_verification.cpp`, e.g. "CL claimed as EQUITY... deferred
+// to live probe") that rely on it answering "internally consistent" without
+// any opinion on wording. But "internally consistent" is not the same
+// question as "did the trader actually say anything supporting this
+// strategy" -- and a 0.6B fine-tune's most common failure mode is a
+// STRUCTURALLY fine strategy id that has no basis in what was typed at all:
+//
+//   - "Long ES, 30 days, 1 contract." -> long_put. Nothing says "put".
+//   - "Buy 100 shares of ES stock, Eversource, 30 days." -> long_call,
+//     quantity=100. Buying shares is not a long call, and this calculator
+//     prices no equity outright -- a share-purchase utterance has no
+//     strategy in this catalogue at all, so "call" is not merely a weak
+//     match, it is absent from a request that never mentioned an option.
+//
+// Both defects share one shape: the id passes `translate()` (every field is
+// individually well-formed and mutually consistent) while the one word that
+// actually distinguishes the id from its siblings never appears in the
+// trader's own words. That is a real, checkable fact -- just not one
+// `AssistantParamsDomain`'s five-field contract can see -- so it lives here,
+// as its own function, taking the utterance as an explicit argument rather
+// than smuggling it into the domain.
+// ---------------------------------------------------------------------------
+
+namespace detail {
+
+/** Tokens inside a catalogue id that carry no discriminating meaning of
+ * their own: a bare direction word a trader states about nearly every trade
+ * regardless of which concrete structure they meant ("long" appears in
+ * "Long ES, 30 days" just as readily for a future, a call, a put, or the
+ * stock itself). Their presence in an utterance is not evidence for any
+ * PARTICULAR strategy, so they are excluded before checking support --
+ * otherwise "long_put" would count "Long ES..." as support for itself
+ * purely because the trader said "Long", which is exactly the failure mode
+ * this check exists to catch, not repeat under a different name. */
+constexpr std::array<std::string_view, 2> kGenericStrategyTokens{"long", "short"};
+
+/** Splits `strategy_id` on `_` into its lower-cased tokens, dropping any
+ * `kGenericStrategyTokens` entry. For every id in `strategy_catalogue.cppm`
+ * today this leaves at least one token ("futures_long" -> {"futures"},
+ * "long_put" -> {"put"}, "bull_call_spread" -> {"bull", "call", "spread"});
+ * an id that were SOMEHOW made of nothing but generic tokens would leave an
+ * empty list, and `strategy_has_lexical_support` below treats that as
+ * "nothing to check", never as "support missing" -- silence about a rule
+ * this table cannot express must not turn into a refusal the same way an
+ * unmapped category above does not. */
+[[nodiscard]] auto strategy_distinguishing_tokens(std::string_view strategy_id) -> std::vector<std::string> {
+    std::vector<std::string> tokens;
+    std::size_t start = 0;
+    while (start <= strategy_id.size()) {
+        const auto sep = strategy_id.find('_', start);
+        const std::string_view token = (sep == std::string_view::npos)
+                                            ? strategy_id.substr(start)
+                                            : strategy_id.substr(start, sep - start);
+        if (!token.empty() && !contains(kGenericStrategyTokens, token)) {
+            tokens.push_back(to_lower_copy(token));
+        }
+        if (sep == std::string_view::npos) break;
+        start = sep + 1;
+    }
+    return tokens;
+}
+
+}  // namespace detail
+
+/**
+ * Whether anything in `context` (expected to be the trader's utterance,
+ * optionally concatenated with a prior clarification exchange -- the same
+ * shape `detect_asset_class_signal` above takes) lexically backs up
+ * `strategy_id` at all.
+ *
+ * Matches loosely ON PURPOSE: any ONE of the id's distinguishing tokens
+ * appearing anywhere in `context`, case-insensitively, counts as support.
+ * This is not trying to verify the model parsed correctly -- only that it
+ * did not invent a structure out of nothing. A stricter all-tokens-must-
+ * match rule would refuse genuine requests over incidental phrasing (a
+ * trader who writes "cash and carry on CL" for `cash_and_carry` should not
+ * be second-guessed over the word "and"); a looser zero-tokens rule would
+ * let exactly the two observed defects back through. One matching token is
+ * the deliberate midpoint.
+ *
+ * Returns `true` (never blocks) when `strategy_id` has no distinguishing
+ * token to check at all (see `strategy_distinguishing_tokens`'s own doc
+ * comment) -- absence of a rule is not evidence of absence of support.
+ */
+export [[nodiscard]] auto strategy_has_lexical_support(std::string_view strategy_id, std::string_view context)
+    -> bool {
+    const auto tokens = detail::strategy_distinguishing_tokens(strategy_id);
+    if (tokens.empty()) return true;
+    const std::string lower_context = detail::to_lower_copy(context);
+    for (const auto& token : tokens) {
+        if (detail::contains_ci(lower_context, token)) return true;
+    }
+    return false;
+}
+
+/**
+ * Whether `strategy` is one of the two "bare direction" ids the fine-tune
+ * reaches for when it cannot actually tell what structure the trader
+ * described, per this file's own trust-bar reasoning below (an options/
+ * equity-category strategy is "the default the model falls back to when
+ * confused") narrowed to the two ids BOTH live-observed defects actually
+ * named: `long_call` and `long_put`. Deliberately not generalised to every
+ * catalogue id -- see `is_unsupported_bare_direction_guess`'s own doc
+ * comment for why a blanket lexical-support requirement across all 47
+ * entries is a real regression risk this function does not take.
+ *
+ * `assistant_service.cpp` calls this for EVERY request, regardless of
+ * symbol -- unlike the ambiguous-root machinery above, the shares ->
+ * long_call conflation is not specific to ES/CL; the identical mistake is
+ * equally wrong for "buy 100 shares of NVDA".
+ *
+ * A BARE "OPTION"/"OPTIONS" WORD IS ITS OWN, SEPARATE ESCAPE HATCH -- checked
+ * IN ADDITION to `strategy_has_lexical_support`, not instead of it, and this
+ * is load-bearing, not a convenience: the round trip this file's own
+ * clarification produces answers "which asset class" without ever picking a
+ * side between call and put. Trader says "Long ES, 30 days, 1 contract.",
+ * gets asked futures-vs-equity, answers "options" -- the model (reasonably)
+ * still has to commit to a direction and may say `long_put`, with the word
+ * "put" appearing nowhere across EITHER turn. Demanding the specific word
+ * "put" here would re-ask a trader who already answered once, which the
+ * task's own gate 3 forbids ("answering that clarification still resolves in
+ * one trip, both 'futures' and 'options'"). A bare options word is still
+ * real evidence of SOME options intent -- just not which side -- which is a
+ * different, narrower kind of ambiguity than the two live defects this
+ * function exists to catch (both of which have NO options-adjacent word at
+ * all: one says nothing about the trade type, the other says "shares").
+ */
+export [[nodiscard]] auto is_unsupported_bare_direction_guess(std::string_view strategy, std::string_view context)
+    -> bool {
+    if (strategy != "long_call" && strategy != "long_put") return false;
+    if (strategy_has_lexical_support(strategy, context)) return false;
+    return !detail::contains_ci(detail::to_lower_copy(context), detail::kOptionsKeyword);
+}
+
+// ---------------------------------------------------------------------------
+// GP-ARA constraint propagation: settling an ambiguous root's asset class by
+// REASONING about the strategy, when `detect_asset_class_signal` above could
+// not settle it from the trader's own words.
+//
+// THE CONSTRAINT ALREADY EXISTS AND WAS ONLY EVER USED TO REJECT:
+// `AssistantParamsDomain::translate()`'s category-vs-asset_class rule already
+// encodes "a Futures-category strategy requires asset_class == FUTURES, and
+// every other known category forbids it". Given an ambiguous root and a
+// strategy whose category is "Futures", that constraint pins asset_class to
+// exactly one value -- FUTURES is not merely consistent with the rest of the
+// request, it is the ONLY asset_class category "Futures" permits at all
+// (every other known category is UNSAFE with is_futures true, and an
+// unmapped category is INDETERMINATE, never PROVEN). So testing the
+// candidate `{symbol, asset_class="FUTURES", strategy, expiration_days,
+// quantity}` through the exact same mandatory `verify_assistant_params` used
+// everywhere else IS the inference: a `Proven` verdict on that candidate
+// could only happen if `strategy`'s category is "Futures" and every other
+// field is independently sound (catalogue membership, the assistant
+// blocklist, `multi_expiry`, quantity and expiration bounds) -- nothing new
+// is invented here, this reuses the one rule table this domain already has.
+//
+// THE TRAP THIS DELIBERATELY DOES NOT WALK INTO:
+// The mirror image -- inferring EQUITY when the strategy's category forbids
+// FUTURES -- is NOT attempted, ever, by this function. The production case
+// this whole task shipped against is exactly that direction: "Long ES, 30
+// days, 1 contract." produces `long_put`, an options-category strategy, with
+// no "put" anywhere in the utterance. `long_put`'s category forbidding
+// FUTURES is real and would "logically" leave EQUITY by elimination between
+// the two readings this ambiguous-root mechanism ever offers -- but per this
+// file's own earlier reasoning (see `AmbiguousRootInfo`'s neighbourhood),
+// an options/equity-category guess is the model's DEFAULT when it cannot
+// actually tell, not evidence it did. Trusting that elimination would
+// propagate a hallucination into a confident, wrong-priced answer -- strictly
+// worse than asking. A Futures-category guess carries no equivalent
+// suspicion: the fine-tune does not emit `futures_long` (or any other
+// Futures-category id) as a generic fallback, so category=="Futures" is
+// asymmetrically strong evidence FUTURES-category is real, in a way
+// category!="Futures" is not evidence EQUITY is.
+//
+// THE SECOND GATE, ON TOP OF THE CONSTRAINT: LEXICAL SUPPORT.
+// Even in the trustworthy direction, this function additionally requires
+// `strategy_has_lexical_support` before inferring -- so a Futures-category
+// id the model produced with literally nothing in the utterance backing it
+// (say, `min_variance_hedge` on a request that never mentioned a hedge or a
+// beta ratio) does not get to settle the ambiguity either. This is a second,
+// independent reason to decline to infer, layered on top of the category
+// constraint rather than replacing it: either one failing is enough to fall
+// through to asking.
+// ---------------------------------------------------------------------------
+
+/**
+ * Attempts to settle an ambiguous root's asset class by reasoning about
+ * `strategy`, when `detect_asset_class_signal` could not settle it from the
+ * trader's own words. Returns `"FUTURES"` when both the category constraint
+ * (via `verify_assistant_params` on the FUTURES candidate) and lexical
+ * support are satisfied; `std::nullopt` otherwise -- covering a definite
+ * `Unsafe` (this strategy could never be FUTURES: wrong category, a
+ * multi-expiry shape a single `expiration_days` cannot carry, the assistant
+ * blocklist, or bad bounds), an `Indeterminate` (an uncategorised strategy),
+ * AND missing lexical support, all three collapsed to the same "cannot
+ * soundly infer" answer on purpose: `assistant_service.cpp`'s call site
+ * falls through to the existing ambiguity Clarification on `std::nullopt`
+ * regardless of which of the three it was, which is the correct behaviour
+ * for every one of them -- none is a case a follow-up question cannot
+ * resolve, in contrast to the OTHER path's Indeterminate (see
+ * `verify_assistant_params`'s own doc comment on why that one stays a flat
+ * refusal). Deliberately never returns `"EQUITY"` -- see the section banner
+ * above for why that direction is not attempted at all.
+ */
+export [[nodiscard]] auto infer_ambiguous_root_asset_class(std::string_view symbol, std::string_view strategy,
+                                                            std::int64_t expiration_days, std::int64_t quantity,
+                                                            std::string_view context)
+    -> std::optional<std::string> {
+    const AssistantParamsInput futures_candidate{.symbol = std::string{symbol},
+                                                  .asset_class = "FUTURES",
+                                                  .strategy = std::string{strategy},
+                                                  .expiration_days = expiration_days,
+                                                  .quantity = quantity};
+    if (verify_assistant_params(futures_candidate).outcome != Outcome::Proven) return std::nullopt;
+    if (!strategy_has_lexical_support(strategy, context)) return std::nullopt;
+    return std::string{"FUTURES"};
+}
+
 }  // namespace options_calculator::assistant::verify
