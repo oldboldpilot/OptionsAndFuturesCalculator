@@ -2,29 +2,60 @@
 """
 Fine-tunes Qwen3-0.6B to turn chat into calculator parameters.
 
-Follows the current Unsloth recipe for this model
-(nb/Qwen3_(0.6B)-Reasoning-Conversational-ExecuTorch.ipynb), which for 0.6B is
-FULL fine-tuning with quantization-aware training rather than LoRA:
+THE RECIPE THAT ACTUALLY SHIPPED, AND WHY (read this before changing
+--method's default): `--method qlora` -- a 4-bit frozen base with LoRA
+adapters trained on top, per get_peft_model() below -- not the full
+fine-tune with int8 QAT this file's docstring used to recommend (that
+notebook-derived recipe is `--method full`, kept only as a documented
+alternative; see its own comments further down for what it does and why it
+is NOT the default).
 
-    FastLanguageModel.from_pretrained(..., full_finetuning=True,
-                                      qat_scheme="int8")
+Both were run to completion on the SAME clean dataset and evaluated the same
+way, and the gap is not close:
 
-QAT is the load-bearing choice here, not an optimisation. The model is destined
-for CPU inference in the sensen service, so it will run quantized whatever we
-do. Training with the quantization in the loop means the deployed model is what
-was trained, instead of a bf16 model degraded at the end -- and at 0.6B there is
-little headroom to absorb that degradation. LoRA is skipped for the same reason
-the notebook skips it: at this size a full fine-tune fits comfortably and
-converges better.
+    --method qlora   rank 16, alpha 16, all 7 projections   95.0% params exact-match
+    --method full    int8 QAT, every one of 398M params      49.8% params exact-match
 
-Scheme is "int8" (8-bit weights and activations) rather than the notebook's
-"int8-int4". int4 linear weights buy roughly half the memory again, which a
-0.6B model on a CPU service does not need, and they cost accuracy this task
-cannot spare: the output is a JSON object where one wrong token is a wrong
-strategy id, not a slightly worse paraphrase. Supported alternatives are int4,
-int8-int4, fp8-fp8 and fp8-int4.
+On a 0.6B model, updating all 398M parameters (`--method full`) damaged the
+pretrained representations faster than it learned this task -- a five-field
+JSON extraction problem does not need, and cannot survive, that much of the
+base model moving. QLoRA's frozen 4-bit base plus a small trained adapter
+(2.5M-ish params, see the "trainable" print below) leaves the pretrained
+representations alone and only ever moves the part that has to change. THE
+BAR FOR ANY FUTURE RUN IS 95.0% PARAMS EXACT-MATCH ON THE HELD-OUT SET
+(agent/dataset/data/val.jsonl), evaluated on the same Q8_0 GGUF this pipeline
+exports (see EXPORT below) -- not on these bf16 merged weights, which are an
+intermediate artifact, not what a trader's request is ever actually decoded
+by. A run that lands materially below 95.0% is a regression, full stop, no
+matter what else about it looks better (faster, smaller loss, more data).
+Per-field accuracy at that baseline, same held-out set: symbol 98.7%,
+asset_class 99.0%, strategy 97.0%, expiration_days 100%, quantity 100%. Use
+these to tell "regressed" apart from "just different" -- 80% overall with
+symbol still near 99% but strategy collapsed to 60% is a different failure
+than a uniform drop, and the fix is not the same.
 
-    python3 train.py --data ../dataset/data --out /scratch/agents/param-agent
+THIS RUN, budgeted: ~2056 steps, ~22 minutes wall clock, ~1.97 GB peak GPU
+memory on the training host's smaller card. That is the number to hold a new
+run against too -- augmenting the dataset (agent/dataset/build_dataset.py) is
+expected and fine, but a run that grows to take materially longer than ~30
+minutes total means something about the recipe changed, not just the data,
+and is worth stopping to explain rather than shipping quietly.
+
+THE FULL CHAIN THIS FILE IS ONE STAGE OF -- train (this file, 4-bit QLoRA) ->
+merge (save_pretrained_merged below, 4-bit adapters folded into bf16 weights)
+-> quantize (llama.cpp convert + llama-quantize, bf16 -> Q8_0 GGUF, ~639 MB) ->
+distribute (private HF repo, checksum pinned, fetched at Docker build time,
+never through `railway up`) -> serve (sensen's in-process LLMPipeline, Q8_0
+weights, q8 KV cache, CPU) -- is documented end to end, including the parts
+that are NOT visible from this file (the training system prompt, the
+Dockerfile's secret-mount trap, why `n_gpu_layers=0` is load-bearing, the
+four-turn clarification shape the backend's prompt builder depends on) in
+docs/STRATEGY_ASSISTANT_PIPELINE.md. Read that before touching anything
+downstream of this script; the constraints it documents were each learned by
+breaking production once, and this file only covers the training stage's own
+slice of them.
+
+    python3 train.py --method qlora --data ../dataset/data --out /scratch/agents/param-agent-qlora
 """
 
 from __future__ import annotations
@@ -97,6 +128,37 @@ def main() -> None:
     train_rows = load_jsonl(data / "train.jsonl")
     val_rows = load_jsonl(data / "val.jsonl")
     print(f"train {len(train_rows)}  val {len(val_rows)}")
+
+    # THREE CONSTRAINTS THAT ARE LOAD-BEARING IN PRODUCTION AND NOT VISIBLE
+    # FROM ANYTHING ELSE IN THIS FILE -- each cost a debugging cycle before it
+    # was written down. Full detail in docs/STRATEGY_ASSISTANT_PIPELINE.md;
+    # stated here because someone editing the dataset or this script is
+    # exactly the person who needs to see them before, not after, changing
+    # something that depends on them.
+    #
+    # 1. The system prompt every row below carries (agent/dataset/
+    #    build_dataset.py's SYSTEM constant) must stay byte-identical to the
+    #    one backend/src/modules/assistant_service.cpp injects on every RPC
+    #    call (kSystemPrompt). Retraining against a reworded prompt, however
+    #    similar, produces a model tuned to a system turn production never
+    #    actually sends it -- Qwen3 reverts to stock behaviour (a <think>
+    #    block, no <params> block, ever) when the prompt it sees at inference
+    #    doesn't match the one it was tuned against, and nothing here would
+    #    catch that at training time; it only shows up as a live 0% at eval.
+    # 2. build_dataset.py's make_clarification() produces a specific FOUR-TURN
+    #    shape -- user request, assistant question, user reply, assistant
+    #    params -- and assistant_service.cpp's build_prompt() constructs
+    #    exactly that shape (system, user, assistant, user, assistant) when a
+    #    caller sends a prior_clarification. The two must move together: this
+    #    file does not enforce the shape, build_dataset.py's docstring on
+    #    make_clarification does, and it says not to change it without
+    #    changing build_prompt() in the same breath.
+    # 3. Every `strategy` value in every row must be an id that exists in
+    #    backend/src/modules/strategy_catalogue.cppm (generated from
+    #    agent/dataset/strategies.json, the single source of truth). An id
+    #    the catalogue does not know is_known() on gets refused at serve
+    #    time regardless of how confidently this model learned to emit it --
+    #    training on one teaches a behaviour production will never honour.
 
     # QLoRA: the base weights are loaded in 4-bit and FROZEN, and the only
     # trainable parameters are the low-rank adapters bolted onto the attention
@@ -229,6 +291,28 @@ def main() -> None:
     print(f"peak GPU memory: {torch.cuda.max_memory_allocated()/1e9:.2f} GB")
 
     Path(args.out).mkdir(parents=True, exist_ok=True)
+
+    # WHAT HAPPENS AFTER THIS FUNCTION RETURNS -- not automated by this
+    # script, and easy to assume is further along than it is:
+    #
+    #   1. merged_16bit (below) writes bf16 weights to args.out. Those are an
+    #      INTERMEDIATE artifact -- a convenient format for llama.cpp's
+    #      converter, not what ships and not what the 95.0% bar above was
+    #      re-verified against when the KV-cache/quantization gate was added.
+    #   2. llama.cpp: `convert_hf_to_gguf.py args.out --outfile model-f16.gguf
+    #      --outtype f16`, then `llama-quantize model-f16.gguf model-Q8_0.gguf
+    #      Q8_0`. This is the SAME quantization scheme production serves
+    #      (Q8_0 weights, q8 KV cache at serve time) -- evaluate the GGUF, not
+    #      the bf16 directory above, or a passing number here can still ship
+    #      a regression.
+    #   3. The GGUF goes to a private HF repo; MODEL_URL/MODEL_SHA256 in
+    #      Railway's build variables point the Docker build at it. Nothing in
+    #      this repo does that upload automatically, and it is deliberately
+    #      not this script's job -- see docs/STRATEGY_ASSISTANT_PIPELINE.md
+    #      for the full merge/export/distribute/serve chain, including the
+    #      Dockerfile secret-mount trap and the serving-time constraints
+    #      (system prompt, n_gpu_layers=0, the four-turn clarification shape)
+    #      that a passing eval number here does not, by itself, protect.
 
     # Export is tried three ways, weakest assumption last, and a failure to
     # export must never be silent: the previous version caught only

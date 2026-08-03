@@ -17,7 +17,9 @@ This policy covers everything in the repository:
 - backend/  — C++23 engine serving three gRPC services (calculator.OptionsCalculator,
               sensen.finance.Finance, calculator.assistant.StrategyAssistant)
               behind Envoy, deployed to Railway as a container
-- frontend/ — Next.js static export deployed to Cloudflare Pages
+- frontend/ — Next.js static export served by a Cloudflare WORKERS static-assets
+              deployment (frontend/wrangler.toml). NOT Cloudflare Pages; the Pages
+              project still exists but nothing points at it.
 - workers/  — Cloudflare Workers (billing: Stripe checkout, licence minting,
               Supabase tier writes)
 - backend/sensen — vendored inference/finance library (see its own policy)
@@ -146,8 +148,14 @@ which sensen commit is pinned.
    - config/.env IS included in the NAS backup by design.
 
 3. **Deploy** (when the change is user-facing)
-   - Frontend: `npx wrangler pages deploy frontend/out --project-name=optionsandfuturescalculator`
+   - Frontend: `cd frontend && npm run build && npx wrangler deploy`
+     This is a WORKERS static-assets deployment (frontend/wrangler.toml), not
+     Cloudflare Pages. `wrangler pages deploy` still succeeds and prints a URL,
+     but the live domains are Workers custom domains, so it deploys nothing a
+     user can see — that mistake cost five "completed" frontend deploys while
+     the apex served a stale bundle pointing Supabase at localhost.
      "Deployment complete" is not the gate — re-verify every referenced asset
-     actually resolves, and redeploy until clean.
+     actually resolves, and grep the served bundle for the config you expect.
+     See docs/guides/ASSISTANT_EVALUATION.md for the general form of this trap.
    - Backend: `railway up --detach` (project fearless-amazement,
      service options-calculator-backend)

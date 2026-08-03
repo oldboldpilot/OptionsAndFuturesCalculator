@@ -29,7 +29,19 @@ if [[ -n "$RAW_NEW" ]]; then
 fi
 
 # Check 2: Fast-math Flag Prohibition
-FAST_MATH=$(grep -rnE --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=build "\-f""fast-math" "${REPO_ROOT}" 2>/dev/null | grep -v "cpp_details.txt" | grep -v "code_policy_check.sh" | grep -v "code_review_adversarial.sh" | grep -v "yaml" | grep -v "PRD_" | grep -v "backend/sensen" | grep -v "backend/StochasticGraphExecutionEngine" | grep -v "external/SGEE" | grep -v "backend/cpp23-logger" | grep -v "backend/nanobind" || true)
+#
+# Scans TRACKED files only (`git ls-files`), not the working tree. A pre-commit
+# gate should judge what is being committed; generated build output is neither
+# committed nor authored. The previous `--exclude-dir=build` matched only a
+# directory named exactly "build", so `backend/build-int8/build.ninja` -- CMake's
+# own generated output, gitignored and untracked -- tripped the gate and blocked
+# every push with a violation no diff could ever fix. `git ls-files` excludes any
+# ignored build dir by construction, whatever it is named.
+# Documentation is excluded because the rule is about a compiler flag, not the
+# string. Prose that says "never pass -ffast-math" is the policy being followed,
+# not broken; docs/superpowers/specs/2026-07-26-opc-parity-design.md had already
+# written this false positive up as a known defect of this very check.
+FAST_MATH=$(git -C "${REPO_ROOT}" ls-files -z | grep -zvE '\.(md|txt)$' | grep -zvE '^docs/' | xargs -0 grep -nE "\-f""fast-math" 2>/dev/null | grep -v "cpp_details.txt" | grep -v "code_policy_check.sh" | grep -v "code_review_adversarial.sh" | grep -v "yaml" | grep -v "PRD_" | grep -v "backend/sensen" | grep -v "backend/StochasticGraphExecutionEngine" | grep -v "external/SGEE" | grep -v "backend/cpp23-logger" | grep -v "backend/nanobind" || true)
 if [[ -n "$FAST_MATH" ]]; then
     echo "❌ ADVERSARIAL AUDIT REJECT: Non-associative -f""fast-math flag found:"
     echo "$FAST_MATH"
@@ -37,7 +49,10 @@ if [[ -n "$FAST_MATH" ]]; then
 fi
 
 # Check 3: Secret Keys in Code / Environment
-SECRETS=$(grep -rnE --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=build "(sk-[A-Za-z0-9]{32,}|ghp_[A-Za-z0-9]{30,}|AKIA[0-9A-Z]{16})" "${REPO_ROOT}" 2>/dev/null | grep -v ".gitignore" || true)
+# Tracked files only, for the same reason as Check 2 -- and additionally because
+# config/.env is gitignored by design and holds real credentials, so scanning the
+# working tree would report a "violation" that must never be fixed by removing it.
+SECRETS=$(git -C "${REPO_ROOT}" ls-files -z | xargs -0 grep -nE "(sk-[A-Za-z0-9]{32,}|ghp_[A-Za-z0-9]{30,}|AKIA[0-9A-Z]{16})" 2>/dev/null | grep -v ".gitignore" || true)
 if [[ -n "$SECRETS" ]]; then
     echo "❌ ADVERSARIAL AUDIT REJECT: Unmasked secret keys detected:"
     echo "$SECRETS"

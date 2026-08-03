@@ -103,7 +103,27 @@ Known limit: the training set restricts futures roots to `ES` and `NQ`, so
 commodity queries are out of distribution — the model answers `CND` for a crude
 crack spread, which is not an instrument. Symbol validation refuses that, and
 `crack_321` is gated out of the UI (the calculator prices it correctly; the
-assistant was never taught it).
+assistant was never taught it). The deployed model also emits no `<params>` for a
+bare futures directive (`Long NQ, 45 days, 2 contracts.`, `Short GC, ...`,
+`gold outright long, ...`) — 3 of the 16 defect-holdout rows, measured 2026-08-03.
+
+**Measure a candidate model on sensen, never llama.cpp** — see
+`docs/guides/ASSISTANT_EVALUATION.md`. `ASSISTANT_BACKEND` defaults to `sensen`
+and production runs it, so a `llama-cli` score describes an engine that never
+handles a request. This is not theoretical: a `llama-cli` holdout scored the
+deployed model 7/16 and triggered a retrain to fix a regression that did not
+exist. Measured through the real RPC the same model scores **13/16**; the retrain
+built to fix the phantom scored **5/16** and was not deployed.
+
+Two traps make a bad measurement look like a model bug. Engines bind `:50051`
+with `SO_REUSEPORT`, so several stale engines each holding a DIFFERENT model all
+listen at once and the kernel splits requests between them — this produced a SPY
+prompt answered with bond-futures text, which reads exactly like KV-cache bleed.
+Assert `pgrep -x calculator_engi | wc -l` is 1 before trusting a number (the
+`comm` name is truncated to 15 chars, so `pkill -x calculator_engine` matches
+nothing). And symbol verification needs live market data; without it every model
+scores identically because the refusal comes from the verification layer, not the
+model — score `[assistant] raw model output`, which is logged before it runs.
 
 ## Pro tier and quota
 

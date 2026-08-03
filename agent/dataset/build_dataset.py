@@ -34,32 +34,64 @@ HERE = Path(__file__).parent
 
 EQUITIES = ["SPY", "QQQ", "IWM", "DIA", "NVDA", "AAPL", "TSLA", "MSFT", "AMZN",
             "META", "GOOGL", "AMD", "NFLX", "COIN", "PLTR", "SMCI"]
-# Roots, not contracts. ES is also Eversource Energy, which is why asset_class
-# is emitted explicitly rather than left for the backend to guess -- that
-# ambiguity once put a utility's share price on an index future.
+# Roots, not contracts. ES is also Eversource Energy, CL is also
+# Colgate-Palmolive -- which is why asset_class is emitted explicitly rather
+# than left for the backend to guess, and why those two roots get their own
+# clarification treatment below (see make_clarification's "asset_class"
+# branch) instead of a guessed resolution.
 #
-# ONLY the roots the provider actually returns a term structure for. Probing the
-# live backend: ES and NQ return eight listed contracts each; RTY, YM, CL, NG,
-# GC, SI, ZB and ZN return zero. Training on those would teach the model to emit
-# parameters the site cannot fulfil -- the request looks well formed, the curve
-# comes back empty, and every futures strategy stays blocked with nothing
-# indicating the symbol was the problem. Extend when the data arrives.
-FUTURES = ["ES", "NQ"]
+# Broadened from {ES, NQ} to add CL, GC and ZB: the live data provider now
+# returns a term structure for these too (see backend/src/modules/
+# market_data.cppm's live Alpaca wiring), and the strategy catalogue prices
+# them the same generic way it prices ES/NQ -- a FUTURE leg is a FUTURE leg
+# regardless of root. Deliberately NOT extended to RTY, YM, NG, SI or ZN:
+# those still have no data behind them (see UNSUPPORTED_FUTURES below), and
+# NOT extended to crack_321 (a 3-2-1 crack spread on CL) -- that id does not
+# exist in strategies.json / strategy_catalogue.cppm and is gated out of the
+# UI for exactly that reason; broadening the ROOT must not be read as
+# teaching the STRATEGY the product refuses to price.
+FUTURES = ["ES", "NQ", "CL", "GC", "ZB"]
 CRYPTO = ["BTC", "ETH"]
 
-FUTURES_NAMES = {
-    "ES": ["e-mini s&p", "es futures", "the s&p future", "emini", "spx futures"],
-    "NQ": ["nasdaq futures", "nq", "e-mini nasdaq", "the nasdaq future"],
+# Roots whose ticker also names a live, ordinarily-traded equity. A bare
+# mention of one of these with no decisive wording is genuinely ambiguous --
+# "Long ES, 30 days, 1 contract" could mean the E-mini future or a directional
+# bet on Eversource stock -- and asking is the correct behaviour, not a
+# guess in either direction. NQ, GC and ZB have no such collision in this
+# dataset's symbol universe and are treated as unambiguous futures roots.
+AMBIGUOUS_ROOTS = ["ES", "CL"]
+
+# How an ambiguous root's EQUITY side is named, for the clarifying question
+# and for the resolved equity-side answer. Deliberately separate from
+# EQUITY_NAMES (whose keys are drawn from EQUITIES, not FUTURES) so the base
+# extraction/modification/clarification generators -- which pick a symbol
+# from EQUITIES or FUTURES, never both -- cannot accidentally produce an
+# EQUITY-class row for "ES" or "CL" outside the dedicated ambiguous-root path.
+AMBIGUOUS_EQUITY_NAMES = {
+    "ES": ["eversource", "eversource energy", "es stock"],
+    "CL": ["colgate", "colgate-palmolive", "cl stock"],
 }
 
-# Roots people ask for that this deployment has no data for. They get a
+FUTURES_NAMES = {
+    "ES": ["e-mini s&p", "es futures", "the s&p future", "emini", "spx futures",
+           # Contract codes are decisive: naming a specific expiry cycle is
+           # never something a trader does for a stock, so these need no
+           # asset-class clarification even though the root is ambiguous.
+           "esu26", "esz26", "esh27"],
+    "NQ": ["nasdaq futures", "nq", "e-mini nasdaq", "the nasdaq future"],
+    "CL": ["crude oil futures", "wti futures", "cl futures", "crude oil",
+           "wti crude", "clz26", "clf27"],
+    "GC": ["gold futures", "gc futures", "gold"],
+    "ZB": ["30-year bond futures", "zb futures", "the long bond futures",
+           "treasury bond futures"],
+}
+
+# Roots people ask for that this deployment still has no data for. They get a
 # straight answer naming what IS available, rather than a params object for a
 # symbol that will come back empty.
 UNSUPPORTED_FUTURES = {
-    "crude": "CL", "oil": "CL", "wti": "CL", "gold": "GC", "silver": "SI",
-    "nat gas": "NG", "natural gas": "NG", "russell futures": "RTY",
-    "dow futures": "YM", "bond futures": "ZB", "the long bond": "ZB",
-    "ten year": "ZN",
+    "silver": "SI", "nat gas": "NG", "natural gas": "NG",
+    "russell futures": "RTY", "dow futures": "YM", "ten year": "ZN",
 }
 EQUITY_NAMES = {
     "SPY": ["spy", "the s&p etf", "s&p 500 etf", "spiders"],
@@ -110,7 +142,8 @@ ALIASES = {
     "futures_short": ["short futures", "sell futures", "short the future"],
     "futures_calendar": ["futures calendar", "roll spread", "calendar in futures"],
     "cash_and_carry": ["cash and carry", "basis trade", "carry trade"],
-    "covered_futures_call": ["covered futures call", "fop covered call"],
+    "covered_futures_call": ["covered futures call", "fop covered call",
+                             "options on the futures", "futures option", "fop"],
     "box_spread": ["box", "box spread"],
     "synthetic_long": ["synthetic long", "synthetic stock"],
     "synthetic_short": ["synthetic short"],
@@ -217,6 +250,253 @@ def make_extraction(rng: random.Random, strategies: list[dict]) -> dict:
     ]}
 
 
+def make_bare_futures_direction(rng: random.Random) -> dict:
+    """
+    Bare "long"/"short" + an UNAMBIGUOUS futures root -> the outright, direct.
+
+    Production defect: "Long ES, 30 days, 1 contract." came back as
+    strategy=long_put. Nothing in that sentence says "put" -- the model
+    appears to treat the bare word "long" as evidence for long_call/long_put,
+    presumably because those ids are the ones spelled "long_*". They are not
+    the only strategies that start with a direction word: "long" and "short"
+    on a futures root mean the outright futures position, and this dataset
+    had no example teaching that reading at all -- every existing
+    futures_long/futures_short alias said "futures" or "the future" outright
+    (see ALIASES), never bare "Long {root}".
+
+    Restricted to NQ, GC and ZB -- the futures roots with no equity-ticker
+    collision -- deliberately. For ES and CL, "Long {root}" is genuinely
+    ambiguous (see AMBIGUOUS_ROOTS) and the correct behaviour is to ask, which
+    is make_clarification's job, not this one's: teaching this function to
+    also answer confidently for ES/CL would just move the guessing problem
+    rather than remove it.
+    """
+    root = rng.choice([r for r in FUTURES if r not in AMBIGUOUS_ROOTS])
+    direction = rng.choice(["long", "short"])
+    strat_id = "futures_long" if direction == "long" else "futures_short"
+    sym_txt = phrase_symbol(rng, root, "FUTURES")
+    dte_txt, dte = phrase_dte(rng)
+
+    # Every template below states a quantity explicitly (unlike the bare
+    # "go long {s} {d}" phrasing this generator used to also offer, which had
+    # no {q} slot at all): sampling a quantity regardless of whether the
+    # template can say it is the exact bug make_extraction's own comment
+    # documents -- a label the utterance never stated, taught as if it were
+    # observable. Keeping every template qty-bearing here sidesteps it rather
+    # than re-deriving the two-step "pick template, then decide whether to
+    # sample" dance for a generator this small.
+    qty = rng.choices([1, 2, 3, 5, 10], [0.6, 0.15, 0.1, 0.1, 0.05])[0]
+    qty_txt = "1 contract" if qty == 1 else rng.choice(
+        [f"{qty} contracts", f"{qty} lots", f"{qty}x"])
+
+    templates = [
+        "{dir} {s}, {d}, {q}.",
+        "{dir} {s}, {d} out, {q}.",
+        "go {dir} {s} {d} for {q}.",
+        "i want to go {dir} on {s}, {d}, {q}.",
+        "{dir} {s} {d} for {q}.",
+    ]
+    user = rng.choice(templates).format(dir=direction, s=sym_txt, d=dte_txt, q=qty_txt)
+    if rng.random() < 0.4:
+        user = user[0].upper() + user[1:]
+
+    obj = {"symbol": root, "asset_class": "FUTURES", "strategy": strat_id,
+           "expiration_days": dte, "quantity": qty}
+    return {"conversations": [
+        {"role": "system", "content": SYSTEM},
+        {"role": "user", "content": user},
+        {"role": "assistant", "content": params_block(obj)},
+    ]}
+
+
+def make_futures_options_extraction(rng: random.Random) -> dict:
+    """
+    "Options on {root} futures" -> covered_futures_call.
+
+    Production defect: "I want options on ES futures, 30 days out, 1
+    contract." came back as strategy=futures_option, which is not a
+    catalogue id -- the model was never taught this phrasing. The nearest
+    (only) catalogue entry for an option written on a futures contract is
+    covered_futures_call ("Covered Futures Call (FOP)", category Futures),
+    so that is the target here.
+
+    The phrase names the root AND says "futures" in the same breath, so this
+    is decisive regardless of whether the root is otherwise ambiguous (ES,
+    CL) -- unlike a bare "long ES", there is no asset-class question to ask
+    when the utterance already states which asset class it means.
+    """
+    root = rng.choice(FUTURES)
+    sym_txt = phrase_symbol(rng, root, "FUTURES")
+    dte_txt, dte = phrase_dte(rng)
+    qty = rng.choices([1, 2, 3, 5, 10], [0.6, 0.15, 0.1, 0.1, 0.05])[0]
+    qty_txt = "1 contract" if qty == 1 else rng.choice([f"{qty} contracts", f"{qty} lots"])
+
+    templates = [
+        "I want options on {s} futures, {d} out, {q}.",
+        "options on {s} futures, {d}, {q}",
+        "set up options on the {s} future, {d} out, {q}.",
+        "I'd like a futures option on {s}, {d}, {q}.",
+        "price options on {s} futures for {d}, {q}.",
+        "futures options on {s}, {d}, {q}",
+    ]
+    user = rng.choice(templates).format(s=sym_txt, d=dte_txt, q=qty_txt)
+
+    obj = {"symbol": root, "asset_class": "FUTURES", "strategy": "covered_futures_call",
+           "expiration_days": dte, "quantity": qty}
+    return {"conversations": [
+        {"role": "system", "content": SYSTEM},
+        {"role": "user", "content": user},
+        {"role": "assistant", "content": params_block(obj)},
+    ]}
+
+
+def make_share_purchase_refusal(rng: random.Random) -> dict:
+    """
+    Buying shares outright -> decline, don't invent an option strategy.
+
+    Production defect: "Buy 100 shares of ES stock, Eversource, 30 days."
+    came back as strategy=long_call, quantity=100. Buying shares is not a
+    long call -- quantity=100 there is a share count, not a contract count,
+    and folding it into long_call's `quantity` field would silently price
+    100 CONTRACTS (10,000 deltas' worth of shares) for a request that named
+    no option at all.
+
+    This calculator prices options and futures positions, not outright stock
+    purchases -- there is no catalogue id for "buy N shares" and inventing
+    one (or coercing it into covered_call, which needs a share count the
+    schema has no field for) would misrepresent what was asked. The correct
+    behaviour is the same one make_refusal and make_unknown_strategy already
+    teach: decline plainly and, since the trader clearly wants exposure to
+    the named underlying, offer the two catalogue strategies that actually
+    take a share position as a leg (covered_call, protective_put) as the
+    nearest useful next step.
+    """
+    pool = list(EQUITIES) + AMBIGUOUS_ROOTS
+    sym = rng.choice(pool)
+    names = AMBIGUOUS_EQUITY_NAMES.get(sym) or EQUITY_NAMES.get(sym) or [sym.lower()]
+    name_txt = rng.choice(names)
+    n = rng.choice([10, 25, 50, 100, 200])
+    dte_txt, _ = phrase_dte(rng)
+
+    templates = [
+        f"Buy {n} shares of {sym} stock, {dte_txt}.",
+        f"Buy {n} shares of {sym} stock, {name_txt}, {dte_txt}.",
+        f"I want to buy {n} shares of {name_txt}.",
+        f"purchase {n} shares of {sym}",
+        f"buy {n} shares of {name_txt}, {dte_txt}",
+    ]
+    user = rng.choice(templates)
+    reply = rng.choice([
+        f"This calculator prices options and futures positions, not outright share "
+        f"purchases. If you want defined exposure to {sym}, I can set up a covered "
+        f"call or a protective put instead — would either of those work?",
+        "Buying shares outright isn't something this tool prices — it models options "
+        "and futures positions. A covered call or protective put uses a share "
+        "position as one leg, if that helps.",
+        f"I can't price a straight stock purchase. If you want to express a view on "
+        f"{sym} through the calculator, tell me an options strategy — covered call, "
+        f"protective put, a spread — and I'll set it up.",
+    ])
+    return {"conversations": [
+        {"role": "system", "content": SYSTEM},
+        {"role": "user", "content": user},
+        {"role": "assistant", "content": reply},
+    ]}
+
+
+def make_ambiguous_root_clarification(rng: random.Random) -> dict:
+    """
+    A bare, non-decisive mention of ES or CL -> ask futures-or-options first.
+
+    This is the direct fix for the production defect where "Long ES, 30 days,
+    1 contract." was answered with strategy=long_put instead of being asked
+    about. ES and CL each name both a futures root and a live equity
+    (Eversource Energy, Colgate-Palmolive); nothing in a bare "Long ES" or
+    "calendar spread on CL" says which one is meant, so the model should ask
+    -- exactly the four-turn shape make_clarification already uses elsewhere
+    (user request, assistant question, user reply, assistant params), not a
+    new shape. The reply vocabulary is "futures" or "options" because that is
+    what the backend's own disambiguation prompt offers; it is deliberately
+    never "stock" or "shares" here, and it is deliberately never something
+    already-decisive like "e-mini" or a contract code -- those are handled by
+    make_bare_futures_direction / the FUTURES_NAMES contract-code entries and
+    must produce params with NO question, or the model learns to ask about
+    utterances that already answered it.
+
+    Two request shapes are covered:
+
+      - direction ("long"/"short" + bare root): resolves to the futures
+        outright on a "futures" reply. On an "options" reply the resolution
+        is long_call for "long" and long_put for "short" -- the common
+        retail reading of a bullish/bearish options view -- which is safe
+        here specifically BECAUSE the trader has now confirmed "options",
+        unlike the production defect where the model guessed a strategy
+        without that confirmation at all.
+
+      - calendar spread (root, no direction word): resolves to
+        futures_calendar or calendar_spread, whichever asset class the reply
+        names. No direction ambiguity here since the strategy id itself
+        doesn't encode calls vs. puts.
+    """
+    root = rng.choice(AMBIGUOUS_ROOTS)
+    equity_name = rng.choice(AMBIGUOUS_EQUITY_NAMES[root])
+    pattern = rng.choice(["direction", "calendar"])
+    dte_txt, dte = phrase_dte(rng)
+
+    ask = rng.choice([
+        f"Futures or options — are you trading the {root} futures contract, "
+        f"or an options position on {equity_name}?",
+        f"Do you mean {root} futures, or options on {equity_name}?",
+        "Futures or options — which did you mean?",
+    ])
+
+    # As in make_extraction: pick the template FIRST, and only sample a
+    # quantity other than 1 when that template can actually say it. Every
+    # template below is qty-silent, so quantity is always 1 here -- this
+    # branch is about the futures-vs-options question, not about size, and
+    # inventing a stated-nowhere quantity is exactly the bug make_extraction's
+    # own comment documents (25% quantity accuracy from doing this once).
+    qty = 1
+
+    if pattern == "direction":
+        direction = rng.choice(["long", "short"])
+        user = rng.choice([
+            f"{direction.capitalize()} {root}, {dte_txt}.",
+            f"{direction} {root} {dte_txt}",
+            f"i want to go {direction} {root}, {dte_txt}",
+        ])
+        follow = rng.choice(["futures", "options"])
+        if follow == "futures":
+            strat = "futures_long" if direction == "long" else "futures_short"
+            cls = "FUTURES"
+        else:
+            strat = "long_call" if direction == "long" else "long_put"
+            cls = "EQUITY"
+        obj = {"symbol": root, "asset_class": cls, "strategy": strat,
+               "expiration_days": dte, "quantity": qty}
+    else:
+        user = rng.choice([
+            f"calendar spread on {root}, {dte_txt}",
+            f"set up a calendar spread on {root} for {dte_txt}",
+            f"{root} calendar, {dte_txt}",
+        ])
+        follow = rng.choice(["futures", "options"])
+        if follow == "futures":
+            obj = {"symbol": root, "asset_class": "FUTURES", "strategy": "futures_calendar",
+                   "expiration_days": dte, "quantity": qty}
+        else:
+            obj = {"symbol": root, "asset_class": "EQUITY", "strategy": "calendar_spread",
+                   "expiration_days": dte, "quantity": qty}
+
+    return {"conversations": [
+        {"role": "system", "content": SYSTEM},
+        {"role": "user", "content": user},
+        {"role": "assistant", "content": ask},
+        {"role": "user", "content": follow},
+        {"role": "assistant", "content": params_block(obj)},
+    ]}
+
+
 def make_clarification(rng: random.Random, strategies: list[dict]) -> dict:
     """
     Missing information -> ONE question, then the params.
@@ -225,13 +505,30 @@ def make_clarification(rng: random.Random, strategies: list[dict]) -> dict:
     default for an unstated expiry silently prices a position the user did not
     ask for, and on this site the number it produces looks exactly as
     authoritative as a correct one.
+
+    Three things can be missing, and "asset_class" is the newest: ES and CL
+    are both futures roots AND live equities (Eversource Energy,
+    Colgate-Palmolive), so a bare, non-decisive mention of one of them is
+    genuinely ambiguous between "the E-mini/WTI future" and "an options
+    position on the stock" -- there is no default that is not a guess. This
+    is the fix for the production defect where "Long ES, 30 days, 1
+    contract." was read as evidence for long_put: the bare word "long" is not
+    a strategy name, it is a direction, and on an ambiguous root the honest
+    response is to ask which asset class before picking a strategy at all.
+    The question and the reply vocabulary are deliberately futures-or-OPTIONS
+    (never "stock" or "equity"), matching what the backend's own
+    disambiguation prompt now offers -- training on a reply vocabulary the
+    backend cannot produce would teach a resolution step that never fires.
     """
     s = rng.choice(strategies)
     is_fut = s["category"] == "Futures"
     cls = "FUTURES" if is_fut else "EQUITY"
     sym = rng.choice(FUTURES if is_fut else EQUITIES)
     name = rng.choice(ALIASES.get(s["id"], [s["name"].lower()]))
-    missing = rng.choice(["dte", "symbol"])
+    missing = rng.choices(["dte", "symbol", "asset_class"], [0.42, 0.42, 0.16])[0]
+
+    if missing == "asset_class":
+        return make_ambiguous_root_clarification(rng)
 
     if missing == "dte":
         user = rng.choice([f"{name} on {phrase_symbol(rng, sym, cls)}",
@@ -390,8 +687,9 @@ def make_unsupported_future(rng: random.Random) -> dict:
         f"{phrase} outright", f"price {phrase} futures for me",
     ])
     reply = (f"There's no term structure for {phrase} on this deployment — the "
-             f"data provider only supplies ES (E-mini S&P) and NQ (E-mini "
-             f"Nasdaq). Would one of those work?")
+             f"data provider covers ES (E-mini S&P), NQ (E-mini Nasdaq), CL "
+             f"(crude oil), GC (gold) and ZB (30-year bond). Would one of "
+             f"those work?")
     return {"conversations": [
         {"role": "system", "content": SYSTEM},
         {"role": "user", "content": ask},
@@ -413,26 +711,39 @@ def main() -> None:
     # Mix. Extraction dominates because it is the job; the rest exist so the
     # model does not treat every input as an extraction and emit a params block
     # for "hello".
+    #
+    # Four additions target production defects 1-3 (defect 4, the broadened
+    # futures roots, and defect 5's asset-class disambiguation are folded
+    # into the existing extraction/modification/clarification generators
+    # instead of new ones -- see FUTURES and make_clarification above). Each
+    # gets a small slice, not a large one: the distribution warning in the
+    # brief is specific -- enough rows to learn the behaviour, not so many
+    # that the model starts asking about, or second-guessing, symbols that
+    # were never ambiguous in the first place.
     mix = [
-        (0.55, make_extraction),
-        (0.16, make_clarification),
-        (0.13, make_modification),
-        (0.06, make_refusal),
-        (0.04, make_chitchat),
-        (0.03, make_unknown_strategy),
-        (0.03, make_unsupported_future),
+        (0.50, make_extraction),
+        (0.14, make_clarification),
+        (0.12, make_modification),
+        (0.05, make_refusal),
+        (0.035, make_chitchat),
+        (0.025, make_unknown_strategy),
+        (0.02, make_unsupported_future),
+        (0.035, make_bare_futures_direction),   # defect 1: bare long/short on an unambiguous root
+        (0.025, make_futures_options_extraction),  # defect 2: "options on {root} futures"
+        (0.02, make_share_purchase_refusal),    # defect 3: buying shares is not a strategy
     ]
     weights = [w for w, _ in mix]
     fns = [f for _, f in mix]
+
+    # Functions taking (rng, strategies); everything else takes just rng.
+    needs_strategies = (make_extraction, make_clarification, make_modification)
 
     rows, seen = [], set()
     attempts = 0
     while len(rows) < args.n and attempts < args.n * 40:
         attempts += 1
         fn = rng.choices(fns, weights)[0]
-        row = (fn(rng, strategies)
-               if fn in (make_extraction, make_clarification, make_modification)
-               else fn(rng))
+        row = fn(rng, strategies) if fn in needs_strategies else fn(rng)
         # Deduplicate on the whole conversation: templated generation repeats,
         # and duplicates are wasted steps that also skew the eval.
         key = json.dumps(row, sort_keys=True)

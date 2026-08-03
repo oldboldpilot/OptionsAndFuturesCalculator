@@ -22,6 +22,12 @@
 - [Tensor observer](../backend/docs/TENSOR_OBSERVER.md) — runtime per-layer
   inspection of the inference engine, attachable by environment variable to an
   already-built release binary
+- [Evaluating a strategy-assistant model](guides/ASSISTANT_EVALUATION.md) — how the
+  assistant is served in-process by sensen, and how to measure a candidate against
+  it. Do not use llama.cpp: it scored the deployed model 7/16 and triggered a
+  retrain for a regression that did not exist (13/16 measured correctly).
+- [Strategy assistant pipeline](STRATEGY_ASSISTANT_PIPELINE.md) — dataset
+  generation through QLoRA, merge/export/quantize, and the serving constraints
 - [Billing worker](../workers/billing/README.md) — Stripe checkout, licence
   minting, Supabase tier writes. **Register all four Stripe webhook events**; the
   README currently lists three, and omitting
@@ -49,6 +55,7 @@ smoke client.
 
 ## Session logs
 
+- [2026-08-03 — frontend served by Workers not Pages, Pro gate verified, assistant eval corrected](session_logs/session_2026-08-03_frontend_workers_pro_gate_and_assistant_eval.md)
 - [2026-08-01 — assistant, sensen performance, Pro tier](session_logs/session_2026-08-01_assistant_sensen_perf_and_pro.md)
 - [2026-07-30 — libc++ std module investigation](session_logs/2026-07-30_libcxx_std_module_investigation.md)
 - [2026-07-30 — calendar spread and matrix axis](session_logs/2026-07-30_calendar_spread_and_matrix_axis.md)
