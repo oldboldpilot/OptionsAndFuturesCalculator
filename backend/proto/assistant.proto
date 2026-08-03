@@ -97,6 +97,22 @@ message StrategyParams {
   string strategy = 3;        // one of the 48 catalogued strategy names
   int32 expiration_days = 4;  // calendar days out, as the trader stated it
   int32 quantity = 5;         // contracts/lots, not shares or notional
+
+  // The FAR leg's expiry, for the five catalogued strategies that structurally
+  // need two (calendar, diagonal, double diagonal, PMCC, futures calendar).
+  // `expiration_days` is the near leg for those.
+  //
+  // 0 means "not stated". That is the common case and is NOT an error: a trader
+  // who says "calendar spread on CL, 45 days" has given the near leg only, and
+  // the calculator's own UI already completes the far one from a second chain
+  // ("Needs two expiries -- add these legs from two chains",
+  // StrategySelector.tsx). Refusing the request outright instead -- which this
+  // service did until 2026-08-03 -- made all five of those strategies
+  // unreachable through the assistant even though the engine prices them.
+  //
+  // When present it must be strictly greater than `expiration_days`; a far leg
+  // at or before the near leg is not a calendar spread.
+  int32 far_expiration_days = 6;
 }
 
 // The one short question the model needs answered before it can commit to a

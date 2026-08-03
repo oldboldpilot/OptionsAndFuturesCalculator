@@ -137,12 +137,36 @@ rows where asking a question *is* the pass condition. So for the deployed model,
 The 2-epoch retrain was **not deployed**. Halving the epochs made it materially
 worse, which also refutes the working theory that 4 epochs had overfit.
 
-Remaining genuine defects in the deployed model, all of the same shape — no
-`<params>` emitted for a bare futures directive:
+### The holdout now passes 16/16 — with no retrain
 
-- `Long NQ, 45 days, 2 contracts.`
-- `Short GC, 60 days, 1 contract.`
-- `gold outright long, 30 days, 3 contracts`
+Every remaining failure turned out to be an engine defect, not a model one. The
+deployed model was unchanged throughout; three fixes took it from 13/16 to
+**16/16** at the RPC layer:
+
+1. **Bare futures directives were refused.** The model reads "Long NQ, 45 days,
+   2 contracts." as a request to PLACE a trade and answers in prose, emitting no
+   params. `recover_bare_futures_directive` (assistant_verification.cppm) parses
+   that one shape deterministically and feeds the result through the SAME
+   validation and GP-ARA gate the model's own output faces. Fixed NQ, GC and
+   `gold outright long`.
+2. **An unclosed `<think>` swallowed a correct answer.** `strip_think_block`
+   dropped everything when `</think>` was missing, on the assumption that meant
+   truncation. The model actually emits `<think>\n\n<params>{...}</params>` --
+   130 bytes, `</params>` balanced, simply missing the closing think tag. A
+   complete answer was being discarded as unparseable. Fixed the NVDA baseline.
+3. **The five two-expiry strategies were unreachable.** `StrategyParams` had one
+   `expiration_days`, so the verifier refused calendar, diagonal, double
+   diagonal, PMCC and futures calendar outright -- strategies the calculator
+   prices and sells. A trader asking "calendar spread on CL, 45 days" got a
+   refusal. `far_expiration_days` was added as an optional field; a near leg
+   alone is now accepted and the UI completes the far one from a second chain,
+   exactly as `StrategySelector.tsx` already does. What is still refused is a far
+   leg at or before the near leg, which no second chain can repair.
+
+Worth noting for its own sake: fix 3 also made `crude oil calendar spread, 60
+days` resolve its ambiguous `CL` root. The ambiguity inference had always been
+able to settle it from the Futures category plus lexical support, but the
+multi-expiry refusal fired first, so that path was dead for all five strategies.
 
 ## Dataset facts worth keeping
 

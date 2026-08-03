@@ -154,11 +154,58 @@ single-turn 66.2%, 47 strategies with min 546 / median 605 / max 657 rows. Well
 balanced. The conclusion is unchanged — the dataset was never the problem — but
 the numbers previously recorded described a file the model never saw.
 
-### Remaining genuine defects
+### 16/16, and not one line of it was the model
 
-The deployed model emits no `<params>` for a bare futures directive:
-`Long NQ, 45 days, 2 contracts.` · `Short GC, 60 days, 1 contract.` ·
-`gold outright long, 30 days, 3 contracts`.
+The remaining failures all turned out to be ENGINE defects. The deployed model
+was never changed; three fixes took the holdout from 13/16 to **16/16** at the
+RPC layer. Each had been sitting behind a plausible-sounding comment.
+
+**1. Bare futures directives were refused.** The model reads "Long NQ, 45 days,
+2 contracts." as a request to PLACE a trade and answers in prose, emitting no
+params. `recover_bare_futures_directive` parses exactly that shape
+deterministically and feeds the result through the SAME validation and GP-ARA
+gate the model's own output faces -- a recovery, not an override, so it can turn
+a wrong refusal into a correct answer but never a refusal into a wrong answer. It
+returns nullopt on any partial match; 15 tests pin that, 11 of them negative
+controls (options strategies, share purchases, missing quantity, contradictory
+direction, unknown roots).
+
+**2. An unclosed `<think>` swallowed a correct answer.** `strip_think_block`
+dropped everything when `</think>` was missing, documented as "the model hit the
+token ceiling mid-reasoning ... leaves nothing to interpret". The real output is
+`<think>\n\n<params>{...}</params>` -- 130 bytes, `</params>` balanced, simply
+missing the closing think tag. Not truncation: a complete answer being discarded
+as unparseable. That alone was failing the `bull call spread on NVDA` baseline in
+production while the model had gotten it right.
+
+**3. The five two-expiry strategies were unreachable.** `StrategyParams` carried
+one `expiration_days`, so the verifier refused calendar, diagonal, double
+diagonal, PMCC and futures calendar outright. The comment argued a single field
+"can never resolve that" -- sound about the FIELD, wrong about the PRODUCT: the
+calculator prices all five and its UI already completes the far leg from a second
+chain (`StrategySelector.tsx`). A trader asking "calendar spread on CL, 45 days"
+was refused for asking about a strategy this calculator sells. Added optional
+`far_expiration_days`; a near leg alone is accepted, and what is still refused is
+a far leg at or before the near leg, which no second chain can repair.
+
+I initially called these three rows a holdout-vs-design disagreement and said the
+holdout was wrong. That was the wrong call, and the correction came from being
+told to fix it rather than excuse it. The schema was the defect.
+
+Fix 3 also revived the ambiguity inference for those strategies: `crude oil
+calendar spread, 60 days` now resolves its `CL` root from the Futures category
+plus lexical support. That path had always existed but the multi-expiry refusal
+fired first, so it was dead for all five.
+
+**Automated reasoner:** the cross-field rules live in
+`AssistantParamsDomain::translate()`, which is the GP-ARA domain itself, so the
+reasoner is updated by construction -- `RuleBasedReasoner` consumes the resulting
+`VerificationFacts` verdict and there is no separate SMT encoding to keep in
+sync. Its banner's own worked example of a contradiction ("a calendar spread
+asked to live inside a single expiration_days field") was exactly the rule that
+changed, and now describes the ordering rule that replaced it.
+
+Verification tests: 92 -> **111 checks, 0 failed**.
 
 ---
 

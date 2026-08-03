@@ -13,8 +13,8 @@
 // failure mode that structure cannot see: fields that are each individually
 // well-formed but CONTRADICT each other -- a crude-oil futures root
 // ("CL") tagged asset_class=EQUITY, a futures-only strategy paired with a
-// crypto symbol, a calendar spread asked to live inside a single
-// expiration_days field. This module is the mandatory gate that catches
+// crypto symbol, a calendar spread whose far leg is not after its near leg.
+// This module is the mandatory gate that catches
 // those contradictions before a single field of the model's output reaches
 // `calculator.assistant.StrategyParams`.
 //
@@ -33,7 +33,7 @@
 // `std::expected<bool, ReasonerError>`), but it decides each of the boolean
 // facts `AssistantParamsDomain::translate()` computes by direct evaluation
 // rather than by discharging an SMT formula. Nothing here needs a solver:
-// every constraint is a closed-form comparison over five short strings/ints,
+// every constraint is a closed-form comparison over six short strings/ints,
 // not a system requiring search. Should a real SMT backend become available
 // to this binary later, `Z3Reasoner` is a drop-in replacement for
 // `RuleBasedReasoner` against the exact same `AssistantParamsDomain` -- nothing
@@ -66,7 +66,7 @@
 // equity ticker today: "ES"/Eversource Energy and "CL"/Colgate-Palmolive
 // both do; "NQ", "GC" and "ZB" do not) is deliberately NOT modelled as this
 // module's own Indeterminate. Resolving which asset class a trader meant
-// needs information this static, five-field reasoner has no access to --
+// needs information this static, six-field reasoner has no access to --
 // either live market data (`assistant_service.cpp`'s `probe_symbol()`,
 // Resolved / Unknown / AssetClassMismatch -> Clarification) or the trader's
 // own utterance (`detect_asset_class_signal()`/`build_ambiguity_clarification()`
@@ -75,7 +75,7 @@
 // `translate()` and an indecisive one short-circuits to a Clarification
 // without paying for GP-ARA or a network round trip). Both live outside this
 // module for the same reason: neither the utterance's free text nor a live
-// quote is a "closed-form comparison over five short strings/ints" this
+// quote is a "closed-form comparison over six short strings/ints" this
 // reasoner's own file banner promises to be. This module proving an
 // ambiguous-root input Proven says only "nothing here contradicts itself on
 // paper" -- it does not skip either check that runs around it.
@@ -85,6 +85,7 @@ module;
 #include <cstdint>
 #include <expected>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -98,7 +99,7 @@ import strategy_catalogue;
 namespace options_calculator::assistant::verify {
 
 // ---------------------------------------------------------------------------
-// The five output fields, as GP-ARA's InputDataType.
+// The output fields, as GP-ARA's InputDataType.
 // ---------------------------------------------------------------------------
 
 /** Mirrors `calculator.assistant.StrategyParams` field for field. Kept as a
@@ -111,6 +112,9 @@ export struct AssistantParamsInput {
     std::string strategy;
     std::int64_t expiration_days = 0;
     std::int64_t quantity = 0;
+    /** Far leg for a multi-expiry strategy. 0 means "not stated", which is the
+     *  common case and is not an error -- see assistant.proto's own comment. */
+    std::int64_t far_expiration_days = 0;
 };
 
 /** Which of the existing `Refusal::Reason` values (see assistant.proto) a
@@ -647,25 +651,42 @@ export class AssistantParamsDomain {
             return f;
         }
 
-        // ---- strategy: needs two distinct expiries this schema cannot carry ----
+        // ---- strategy: the two-expiry strategies ----
         //
-        // `StrategyParams` (assistant.proto) has exactly one `expiration_days`
-        // field. `strategy_catalogue::StrategyInfo::multi_expiry` marks the
-        // strategies that structurally need two (calendar/diagonal spreads,
-        // double diagonal, PMCC, futures calendar spread) -- and the
-        // calculator's own UI already refuses to build one of these from a
-        // single chain ("Needs two expiries -- add these legs from two
-        // chains", frontend/src/components/StrategySelector.tsx). A single
-        // expiration_days value can never resolve that regardless of what
-        // number the model emits, so this is a definite contradiction, not a
-        // bounds question -- checked before, and independent of, the
-        // expiration_days range check below.
-        if (info->multi_expiry) {
+        // `strategy_catalogue::StrategyInfo::multi_expiry` marks the five that
+        // structurally need two expiries (calendar/diagonal spreads, double
+        // diagonal, PMCC, futures calendar spread).
+        //
+        // This used to refuse them outright, on the reasoning that one
+        // `expiration_days` field "can never resolve that". The reasoning was
+        // sound about the FIELD and wrong about the PRODUCT: the calculator
+        // prices all five, and its UI already completes the far leg from a
+        // second chain ("Needs two expiries -- add these legs from two chains",
+        // frontend/src/components/StrategySelector.tsx). Refusing here made
+        // every one of them unreachable through the assistant -- a trader who
+        // said "calendar spread on CL, 45 days" got a refusal for asking about
+        // a strategy this calculator sells.
+        //
+        // So a stated near leg alone is accepted and the UI finishes the job.
+        // What is still a definite contradiction is a far leg that is not after
+        // the near one, which no second chain can repair.
+        if (info->multi_expiry && in.far_expiration_days != 0 &&
+            in.far_expiration_days <= in.expiration_days) {
+            f.violated = true;
+            f.reason = ReasonCode::UnsupportedStrategy;
+            f.detail = "\"" + in.strategy + "\" needs its far leg after its near leg, but got " +
+                       std::to_string(in.far_expiration_days) + " against " +
+                       std::to_string(in.expiration_days) + ".";
+            return f;
+        }
+        // A far expiry on a strategy with only one leg-expiry is meaningless and
+        // signals the model mixed up two strategies; refuse rather than silently
+        // dropping a field the trader may have stated deliberately.
+        if (!info->multi_expiry && in.far_expiration_days != 0) {
             f.violated = true;
             f.reason = ReasonCode::UnsupportedStrategy;
             f.detail = "\"" + in.strategy +
-                       "\" needs two distinct expiries; a single expiration_days field cannot "
-                       "express that.";
+                       "\" has a single expiry, but a far expiration was also given.";
             return f;
         }
 
@@ -866,7 +887,7 @@ export [[nodiscard]] auto verify_assistant_params(const AssistantParamsInput& in
 // named at all?
 //
 // WHY THIS EXISTS: `translate()` above is deliberately blind to the
-// utterance -- its whole contract is "closed-form comparison over five short
+// utterance -- its whole contract is "closed-form comparison over six short
 // strings/ints" (file banner), and it must stay that way, because
 // `verify_assistant_params` already has callers/tests (this file's own
 // `test_assistant_verification.cpp`, e.g. "CL claimed as EQUITY... deferred
@@ -1085,6 +1106,151 @@ export [[nodiscard]] auto infer_ambiguous_root_asset_class(std::string_view symb
     if (verify_assistant_params(futures_candidate).outcome != Outcome::Proven) return std::nullopt;
     if (!strategy_has_lexical_support(strategy, context)) return std::nullopt;
     return std::string{"FUTURES"};
+}
+
+// ---------------------------------------------------------------------------
+// Deterministic recovery for a bare futures directive
+// ---------------------------------------------------------------------------
+
+namespace detail {
+
+/** Commodity and index words a trader uses instead of the exchange root.
+ *
+ * Only roots this calculator already prices (`kKnownFuturesRoots`) appear here.
+ * A word that maps to an instrument the engine cannot price would turn a clean
+ * refusal into a wrong answer, which is strictly worse.
+ */
+struct RootWord {
+    std::string_view word;
+    std::string_view root;
+};
+constexpr std::array<RootWord, 12> kRootWords{{
+    {"gold", "GC"},
+    {"crude", "CL"},
+    {"crude oil", "CL"},
+    {"wti", "CL"},
+    {"oil", "CL"},
+    {"e-mini s&p", "ES"},
+    {"e-mini", "ES"},
+    {"s&p", "ES"},
+    {"nasdaq", "NQ"},
+    {"30-year bond", "ZB"},
+    {"t-bond", "ZB"},
+    {"treasury bond", "ZB"},
+}};
+
+/** Vocabulary that means the request is NOT a bare futures directive.
+ *
+ * If any of this appears, the utterance is about options (or about buying the
+ * underlying outright), and forcing a futures reading would invent a position
+ * the trader did not ask for. The whole value of this recovery is that it fires
+ * only on the shape it can parse with certainty.
+ */
+constexpr std::array<std::string_view, 14> kNotBareFutures{
+    "call", "put", "option", "spread", "condor", "butterfly", "straddle",
+    "strangle", "strike", "collar", "share", "stock", "covered", "calendar"};
+
+/** First integer immediately preceding any of `units`, e.g. "45 days" -> 45. */
+[[nodiscard]] auto number_before(std::string_view lowered,
+                                 std::span<const std::string_view> units) -> std::optional<std::int64_t> {
+    for (const auto unit : units) {
+        std::size_t from = 0;
+        while ((from = lowered.find(unit, from)) != std::string_view::npos) {
+            // Walk back over the separating spaces, then over the digits.
+            std::size_t end = from;
+            while (end > 0 && lowered[end - 1] == ' ') --end;
+            std::size_t start = end;
+            while (start > 0 && lowered[start - 1] >= '0' && lowered[start - 1] <= '9') --start;
+            if (start < end) {
+                std::int64_t value = 0;
+                for (std::size_t i = start; i < end; ++i) {
+                    value = value * 10 + (lowered[i] - '0');
+                    if (value > kMaxExpirationDays * 100) return std::nullopt;  // absurd, refuse
+                }
+                return value;
+            }
+            // Spelled-out quantities: only the small words a trader actually types.
+            constexpr std::array<std::pair<std::string_view, std::int64_t>, 5> kWords{
+                {{"one", 1}, {"two", 2}, {"three", 3}, {"four", 4}, {"five", 5}}};
+            for (const auto& [w, v] : kWords) {
+                if (end >= w.size() && lowered.substr(end - w.size(), w.size()) == w) return v;
+            }
+            from += unit.size();
+        }
+    }
+    return std::nullopt;
+}
+
+}  // namespace detail
+
+/**
+ * Recovers parameters from a bare directional futures order the model declined.
+ *
+ * The fine-tuned model reads "Long NQ, 45 days, 2 contracts." as a request to
+ * PLACE a trade and answers with prose ("I can't price a position directly"),
+ * emitting no `<params>` block at all. Measured 2026-08-03, that is 3 of the 16
+ * defect-holdout rows -- NQ, GC, and a commodity named in words ("gold outright
+ * long") -- while the identically-shaped ES row succeeds, so it is a gap in what
+ * the model learned rather than a missing capability in the calculator.
+ *
+ * This does NOT second-guess the model. It runs only when the model produced no
+ * params at all, and its output goes back through the SAME validation and GP-ARA
+ * gate the model's own output does -- a recovered guess that cannot be proven
+ * safe is refused exactly like a hallucinated one.
+ *
+ * Deliberately narrow. It fires only when every one of these holds, because a
+ * partial match is a guess and this returns nullopt rather than guessing:
+ *   - a direction word (long/short/buy/sell) is present
+ *   - a futures root resolves, by ticker or by commodity word
+ *   - an expiration in days and a contract quantity are both stated
+ *   - NO options or share vocabulary appears anywhere in the utterance
+ *
+ * Returns the `<params>` JSON object as a string, so the caller feeds it through
+ * the identical path an extracted block takes and no second parser exists.
+ */
+export [[nodiscard]] auto recover_bare_futures_directive(std::string_view utterance)
+    -> std::optional<std::string> {
+    const std::string lowered = detail::to_lower_copy(utterance);
+
+    for (const auto bad : detail::kNotBareFutures) {
+        if (detail::contains_ci(lowered, bad)) return std::nullopt;
+    }
+
+    const bool is_short = detail::contains_ci(lowered, "short") || detail::contains_ci(lowered, "sell");
+    const bool is_long = detail::contains_ci(lowered, "long") || detail::contains_ci(lowered, "buy");
+    if (is_short == is_long) return std::nullopt;  // neither, or contradictory
+
+    // An explicit exchange root wins over a commodity word: "gold" inside a
+    // sentence that also names GC should resolve once, not twice.
+    std::string_view root;
+    for (const auto known : detail::kKnownFuturesRoots) {
+        const std::string needle = detail::to_lower_copy(known);
+        if (detail::contains_ci(lowered, needle)) { root = known; break; }
+    }
+    if (root.empty()) {
+        for (const auto& [word, mapped] : detail::kRootWords) {
+            if (detail::contains_ci(lowered, word)) { root = mapped; break; }
+        }
+    }
+    if (root.empty()) return std::nullopt;
+
+    constexpr std::array<std::string_view, 2> kDayUnits{"day", "dte"};
+    constexpr std::array<std::string_view, 3> kQtyUnits{"contract", "lot", "future"};
+    const auto days = detail::number_before(lowered, kDayUnits);
+    const auto qty = detail::number_before(lowered, kQtyUnits);
+    if (!days.has_value() || !qty.has_value()) return std::nullopt;
+
+    const AssistantParamsInput candidate{.symbol = std::string{root},
+                                         .asset_class = "FUTURES",
+                                         .strategy = is_short ? "futures_short" : "futures_long",
+                                         .expiration_days = *days,
+                                         .quantity = *qty};
+    if (verify_assistant_params(candidate).outcome != Outcome::Proven) return std::nullopt;
+
+    return std::string{"{\"symbol\":\""} + std::string{root} +
+           "\",\"asset_class\":\"FUTURES\",\"strategy\":\"" + candidate.strategy +
+           "\",\"expiration_days\":" + std::to_string(*days) +
+           ",\"quantity\":" + std::to_string(*qty) + "}";
 }
 
 }  // namespace options_calculator::assistant::verify

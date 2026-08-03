@@ -82,15 +82,29 @@ auto main() -> int {
                     .expiration_days = 30, .quantity = 1},
                    Outcome::Unsafe, "futures_short strategy with asset_class=CRYPTO");
 
-    // A calendar spread is BOTH futures-only-shaped (per the task's example
-    // wording) and multi_expiry -- check the multi_expiry rule fires
-    // regardless of which asset_class accompanies it.
+    // The two-expiry strategies. These used to be Unsafe unconditionally, which
+    // made all five of them unreachable through the assistant even though the
+    // calculator prices them; a near leg alone is now accepted and the UI
+    // completes the far one from a second chain. What remains Unsafe is a far
+    // leg that is not after the near leg, which no second chain can repair.
     expect_outcome({.symbol = "ES", .asset_class = "FUTURES", .strategy = "futures_calendar",
                     .expiration_days = 60, .quantity = 1},
-                   Outcome::Unsafe, "futures_calendar (multi_expiry) even with matching asset_class");
+                   Outcome::Proven, "futures_calendar with the near leg only is accepted");
     expect_outcome({.symbol = "SPY", .asset_class = "EQUITY", .strategy = "calendar_spread",
                     .expiration_days = 60, .quantity = 1},
-                   Outcome::Unsafe, "calendar_spread (multi_expiry, options) rejected regardless of days");
+                   Outcome::Proven, "calendar_spread with the near leg only is accepted");
+    expect_outcome({.symbol = "ES", .asset_class = "FUTURES", .strategy = "futures_calendar",
+                    .expiration_days = 30, .quantity = 1, .far_expiration_days = 90},
+                   Outcome::Proven, "futures_calendar with a far leg after the near leg");
+    expect_outcome({.symbol = "ES", .asset_class = "FUTURES", .strategy = "futures_calendar",
+                    .expiration_days = 90, .quantity = 1, .far_expiration_days = 30},
+                   Outcome::Unsafe, "futures_calendar with the far leg BEFORE the near leg");
+    expect_outcome({.symbol = "ES", .asset_class = "FUTURES", .strategy = "futures_calendar",
+                    .expiration_days = 60, .quantity = 1, .far_expiration_days = 60},
+                   Outcome::Unsafe, "futures_calendar with both legs on the same expiry");
+    expect_outcome({.symbol = "ES", .asset_class = "FUTURES", .strategy = "futures_long",
+                    .expiration_days = 30, .quantity = 1, .far_expiration_days = 90},
+                   Outcome::Unsafe, "a far expiry on a single-expiry strategy is refused");
 
     // An equity/options-only strategy with asset_class=FUTURES.
     expect_outcome({.symbol = "NVDA", .asset_class = "FUTURES", .strategy = "bull_call_spread",
@@ -576,17 +590,19 @@ auto main() -> int {
               "through to asking, exactly as the task brief requires");
     }
 
-    // A Futures-category strategy that structurally CANNOT be this
-    // candidate: futures_calendar is multi_expiry, so `verify_assistant_params`
-    // is Unsafe for it under ANY asset_class, FUTURES included. Confirms the
-    // category constraint alone is not enough -- the full mandatory gate
-    // must also pass.
+    // futures_calendar on an ambiguous root, with decisive wording. This used to
+    // assert NOT-inferred, because the multi_expiry rule made the strategy
+    // Unsafe under every asset_class. Now that a near-leg-only calendar is a
+    // legitimate request, the Futures category plus lexical support resolves the
+    // root exactly as it does for any other Futures-category strategy -- which
+    // is the point of the inference, and was previously unreachable for the five
+    // two-expiry strategies.
     {
         const auto inferred = infer_ambiguous_root_asset_class(
             "ES", "futures_calendar", 60, 1, "Long ES futures calendar spread, near and far months.");
-        check(!inferred.has_value(),
-              "futures_calendar (multi_expiry) on ambiguous root ES is NOT inferred, even though its category "
-              "is Futures and the wording is decisive -- a single expiration_days field still cannot carry it");
+        check(inferred.has_value() && *inferred == "FUTURES",
+              "futures_calendar on ambiguous root ES resolves to FUTURES once a near-leg-only "
+              "calendar is a valid request");
     }
 
     // THE SECOND GATE IN ACTION: a Futures-category strategy that is
@@ -652,6 +668,69 @@ auto main() -> int {
                     static_cast<long long>(total_ns), ns_per_call, ns_per_call / 1000.0);
         check(ns_per_call < 50'000.0,
               "verification is cheap relative to ~1.1s generation (< 50us/call)");
+    }
+
+    // -----------------------------------------------------------------------
+    // recover_bare_futures_directive
+    //
+    // The fine-tune reads a bare directional futures order as a request to PLACE
+    // a trade and answers with prose, emitting no <params> at all -- 3 of the 16
+    // defect-holdout rows on 2026-08-03. These lock in that the recovery fires on
+    // exactly that shape and, more importantly, that it stays silent everywhere
+    // else: a recovery that guesses is worse than the refusal it replaces.
+    // -----------------------------------------------------------------------
+    {
+        std::printf("\n=== Bare-futures directive recovery ===\n");
+        using ::options_calculator::assistant::verify::recover_bare_futures_directive;
+
+        const auto expect = [&](std::string_view utterance, std::string_view wanted,
+                                const std::string& label) {
+            const auto got = recover_bare_futures_directive(utterance);
+            check(got.has_value() && *got == wanted,
+                  label + " -> " + (got.has_value() ? *got : std::string{"<none>"}));
+        };
+        const auto expect_none = [&](std::string_view utterance, const std::string& label) {
+            const auto got = recover_bare_futures_directive(utterance);
+            check(!got.has_value(),
+                  label + (got.has_value() ? " -> WRONGLY recovered " + *got : ""));
+        };
+
+        // The three production defects this exists for.
+        expect("Long NQ, 45 days, 2 contracts.",
+               R"({"symbol":"NQ","asset_class":"FUTURES","strategy":"futures_long","expiration_days":45,"quantity":2})",
+               "bare long on a known root");
+        expect("Short GC, 60 days, 1 contract.",
+               R"({"symbol":"GC","asset_class":"FUTURES","strategy":"futures_short","expiration_days":60,"quantity":1})",
+               "bare short on a known root");
+        expect("gold outright long, 30 days, 3 contracts",
+               R"({"symbol":"GC","asset_class":"FUTURES","strategy":"futures_long","expiration_days":30,"quantity":3})",
+               "commodity named in words maps to its root");
+
+        // Spelled-out quantity, the way a trader actually types it.
+        expect("Long ES, 30 days, one contract",
+               R"({"symbol":"ES","asset_class":"FUTURES","strategy":"futures_long","expiration_days":30,"quantity":1})",
+               "spelled-out quantity");
+
+        // Everything below must stay silent. Each is a shape where a forced
+        // futures reading would invent a position the trader did not ask for.
+        expect_none("Buy a bull call spread on NVDA expiring in 45 days, 2 contracts.",
+                    "an options strategy is never recovered as futures");
+        expect_none("Iron condor on SPY, 30 days out, one contract.",
+                    "a multi-leg options strategy is not recovered");
+        expect_none("calendar spread on CL, 45 days",
+                    "a calendar spread is not recovered (two expiries, one field)");
+        expect_none("Buy 100 shares of ES stock, Eversource, 30 days.",
+                    "buying the underlying outright is not recovered");
+        expect_none("I want options on ES futures, 30 days out, 1 contract",
+                    "options ON futures is not a bare futures directive");
+        expect_none("Long NQ, 2 contracts.", "no expiration stated -> no guess");
+        expect_none("Long NQ, 45 days.", "no quantity stated -> no guess");
+        expect_none("NQ, 45 days, 2 contracts.", "no direction stated -> no guess");
+        expect_none("long and short NQ, 45 days, 2 contracts.",
+                    "contradictory direction -> no guess");
+        expect_none("Long TSLA, 45 days, 2 contracts.",
+                    "an equity ticker is not a futures root");
+        expect_none("Long ZZ, 45 days, 2 contracts.", "an unknown root -> no guess");
     }
 
     std::printf("\n=== Results: %d checks, %d failed ===\n", g_checks, g_failures);

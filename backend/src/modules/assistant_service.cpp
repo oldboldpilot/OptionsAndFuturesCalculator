@@ -82,7 +82,7 @@ constexpr std::string_view kSystemPrompt =
 /**
  * Upper bound on generated tokens per call.
  *
- * A `<params>` JSON blob (five short fields) or a one-sentence clarifying
+ * A `<params>` JSON blob (six short fields, one of them optional) or a one-sentence clarifying
  * question both fit comfortably inside this many tokens; it exists mainly to
  * bound the worst case -- a model that fails to emit a closing tag and just
  * keeps going -- so one bad call cannot hold the single worker thread for an
@@ -1457,10 +1457,25 @@ class AssistantWorker {
  * empty -- so its presence carries no information and cannot be used to detect
  * anything. Only what comes AFTER it is the model's actual answer.
  *
- * An unterminated `<think>` (the model hit the token ceiling mid-reasoning)
- * leaves nothing to interpret, so everything is dropped and the caller falls
- * through to its refusal path rather than showing a trader a severed reasoning
- * trace. Text with no `<think>` at all is returned unchanged. */
+ * An unterminated `<think>` USUALLY means the model hit the token ceiling
+ * mid-reasoning, leaving nothing to interpret -- everything is dropped and the
+ * caller falls through to its refusal path rather than showing a trader a
+ * severed reasoning trace. Text with no `<think>` at all is returned unchanged.
+ *
+ * But "unterminated" does not always mean "truncated", and assuming it did was
+ * silently discarding correct answers. The deployed model answers
+ *
+ *     <think>\n\n<params>{"symbol":"NVDA",...}</params>
+ *
+ * -- 130 bytes, `</params>` present and balanced, simply missing `</think>`.
+ * That is a COMPLETE answer, not a severed trace, and dropping it turned a
+ * correct parse into "the assistant could not produce structured parameters".
+ * Measured 2026-08-03: it is why the `bull call spread on NVDA` baseline failed
+ * in production while the model itself had gotten it right.
+ *
+ * So an unterminated block is dropped only up to a complete `<params>` block, if
+ * one follows. With no such block the original all-or-nothing behaviour stands,
+ * because then there really is nothing safe to show. */
 [[nodiscard]] auto strip_think_block(std::string_view text) -> std::string {
     constexpr std::string_view kOpen = "<think>";
     constexpr std::string_view kClose = "</think>";
@@ -1469,7 +1484,19 @@ class AssistantWorker {
     if (open == std::string_view::npos) return std::string{text};
 
     const auto close = text.find(kClose, open + kOpen.size());
-    if (close == std::string_view::npos) return {};
+    if (close == std::string_view::npos) {
+        // Rescue a complete params block that a missing </think> would otherwise
+        // swallow. Both tags must be present, in order, or this is a genuine
+        // truncation and the caller should refuse.
+        constexpr std::string_view kParamsOpen = "<params>";
+        constexpr std::string_view kParamsClose = "</params>";
+        const auto p_open = text.find(kParamsOpen, open + kOpen.size());
+        if (p_open == std::string_view::npos) return {};
+        if (text.find(kParamsClose, p_open + kParamsOpen.size()) == std::string_view::npos) return {};
+        std::string rescued{text.substr(0, open)};
+        rescued += text.substr(p_open);
+        return rescued;
+    }
 
     std::string out{text.substr(0, open)};
     out += text.substr(close + kClose.size());
@@ -1880,6 +1907,24 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
         return;
     }
 
+    // Optional far leg, for the five two-expiry strategies. Absent is the common
+    // case and means "the trader gave only the near leg" -- the UI completes it
+    // from a second chain. Only a present-but-nonsense value is refused here;
+    // the near/far ORDER is the verifier's business, since that is a cross-field
+    // rule and this loop is per-field.
+    std::int64_t far_expiration_days = 0;
+    if (obj.contains("far_expiration_days") && obj["far_expiration_days"].is_number()) {
+        far_expiration_days = obj["far_expiration_days"].as_int64();
+        if (far_expiration_days != 0 &&
+            (far_expiration_days < kMinExpirationDays || far_expiration_days > kMaxExpirationDays)) {
+            populate_refusal(response, calculator::assistant::Refusal::OUT_OF_SCOPE,
+                             "The assistant's far expiration (" +
+                                 std::to_string(far_expiration_days) +
+                                 " days) is out of a sane range.");
+            return;
+        }
+    }
+
     if (!obj.contains("quantity") || !obj["quantity"].is_number()) {
         populate_refusal(response, calculator::assistant::Refusal::OUT_OF_SCOPE,
                          "The assistant did not give a quantity for this request.");
@@ -2063,7 +2108,8 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
          .asset_class = asset_class,
          .strategy = strategy,
          .expiration_days = expiration_days,
-         .quantity = quantity});
+         .quantity = quantity,
+         .far_expiration_days = far_expiration_days});
     const auto verification_us = std::chrono::duration_cast<std::chrono::microseconds>(
                                       std::chrono::steady_clock::now() - verification_start)
                                       .count();
@@ -2141,6 +2187,7 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
     params->set_strategy(strategy);
     params->set_expiration_days(static_cast<std::int32_t>(expiration_days));
     params->set_quantity(static_cast<std::int32_t>(quantity));
+    params->set_far_expiration_days(static_cast<std::int32_t>(far_expiration_days));
 }
 
 /**
@@ -2189,6 +2236,29 @@ auto interpret_model_output(const std::string& raw_text, std::string_view uttera
 
     if (const auto block = extract_params_block(visible); block.has_value()) {
         validate_and_populate_params(trim(*block), utterance, prior_clarification, response);
+        return;
+    }
+
+    // The model emitted no params. Before treating its prose as a clarifying
+    // question, try the one shape it is known to decline wrongly: a bare
+    // directional futures order ("Long NQ, 45 days, 2 contracts."), which it
+    // reads as a request to PLACE a trade and answers with "I can't price a
+    // position directly". Measured 2026-08-03 that is 3 of 16 defect-holdout
+    // rows, while the identically-shaped ES row succeeds -- a gap in what the
+    // model learned, not a missing capability.
+    //
+    // This is a recovery, not an override: it runs ONLY when there is no params
+    // block, and its result goes through `validate_and_populate_params` -- the
+    // same per-field validation and the same mandatory GP-ARA gate the model's
+    // own output faces. A recovered guess that cannot be proven safe is refused
+    // exactly like a hallucinated one, so this can turn a wrong refusal into a
+    // correct answer but never a refusal into a wrong answer.
+    if (const auto recovered =
+            ::options_calculator::assistant::verify::recover_bare_futures_directive(utterance);
+        recovered.has_value()) {
+        std::fprintf(stderr, "[assistant] recovered bare futures directive: %s\n", recovered->c_str());
+        std::fflush(stderr);
+        validate_and_populate_params(*recovered, utterance, prior_clarification, response);
         return;
     }
 
