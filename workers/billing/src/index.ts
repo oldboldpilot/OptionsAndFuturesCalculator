@@ -391,8 +391,11 @@ async function customerEmail(env: Env, customerId: string): Promise<string | nul
 }
 
 async function sendLicenceEmail(env: Env, to: string, licence: string): Promise<void> {
-  if (!env.RESEND_API_KEY) return;
-  await fetch('https://api.resend.com/emails', {
+  if (!env.RESEND_API_KEY) {
+    console.error(`EMAIL SKIPPED for ${to}: RESEND_API_KEY is not set on this Worker.`);
+    return;
+  }
+  const res = await fetch('https://api.resend.com/emails', {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${env.RESEND_API_KEY}`,
