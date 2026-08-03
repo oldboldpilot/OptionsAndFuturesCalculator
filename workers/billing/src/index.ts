@@ -415,6 +415,19 @@ async function sendLicenceEmail(env: Env, to: string, licence: string): Promise<
         `fresh one each period, and the old one keeps working until it expires.\n`,
     }),
   });
+
+  // The response was previously discarded. That is how this failed silently:
+  // the sending domain was not verified on Resend, every send was rejected, the
+  // webhook still answered Stripe 200, and no customer received the licence
+  // that is their fallback when the payment cannot be matched to an account.
+  //
+  // Deliberately not thrown. The Supabase tier write happens before this and
+  // may well have succeeded, so making Stripe retry the whole event would
+  // re-run it. Logged with the status so it is visible in `wrangler tail`.
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '<unreadable>');
+    console.error(`licence email FAILED for ${to}: ${res.status} ${detail.slice(0, 200)}`);
+  }
 }
 
 export default {
