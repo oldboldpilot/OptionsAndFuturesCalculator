@@ -324,6 +324,55 @@ auto main() -> int {
                    Outcome::Proven,
                    "round trip step 2: ES/FUTURES/futures_long after disambiguation is Proven, not re-asked");
 
+    std::printf("\n=== GP-ARA assistant verification: near-miss strategy name normalisation ===\n");
+
+    using options_calculator::assistant::verify::normalize_strategy_alias;
+
+    // The production bug, verbatim: answering the ES clarification with
+    // "futures" makes the model emit `long_futures`, a transposition of the
+    // catalogue's real `futures_long`. Must resolve to exactly that id.
+    {
+        const auto alias = normalize_strategy_alias("long_futures");
+        check(alias.has_value() && *alias == "futures_long",
+              "normalize_strategy_alias(\"long_futures\") -> \"futures_long\"");
+    }
+
+    // A second, independently-derived transposition -- proves this is a
+    // general mechanism over the catalogue, not a hand-picked single case.
+    {
+        const auto alias = normalize_strategy_alias("short_futures");
+        check(alias.has_value() && *alias == "futures_short",
+              "normalize_strategy_alias(\"short_futures\") -> \"futures_short\"");
+    }
+    {
+        const auto alias = normalize_strategy_alias("put_long");
+        check(alias.has_value() && *alias == "long_put",
+              "normalize_strategy_alias(\"put_long\") -> \"long_put\"");
+    }
+
+    // A real catalogue id must never be "normalised" to something else --
+    // this function is only ever consulted for strings the catalogue has
+    // ALREADY rejected (see assistant_service.cpp's call site), but proving
+    // it is inert on real ids directly guards against a future caller
+    // wiring it in before the catalogue check by mistake.
+    check(!normalize_strategy_alias("futures_long").has_value(),
+          "normalize_strategy_alias(\"futures_long\") -- a REAL id -- is nullopt, not re-mapped");
+    check(!normalize_strategy_alias("bull_call_spread").has_value(),
+          "normalize_strategy_alias(\"bull_call_spread\") is nullopt (three tokens, not aliased)");
+
+    // A wholly unrelated hallucination is not silently mapped to anything --
+    // the conservative default is refusal, never a nearest-neighbour guess.
+    check(!normalize_strategy_alias("bull_call_ladder_wide").has_value(),
+          "normalize_strategy_alias(\"bull_call_ladder_wide\") is nullopt (not a two-token near miss)");
+    check(!normalize_strategy_alias("condor_iron_wide").has_value(),
+          "normalize_strategy_alias(\"condor_iron_wide\") is nullopt (three tokens)");
+
+    // crack_321 is excluded from the backend catalogue entirely (see
+    // strategy_catalogue.cppm's own header comment), so its transposition
+    // must not accidentally alias to anything either.
+    check(!normalize_strategy_alias("321_crack").has_value(),
+          "normalize_strategy_alias(\"321_crack\") is nullopt -- crack_321 is not in the backend catalogue");
+
     std::printf("\n=== GP-ARA assistant verification: Indeterminate never falls through to acceptance ===\n");
 
     // Direct reasoner-level proof that an "incomplete" fact set -- the one

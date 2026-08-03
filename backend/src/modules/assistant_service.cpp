@@ -188,16 +188,54 @@ constexpr std::int64_t kMaxQuantity = 100'000;
  * exported for reuse; duplicating four lines of string concatenation is
  * cheaper and safer than pulling in the whole HTTP surface for it.
  *
- * `prior_clarification`, when present, is represented as the assistant's own
- * preceding turn. This is a judgement call, not something the proto or the
- * training data specifies: ParseRequest deliberately does not carry the
- * ORIGINAL utterance that provoked the clarification (see assistant.proto's
- * own comment on why), so the true three-turn exchange (user, assistant
- * question, user answer) cannot be fully reconstructed -- only its last two
- * turns can. Presenting those two turns in the correct roles is the most
- * faithful representation available from what the proto actually carries,
- * and leans on the fine-tuned model's own robustness to recover the missing
- * first turn from context the way a human reading the transcript would.
+ * THIS SHAPE WAS WRONG, AND IT WAS THE ROOT CAUSE OF A PRODUCTION DEFECT:
+ * a trader asks "Long ES, 30 days, 1 contract.", correctly gets asked
+ * futures-or-equity, answers "futures", and the SAME request that produces
+ * `futures_long` when phrased with explicit futures wording instead produces
+ * the near-miss `long_futures` and gets refused. The model can clearly
+ * produce the right token; feeding it `prior_clarification` was what
+ * perturbed it.
+ *
+ * The previous version of this function put `prior_clarification` in an
+ * `assistant` turn, BEFORE the `user` turn carrying `utterance`:
+ *
+ *     assistant: futures
+ *     user: Long ES, 30 days, 1 contract.
+ *
+ * That is backwards on both axes at once against what this model actually
+ * saw in training (agent/dataset/build_dataset.py's `make_clarification`,
+ * which is 16% of the 28,500-row fine-tuning set): every clarification
+ * example there is `user(full request) -> assistant(one short question) ->
+ * user(one short reply) -> assistant(final answer)`. Putting the TRADER's
+ * own one-word reply in the ASSISTANT's mouth, and putting it BEFORE the
+ * request it is answering rather than after, is a shape this fine-tune never
+ * saw -- and Qwen3 has no other prior to fall back on, so it produced a
+ * degraded near-miss instead of the trained one.
+ *
+ * This version restores both: `utterance` (the trader's original request,
+ * which is what every observed caller -- including scripts/probe_live_
+ * assistant.py -- resends unchanged on the answering turn) is the FIRST user
+ * turn, and `prior_clarification` (the trader's short reply, e.g. "futures")
+ * is a LATER user turn, never an assistant one. A short, neutral placeholder
+ * fills the assistant slot in between so the turns keep strictly alternating
+ * roles, matching the training shape structurally -- its exact wording is
+ * not load-bearing: ParseRequest deliberately does not carry the actual
+ * question this service asked last turn (see assistant.proto's own comment
+ * on why: only the last two turns of the true three-turn exchange survive
+ * the round trip, not the first), so the real question text is not
+ * reconstructable here, and this specific ambiguous-root clarification was
+ * never itself a training example either way (the model was never taught
+ * the ES/Eversource distinction; see CLAUDE.md's own note that asset-class
+ * disambiguation is resolved by this file's static heuristics, never by the
+ * model). What the placeholder buys is ROLE and POSITION, not content: the
+ * trader's words stay attributed to the trader, in the position a genuine
+ * answer-to-a-question occupies.
+ *
+ * When `prior_clarification` is empty (every first-turn call, and every
+ * currently-passing case: SPY iron condor, NVDA bull call spread, explicit
+ * E-mini wording, explicit shares wording, CL+equity) this function emits
+ * EXACTLY the same three-turn prompt it always has -- system, user,
+ * assistant -- so none of those are touched by this change.
  */
 [[nodiscard]] auto build_prompt(std::string_view utterance, std::string_view prior_clarification)
     -> std::string {
@@ -205,14 +243,15 @@ constexpr std::int64_t kMaxQuantity = 100'000;
     prompt += "<|im_start|>system\n";
     prompt += kSystemPrompt;
     prompt += "<|im_end|>\n";
-    if (!prior_clarification.empty()) {
-        prompt += "<|im_start|>assistant\n";
-        prompt += prior_clarification;
-        prompt += "<|im_end|>\n";
-    }
     prompt += "<|im_start|>user\n";
     prompt += utterance;
     prompt += "<|im_end|>\n";
+    if (!prior_clarification.empty()) {
+        prompt += "<|im_start|>assistant\nWhich did you mean?<|im_end|>\n";
+        prompt += "<|im_start|>user\n";
+        prompt += prior_clarification;
+        prompt += "<|im_end|>\n";
+    }
     prompt += "<|im_start|>assistant\n";
     return prompt;
 }
@@ -1807,11 +1846,25 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
                          "The assistant did not name a strategy for this request.");
         return;
     }
-    const std::string strategy{obj["strategy"].as_string()};
+    std::string strategy{obj["strategy"].as_string()};
     if (!::options_calculator::strategy::is_known(strategy)) {
-        populate_refusal(response, calculator::assistant::Refusal::UNSUPPORTED_STRATEGY,
-                         "\"" + strategy + "\" is not one of the strategies this calculator prices.");
-        return;
+        // A token-order near miss (e.g. "long_futures" for the catalogue's
+        // "futures_long") is a general failure mode of a 0.6B fine-tune, not
+        // a one-off -- see assistant_verification.cppm's own doc comment for
+        // the derivation and the ambiguity guard that keeps this from ever
+        // silently redirecting to the WRONG strategy. This is a guard on top
+        // of the prompt fix in `build_prompt`, not a substitute for it: it
+        // catches whatever the prompt fix does not.
+        if (const auto alias =
+                ::options_calculator::assistant::verify::normalize_strategy_alias(strategy);
+            alias.has_value()) {
+            strategy = *alias;
+        } else {
+            populate_refusal(
+                response, calculator::assistant::Refusal::UNSUPPORTED_STRATEGY,
+                "\"" + strategy + "\" is not one of the strategies this calculator prices.");
+            return;
+        }
     }
 
     if (!obj.contains("expiration_days") || !obj["expiration_days"].is_number()) {

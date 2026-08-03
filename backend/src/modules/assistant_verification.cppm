@@ -87,6 +87,8 @@ module;
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 export module assistant_verification;
 
@@ -428,6 +430,113 @@ export [[nodiscard]] auto build_ambiguity_clarification(std::string_view symbol,
         question += "\"; let me know if that is not right either.)";
     }
     return question;
+}
+
+// ---------------------------------------------------------------------------
+// Near-miss strategy name normalisation.
+//
+// Observed against the live service: given a clarification round trip ("Long
+// ES, 30 days, 1 contract." then answered "futures"), the model emits
+// `long_futures`. The catalogue's real id is `futures_long` -- a
+// transposition of the same two tokens. This is not the model failing to
+// know the strategy: the identical trade phrased with explicit futures
+// wording ("Buy an E-mini ES futures outright...") gets `futures_long`
+// right, so the transposition is a token-order slip on THIS input, not a
+// missing capability. A 0.6B fine-tune is going to do this again for some
+// other two-token id under some other input; this is the general guard, not
+// a special case for one string.
+//
+// Derived MECHANICALLY from `strategy_catalogue::all()`, never hand-authored
+// -- see the task brief this shipped against: an invented alias list is
+// exactly the kind of drift `strategy_catalogue.cppm` itself exists to
+// prevent (that file's own banner: three places name these ids, and two of
+// them must never independently guess). For every catalogue id with EXACTLY
+// two underscore-separated tokens, the single transposition of those two
+// tokens is a candidate alias, UNLESS:
+//
+//   - that transposed string is ITSELF a different catalogue entry (then the
+//     model saying it verbatim already means that other, real strategy --
+//     there is nothing to alias, and silently redirecting it would be
+//     exactly the wrong-priced-position failure this whole mechanism exists
+//     to avoid), or
+//   - more than one catalogue id transposes to the same candidate string
+//     (then which one the model meant is genuinely ambiguous; per the task
+//     brief, "silently 'correcting' a name to the wrong strategy would be
+//     far worse than refusing", so NEITHER candidate becomes an alias and
+//     both stay a refusal).
+//
+// Ids with anything other than exactly one underscore are skipped outright:
+// a transposition of three or more tokens has more than one possible swap
+// (is "bull_call_spread" misheard as "call_bull_spread" or
+// "spread_call_bull" or ...?), which is exactly the kind of guess this
+// function refuses to make. Checked against the current 47-entry catalogue:
+// every two-token id's transposition is unique and collides with no other
+// entry, so today this excludes nothing -- but the check runs against
+// whatever `strategy_catalogue.cppm` regenerates to, not against today's
+// count, so a future catalogue addition that DOES collide is still caught.
+// ---------------------------------------------------------------------------
+
+namespace detail {
+
+/** One derived alias: `alias` is the token-order near-miss a model might
+ * emit; `canonical` is the one real catalogue id it unambiguously means. */
+struct StrategyAlias {
+    std::string alias;
+    std::string canonical;
+};
+
+[[nodiscard]] auto build_strategy_aliases() -> std::vector<StrategyAlias> {
+    std::vector<std::pair<std::string, std::string>> candidates;
+    for (const auto& info : ::options_calculator::strategy::all()) {
+        const std::string id{info.id};
+        const auto sep = id.find('_');
+        if (sep == std::string::npos || id.find('_', sep + 1) != std::string::npos) {
+            continue;  // not exactly two tokens -- see banner above.
+        }
+        std::string transposed = id.substr(sep + 1) + "_" + id.substr(0, sep);
+        if (::options_calculator::strategy::is_known(transposed)) {
+            continue;  // already means a different, real strategy verbatim.
+        }
+        candidates.emplace_back(std::move(transposed), id);
+    }
+
+    std::vector<StrategyAlias> result;
+    result.reserve(candidates.size());
+    for (const auto& [alias, canonical] : candidates) {
+        std::size_t collisions = 0;
+        for (const auto& other : candidates) {
+            if (other.first == alias) ++collisions;
+        }
+        if (collisions == 1) {
+            result.push_back(StrategyAlias{.alias = alias, .canonical = canonical});
+        }
+        // collisions > 1: two different catalogue ids transpose to the same
+        // string -- genuinely ambiguous, so neither becomes an alias (both
+        // stay refused, per this section's own banner).
+    }
+    return result;
+}
+
+}  // namespace detail
+
+/**
+ * Maps a strategy id the model emitted but the catalogue does not recognise
+ * to the one catalogue entry it unambiguously means, or `std::nullopt` if
+ * `raw` is not a known token-order transposition of exactly one catalogue
+ * entry.
+ *
+ * This is a NAME-LEVEL fix only. Callers MUST still run whatever this
+ * returns through the catalogue and through `verify_assistant_params` --
+ * this function only answers "is `raw` a plausible token-order slip of a
+ * real strategy id," never "is this strategy compatible with the rest of
+ * this request."
+ */
+export [[nodiscard]] auto normalize_strategy_alias(std::string_view raw) -> std::optional<std::string> {
+    static const std::vector<detail::StrategyAlias> aliases = detail::build_strategy_aliases();
+    for (const auto& entry : aliases) {
+        if (entry.alias == raw) return entry.canonical;
+    }
+    return std::nullopt;
 }
 
 // ---------------------------------------------------------------------------
