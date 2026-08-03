@@ -9,10 +9,12 @@ This document outlines the system architecture, build commands, and deployment i
 ```
 [ Client Browser ]
       │
-      ├──> Cloudflare Pages (Frontend Web UI: Static Next.js Export)
+      ├──> Cloudflare Workers static assets (Frontend Web UI: Static Next.js Export)
       │      • Domain: https://optionsandfuturescalculator.com
       │      • WWW Alias: https://www.optionsandfuturescalculator.com
-      │      • Pages Subdomain: https://optionsandfuturescalculator.pages.dev
+      │      • Verification URL: https://optionsandfuturescalculator.muyiwamc2.workers.dev
+      │      • NOT Cloudflare Pages -- the Pages project still exists and still
+      │        deploys, but NOTHING points at it. See Deployment Details.
       │
       ├──> Railway Container Ingress (gRPC-Web / HTTP Engine Proxy)
       │      • Public Custom Domain: https://api.optionsandfuturescalculator.com
@@ -71,6 +73,12 @@ plain-English request into calculator parameters. It runs **in-process**, Q8_0
 on CPU, fetched at image build time from a private HF repo with the checksum
 pinned — it cannot travel through `railway up`, which enforces an upload
 deadline that 62 MB already failed.
+
+The full training-to-serving chain — dataset generation, the QLoRA-vs-full
+comparison that decided the recipe, merge/export/quantize, the Dockerfile's
+build-time fetch (and its secret-mount trap on Railway's builder), and every
+serving constraint below in more detail — is documented end to end in
+`docs/STRATEGY_ASSISTANT_PIPELINE.md`. This section is the short version.
 
 Three things about it are load-bearing and easy to get wrong:
 
@@ -138,7 +146,29 @@ not. Do not "fix" the live policy by copying the doc.
 
 ## Deployment Details
 
-- **Frontend Deployment:** Cloudflare Pages CLI (`npx wrangler pages deploy frontend/out --project-name=optionsandfuturescalculator`).
+- **Frontend Deployment:** `cd frontend && npm run build && npx wrangler deploy` — a
+  **Workers static-assets** deployment (`frontend/wrangler.toml`, `[assets] directory = "./out"`).
+
+  **`wrangler pages deploy` does not deploy this site.** The Pages project
+  `optionsandfuturescalculator` still exists and still accepts deployments, so the
+  command succeeds and prints a URL — but the live domains are **Workers custom
+  domains** bound to the `optionsandfuturescalculator` Worker, so a Pages deploy
+  changes nothing a user can see. This cost five "completed" frontend deploys: each
+  updated Pages while the apex kept serving a months-old bundle whose Supabase URL
+  was still `http://localhost:8000` with a placeholder anon key, so sign-in — and
+  therefore the JWT route to Pro — was dead in production the whole time.
+
+  The tell, if it happens again: the apex returns `cf-cache-status: HIT` with **none**
+  of the Pages response headers (`access-control-allow-origin`, `referrer-policy`,
+  `x-content-type-options`) that `pages.dev` returns, and a cache purge does not change
+  it. The apex/`www` DNS records are `AAAA 100::` (the discard prefix Cloudflare writes
+  for a Workers custom domain), not a CNAME. Confirm with
+  `GET /accounts/{acct}/workers/domains` — if the hostname is listed there, Pages is
+  not serving it and never was.
+
+  Do not "fix" this by attaching the domains to the Pages project: while the Workers
+  custom domain owns the hostname, the Pages attachment sits at `status=pending`
+  forever and does nothing.
 - **Backend Deployment:** Railway CLI (`railway up --detach` linked to project `fearless-amazement` service `options-calculator-backend`).
 - **Database Schema:** Applied `backend/migrations/01_init.sql` to Railway Postgres via `psql`.
 
@@ -148,8 +178,8 @@ Recorded here because none of it is otherwise represented in the repository.
 
 | Record | Target | Proxied |
 | --- | --- | --- |
-| `optionsandfuturescalculator.com` CNAME | `optionsandfuturescalculator.pages.dev` | yes |
-| `www` CNAME | `optionsandfuturescalculator.pages.dev` | yes |
+| `optionsandfuturescalculator.com` AAAA | `100::` (Workers custom domain) | yes |
+| `www` AAAA | `100::` (Workers custom domain) | yes |
 | `api` CNAME | `3nw3v5qd.up.railway.app` | **no** |
 | `_railway-verify.api` TXT | `railway-verify=8f82c9d1...` | n/a |
 
