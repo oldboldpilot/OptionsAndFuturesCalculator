@@ -58,6 +58,29 @@ measurement.
 stdin until the timeout — which reads as "the model is slow" rather than "the
 harness is wrong".
 
+## Verify WHICH model production serves, by checksum
+
+The GGUF sitting on the training host is not necessarily the one production runs.
+Production fetches its model at image build time from the URL pinned in
+`MODEL_URL` and verifies it against `MODEL_SHA256`. Read those, and check the
+candidate's `sha256sum` against them before calling anything "the deployed model":
+
+```bash
+railway variables --service options-calculator-backend --kv | grep -E '^MODEL_(URL|SHA256)='
+sha256sum /path/to/candidate.gguf
+```
+
+Measured 2026-08-03: `/scratch/agents/gguf_v2/param-agent-qlora-v2-Q8_0.gguf`
+(`eab97cf5…`) had been treated as "the deployed model" for a whole session of
+measurements. Production was pinned to `91d4ea5d…` — a different file, and a
+materially worse one: **6/16 against the candidate's 16/16** on the identical
+engine build and harness. The better model had been built and left unused while
+production served the weaker one.
+
+To change it: upload the GGUF to the HF repo, set `MODEL_URL` and `MODEL_SHA256`
+together, redeploy. Re-download and re-checksum after uploading — the file that
+was measured and the file that gets served must be provably the same bytes.
+
 ## The measurement harness
 
 Drive the real RPC. `MODEL_PATH` points at the candidate; everything else is the
@@ -123,10 +146,20 @@ which is what a user experiences.
 Identical harness, single verified engine, raw-output layer, 16-row defect
 holdout plus the two baseline regressions.
 
+Raw-output layer, before the engine fixes below, on the candidate GGUF
+(`eab97cf5…`):
+
 | Model | Holdout | Emitted `<params>` | Baselines |
 | --- | --- | --- | --- |
-| Deployed (QLoRA, 4 epochs) | **13/16** | 11/16 | both pass |
-| Retrain (QLoRA, 2 epochs) | 5/16 | 3/16 | both fail |
+| QLoRA, 4 epochs (`eab97cf5`) | **13/16** | 11/16 | both pass |
+| QLoRA, 2 epochs (`b70fd737`) | 5/16 | 3/16 | both fail |
+
+RPC layer, after the engine fixes, single verified engine, live market data:
+
+| Model | Holdout |
+| --- | --- |
+| `eab97cf5` — **now deployed** | **16/16** |
+| `91d4ea5d` — what production served until 2026-08-03 | 6/16 |
 
 The two columns are not complements, and the arithmetic looks wrong until you see
 why: **2 of the 16 rows correctly emit no `<params>` at all** — they are ambiguity

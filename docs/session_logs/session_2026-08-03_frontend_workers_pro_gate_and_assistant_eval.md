@@ -197,6 +197,33 @@ calendar spread, 60 days` now resolves its `CL` root from the Futures category
 plus lexical support. That path had always existed but the multi-expiry refusal
 fired first, so it was dead for all five.
 
+### A third wrong-artifact error: production ran a different model
+
+After all three engine fixes, production still failed the futures cases while the
+local run passed 16/16. Cause: the GGUF I had called "the deployed model" all
+session (`/scratch/agents/gguf_v2/...`, `eab97cf5`) was NOT what production
+served. `MODEL_SHA256` pinned `91d4ea5d` -- a different file, fetched from HF at
+image build.
+
+Measured on the identical engine build and harness:
+
+| model | holdout |
+| --- | --- |
+| `eab97cf5` (built, unused) | **16/16** |
+| `91d4ea5d` (what production served) | 6/16 |
+
+The better model had been sitting on the training host while production served
+the weaker one. Uploaded `eab97cf5` to the HF repo, re-downloaded and confirmed
+the bytes round-trip to the same sha256, repointed `MODEL_URL`/`MODEL_SHA256`,
+redeployed, and verified every previously-broken utterance in production over
+gRPC-Web with a real Pro licence.
+
+The checksum check that catches this is now the first section of
+`docs/guides/ASSISTANT_EVALUATION.md`. Three times this session a conclusion came
+from the wrong artifact -- llama.cpp instead of sensen, `out/` instead of `data/`,
+and now `gguf_v2` instead of the pinned model. The common fix is the same: verify
+identity (checksum, process, path) before measuring, not after a result looks odd.
+
 **Automated reasoner:** the cross-field rules live in
 `AssistantParamsDomain::translate()`, which is the GP-ARA domain itself, so the
 reasoner is updated by construction -- `RuleBasedReasoner` consumes the resulting
