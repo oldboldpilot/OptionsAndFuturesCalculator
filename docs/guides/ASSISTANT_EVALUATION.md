@@ -79,7 +79,10 @@ production served the weaker one.
 
 To change it: upload the GGUF to the HF repo, set `MODEL_URL` and `MODEL_SHA256`
 together, redeploy. Re-download and re-checksum after uploading — the file that
-was measured and the file that gets served must be provably the same bytes.
+was measured and the file that gets served must be provably the same bytes. The
+worked procedure is in `docs/STRATEGY_ASSISTANT_PIPELINE.md` §4 ("Swapping the
+served model"); the full provenance of the model serving today — recipe,
+hyperparameters, losses, timings, checksum — is §2b ("Model of record").
 
 ## The measurement harness
 

@@ -80,6 +80,13 @@ build-time fetch (and its secret-mount trap on Railway's builder), and every
 serving constraint below in more detail — is documented end to end in
 `docs/STRATEGY_ASSISTANT_PIPELINE.md`. This section is the short version.
 
+The model serving today is pinned by `MODEL_SHA256` and its provenance —
+recipe, hyperparameters, losses, wall clock, checksum, holdout score — is
+§2b "Model of record" of that document; §4 has the procedure for swapping it.
+It was trained 2026-08-03 from `unsloth/Qwen3-0.6B`, QLoRA rank 16, **4 epochs**
+(`run_qlora.sh` overrides `train.py`'s `default=2.0`; reading that default as the
+recipe produced a 2-epoch retrain scoring 5/16 against this model's 16/16).
+
 Three things about it are load-bearing and easy to get wrong:
 
 1. **The model requires its training system prompt.** Without it, it reverts to

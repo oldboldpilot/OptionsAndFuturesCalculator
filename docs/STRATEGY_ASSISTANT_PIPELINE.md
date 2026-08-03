@@ -77,6 +77,45 @@ grows to take materially longer means something about the recipe changed,
 not just the data volume, and is worth explaining rather than shipping
 quietly.
 
+### 2b. Model of record — what production serves today
+
+The exact provenance of the GGUF currently pinned in `MODEL_SHA256`. Recorded
+because "which model is this?" was answered three times from memory during the
+2026-08-03 session and was wrong every time.
+
+| | value |
+| --- | --- |
+| GGUF | `param-agent-qlora-v2-Q8_0.gguf`, 639,447,616 bytes |
+| sha256 | `eab97cf531b0c3746e366afafaaf74f90bec2d9263f269cd66018605223d80ac` |
+| trained | 2026-08-03, 11:38:04 → 12:03:22 UTC (23 m 27 s wall) |
+| quantized | 2026-08-03, 15:20:56 UTC |
+| base | `unsloth/Qwen3-0.6B`, `load_in_4bit=True` |
+| epochs | **4** (`run_qlora.sh` passes `--epochs 4`) |
+| steps | 2044 |
+| batching | per-device 8 × grad-accum 4 (effective 32), `max_seq_length` 1024 |
+| seed | 3407 |
+| losses | `train_loss` 0.1741, `eval_loss` 0.1289 |
+| data | `agent/dataset/data` — 28,500 train / 1,500 val |
+| defect holdout | **16/16** (RPC layer, single verified engine, live market data) |
+
+Reproduce with `/scratch/agents/run_qlora.sh` on the training host, then
+`/scratch/agents/convert_to_gguf.sh <merged_dir> <out_dir>` (section 3).
+
+**`--epochs 4` is the recipe; the script's default is 2.** `train.py` declares
+`--argument epochs default=2.0`, and `run_qlora.sh` overrides it. Reading the
+default as "the recipe" is what motivated a 2-epoch retrain on 2026-08-03 to
+"correct an overfit"; it scored 5/16 against this model's 16/16 and was
+discarded. Halving the epochs made it materially worse.
+
+**This model was nearly thrown away.** It was benchmarked at 7/16 with
+`llama-cli` — an engine that never serves a request — declared a regression, and
+left unused on the training host while production served a different, worse file
+(`91d4ea5d…`, 6/16). Measured through the real sensen serving path it is 13/16
+raw, and 16/16 once three engine defects are fixed. Always score a candidate the
+way `docs/guides/ASSISTANT_EVALUATION.md` describes, and always compare the
+candidate's `sha256sum` against `MODEL_SHA256` before calling anything "the
+deployed model".
+
 ## 3. Merge and export
 
 `train.py` saves the LoRA adapter on its own first (a few MB, always
@@ -133,6 +172,42 @@ fluent, confident, wrong text, which is worse than a red build). An EMPTY
 general finance surface don't need the assistant; failing the whole image
 over an optional feature would take down working functionality for an
 unrelated reason).
+
+### Swapping the served model
+
+`MODEL_URL` and `MODEL_SHA256` must move together -- changing the URL alone
+fails the build on the checksum, and changing the checksum alone fetches the old
+file and fails the same way. Both are Railway variables, so this needs no code
+change and no commit.
+
+```bash
+# 1. Publish. HF_TOKEN (config/.env) needs the `write` role.
+python -c "
+from huggingface_hub import HfApi
+HfApi(token='<HF_TOKEN>').upload_file(
+    path_or_fileobj='<candidate>.gguf',
+    path_in_repo='<name>.gguf',
+    repo_id='olumuyiwaoluwasanmi/options-param-agent-qwen3-0.6b',
+    repo_type='model')"
+
+# 2. Prove the bytes survived the round trip. The file MEASURED and the file
+#    SERVED must be provably identical -- re-download and re-checksum, do not
+#    assume the upload was faithful.
+curl -sSL -H "Authorization: Bearer <HF_TOKEN>" \
+  https://huggingface.co/olumuyiwaoluwasanmi/options-param-agent-qwen3-0.6b/resolve/main/<name>.gguf \
+  -o /tmp/verify.gguf && sha256sum /tmp/verify.gguf
+
+# 3. Repoint and redeploy.
+railway variables --service options-calculator-backend \
+  --set 'MODEL_URL=https://huggingface.co/.../<name>.gguf' \
+  --set 'MODEL_SHA256=<sha>' --skip-deploys
+railway up --detach --service options-calculator-backend
+```
+
+Then verify in production over **gRPC-Web** with a real Pro licence -- native
+gRPC does not survive the Railway ingress, and the assistant is Pro-gated, so an
+unauthenticated probe returns `grpc-status 7` and looks like a broken model.
+`scripts/mint_pro_gate_creds.mjs` mints the licence; it rides `x-api-key`.
 
 ## 5. Serving
 
