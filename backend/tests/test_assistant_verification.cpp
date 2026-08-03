@@ -73,15 +73,6 @@ auto expect_outcome(const AssistantParamsInput& in, Outcome expected, const std:
 auto main() -> int {
     std::printf("=== GP-ARA assistant verification: direction 1 -- illegitimate input rejects ===\n");
 
-    // symbol=CL (crude oil futures root) with asset_class=EQUITY. CL is also
-    // Colgate-Palmolive's real NYSE ticker -- exactly the "plausible but
-    // wrong" shape the live market-data probe alone would NOT catch (a real
-    // equity quote for "CL" genuinely exists), which is why this static,
-    // pre-network check matters.
-    expect_outcome({.symbol = "CL", .asset_class = "EQUITY", .strategy = "long_call",
-                    .expiration_days = 30, .quantity = 1},
-                   Outcome::Unsafe, "symbol=CL claimed as EQUITY (known futures root)");
-
     // A futures-only strategy (category "Futures", not multi-expiry) with a
     // non-futures asset_class.
     expect_outcome({.symbol = "ES", .asset_class = "EQUITY", .strategy = "futures_long",
@@ -164,22 +155,174 @@ auto main() -> int {
                     .expiration_days = 14, .quantity = 2},
                    Outcome::Proven, "BTC / CRYPTO / long_straddle / 14d / 2 contracts");
 
-    std::printf("\n=== GP-ARA assistant verification: the ES collision is NOT this module's call ===\n");
+    std::printf("\n=== GP-ARA assistant verification: genuinely ambiguous roots are NOT this "
+                "module's call ===\n");
 
     // "ES" is genuinely ambiguous (E-mini S&P futures root AND Eversource
     // Energy's equity ticker). This static, pre-network reasoner must not
     // guess -- and per its own design, it does not: neither claim is treated
-    // as a contradiction here, because resolving which one is real is live
-    // market data's job (assistant_service.cpp::probe_symbol, which is what
-    // actually turns an unresolved FUTURES claim into a Clarification and a
-    // resolving EQUITY claim into Resolved). Proven here means "internally
-    // consistent," not "verified real" -- the live probe still has to run.
+    // as a contradiction here, because resolving which one is real is either
+    // live market data's job (assistant_service.cpp::probe_symbol) or the
+    // trader's own words' job (assistant_service.cpp::detect_asset_class_signal,
+    // run even earlier). Proven here means "internally consistent," not
+    // "verified real" -- one of those two checks still has to run.
     expect_outcome({.symbol = "ES", .asset_class = "EQUITY", .strategy = "bull_call_spread",
                     .expiration_days = 30, .quantity = 1},
                    Outcome::Proven, "ES claimed as EQUITY (ambiguous root, deferred to live probe)");
     expect_outcome({.symbol = "ES", .asset_class = "FUTURES", .strategy = "futures_long",
                     .expiration_days = 30, .quantity = 1},
                    Outcome::Proven, "ES claimed as FUTURES (ambiguous root, deferred to live probe)");
+
+    // "CL" is ALSO genuinely ambiguous -- crude oil's futures root AND
+    // Colgate-Palmolive's real, currently-listed NYSE ticker (verified
+    // against a live equity-ticker lookup, not assumed; see
+    // assistant_verification.cppm's kAmbiguousRoots doc comment). Before this
+    // change CL+EQUITY was flagged Unsafe here on the assumption that CL
+    // claimed as an equity was always a hallucination -- which was itself a
+    // latent over-refusal bug: a trader legitimately trading Colgate-Palmolive
+    // stock would have been silently refused because CL ALSO happens to be a
+    // futures root. Moving CL into kAmbiguousRoots corrects that.
+    expect_outcome({.symbol = "CL", .asset_class = "EQUITY", .strategy = "long_call",
+                    .expiration_days = 30, .quantity = 1},
+                   Outcome::Proven, "CL claimed as EQUITY (ambiguous root, deferred to live probe)");
+    expect_outcome({.symbol = "CL", .asset_class = "FUTURES", .strategy = "futures_long",
+                    .expiration_days = 30, .quantity = 1},
+                   Outcome::Proven, "CL claimed as FUTURES (ambiguous root, deferred to live probe)");
+
+    // Roots that merely LOOK like they might collide but do not, checked
+    // rather than assumed: NQ Mobile Inc traded as NYSE:NQ but is
+    // long delisted/renamed; no live NYSE/NASDAQ ticker "GC" exists today
+    // (only the COMEX gold futures continuation symbol); "ZB-A" is a Zions
+    // Bancorporation PREFERRED-share class, a different ticker from plain
+    // "ZB". None of the three should be treated as ambiguous -- the static
+    // contradiction rule must still fire for them exactly as it does for any
+    // other non-ambiguous futures root.
+    expect_outcome({.symbol = "NQ", .asset_class = "EQUITY", .strategy = "long_call",
+                    .expiration_days = 30, .quantity = 1},
+                   Outcome::Unsafe, "symbol=NQ claimed as EQUITY (not a genuine ambiguity)");
+    expect_outcome({.symbol = "GC", .asset_class = "EQUITY", .strategy = "long_call",
+                    .expiration_days = 30, .quantity = 1},
+                   Outcome::Unsafe, "symbol=GC claimed as EQUITY (not a genuine ambiguity)");
+    expect_outcome({.symbol = "ZB", .asset_class = "EQUITY", .strategy = "long_call",
+                    .expiration_days = 30, .quantity = 1},
+                   Outcome::Unsafe, "symbol=ZB claimed as EQUITY (not a genuine ambiguity)");
+
+    std::printf("\n=== GP-ARA assistant verification: ambiguity signal detection "
+                "(assistant_service.cpp's job) ===\n");
+
+    using options_calculator::assistant::verify::AssetClassSignal;
+    using options_calculator::assistant::verify::build_ambiguity_clarification;
+    using options_calculator::assistant::verify::detect_asset_class_signal;
+    using options_calculator::assistant::verify::find_ambiguous_root_info;
+
+    auto expect_signal = [](std::string_view symbol, std::string_view context, AssetClassSignal expected,
+                            const std::string& label) {
+        const auto got = detect_asset_class_signal(symbol, context);
+        const auto name = [](AssetClassSignal s) {
+            switch (s) {
+                case AssetClassSignal::None: return "None";
+                case AssetClassSignal::Futures: return "Futures";
+                case AssetClassSignal::Equity: return "Equity";
+            }
+            return "?";
+        };
+        check(got == expected, label + " -> expected " + std::string{name(expected)} + ", got " +
+                                    std::string{name(got)});
+    };
+
+    // The production bug, verbatim: "Long ES, 30 days, 1 contract." must NOT
+    // resolve silently. "contract" is present but is explicitly NOT decisive
+    // on its own (traders say "1 contract" about options on equities too --
+    // see the task brief's own caveat) -- no stronger futures/equity signal
+    // appears anywhere in the utterance, so this must stay None (i.e. still
+    // ask), not quietly resolve to either side.
+    expect_signal("ES", "Long ES, 30 days, 1 contract.", AssetClassSignal::None,
+                  "\"Long ES, 30 days, 1 contract.\" -- bare \"contract\" is not decisive");
+
+    // Explicit futures disambiguators, both directions of "honour it, don't
+    // ask": the word "futures", "e-mini"/"emini", "front month", and a real
+    // contract code (root + delivery-month letter + 2-digit year).
+    expect_signal("ES", "Long the ES futures, 30 days, 1 contract.", AssetClassSignal::Futures,
+                  "\"ES futures\" is decisive");
+    expect_signal("ES", "Buy the e-mini S&P, 30 days out.", AssetClassSignal::Futures,
+                  "\"e-mini\" is decisive");
+    expect_signal("ES", "Long ES, front month, 1 contract.", AssetClassSignal::Futures,
+                  "\"front month\" is decisive");
+    expect_signal("ES", "Long ESU26, 1 contract.", AssetClassSignal::Futures,
+                  "a contract code (ESU26) is decisive");
+    expect_signal("CL", "Short CLZ26 outright.", AssetClassSignal::Futures,
+                  "a contract code (CLZ26) is decisive for CL too");
+
+    // Explicit equity disambiguators: "shares"/"stock"/"equity", and the
+    // company name itself (a trader naming Eversource or Colgate directly
+    // clearly means the stock, not the futures root).
+    expect_signal("ES", "Buy 100 shares of ES.", AssetClassSignal::Equity, "\"shares\" is decisive");
+    expect_signal("CL", "Long CL stock, 30 days.", AssetClassSignal::Equity, "\"stock\" is decisive");
+    expect_signal("ES", "Bullish on Eversource into earnings.", AssetClassSignal::Equity,
+                  "naming \"Eversource\" is decisive for ES");
+    expect_signal("CL", "Covered call on Colgate-Palmolive.", AssetClassSignal::Equity,
+                  "naming \"Colgate\" is decisive for CL");
+
+    // A symbol that is not one of the genuinely ambiguous roots is never
+    // routed through any of this -- SPY/NVDA/QQQ (and every other
+    // in-distribution symbol) must come back None unconditionally, and
+    // `find_ambiguous_root_info` must say so directly, proving the whole
+    // mechanism is inert for them regardless of what the utterance says.
+    expect_signal("SPY", "Buy SPY futures front month e-mini shares", AssetClassSignal::None,
+                  "SPY is not an ambiguous root -- signal detection is a no-op for it");
+    check(find_ambiguous_root_info("SPY") == nullptr, "SPY is not in the ambiguous-root table");
+    check(find_ambiguous_root_info("NVDA") == nullptr, "NVDA is not in the ambiguous-root table");
+    check(find_ambiguous_root_info("QQQ") == nullptr, "QQQ is not in the ambiguous-root table");
+    check(find_ambiguous_root_info("ES") != nullptr, "ES IS in the ambiguous-root table");
+    check(find_ambiguous_root_info("CL") != nullptr, "CL IS in the ambiguous-root table");
+
+    // The clarification message itself: must name BOTH concrete instruments
+    // (never "please clarify") and surface the strategy the model inferred,
+    // so a trader can catch the separate, out-of-scope "long_put from 'Long
+    // ES'" defect too, in the same round trip.
+    {
+        const auto question = build_ambiguity_clarification("ES", "long_put");
+        check(question.has_value(), "build_ambiguity_clarification(ES, ...) produces a question");
+        if (question.has_value()) {
+            check(question->find("Eversource") != std::string::npos,
+                  "clarification names the equity reading (Eversource)");
+            check(question->find("E-mini") != std::string::npos ||
+                      question->find("e-mini") != std::string::npos,
+                  "clarification names the futures reading (E-mini S&P 500)");
+            check(question->find("long_put") != std::string::npos,
+                  "clarification surfaces the strategy the model inferred (long_put)");
+        }
+        check(!build_ambiguity_clarification("SPY", "long_call").has_value(),
+              "build_ambiguity_clarification(SPY, ...) is nullopt -- SPY is not ambiguous");
+    }
+
+    std::printf("\n=== GP-ARA assistant verification: round trip -- an answered clarification "
+                "produces a correct, non-looping FUTURES parse ===\n");
+
+    // Round 1: "Long ES, 30 days, 1 contract." has no decisive signal (proven
+    // above) -- assistant_service.cpp returns a Clarification and never
+    // reaches this module at all for that turn.
+    //
+    // Round 2: the trader answers the clarification with one word, "futures".
+    // assistant_service.cpp concatenates this new utterance with the prior
+    // clarification question and re-runs detect_asset_class_signal -- which
+    // must now resolve decisively (closing the loop: a second, indecisive
+    // answer would correctly ask again, but a decisive one must not loop).
+    expect_signal("ES", "futures", AssetClassSignal::Futures,
+                  "round-trip: answering \"futures\" resolves decisively");
+
+    // Once resolved, assistant_service.cpp overwrites asset_class to FUTURES
+    // before this module ever sees the input -- so the ONLY thing left for
+    // this module to prove is that a SENSIBLE second-round model output
+    // (symbol=ES, asset_class=FUTURES, a real futures strategy) is Proven,
+    // never re-flagged as unsafe or indeterminate. That is exactly the
+    // existing ES-claimed-as-FUTURES case proven above -- this is the same
+    // fact, named for the round trip specifically so a reader does not have
+    // to infer it.
+    expect_outcome({.symbol = "ES", .asset_class = "FUTURES", .strategy = "futures_long",
+                    .expiration_days = 30, .quantity = 1},
+                   Outcome::Proven,
+                   "round trip step 2: ES/FUTURES/futures_long after disambiguation is Proven, not re-asked");
 
     std::printf("\n=== GP-ARA assistant verification: Indeterminate never falls through to acceptance ===\n");
 

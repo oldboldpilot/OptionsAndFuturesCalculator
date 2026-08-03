@@ -1650,9 +1650,36 @@ enum class SymbolProbeOutcome { Resolved, Unknown, AssetClassMismatch, ProviderU
  *     signal available -- because the alternative is accepting every string
  *     the model ever emits for those two classes, which is precisely the
  *     hole "CND" fell through.
+ *
+ * `already_disambiguated_ambiguous_root` is true iff `symbol` is one of
+ * `assistant_verification::kAmbiguousRoots` (ES/CL) -- which, by the time
+ * this function is ever called, `validate_and_populate_params` has already
+ * resolved via the trader's own words (see its own comment on
+ * `detect_asset_class_signal`) or refused to proceed past with a
+ * Clarification instead. For a FUTURES/CRYPTO claim on one of those roots,
+ * the live equity quote WILL resolve (that resolving quote is the ambiguity
+ * itself: "ES" really is Eversource's live ticker), so running the ordinary
+ * AssistantParamsMismatch branch below would re-discover the exact same
+ * ambiguity the trader just answered and ask about it again (the ordinary
+ * branch is named `SymbolProbeOutcome::AssetClassMismatch` below) -- the
+ * infinite-loop failure mode the round-trip is specifically built to avoid.
+ * So for this one case the live quote is skipped entirely and catalogue
+ * membership (`kKnownFuturesRoots`/`kKnownCryptoSymbols`) is trusted
+ * directly, exactly as already happens below when the quote fails to
+ * resolve at all -- the resolving-quote case is simply never reached for an
+ * already-disambiguated ambiguous root.
  */
-[[nodiscard]] auto probe_symbol(const std::string& symbol, const std::string& asset_class)
-    -> SymbolProbeOutcome {
+[[nodiscard]] auto probe_symbol(const std::string& symbol, const std::string& asset_class,
+                                 bool already_disambiguated_ambiguous_root) -> SymbolProbeOutcome {
+    if (already_disambiguated_ambiguous_root && asset_class != "EQUITY") {
+        if (asset_class == "FUTURES") {
+            return in_catalogue(kKnownFuturesRoots, symbol) ? SymbolProbeOutcome::Resolved
+                                                             : SymbolProbeOutcome::Unknown;
+        }
+        return in_catalogue(kKnownCryptoSymbols, symbol) ? SymbolProbeOutcome::Resolved
+                                                          : SymbolProbeOutcome::Unknown;
+    }
+
     const auto quote = market_data::fetch_quote(symbol);
     if (quote.has_value()) {
         return (asset_class == "EQUITY") ? SymbolProbeOutcome::Resolved
@@ -1733,8 +1760,15 @@ enum class SymbolProbeOutcome { Resolved, Unknown, AssetClassMismatch, ProviderU
  * futures-only strategy paired with a crypto symbol makes sense. See that
  * call site's own comment for why it runs where it does, and
  * assistant_verification.cppm's file banner for the full rule set.
+ *
+ * `utterance`/`prior_clarification` exist on this signature for exactly one
+ * purpose: resolving a genuinely ambiguous futures/equity root (ES, CL) from
+ * the trader's own words, immediately below, before either GP-ARA or
+ * `probe_symbol` ever see the symbol. Everything else in this function is
+ * unaffected by them.
  */
-auto validate_and_populate_params(std::string_view json_text,
+auto validate_and_populate_params(std::string_view json_text, std::string_view utterance,
+                                   std::string_view prior_clarification,
                                    calculator::assistant::ParseResponse& response) -> void {
     auto parsed = fastjson::parse(json_text);
     if (!parsed.has_value() || !parsed->is_object()) {
@@ -1761,7 +1795,7 @@ auto validate_and_populate_params(std::string_view json_text,
                          "The assistant did not resolve an asset class for \"" + symbol + "\".");
         return;
     }
-    const std::string asset_class{obj["asset_class"].as_string()};
+    std::string asset_class{obj["asset_class"].as_string()};
     if (!is_known_asset_class(asset_class)) {
         populate_refusal(response, calculator::assistant::Refusal::UNKNOWN_SYMBOL,
                          "\"" + asset_class + "\" is not a supported asset class.");
@@ -1804,6 +1838,66 @@ auto validate_and_populate_params(std::string_view json_text,
                          "The assistant's quantity (" + std::to_string(quantity) +
                              ") is out of a sane range.");
         return;
+    }
+
+    // ------------------------------------------------------------------
+    // Ambiguous-root disambiguation (ES/Eversource, CL/Colgate-Palmolive).
+    //
+    // Runs before GP-ARA and before the live probe, deliberately: it is free
+    // (no network), and it can change `asset_class` -- so GP-ARA's own
+    // cross-field checks below (strategy category vs asset_class) see the
+    // TRADER'S resolved asset class rather than whatever the model happened
+    // to guess when it had no real basis to pick one. `symbol` is only ever
+    // one of these two roots today (`kAmbiguousRoots`, checked against a real
+    // equity-ticker lookup -- see that array's own doc comment for which of
+    // the five supported futures roots genuinely collide with a live equity
+    // and which do not); every other symbol gets `nullptr` here and this
+    // whole block is a no-op, so SPY/NVDA/QQQ/etc. are provably unaffected.
+    //
+    // Resolution is deterministic keyword matching over the trader's own
+    // words -- the utterance THIS turn plus the clarification question ASKED
+    // last turn, concatenated, so a one-word reply on a second turn ("futures",
+    // "the stock", "Eversource") resolves exactly like a first-turn utterance
+    // that already answered the question would (see
+    // `detect_asset_class_signal`'s own comment) -- never the model's own
+    // asset_class guess. The model was never trained to arbitrate this
+    // specific ambiguity (CLAUDE.md's own documented note that the training
+    // set restricts futures roots to ES/NQ, making anything about them
+    // out-of-distribution), so its guess is evidence of nothing here.
+    //
+    // A decisive signal OVERWRITES `asset_class` to match, so a stale or
+    // simply-guessed model value can never leak through once the trader's own
+    // words already answer the question -- this is also what keeps the
+    // round trip from looping: `probe_symbol` below is told
+    // (`already_disambiguated_ambiguous_root`) that this symbol's asset class
+    // was resolved right here, so it skips the live-quote check that would
+    // otherwise rediscover the very ambiguity just resolved and ask about it
+    // again. No signal at all short-circuits straight to a Clarification
+    // naming both concrete readings (never "please clarify"), skipping GP-ARA
+    // and the network probe entirely for a request that is about to be asked
+    // a question anyway.
+    if (const auto* ambiguous = ::options_calculator::assistant::verify::find_ambiguous_root_info(symbol);
+        ambiguous != nullptr) {
+        std::string disambiguation_context;
+        disambiguation_context.reserve(utterance.size() + prior_clarification.size() + 1);
+        disambiguation_context += utterance;
+        disambiguation_context += ' ';
+        disambiguation_context += prior_clarification;
+
+        const auto signal =
+            ::options_calculator::assistant::verify::detect_asset_class_signal(symbol, disambiguation_context);
+        if (signal == ::options_calculator::assistant::verify::AssetClassSignal::None) {
+            const auto question =
+                ::options_calculator::assistant::verify::build_ambiguity_clarification(symbol, strategy);
+            populate_clarification(response, question.has_value()
+                                                  ? *question
+                                                  : "\"" + symbol + "\" is ambiguous between more than one "
+                                                        "asset class -- which did you mean?");
+            return;
+        }
+        asset_class = (signal == ::options_calculator::assistant::verify::AssetClassSignal::Futures)
+                          ? "FUTURES"
+                          : "EQUITY";
     }
 
     // ------------------------------------------------------------------
@@ -1867,7 +1961,8 @@ auto validate_and_populate_params(std::string_view json_text,
     // always going to be refused for its strategy, its expiration, its
     // quantity, or a cross-field contradiction should not also pay for a
     // live quote it will never use.
-    switch (probe_symbol(symbol, asset_class)) {
+    switch (probe_symbol(symbol, asset_class,
+                          ::options_calculator::assistant::verify::find_ambiguous_root_info(symbol) != nullptr)) {
         case SymbolProbeOutcome::Unknown:
             populate_refusal(response, calculator::assistant::Refusal::UNKNOWN_SYMBOL,
                              "I could not find a tradeable instrument for '" + symbol +
@@ -1931,7 +2026,8 @@ auto validate_and_populate_params(std::string_view json_text,
  * succeeded, it just succeeded by asking something back instead of finishing
  * the parse.
  */
-auto interpret_model_output(const std::string& raw_text,
+auto interpret_model_output(const std::string& raw_text, std::string_view utterance,
+                             std::string_view prior_clarification,
                              calculator::assistant::ParseResponse& response) -> void {
     // Qwen3 emits a `<think>` block on EVERY response, including the ones that
     // are exactly right. Measured against this fine-tune, a correct answer looks
@@ -1966,7 +2062,7 @@ auto interpret_model_output(const std::string& raw_text,
     const std::string visible = strip_think_block(raw_text);
 
     if (const auto block = extract_params_block(visible); block.has_value()) {
-        validate_and_populate_params(trim(*block), response);
+        validate_and_populate_params(trim(*block), utterance, prior_clarification, response);
         return;
     }
 
@@ -2105,7 +2201,7 @@ class StrategyAssistantImpl final : public calculator::assistant::StrategyAssist
             return Status::OK;
         }
 
-        interpret_model_output(outcome->text, *response);
+        interpret_model_output(outcome->text, request->utterance(), request->prior_clarification(), *response);
         return Status::OK;
     }
 };

@@ -60,19 +60,31 @@
 //     see its own comment for why that is the correct default and not merely
 //     the convenient one.
 //
-// A symbol root that is genuinely ambiguous across asset classes (documented
-// case: "ES", both the E-mini S&P futures root and Eversource Energy's
-// NYSE ticker) is deliberately NOT modelled as this module's own
-// Indeterminate. Resolving it needs live market data this static reasoner
-// has no access to; `assistant_service.cpp`'s `probe_symbol()` already does
-// exactly that resolution (Resolved / Unknown / AssetClassMismatch ->
-// Clarification), never guessing either way. This module proving an
+// A symbol root that is genuinely ambiguous across asset classes (checked,
+// not assumed -- see `kAmbiguousRootDetails` below for which of the five
+// supported futures roots actually collide with a real, currently-listed
+// equity ticker today: "ES"/Eversource Energy and "CL"/Colgate-Palmolive
+// both do; "NQ", "GC" and "ZB" do not) is deliberately NOT modelled as this
+// module's own Indeterminate. Resolving which asset class a trader meant
+// needs information this static, five-field reasoner has no access to --
+// either live market data (`assistant_service.cpp`'s `probe_symbol()`,
+// Resolved / Unknown / AssetClassMismatch -> Clarification) or the trader's
+// own utterance (`detect_asset_class_signal()`/`build_ambiguity_clarification()`
+// below, called by `assistant_service.cpp` BEFORE this module ever runs, so
+// that a decisive answer overrides `asset_class` before it reaches
+// `translate()` and an indecisive one short-circuits to a Clarification
+// without paying for GP-ARA or a network round trip). Both live outside this
+// module for the same reason: neither the utterance's free text nor a live
+// quote is a "closed-form comparison over five short strings/ints" this
+// reasoner's own file banner promises to be. This module proving an
 // ambiguous-root input Proven says only "nothing here contradicts itself on
-// paper" -- it does not skip the live check that runs immediately after.
+// paper" -- it does not skip either check that runs around it.
 module;
 #include <array>
+#include <cctype>
 #include <cstdint>
 #include <expected>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -130,13 +142,34 @@ namespace detail {
  * assistant_service.cpp-independent; see the file banner. */
 constexpr std::array<std::string_view, 5> kKnownFuturesRoots{"ES", "NQ", "CL", "GC", "ZB"};
 
-/** Roots documented as genuinely ambiguous across asset classes -- see the
- * project memory note "Futures root ticker collision". Excluded from the
- * static symbol/asset_class contradiction rule below; live market data (in
- * `assistant_service.cpp::probe_symbol`) is the only thing that can
- * disambiguate these, so this module deliberately expresses no opinion on
- * them. */
-constexpr std::array<std::string_view, 1> kAmbiguousRoots{"ES"};
+/** Roots genuinely ambiguous across asset classes -- CHECKED against a real
+ * equity-ticker lookup, not assumed from the project memory note's own
+ * headline example. Of the five supported futures roots (`kKnownFuturesRoots`
+ * above): "ES" collides with Eversource Energy (NYSE: ES, a live listing
+ * today) and "CL" collides with Colgate-Palmolive (NYSE: CL, also live
+ * today). "NQ" (NQ Mobile Inc traded under NYSE: NQ but delisted/renamed
+ * years ago), "GC" (no current NYSE/NASDAQ equity ticker "GC" -- "GC" as a
+ * plain symbol today means the COMEX gold futures continuation, not a
+ * stock), and "ZB" (no plain equity ticker "ZB" -- "ZB-A" is a Zions
+ * Bancorporation PREFERRED-share class suffix, a different ticker) have no
+ * live equity twin, so a root with no twin is NOT ambiguous and must not be
+ * added here on the strength of a superficial resemblance alone.
+ *
+ * Excluded from the static symbol/asset_class contradiction rule below for
+ * both entries (this array previously covered only "ES", silently treating
+ * "CL claimed as EQUITY" as a definite hallucination even though CL really
+ * is a live equity too -- that was itself a latent over-refusal bug this
+ * correction closes). Neither live market data nor this static reasoner can
+ * disambiguate these; see `detect_asset_class_signal()`/
+ * `build_ambiguity_clarification()` below for the utterance-based resolution
+ * `assistant_service.cpp` runs instead, and that file's `probe_symbol()` for
+ * the live-market-based one. Kept as a plain symbol list, separate from the
+ * more detailed `kAmbiguousRootDetails` table below, only so the static
+ * contradiction rule's `contains()` check stays a one-line array lookup;
+ * the two lists are the same two roots and must be kept in sync by hand --
+ * the same accepted duplication tradeoff `kKnownFuturesRoots`'s own doc
+ * comment already makes for cross-file independence. */
+constexpr std::array<std::string_view, 2> kAmbiguousRoots{"ES", "CL"};
 
 /** Crypto symbols this product's catalogue recognizes ("Crypto (BTC, ETH)"). */
 constexpr std::array<std::string_view, 2> kKnownCryptoSymbols{"BTC", "ETH"};
@@ -182,6 +215,220 @@ template <std::size_t N>
 }
 
 }  // namespace detail
+
+// ---------------------------------------------------------------------------
+// Ambiguous-root disambiguation.
+//
+// `assistant_service.cpp` calls this BEFORE it ever builds an
+// `AssistantParamsInput` for the two roots in `kAmbiguousRoots`: a decisive
+// signal overrides the model's `asset_class` guess so it can never leak a
+// stale/wrong value through, and an indecisive one short-circuits straight
+// to a `Clarification`, before either GP-ARA or the live market-data probe
+// run. See the `kAmbiguousRoots` doc comment above for why this lives
+// outside `translate()`'s own five-field, network-free contract: resolving
+// which asset class a trader meant needs the trader's own free-text words,
+// which is exactly the kind of per-request, non-categorical information that
+// reasoner is deliberately built without.
+// ---------------------------------------------------------------------------
+
+/** Which concrete asset class, if any, a trader's own words settle an
+ * ambiguous root to. `None` covers both "said nothing relevant" and "said
+ * something that reads as both at once" (e.g. contradictory or nonsensical
+ * text) -- either way, this layer cannot honestly pick a side, so both map
+ * to the same "ask" outcome. */
+export enum class AssetClassSignal { None, Futures, Equity };
+
+/** One ambiguous root's pair of concrete readings, for both the signal
+ * detector below and the clarification question it produces when it cannot
+ * decide. `futures_label`/`equity_label` are what actually gets shown to the
+ * trader -- concrete enough that "the answer is one word" (per the task
+ * brief), not "please clarify." `equity_keyword` is the company name a
+ * trader might use INSTEAD of "shares"/"stock"/"equity" to mean the equity
+ * side (e.g. naming Eversource or Colgate directly) -- checked as a
+ * lowercase substring of the utterance. */
+export struct AmbiguousRootInfo {
+    std::string_view symbol;
+    std::string_view futures_label;
+    std::string_view equity_label;
+    std::string_view equity_keyword;
+};
+
+namespace detail {
+
+constexpr std::array<AmbiguousRootInfo, 2> kAmbiguousRootDetails{
+    {{.symbol = "ES",
+      .futures_label = "the E-mini S&P 500 futures contract",
+      .equity_label = "Eversource Energy, the NYSE utility stock",
+      .equity_keyword = "eversource"},
+     {.symbol = "CL",
+      .futures_label = "the WTI crude oil futures contract",
+      .equity_label = "Colgate-Palmolive, the NYSE consumer-goods stock",
+      .equity_keyword = "colgate"}}};
+
+[[nodiscard]] constexpr auto to_lower_char(char c) noexcept -> char {
+    return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
+}
+
+[[nodiscard]] auto to_lower_copy(std::string_view s) -> std::string {
+    std::string out(s.size(), '\0');
+    for (std::size_t i = 0; i < s.size(); ++i) out[i] = to_lower_char(s[i]);
+    return out;
+}
+
+[[nodiscard]] auto to_upper_copy(std::string_view s) -> std::string {
+    std::string out(s.size(), '\0');
+    for (std::size_t i = 0; i < s.size(); ++i) {
+        const char c = s[i];
+        out[i] = (c >= 'a' && c <= 'z') ? static_cast<char>(c - 'a' + 'A') : c;
+    }
+    return out;
+}
+
+[[nodiscard]] auto contains_ci(std::string_view lowercased_haystack, std::string_view lowercase_needle) noexcept
+    -> bool {
+    return lowercased_haystack.find(lowercase_needle) != std::string_view::npos;
+}
+
+constexpr std::string_view kMonthCodeLetters = "FGHJKMNQUVXZ";
+
+/** True iff `context` contains a real futures contract code for `root` as
+ * its own token -- `root` immediately followed by one of the twelve
+ * standard delivery-month letters and exactly two digits (e.g. "ESU26",
+ * "clz26"), not embedded inside a longer alphanumeric run. Matched
+ * case-insensitively since a trader may type either case; decisive on its
+ * own per the task brief ("a contract code like ESU26"). */
+[[nodiscard]] auto contains_contract_code(std::string_view context, std::string_view root) noexcept -> bool {
+    if (root.size() != 2) return false;  // both ambiguous roots today are 2 characters
+    const std::string upper = to_upper_copy(context);
+    const std::string upper_root = to_upper_copy(root);
+
+    std::size_t pos = 0;
+    while (true) {
+        pos = upper.find(upper_root, pos);
+        if (pos == std::string::npos) return false;
+
+        const std::size_t after = pos + upper_root.size();
+        const bool left_boundary_ok =
+            (pos == 0) || (std::isalnum(static_cast<unsigned char>(upper[pos - 1])) == 0);
+        if (left_boundary_ok && after + 3 <= upper.size()) {
+            const bool is_month_letter = kMonthCodeLetters.find(upper[after]) != std::string_view::npos;
+            const bool digit1 = upper[after + 1] >= '0' && upper[after + 1] <= '9';
+            const bool digit2 = upper[after + 2] >= '0' && upper[after + 2] <= '9';
+            const bool right_boundary_ok =
+                (after + 3 == upper.size()) || (std::isalnum(static_cast<unsigned char>(upper[after + 3])) == 0);
+            if (is_month_letter && digit1 && digit2 && right_boundary_ok) return true;
+        }
+        ++pos;
+    }
+}
+
+/** Words that are decisive on their own for the futures side. Deliberately
+ * does NOT include the bare word "contract": traders use "contract" loosely
+ * for options on equities too (the task brief's own example -- "Long ES,
+ * 30 days, 1 contract" -- must still ask, and it says "contract"), so it is
+ * suggestive at best, never sufficient by itself to skip the question. */
+constexpr std::array<std::string_view, 5> kFuturesKeywords{"futures", "e-mini", "emini", "front month",
+                                                            "front-month"};
+
+/** Words that are decisive on their own for the equity side. Matched as
+ * substrings, so "share"/"stock"/"equity" alone already cover their plurals
+ * ("shares"/"stocks"/"equities"). */
+constexpr std::array<std::string_view, 3> kEquityKeywords{"share", "stock", "equity"};
+
+}  // namespace detail
+
+/** Looks up the ambiguous-root detail entry for `symbol`, or `nullptr` if
+ * `symbol` is not one of the roots this file has verified genuinely
+ * collides with a real equity (see `kAmbiguousRoots`'s doc comment). This is
+ * the one check `assistant_service.cpp` needs to know whether ANY of this
+ * section's machinery applies to a given symbol at all -- a plain,
+ * unambiguous ticker (SPY, NVDA, QQQ, ...) always gets `nullptr` here and is
+ * therefore never routed through disambiguation or asked a question. */
+export [[nodiscard]] auto find_ambiguous_root_info(std::string_view symbol) -> const AmbiguousRootInfo* {
+    for (const auto& info : detail::kAmbiguousRootDetails) {
+        if (info.symbol == symbol) return &info;
+    }
+    return nullptr;
+}
+
+/**
+ * Decides, from the trader's own words alone, which concrete asset class an
+ * ambiguous `symbol` refers to -- `None` if `symbol` is not ambiguous in the
+ * first place, or if `context` settles neither side, or both.
+ *
+ * `context` is expected to be the trader's current utterance and (on a
+ * second turn) the prior clarification question concatenated -- see
+ * `assistant_service.cpp`'s call site. Using the SAME keyword scan on both
+ * turns is what makes the round trip work without special-casing it: a
+ * one-word reply to the clarification ("futures", "the stock", "Eversource")
+ * IS itself a fresh utterance containing a decisive keyword, so it resolves
+ * exactly like a first-turn utterance that happened to already answer the
+ * question would.
+ */
+export [[nodiscard]] auto detect_asset_class_signal(std::string_view symbol, std::string_view context)
+    -> AssetClassSignal {
+    const auto* info = find_ambiguous_root_info(symbol);
+    if (info == nullptr) return AssetClassSignal::None;
+
+    const std::string lower = detail::to_lower_copy(context);
+
+    bool futures_signal = detail::contains_contract_code(context, info->symbol);
+    for (const auto keyword : detail::kFuturesKeywords) {
+        if (detail::contains_ci(lower, keyword)) {
+            futures_signal = true;
+            break;
+        }
+    }
+
+    bool equity_signal = detail::contains_ci(lower, info->equity_keyword);
+    for (const auto keyword : detail::kEquityKeywords) {
+        if (detail::contains_ci(lower, keyword)) {
+            equity_signal = true;
+            break;
+        }
+    }
+
+    // Both signals (contradictory) and neither signal (silent) are the same
+    // "cannot honestly decide" outcome -- see AssetClassSignal::None's own
+    // doc comment.
+    if (futures_signal == equity_signal) return AssetClassSignal::None;
+    return futures_signal ? AssetClassSignal::Futures : AssetClassSignal::Equity;
+}
+
+/**
+ * Builds the clarification question for an ambiguous root neither
+ * `detect_asset_class_signal` nor (upstream of it) anything else could
+ * resolve -- `std::nullopt` iff `symbol` is not ambiguous at all, so a
+ * caller can tell "not applicable" apart from "applicable, and here is the
+ * question."
+ *
+ * Names both concrete readings (never "please clarify") so the answer is
+ * one word, per the task brief. Also surfaces the strategy the model
+ * inferred: `long_put` from an utterance that never said "put" is a known,
+ * separate defect (out of scope here -- see the task brief) in the SAME
+ * model call that produced this ambiguous symbol, so a trader reading this
+ * question gets a chance to catch that mistake too, in the same round trip,
+ * rather than only after a second wrong answer downstream.
+ */
+export [[nodiscard]] auto build_ambiguity_clarification(std::string_view symbol, std::string_view strategy)
+    -> std::optional<std::string> {
+    const auto* info = find_ambiguous_root_info(symbol);
+    if (info == nullptr) return std::nullopt;
+
+    std::string question = "\"";
+    question += symbol;
+    question += "\" could mean ";
+    question += info->futures_label;
+    question += ", or ";
+    question += info->equity_label;
+    question += " -- which did you mean?";
+    if (!strategy.empty()) {
+        question += " (I read this as attempting \"";
+        question += strategy;
+        question += "\"; let me know if that is not right either.)";
+    }
+    return question;
+}
 
 // ---------------------------------------------------------------------------
 // The domain.
