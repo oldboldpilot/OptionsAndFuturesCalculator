@@ -30,8 +30,28 @@ export interface Env {
   // Optional: when both are set, the subscription tier is also written onto the
   // Supabase account. Absent, the licence path alone still works -- which is
   // deliberate, because it keeps billing functioning during a Supabase outage.
+  //
+  // This MUST be the self-hosted GoTrue/Kong gateway
+  // (https://auth.optionsandfuturescalculator.com, see infra/supabase/README.md)
+  // -- not a hosted supabase.co project. And SUPABASE_SERVICE_ROLE_KEY must be
+  // SUPABASE_SELFHOST_SERVICE_ROLE_KEY's value (config/.env), which HMAC-verifies
+  // against SUPABASE_JWT_SECRET. The plain SUPABASE_SERVICE_ROLE_KEY in
+  // config/.env belongs to an unrelated hosted project and will 403 here.
   SUPABASE_URL: string;
   SUPABASE_SERVICE_ROLE_KEY: string;
+}
+
+/**
+ * True once both Supabase settings are present. Does not check they are the
+ * RIGHT ones -- a wrong URL or key still 403s at the first real call, which
+ * `setSupabaseTier` logs loudly. This only catches the "nobody set it at all"
+ * case, which is exactly the defect that shipped silently for the entire life
+ * of this integration: every webhook returned 200, and `setSupabaseTier`
+ * returned `false` on its very first line with zero log output, so nothing
+ * ever wrote a tier and nothing ever said so.
+ */
+function supabaseConfigured(env: Env): boolean {
+  return Boolean(env.SUPABASE_URL && env.SUPABASE_SERVICE_ROLE_KEY);
 }
 
 /**
@@ -191,7 +211,19 @@ async function handleLicence(url: URL, env: Env, origin: string | null): Promise
  * Stripe retry and eventually disable the endpoint.
  */
 async function setSupabaseTier(env: Env, email: string, tier: string): Promise<boolean> {
-  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY || !email) return false;
+  if (!email) return false;
+
+  // Loud and distinct from "no account found" below: a missing env var is an
+  // operational bug that will not resolve itself on Stripe's retry, and it
+  // must be visible in `wrangler tail` / the Cloudflare dashboard without
+  // waiting for someone to notice a customer never got their tier.
+  if (!supabaseConfigured(env)) {
+    console.error(
+      `CONFIG ERROR: Supabase tier write skipped for ${email} (tier=${tier}) -- ` +
+        'SUPABASE_URL and/or SUPABASE_SERVICE_ROLE_KEY are not set on this Worker.',
+    );
+    return false;
+  }
 
   const headers = {
     apikey: env.SUPABASE_SERVICE_ROLE_KEY,
@@ -379,7 +411,11 @@ export default {
       case 'POST /webhook':
         return handleWebhook(req, env);
       case 'GET /health':
-        return json({ ok: true }, 200, origin);
+        // supabaseConfigured is a config presence check only (no secret
+        // material, no live call to Supabase) -- it exists so misconfiguration
+        // can be checked with `curl` instead of only surfacing after a real
+        // webhook fires and someone reads the logs.
+        return json({ ok: true, supabaseConfigured: supabaseConfigured(env) }, 200, origin);
       default:
         return json({ error: 'not found' }, 404, origin);
     }

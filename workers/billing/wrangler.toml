@@ -18,6 +18,24 @@ TRIAL_DAYS    = "7"
 #   wrangler secret put STRIPE_WEBHOOK_SECRET
 #   wrangler secret put LICENCE_SIGNING_KEY
 #   wrangler secret put RESEND_API_KEY
+#   wrangler secret put SUPABASE_URL
+#   wrangler secret put SUPABASE_SERVICE_ROLE_KEY
 #
 # LICENCE_SIGNING_KEY must be the SAME value the engine has, or every licence
 # this Worker mints will fail verification there.
+#
+# SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY are optional (see the comment on Env
+# in src/index.ts) but if set MUST be the self-hosted stack, not a hosted
+# supabase.co project:
+#
+#   SUPABASE_URL               <- config/.env SUPABASE_PUBLIC_URL
+#                                  (https://auth.optionsandfuturescalculator.com)
+#   SUPABASE_SERVICE_ROLE_KEY  <- config/.env SUPABASE_SELFHOST_SERVICE_ROLE_KEY
+#                                  (NOT the plain SUPABASE_SERVICE_ROLE_KEY in
+#                                  config/.env -- that one HMAC-verifies against
+#                                  an unrelated hosted project's JWT secret and
+#                                  will 403 against self-hosted GoTrue).
+#
+# GET /health reports whether both are present (`supabaseConfigured`) without
+# revealing either value -- check that after setting the secrets, rather than
+# waiting for a live webhook to confirm it.
