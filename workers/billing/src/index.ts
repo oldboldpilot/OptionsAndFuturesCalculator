@@ -230,11 +230,27 @@ async function setSupabaseTier(env: Env, email: string, tier: string): Promise<b
     Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
     'Content-Type': 'application/json',
   };
+  // SUPABASE_URL points DIRECTLY at GoTrue, so admin endpoints live at
+  // /admin/..., not /auth/v1/admin/... . That `/auth/v1` prefix is a Kong
+  // route, and Kong is deliberately not deployed: its only job is presenting
+  // GoTrue and PostgREST behind one origin, and this architecture runs one
+  // GoTrue per product with no PostgREST at all, so a gateway would be pure
+  // surface with nothing to multiplex.
+  //
+  // This cost a silent failure worth recording. With the prefix, every request
+  // 404'd, `lookup.ok` was false, the function returned false, and the webhook
+  // still answered Stripe 200 -- so a paid checkout completed, no tier was
+  // written, and nothing surfaced. It is the same shape as the missing-env-var
+  // bug directly above, which is why both now log rather than only returning.
+  //
+  // If a gateway is ever introduced, set SUPABASE_URL to the gateway origin
+  // and restore the /auth/v1 prefix TOGETHER -- changing one without the other
+  // reproduces exactly this failure.
   const base = env.SUPABASE_URL.replace(/\/+$/, '');
 
   try {
     const lookup = await fetch(
-      `${base}/auth/v1/admin/users?filter=${encodeURIComponent(email)}`,
+      `${base}/admin/users?filter=${encodeURIComponent(email)}`,
       { headers },
     );
     if (!lookup.ok) {
@@ -252,7 +268,11 @@ async function setSupabaseTier(env: Env, email: string, tier: string): Promise<b
     );
     if (!target) return false;
 
-    const update = await fetch(`${base}/auth/v1/admin/users/${target.id}`, {
+    // Same direct-GoTrue path as the lookup above. Both call sites must move
+    // together -- fixing only the lookup leaves the write 404ing, which looks
+    // exactly like success from outside: the user is found, the webhook still
+    // answers 200, and no tier is written.
+    const update = await fetch(`${base}/admin/users/${target.id}`, {
       method: 'PUT',
       headers,
       body: JSON.stringify({ app_metadata: { tier } }),
