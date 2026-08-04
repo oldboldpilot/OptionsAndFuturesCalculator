@@ -1096,6 +1096,15 @@ if(ENABLE_LLAMACPP_BACKEND)
     add_executable(observer_cost_probe src/observer_cost_probe.cpp)
     target_link_libraries(observer_cost_probe PRIVATE sensen_slim)
 
+    # End-to-end generation throughput of the SERVING path, not a kernel
+    # microbenchmark: same LLMPipeline construction assistant_service.cpp uses,
+    # so the number includes tokenisation, prefill, sampler and KV cache -- what
+    # a trader actually waits on. Sweeps thread count, and --gpu-layers measures
+    # the GPU path through the identical loop on a CUDA-enabled build. Links
+    # sensen alone; it measures this engine rather than comparing two.
+    add_executable(assistant_throughput_probe src/assistant_throughput_probe.cpp)
+    target_link_libraries(assistant_throughput_probe PRIVATE sensen_slim)
+
     # Long-context decode cost, prefill excluded. The KV cache is the only part
     # of the per-token read stream that grows with position, so a fixed short
     # prompt cannot measure a KV-width change at all; this sweeps the context
