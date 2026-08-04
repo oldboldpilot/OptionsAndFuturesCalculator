@@ -121,18 +121,44 @@ deployed model".
 `train.py` saves the LoRA adapter on its own first (a few MB, always
 succeeds), then folds the adapter into the frozen base to produce a bf16
 merged checkpoint (`save_pretrained_merged`, `save_method="merged_16bit"`).
-That merged directory is an **intermediate artifact** -- convenient input
-for llama.cpp's converter, not what ships and not what the accuracy bar
-above is measured against once a quantized serving path exists (see section
-4).
+That merged directory is an **intermediate artifact** -- the converter's
+input, not what ships and not what the accuracy bar above is measured
+against once a quantized serving path exists (see section 4).
 
-GGUF conversion (not automated by `train.py`; run by hand or by a follow-up
-script):
+GGUF conversion uses **sensen's own converter**, which is the standard here
+for the same reason sensen is the standard for serving:
 
+```bash
+ninja -C backend/sensen/build convert_safetensors_to_gguf validate_gguf   # once
+scripts/convert_to_gguf.sh <merged_dir> <out.gguf> q8_0
 ```
-python3 convert_hf_to_gguf.py <merged_dir> --outfile model-f16.gguf --outtype f16
-llama-quantize model-f16.gguf model-Q8_0.gguf Q8_0
-```
+
+`sensen::convert_safetensors_to_gguf` (`backend/sensen/src/model_converter.cppm`)
+writes Q8_0 **directly** from the merged safetensors. It replaced a llama.cpp
+two-step on 2026-08-03:
+
+| | llama.cpp | sensen |
+| --- | --- | --- |
+| steps | `convert_hf_to_gguf.py --outtype f16`, then `llama-quantize ... Q8_0` | one call |
+| intermediate | a 1.2 GB f16 GGUF | none |
+| wall clock | minutes | **0.765 s** |
+| holdout | 16/16 | **16/16** |
+
+The two outputs are **not** byte-identical -- ~480 bytes of metadata differ,
+the weights do not -- so comparing checksums across the two writers proves
+nothing. Compare behaviour, per `docs/guides/ASSISTANT_EVALUATION.md`. The
+sensen path IS deterministic: repeated runs of the same merged checkpoint
+reproduce the same sha256.
+
+`scripts/convert_to_gguf.sh` refuses a `model_type` the converter does not
+support (qwen3/qwen2 only) rather than emitting a GGUF that loads and then
+generates confident nonsense, and runs `validate_gguf` on the result.
+
+llama.cpp remains vendored, for two things this does not replace: the parity
+probes under `backend/src/*_probe.cpp`, which need an INDEPENDENT
+implementation to check sensen against (a reference sharing sensen's code
+would prove nothing), and the opt-in `ASSISTANT_BACKEND=llamacpp` second
+backend. Neither is a conversion or serving default.
 
 Output: a Q8_0 GGUF, ~639 MB, 310 tensors. The precision drop from bf16
 (export) to Q8_0 (serve) is deliberate, not a contradiction with training at

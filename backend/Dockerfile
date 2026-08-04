@@ -297,17 +297,30 @@ COPY backend/ /src/backend/
 # in /usr/share/libc++/v1 and /usr/local. The LLVM apt packages install them
 # per-version instead, so the location has to be passed in explicitly.
 #
-# ENABLE_LLAMACPP_BACKEND is left at its CMakeLists default of ON, and that is
-# a deliberate cost this image pays rather than an oversight.
+# ENABLE_LLAMACPP_BACKEND is OFF for this image, as of 2026-08-04.
 #
-# It is ON because calculator_engine LINKS llama.cpp: it is the second
-# inference backend behind the assistant RPC, selected at runtime by
-# ASSISTANT_BACKEND=llamacpp (see the ENABLE_LLAMACPP_BACKEND block in
-# backend/CMakeLists.txt for why a second engine is carried at all). Turning
-# it off here would produce an image in which that environment variable does
-# nothing but log a build-configuration error -- which is honest, but useless
-# in exactly the incident the fallback exists for, because switching backends
-# would then require a rebuild and redeploy rather than a restart.
+# Project policy: **sensen is the standard for serving and for conversion.**
+# llama.cpp is a debugging and cross-checking tool -- the parity probes under
+# backend/src/*_probe.cpp need an INDEPENDENT implementation to check sensen
+# against, and that is the whole of its role. It is not a serving alternative.
+#
+# This reverses the earlier rationale, which kept it ON so an incident could
+# switch backends with a restart instead of a rebuild. That traded a real,
+# permanent build cost for a fallback to an engine we do not serve on and do
+# not measure against: every gate in this repo -- the defect holdout, the
+# baselines, the 95.0% params bar -- is defined on the sensen path, so a
+# runtime flip to llama.cpp would move production onto an engine no gate
+# covers. Restoring it is a one-line rebuild if that is ever genuinely wanted.
+#
+# What turning it off saves: a ~167 MB git clone of github.com/ggml-org/llama.cpp
+# at CONFIGURE time, compiling ggml and llama, and one external host this build
+# had to reach -- which also removes a build failure mode that did not exist
+# before it was added (the build failed if GitHub was unreachable).
+#
+# ASSISTANT_BACKEND=llamacpp in this image now logs a build-configuration error
+# and leaves the assistant unavailable rather than silently starting sensen --
+# assistant_service.cpp is explicit that it never quietly substitutes one engine
+# for another.
 #
 # What it costs: a ~167 MB git clone of github.com/ggml-org/llama.cpp at
 # CONFIGURE time (FetchContent_MakeAvailable runs during `cmake -S`, not
@@ -331,6 +344,7 @@ RUN cmake -S /src/backend -B /src/build -G Ninja \
         -DCMAKE_CXX_FLAGS="${GCC_TOOLCHAIN_FLAGS}" \
         -DLIBCXX_MODULES_PATH=/usr/lib/llvm-${LLVM_VERSION}/share/libc++/v1 \
         -DCPP23_LOGGER_LIBCXX_MODULES_PATH=/usr/lib/llvm-${LLVM_VERSION}/share/libc++/v1 \
+        -DENABLE_LLAMACPP_BACKEND=OFF \
     && cmake --build /src/build --target calculator_engine smoke_client proto_descriptor
 
 # calculator_engine and smoke_client now link against libc++ instead of

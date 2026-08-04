@@ -43,7 +43,8 @@ and is worth stopping to explain rather than shipping quietly.
 
 THE FULL CHAIN THIS FILE IS ONE STAGE OF -- train (this file, 4-bit QLoRA) ->
 merge (save_pretrained_merged below, 4-bit adapters folded into bf16 weights)
--> quantize (llama.cpp convert + llama-quantize, bf16 -> Q8_0 GGUF, ~639 MB) ->
+-> quantize (scripts/convert_to_gguf.sh, sensen's own converter, bf16 -> Q8_0
+GGUF in one step, ~639 MB) ->
 distribute (private HF repo, checksum pinned, fetched at Docker build time,
 never through `railway up`) -> serve (sensen's in-process LLMPipeline, Q8_0
 weights, q8 KV cache, CPU) -- is documented end to end, including the parts
@@ -296,15 +297,18 @@ def main() -> None:
     # script, and easy to assume is further along than it is:
     #
     #   1. merged_16bit (below) writes bf16 weights to args.out. Those are an
-    #      INTERMEDIATE artifact -- a convenient format for llama.cpp's
-    #      converter, not what ships and not what the 95.0% bar above was
-    #      re-verified against when the KV-cache/quantization gate was added.
-    #   2. llama.cpp: `convert_hf_to_gguf.py args.out --outfile model-f16.gguf
-    #      --outtype f16`, then `llama-quantize model-f16.gguf model-Q8_0.gguf
-    #      Q8_0`. This is the SAME quantization scheme production serves
-    #      (Q8_0 weights, q8 KV cache at serve time) -- evaluate the GGUF, not
-    #      the bf16 directory above, or a passing number here can still ship
-    #      a regression.
+    #      INTERMEDIATE artifact -- the input to the converter, not what ships,
+    #      and not what the 95.0% bar above was re-verified against when the
+    #      KV-cache/quantization gate was added.
+    #   2. `scripts/convert_to_gguf.sh <args.out> <out.gguf> q8_0` -- SENSEN's
+    #      converter (sensen::convert_safetensors_to_gguf), which writes Q8_0
+    #      directly from the merged safetensors. One call, no f16 intermediate,
+    #      0.765 s. This replaced a llama.cpp two-step on 2026-08-03; both score
+    #      16/16 on the defect holdout, and sensen is the project standard for
+    #      conversion as well as serving. This is the SAME quantization scheme
+    #      production serves (Q8_0 weights, q8 KV cache at serve time) --
+    #      evaluate the GGUF, not the bf16 directory above, or a passing number
+    #      here can still ship a regression.
     #   3. The GGUF goes to a private HF repo; MODEL_URL/MODEL_SHA256 in
     #      Railway's build variables point the Docker build at it. Nothing in
     #      this repo does that upload automatically, and it is deliberately

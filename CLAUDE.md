@@ -87,6 +87,33 @@ It was trained 2026-08-03 from `unsloth/Qwen3-0.6B`, QLoRA rank 16, **4 epochs**
 (`run_qlora.sh` overrides `train.py`'s `default=2.0`; reading that default as the
 recipe produced a 2-epoch retrain scoring 5/16 against this model's 16/16).
 
+**sensen is the standard for serving AND for conversion. llama.cpp is a
+debugging and cross-checking tool only.** Its one legitimate role is being an
+INDEPENDENT implementation for the parity probes (`backend/src/*_probe.cpp`) —
+a reference that shared sensen's code would prove nothing. It is not a serving
+alternative and not a conversion step:
+
+- **Serving:** `ASSISTANT_BACKEND` defaults to `sensen` and production runs it.
+  The production image is built `-DENABLE_LLAMACPP_BACKEND=OFF` (2026-08-04), so
+  `ASSISTANT_BACKEND=llamacpp` there logs a build-configuration error and leaves
+  the assistant unavailable rather than quietly substituting an engine. Every
+  gate in this repo — the defect holdout, the baselines, the 95.0% params bar —
+  is defined on the sensen path, so serving on llama.cpp would put production on
+  an engine no gate covers.
+- **Conversion:** `scripts/convert_to_gguf.sh` uses
+  `sensen::convert_safetensors_to_gguf`, which writes Q8_0 directly from merged
+  safetensors — one call, no f16 intermediate, **0.765 s** against a llama.cpp
+  two-step that took minutes. Both score 16/16; sensen is the standard.
+  `sensen.model_converter` is a universal hub (safetensors ↔ GGUF ↔ PyTorch ↔
+  ONNX ↔ sensen-native), not just this one direction.
+- **Evaluation:** measure candidates on sensen, never llama.cpp — a `llama-cli`
+  score describes an engine that never handles a request. See
+  `docs/guides/ASSISTANT_EVALUATION.md`.
+
+Reaching for llama.cpp out of habit cost real work on 2026-08-03: it produced a
+phantom regression that triggered an unnecessary retrain, and a conversion step
+orders of magnitude slower than the one already in the tree.
+
 Three things about it are load-bearing and easy to get wrong:
 
 1. **The model requires its training system prompt.** Without it, it reverts to
