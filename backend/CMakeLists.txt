@@ -1105,6 +1105,16 @@ if(ENABLE_LLAMACPP_BACKEND)
     add_executable(assistant_throughput_probe src/assistant_throughput_probe.cpp)
     target_link_libraries(assistant_throughput_probe PRIVATE sensen_slim)
 
+    # Bit-exactness gate for the decode path. Captures the exact token-id stream
+    # for a fixed prompt battery under greedy deterministic decoding, and later
+    # re-checks it. Every change that claims to be numerically identical -- a
+    # weight repacking, a new SIMD dispatch tier, a replayed CUDA graph -- must
+    # reproduce it exactly. Takes --gpu-layers, so the CPU layout work and the
+    # GPU graph work are held to ONE definition of correct rather than each
+    # inventing its own tolerance.
+    add_executable(decode_golden_probe src/decode_golden_probe.cpp)
+    target_link_libraries(decode_golden_probe PRIVATE sensen_slim)
+
     # Long-context decode cost, prefill excluded. The KV cache is the only part
     # of the per-token read stream that grows with position, so a fixed short
     # prompt cannot measure a KV-width change at all; this sweeps the context
