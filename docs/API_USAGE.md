@@ -33,6 +33,10 @@ a server bug rather than a transport one: your client connects, TLS completes, a
 the stream is then dropped with no server-side trace.
 
 - **Browsers and any external service** → gRPC-Web against the public domain.
+- **Server-side callers who want plain HTTP** → a **JSON transcoder** is also
+  available on the same URLs: send `Content-Type: application/json` with a JSON
+  body and you get JSON back. Convenient, but read §3.1 before using it — it has a
+  failure mode gRPC-Web does not.
 - **Local development and in-cluster callers** → native gRPC works normally
   (`localhost:50051`, or the Railway TCP proxy).
 
@@ -99,6 +103,40 @@ decimal, an absent compounding frequency, an underspecified bond, a ragged batch
 or a loan whose payment cannot cover its interest all produce an error, never a
 plausible-looking number. Treat a refusal as correct behaviour and surface it;
 do not fall back to a default.
+
+### 3.1 The JSON path silently drops unknown fields
+
+**A mistyped or omitted field on the JSON path does not error. It defaults, and the
+service computes on the default.** Measured against production on 2026-08-05:
+
+| Request | Response | HTTP |
+| --- | --- | --- |
+| `{"present_value":"300000","rate":"0.005","periods":360}` | `-1798.651575458257198999` | 200 |
+| `{"presentvalue":"300000", ...}` (one typo) | `0.000000000000000000` | 200 |
+| `{}` | `0.000000000000000000` | 200 |
+| `{"present_value":"300000","periods":360}` (no rate) | **`-833.333333333333333333`** | 200 |
+
+The last row is the one to worry about. A zero looks broken and gets investigated;
+omitting the *rate* makes the service assume 0% and return principal ÷ periods — a
+plausible, confidently wrong payment.
+
+The cause is structural: Envoy's gRPC-JSON transcoder ignores unknown JSON fields,
+and proto3 scalars have no presence, so an absent field is indistinguishable from
+one explicitly set to its default.
+
+**Consequences for you:**
+
+- **Prefer generated gRPC-Web stubs over hand-written JSON.** Stub field names are
+  checked at compile time, so this class of mistake cannot reach the wire. This is
+  the main practical reason to generate a client rather than hand-roll HTTP.
+- **If you use the JSON path, assert on the answer, not on HTTP 200.** A 200 with a
+  zero — or a suspiciously round figure — means check your field names first.
+- Note the empty-string distinction: because money fields are *strings*, `""` means
+  absent while `"0"` means an explicit zero. That difference is one reason they are
+  strings rather than numbers.
+
+A fix requiring these fields is in progress; treat the behaviour above as current,
+not intended.
 
 ## 4. Quota and identity — the part that surprises people
 
