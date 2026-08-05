@@ -860,6 +860,11 @@ target_link_libraries(smoke_client PRIVATE proto_lib)
 add_executable(assistant_load_probe src/assistant_load_probe.cpp)
 target_link_libraries(assistant_load_probe PRIVATE proto_lib)
 
+# adv_client: throwaway adversarial-testing client for the strategy assistant
+# security review (see its source header). Not part of the deploy gate.
+add_executable(adv_client src/adv_client.cpp)
+target_link_libraries(adv_client PRIVATE proto_lib)
+
 # --------------------------------------------------------------------------
 # llama.cpp / ggml -- upstream (ggml-org/llama.cpp), fetched and built inside
 # this tree to prove, in this exact build with this exact toolchain, that it

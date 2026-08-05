@@ -2348,6 +2348,38 @@ class StrategyAssistantImpl final : public calculator::assistant::StrategyAssist
                               "-character limit for this RPC.");
         }
 
+        // Two input-side guards, run BEFORE the model is ever asked to
+        // generate -- see assistant_verification.cppm's "Input-side guards"
+        // section banner for the two live probes that motivated each one and
+        // why no check on the model's OUTPUT can substitute for refusing
+        // before the model ever answers: both attacks below produce a
+        // structurally self-consistent `<params>` block that every
+        // cross-field rule in `AssistantParamsDomain::translate()` accepts,
+        // because that domain only ever sees the model's five final fields,
+        // never the utterance that produced them.
+        //
+        // Checked on `utterance` AND `prior_clarification`: a second-turn
+        // reply is just as capable of carrying either signal as a first-turn
+        // request is, and `build_prompt` feeds both to the model verbatim.
+        if (::options_calculator::assistant::verify::looks_like_prompt_injection(request->utterance()) ||
+            ::options_calculator::assistant::verify::looks_like_prompt_injection(
+                request->prior_clarification())) {
+            populate_refusal(
+                *response, calculator::assistant::Refusal::OUT_OF_SCOPE,
+                "This reads like an instruction to the assistant rather than a trade description. "
+                "Describe the strategy you want priced (e.g. \"bull call spread on NVDA, 30 days, "
+                "2 contracts\") without instructions aimed at the assistant itself.");
+            return Status::OK;
+        }
+        if (::options_calculator::assistant::verify::looks_like_advice_request(request->utterance())) {
+            populate_refusal(
+                *response, calculator::assistant::Refusal::OUT_OF_SCOPE,
+                "I don't give trading advice, predictions, or recommendations -- describe a "
+                "specific strategy (e.g. \"bull call spread on NVDA, 30 days, 2 contracts\") and "
+                "I will price it.");
+            return Status::OK;
+        }
+
         // The Pro gate, server-side and before any inference work -- same
         // placement rationale as CalculateStrategy's own gate in
         // calculator_service.cpp. `_id` is the identity CHARGE already
