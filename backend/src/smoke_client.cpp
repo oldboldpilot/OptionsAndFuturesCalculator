@@ -1809,13 +1809,23 @@ auto check_finance(sensen::finance::Finance::Stub& stub) -> bool {
     {
         // ComputeHomeNpv: the same malformed-decimal probe as ComputePayment
         // above, reused on a new field -- "12x3" must not silently become
-        // 123.
+        // 123. Every OTHER required decimal field is filled in with a real
+        // value so this specifically exercises the malformed-annual_discount_rate
+        // parse failure, not one of the absent-required-field refusals
+        // exercised separately below.
         sensen::finance::HomeNpvRequest req;
         req.set_property_price("350000");
         req.set_down_payment("70000");
+        req.set_closing_costs_buy("5000");
         req.set_loan_amount("280000");
         req.set_loan_annual_rate("0.05");
         req.set_loan_term_years(30);
+        req.set_monthly_taxes_ins_hoa("400");
+        req.set_monthly_maintenance("150");
+        req.set_annual_appreciation_rate("0.03");
+        req.set_selling_closing_cost_percent("0.06");
+        req.set_monthly_rent_saved("1800");
+        req.set_annual_rent_increase("0.03");
         req.set_holding_period_years(7);
         req.set_annual_discount_rate("12x3");
         sensen::finance::HomeNpvResponse res;
@@ -1825,9 +1835,750 @@ auto check_finance(sensen::finance::Finance::Stub& stub) -> bool {
             return false;
         }
     }
+    // -------------------------------------------------------------------
+    // Adversarial regression cases, six new home-finance RPCs.
+    //
+    // Each of these reproduces an attack that was verified live against a
+    // running engine before the corresponding handler guard existed --
+    // resource exhaustion, integer overflow, BigDecimal magnitude overflow,
+    // and a silent-zero at a rate the engine's own solver does not detect
+    // as a domain error. See docs/superpowers/specs/2026-08-05-
+    // finance-proto-extension.md for the six-RPC design and
+    // finance_service.cpp's check_payments_per_year /
+    // check_decimal_string_magnitude / check_rate_floor /
+    // check_compound_growth_safe for the fix. Pinned here so none of them
+    // can regress silently.
+    // -------------------------------------------------------------------
+    {
+        // ComputeRefinance: payments_per_year=20,000,000 with new_term_years
+        // at its cap (100) makes calculate_refinance_metrics walk
+        // max(current_remaining_months, new_term_years*payments_per_year) =
+        // 2,000,000,000 months -- measured at 11.5s of engine wall-clock
+        // for this ONE call before the payments_per_year ceiling existed,
+        // charged only cost_amortization(1200) (101 compute units against a
+        // 120,000/hour anonymous budget) because the CHARGE line priced
+        // new_term_years*12, not new_term_years*payments_per_year. Refused
+        // AND fast is the assertion -- a refusal that still took 11 seconds
+        // would still be a denial of service.
+        sensen::finance::RefinanceRequest req;
+        req.set_current_loan_balance("300000");
+        req.set_current_monthly_payment("2000");
+        req.set_current_annual_rate("0.06");
+        req.set_current_remaining_months(300);
+        req.set_property_value("400000");
+        req.set_new_annual_rate("0.045");
+        req.set_new_term_years(100);
+        req.set_closing_costs("6000");
+        req.set_payments_per_year(20000000);
+        sensen::finance::RefinanceResponse res;
+        const auto ctx = make_context();
+        const auto t0 = std::chrono::steady_clock::now();
+        const auto status = stub.ComputeRefinance(ctx.get(), req, &res);
+        const auto elapsed = std::chrono::steady_clock::now() - t0;
+        if (status.ok()) {
+            std::cerr << "ComputeRefinance accepted payments_per_year=20,000,000 rather than "
+                         "refusing an unreal payment cadence\n";
+            return false;
+        }
+        if (elapsed > std::chrono::seconds(2)) {
+            std::cerr << "ComputeRefinance took " << std::chrono::duration<double>(elapsed).count()
+                      << "s to REFUSE payments_per_year=20,000,000 -- the refusal must happen "
+                         "before the amortization walk, not after it\n";
+            return false;
+        }
+    }
+    {
+        // ComputeRefinance: payments_per_year large enough to overflow the
+        // int32 product new_term_years*payments_per_year, rather than merely
+        // inflate it. Before the fix this returned a "successful" response
+        // with payoff_date_shift_months = -1863463212 -- a wrong-but-
+        // plausible-looking number from the wraparound, not an error.
+        sensen::finance::RefinanceRequest req;
+        req.set_current_loan_balance("300000");
+        req.set_current_monthly_payment("2000");
+        req.set_current_annual_rate("0.06");
+        req.set_current_remaining_months(300);
+        req.set_property_value("400000");
+        req.set_new_annual_rate("0.045");
+        req.set_new_term_years(100);
+        req.set_closing_costs("6000");
+        req.set_payments_per_year(2000000000);
+        sensen::finance::RefinanceResponse res;
+        const auto ctx = make_context();
+        if (stub.ComputeRefinance(ctx.get(), req, &res).ok()) {
+            std::cerr << "ComputeRefinance accepted payments_per_year=2,000,000,000 (an int32 "
+                         "overflow of new_term_years*payments_per_year) rather than refusing\n";
+            return false;
+        }
+    }
+    {
+        // ComputePayoffTiming, ComputeMortgageRecast, ComputeHomeFutureValue:
+        // the same payments_per_year ceiling, one probe each -- all three
+        // handlers only had a `> 0` floor, no ceiling, before this fix.
+        sensen::finance::PayoffTimingRequest pt;
+        pt.set_current_loan_balance("300000");
+        pt.set_annual_rate("0.06");
+        pt.set_current_monthly_payment("2000");
+        pt.set_payments_per_year(2000000000);
+        sensen::finance::PayoffTimingResponse pt_res;
+        const auto ctx1 = make_context();
+        if (stub.ComputePayoffTiming(ctx1.get(), pt, &pt_res).ok()) {
+            std::cerr << "ComputePayoffTiming accepted payments_per_year=2,000,000,000\n";
+            return false;
+        }
+
+        sensen::finance::MortgageRecastRequest mr;
+        mr.set_current_loan_balance("300000");
+        mr.set_current_monthly_payment("2000");
+        mr.set_lump_sum_payment("0");
+        mr.set_annual_rate("0.06");
+        mr.set_remaining_months(300);
+        mr.set_payments_per_year(2000000000);
+        sensen::finance::MortgageRecastResponse mr_res;
+        const auto ctx2 = make_context();
+        if (stub.ComputeMortgageRecast(ctx2.get(), mr, &mr_res).ok()) {
+            std::cerr << "ComputeMortgageRecast accepted payments_per_year=2,000,000,000\n";
+            return false;
+        }
+
+        sensen::finance::HomeFutureValueRequest hf;
+        hf.set_current_property_value("400000");
+        hf.set_annual_appreciation_rate("0.03");
+        hf.set_current_loan_balance("300000");
+        hf.set_annual_mortgage_rate("0.06");
+        hf.set_current_monthly_payment("2000");
+        hf.set_target_years(100);
+        hf.set_payments_per_year(2000000000);
+        sensen::finance::HomeFutureValueResponse hf_res;
+        const auto ctx3 = make_context();
+        if (stub.ComputeHomeFutureValue(ctx3.get(), hf, &hf_res).ok()) {
+            std::cerr << "ComputeHomeFutureValue accepted payments_per_year=2,000,000,000\n";
+            return false;
+        }
+    }
+    {
+        // ComputeHeloc: the SAME unbounded-integer shape as the five RPCs
+        // above, on an RPC that predates them and was already deployed. It is
+        // covered here rather than left to the newer six because
+        // calculate_heloc_metrics computes
+        //     int total_repayment_periods = repayment_term_years * payments_per_year;
+        // -- an int32 product of two caller-controlled values that both
+        // carried only a `> 0` floor, so the multiplication itself is signed
+        // overflow (UB) before the result is used. Both operands get a probe,
+        // because bounding only one of them still leaves the product
+        // overflowable from the other side.
+        const auto heloc_probe = [&](int term_years, int ppy, const char* rate,
+                                     const char* what) -> bool {
+            sensen::finance::HelocRequest req;
+            req.set_home_value("500000");
+            req.set_current_mortgage_balance("300000");
+            req.set_max_ltv_rate("0.8");
+            req.set_drawn_amount("50000");
+            req.set_annual_rate(rate);
+            req.set_repayment_term_years(term_years);
+            req.set_payments_per_year(ppy);
+            sensen::finance::HelocResponse res;
+            const auto c = make_context();
+            if (stub.ComputeHeloc(c.get(), req, &res).ok()) {
+                std::cerr << "ComputeHeloc accepted " << what << " rather than refusing; it "
+                          << "answered repayment_period_payment="
+                          << res.repayment_period_payment() << "\n";
+                return false;
+            }
+            return true;
+        };
+        if (!heloc_probe(100, 2000000000, "0.07",
+                         "payments_per_year=2,000,000,000 (int32 overflow of "
+                         "repayment_term_years*payments_per_year)")) {
+            return false;
+        }
+        if (!heloc_probe(2000000000, 12, "0.07",
+                         "repayment_term_years=2,000,000,000 (the same overflow from the "
+                         "other operand)")) {
+            return false;
+        }
+        // A rate extreme enough to overflow pmt()'s BigDecimal pow() even once
+        // both integer operands are bounded -- the recast/home-FV failure mode,
+        // which a ceiling on the period count alone does not close.
+        if (!heloc_probe(100, 366, "1000000", "annual_rate=1,000,000 (100,000,000% APR)")) {
+            return false;
+        }
+        // Non-vacuous control: an ordinary HELOC must still be answered. Without
+        // this, refusing every ComputeHeloc call would pass the three probes
+        // above and look like a fix.
+        {
+            sensen::finance::HelocRequest req;
+            req.set_home_value("500000");
+            req.set_current_mortgage_balance("300000");
+            req.set_max_ltv_rate("0.8");
+            req.set_drawn_amount("50000");
+            req.set_annual_rate("0.07");
+            req.set_repayment_term_years(15);
+            req.set_payments_per_year(12);
+            sensen::finance::HelocResponse res;
+            const auto c = make_context();
+            if (const auto s = stub.ComputeHeloc(c.get(), req, &res); !s.ok()) {
+                std::cerr << "ComputeHeloc refused an ordinary 15-year/monthly HELOC: "
+                          << s.error_message() << "\n";
+                return false;
+            }
+        }
+    }
+    {
+        // ComputePayoffTiming: annual_rate=-1 with payments_per_year=1 makes
+        // the per-period rate exactly -100%. calculate_payoff_timing's own
+        // numerator/denominator sign check does not catch this -- it
+        // evaluates log(0)/log(1-1) down to a clean IEEE 0.0, so the RPC
+        // returned original_months_remaining=0 ("already paid off") for a
+        // loan that manifestly is not, instead of refusing. This is the
+        // silent-zero hazard the six-RPC spec's own §1b flagged, just not at
+        // the input the spec's own probe exercises.
+        sensen::finance::PayoffTimingRequest req;
+        req.set_current_loan_balance("300000");
+        req.set_annual_rate("-1");
+        req.set_current_monthly_payment("2000");
+        req.set_payments_per_year(1);
+        sensen::finance::PayoffTimingResponse res;
+        const auto ctx = make_context();
+        if (stub.ComputePayoffTiming(ctx.get(), req, &res).ok()) {
+            std::cerr << "ComputePayoffTiming accepted a -100%-per-period rate rather than "
+                         "refusing it, and " << (res.original_months_remaining() == 0
+                                                      ? "returned the silent-zero \"already paid "
+                                                        "off\" answer"
+                                                      : "returned a real-looking answer")
+                      << " for a loan that cannot amortize at that rate\n";
+            return false;
+        }
+    }
+    {
+        // ComputeMortgageRecast: the same -100%-per-period rate. Before the
+        // fix this returned new_monthly_payment="0.000...000" -- "the
+        // recast pays this loan off entirely" -- which is the same
+        // silent-zero shape, through pmt()'s BigDecimal pow(0) rather than
+        // nper_fn's log().
+        sensen::finance::MortgageRecastRequest req;
+        req.set_current_loan_balance("300000");
+        req.set_current_monthly_payment("2000");
+        req.set_lump_sum_payment("0");
+        req.set_annual_rate("-1");
+        req.set_remaining_months(300);
+        req.set_payments_per_year(1);
+        sensen::finance::MortgageRecastResponse res;
+        const auto ctx = make_context();
+        if (stub.ComputeMortgageRecast(ctx.get(), req, &res).ok()) {
+            std::cerr << "ComputeMortgageRecast accepted a -100%-per-period rate rather than "
+                         "refusing it\n";
+            return false;
+        }
+    }
+    {
+        // ComputeMortgageRecast: annual_rate=1,000,000 (100,000,000% APR)
+        // with remaining_months at its cap (1200) overflows BigDecimal's
+        // pow() -- measured before the fix as new_monthly_payment =
+        // "-62493201672074.130046976086341595" for a $300,000 loan, a
+        // wrong-but-plausible-looking number from the __int128 wraparound,
+        // not an error.
+        sensen::finance::MortgageRecastRequest req;
+        req.set_current_loan_balance("300000");
+        req.set_current_monthly_payment("2000");
+        req.set_lump_sum_payment("0");
+        req.set_annual_rate("1000000");
+        req.set_remaining_months(1200);
+        req.set_payments_per_year(12);
+        sensen::finance::MortgageRecastResponse res;
+        const auto ctx = make_context();
+        if (stub.ComputeMortgageRecast(ctx.get(), req, &res).ok()) {
+            std::cerr << "ComputeMortgageRecast accepted annual_rate=1,000,000 (100,000,000% "
+                         "APR) rather than refusing a compounding factor its exact decimal "
+                         "engine cannot represent\n";
+            return false;
+        }
+    }
+    {
+        // ComputeHomeFutureValue: the same extreme-rate overflow, through
+        // fv()'s BigDecimal pow(). Measured before the fix as
+        // future_loan_balance = "111827623405189370487.15..." for a
+        // $300,000 starting balance.
+        sensen::finance::HomeFutureValueRequest req;
+        req.set_current_property_value("400000");
+        req.set_annual_appreciation_rate("0.03");
+        req.set_current_loan_balance("300000");
+        req.set_annual_mortgage_rate("1000000");
+        req.set_current_monthly_payment("2000");
+        req.set_target_years(100);
+        req.set_payments_per_year(12);
+        sensen::finance::HomeFutureValueResponse res;
+        const auto ctx = make_context();
+        if (stub.ComputeHomeFutureValue(ctx.get(), req, &res).ok()) {
+            std::cerr << "ComputeHomeFutureValue accepted annual_mortgage_rate=1,000,000 rather "
+                         "than refusing a compounding factor its exact decimal engine cannot "
+                         "represent\n";
+            return false;
+        }
+    }
+    {
+        // ComputeRefinance: a 200-digit current_loan_balance. BigDecimal is
+        // an exact __int128 fixed-point type (scale 1e18) with a
+        // representable ceiling around 1.7e20 -- about 20 integer digits --
+        // and neither its string constructor nor its arithmetic detect an
+        // overflow past that; they wrap. Measured before the fix as
+        // new_loan_amount = "-75618303760208547436.42..." -- NEGATIVE --
+        // from a 200-digit POSITIVE input.
+        sensen::finance::RefinanceRequest req;
+        req.set_current_loan_balance(std::string(200, '1'));
+        req.set_current_monthly_payment("2000");
+        req.set_current_annual_rate("0.06");
+        req.set_current_remaining_months(300);
+        req.set_property_value("400000");
+        req.set_new_annual_rate("0.045");
+        req.set_new_term_years(30);
+        req.set_closing_costs("6000");
+        req.set_payments_per_year(12);
+        sensen::finance::RefinanceResponse res;
+        const auto ctx = make_context();
+        if (stub.ComputeRefinance(ctx.get(), req, &res).ok()) {
+            std::cerr << "ComputeRefinance accepted a 200-digit current_loan_balance rather than "
+                         "refusing a magnitude its exact decimal engine cannot represent (a "
+                         "positive 200-digit input previously came back as a NEGATIVE "
+                         "new_loan_amount)\n";
+            return false;
+        }
+    }
+    {
+        // ComputeHomeNpv: holding_period_years = INT32_MAX. The CHARGE line
+        // above this RPC's validation multiplies holding_period_years*12
+        // BEFORE the <=100 check runs (CHARGE must run before validation --
+        // see finance_service.cpp's own comment on why -- so it prices the
+        // unvalidated request). INT32_MAX*12 overflows int32, which is
+        // undefined behaviour regardless of what the validation two lines
+        // later does with the result. This probe cannot observe the UB
+        // directly through the RPC surface; what it pins is that the
+        // request is refused cleanly, so a future change to the CHARGE
+        // line's arithmetic cannot silently reopen it without a build
+        // sanitizer (or this probe, under one) catching it.
+        sensen::finance::HomeNpvRequest req;
+        req.set_property_price("400000");
+        req.set_down_payment("80000");
+        req.set_closing_costs_buy("8000");
+        req.set_loan_amount("320000");
+        req.set_loan_annual_rate("0.06");
+        req.set_loan_term_years(30);
+        req.set_monthly_taxes_ins_hoa("500");
+        req.set_monthly_maintenance("200");
+        req.set_annual_appreciation_rate("0.03");
+        req.set_selling_closing_cost_percent("0.06");
+        req.set_monthly_rent_saved("2000");
+        req.set_annual_rent_increase("0.03");
+        req.set_annual_discount_rate("0.05");
+        req.set_holding_period_years(2147483647);
+        sensen::finance::HomeNpvResponse res;
+        const auto ctx = make_context();
+        if (stub.ComputeHomeNpv(ctx.get(), req, &res).ok()) {
+            std::cerr << "ComputeHomeNpv accepted holding_period_years=INT32_MAX rather than "
+                         "refusing it\n";
+            return false;
+        }
+    }
+    // -------------------------------------------------------------------
+    // Absent/empty REQUIRED decimal fields must be refused, not silently
+    // computed on as zero.
+    //
+    // Envoy's gRPC-JSON transcoder drops any JSON field it does not
+    // recognise, and proto3 scalars have no wire presence -- so a mistyped
+    // field name and a field the caller genuinely never set are BOTH just
+    // "" on the wire, indistinguishable from each other and, before this
+    // fix, from an explicit "$0"/"0%". Verified live against a running
+    // engine before the fix existed:
+    //
+    //   POST ComputePayment {"present_value":"300000","rate":"0.005","periods":360}
+    //     -> "-1798.651575458257198999"                          (correct)
+    //   POST ComputePayment {"presentvalue":"300000","rate":"0.005","periods":360}
+    //     -> "0.000000000000000000"           HTTP 200  (typo -> silent 0)
+    //   POST ComputePayment {}
+    //     -> "0.000000000000000000"           HTTP 200
+    //   POST ComputePayment {"present_value":"","rate":"0.005","periods":360}
+    //     -> "0.000000000000000000"           HTTP 200
+    //   POST ComputePayment {"present_value":"300000","periods":360}
+    //     -> "-833.333333333333333333"        HTTP 200  (absent rate -> 0%)
+    //   POST ComputeAmortization with loan_amount mistyped
+    //     -> empty schedule, all-zero summary, HTTP 200
+    //
+    // A gRPC C++ stub cannot itself mistype a JSON field name -- proto
+    // setters are compile-checked -- but "the setter for this field was
+    // never called" is EXACTLY what a mistyped JSON name produces once past
+    // the transcoder (an unset string field, "" on the wire), so every case
+    // below reproduces the bug at the point that matters: the handler
+    // receiving an empty required field, regardless of how it got that way.
+    // See finance_service.cpp's REQUIRE_DECIMAL / REQUIRE_DECIMAL_SAFE /
+    // check_periods for the fix; each case here is pinned so none of them
+    // can regress back to a silent zero.
+    // -------------------------------------------------------------------
+    {
+        // Entirely empty request body -- the {} case above.
+        sensen::finance::PaymentRequest req;
+        sensen::finance::DecimalResponse res;
+        const auto ctx = make_context();
+        if (stub.ComputePayment(ctx.get(), req, &res).ok()) {
+            std::cerr << "ComputePayment accepted an entirely empty request rather than "
+                         "refusing it\n";
+            return false;
+        }
+    }
+    {
+        // The exact "present_value typo'd to presentvalue" shape: rate and
+        // periods are real, present_value's setter was simply never called.
+        sensen::finance::PaymentRequest req;
+        req.set_rate("0.005");
+        req.set_periods(360);
+        sensen::finance::DecimalResponse res;
+        const auto ctx = make_context();
+        if (stub.ComputePayment(ctx.get(), req, &res).ok()) {
+            std::cerr << "ComputePayment accepted an absent present_value (the mistyped-"
+                         "field-name shape) rather than refusing it\n";
+            return false;
+        }
+    }
+    {
+        // The exact "omitted rate" request that measured -833.333... in
+        // production: present_value and periods only, no rate at all.
+        sensen::finance::PaymentRequest req;
+        req.set_present_value("300000");
+        req.set_periods(360);
+        sensen::finance::DecimalResponse res;
+        const auto ctx = make_context();
+        if (stub.ComputePayment(ctx.get(), req, &res).ok()) {
+            std::cerr << "ComputePayment accepted an absent rate rather than refusing it -- "
+                         "this is the exact request that used to silently return "
+                         "-833.333333333333333333 (principal/periods at an assumed 0%)\n";
+            return false;
+        }
+    }
+    {
+        // periods=0 (never set) is the same silent-zero class through an
+        // int32 default rather than an empty string: pmt()'s own BigDecimal
+        // divide resolves 0/0 through value_or(0) instead of erroring.
+        sensen::finance::PaymentRequest req;
+        req.set_rate("0.005");
+        req.set_present_value("300000");
+        sensen::finance::DecimalResponse res;
+        const auto ctx = make_context();
+        if (stub.ComputePayment(ctx.get(), req, &res).ok()) {
+            std::cerr << "ComputePayment accepted periods=0 (never set) rather than refusing "
+                         "it\n";
+            return false;
+        }
+    }
+    {
+        sensen::finance::PresentValueRequest req;
+        req.set_periods(360);
+        req.set_payment("-1798.651575458257198999");
+        sensen::finance::DecimalResponse res;
+        const auto ctx = make_context();
+        if (stub.ComputePresentValue(ctx.get(), req, &res).ok()) {
+            std::cerr << "ComputePresentValue accepted an absent rate rather than refusing it\n";
+            return false;
+        }
+    }
+    {
+        sensen::finance::FutureValueRequest req;
+        req.set_rate("0.005");
+        req.set_periods(360);
+        sensen::finance::DecimalResponse res;
+        const auto ctx = make_context();
+        if (stub.ComputeFutureValue(ctx.get(), req, &res).ok()) {
+            std::cerr << "ComputeFutureValue accepted an absent payment rather than refusing "
+                         "it\n";
+            return false;
+        }
+    }
+    {
+        sensen::finance::FutureValueDetailedRequest req;
+        req.set_years(10);
+        req.set_annual_contribution("1000");
+        req.set_compound_frequency(12);
+        sensen::finance::FutureValueDetailedResponse res;
+        const auto ctx = make_context();
+        if (stub.ComputeFutureValueDetailed(ctx.get(), req, &res).ok()) {
+            std::cerr << "ComputeFutureValueDetailed accepted an absent annual_rate rather "
+                         "than refusing it\n";
+            return false;
+        }
+    }
+    {
+        sensen::finance::PeriodPaymentRequest req;
+        req.set_period(1);
+        req.set_periods(360);
+        req.set_present_value("300000");
+        sensen::finance::DecimalResponse ires;
+        sensen::finance::DecimalResponse pres;
+        const auto c1 = make_context();
+        const auto c2 = make_context();
+        if (stub.ComputeInterestPayment(c1.get(), req, &ires).ok()) {
+            std::cerr << "ComputeInterestPayment accepted an absent rate rather than refusing "
+                         "it\n";
+            return false;
+        }
+        if (stub.ComputePrincipalPayment(c2.get(), req, &pres).ok()) {
+            std::cerr << "ComputePrincipalPayment accepted an absent rate rather than "
+                         "refusing it\n";
+            return false;
+        }
+    }
+    {
+        sensen::finance::RateRequest req;
+        req.set_periods(360);
+        req.set_present_value("300000");
+        sensen::finance::DecimalResponse res;
+        const auto ctx = make_context();
+        if (stub.ComputeRate(ctx.get(), req, &res).ok()) {
+            std::cerr << "ComputeRate accepted an absent payment rather than refusing it\n";
+            return false;
+        }
+    }
+    {
+        sensen::finance::PeriodsRequest req;
+        req.set_payment("-1798.651575458257198999");
+        req.set_present_value("300000");
+        sensen::finance::DecimalResponse res;
+        const auto ctx = make_context();
+        if (stub.ComputePeriods(ctx.get(), req, &res).ok()) {
+            std::cerr << "ComputePeriods accepted an absent rate rather than refusing it\n";
+            return false;
+        }
+    }
+    {
+        // ComputeAmortization: the exact "mistyped loan_amount" shape --
+        // used to return an empty schedule and an all-zero summary at
+        // HTTP 200.
+        sensen::finance::AmortizationRequest req;
+        req.set_annual_rate("0.06");
+        req.set_term_months(360);
+        sensen::finance::AmortizationResponse res;
+        const auto ctx = make_context();
+        if (stub.ComputeAmortization(ctx.get(), req, &res).ok()) {
+            std::cerr << "ComputeAmortization accepted an absent loan_amount rather than "
+                         "refusing it -- this is the exact request that used to return an "
+                         "empty schedule and an all-zero summary\n";
+            return false;
+        }
+    }
+    {
+        sensen::finance::AmortizationRequest req;
+        req.set_loan_amount("300000");
+        req.set_term_months(360);
+        sensen::finance::AmortizationResponse res;
+        const auto ctx = make_context();
+        if (stub.ComputeAmortization(ctx.get(), req, &res).ok()) {
+            std::cerr << "ComputeAmortization accepted an absent annual_rate rather than "
+                         "refusing it -- an absent rate silently becomes a 0% loan\n";
+            return false;
+        }
+    }
+    {
+        sensen::finance::DetailedAmortizationRequest req;
+        req.set_annual_rate("0.06");
+        req.set_term_months(360);
+        sensen::finance::DetailedAmortizationResponse res;
+        const auto ctx = make_context();
+        if (stub.ComputeDetailedAmortization(ctx.get(), req, &res).ok()) {
+            std::cerr << "ComputeDetailedAmortization accepted an absent loan_amount rather "
+                         "than refusing it\n";
+            return false;
+        }
+    }
+    {
+        sensen::finance::HelocRequest req;
+        req.set_current_mortgage_balance("300000");
+        req.set_max_ltv_rate("0.80");
+        req.set_annual_rate("0.07");
+        req.set_repayment_term_years(15);
+        req.set_payments_per_year(12);
+        sensen::finance::HelocResponse res;
+        const auto ctx = make_context();
+        if (stub.ComputeHeloc(ctx.get(), req, &res).ok()) {
+            std::cerr << "ComputeHeloc accepted an absent home_value rather than refusing it\n";
+            return false;
+        }
+    }
+    {
+        sensen::finance::HelocRequest req;
+        req.set_home_value("500000");
+        req.set_current_mortgage_balance("300000");
+        req.set_max_ltv_rate("0.80");
+        req.set_repayment_term_years(15);
+        req.set_payments_per_year(12);
+        sensen::finance::HelocResponse res;
+        const auto ctx = make_context();
+        if (stub.ComputeHeloc(ctx.get(), req, &res).ok()) {
+            std::cerr << "ComputeHeloc accepted an absent annual_rate rather than refusing "
+                         "it\n";
+            return false;
+        }
+    }
+    {
+        sensen::finance::RefinanceRequest req;
+        req.set_current_monthly_payment("2000");
+        req.set_current_annual_rate("0.06");
+        req.set_current_remaining_months(300);
+        req.set_property_value("400000");
+        req.set_new_annual_rate("0.045");
+        req.set_new_term_years(30);
+        req.set_closing_costs("6000");
+        req.set_payments_per_year(12);
+        sensen::finance::RefinanceResponse res;
+        const auto ctx = make_context();
+        if (stub.ComputeRefinance(ctx.get(), req, &res).ok()) {
+            std::cerr << "ComputeRefinance accepted an absent current_loan_balance rather "
+                         "than refusing it\n";
+            return false;
+        }
+    }
+    {
+        // The new-loan rate absent: the same "confidently wrong, not
+        // obviously broken" shape as the ComputePayment headline bug --
+        // the refinance would silently price the new loan as interest-free.
+        sensen::finance::RefinanceRequest req;
+        req.set_current_loan_balance("300000");
+        req.set_current_monthly_payment("2000");
+        req.set_current_annual_rate("0.06");
+        req.set_current_remaining_months(300);
+        req.set_property_value("400000");
+        req.set_new_term_years(30);
+        req.set_closing_costs("6000");
+        req.set_payments_per_year(12);
+        sensen::finance::RefinanceResponse res;
+        const auto ctx = make_context();
+        if (stub.ComputeRefinance(ctx.get(), req, &res).ok()) {
+            std::cerr << "ComputeRefinance accepted an absent new_annual_rate rather than "
+                         "refusing it\n";
+            return false;
+        }
+    }
+    {
+        sensen::finance::PayoffTimingRequest req;
+        req.set_annual_rate("0.05");
+        req.set_current_monthly_payment("1580");
+        req.set_payments_per_year(12);
+        sensen::finance::PayoffTimingResponse res;
+        const auto ctx = make_context();
+        if (stub.ComputePayoffTiming(ctx.get(), req, &res).ok()) {
+            std::cerr << "ComputePayoffTiming accepted an absent current_loan_balance rather "
+                         "than refusing it\n";
+            return false;
+        }
+    }
+    {
+        sensen::finance::PayoffTimingRequest req;
+        req.set_current_loan_balance("200000");
+        req.set_current_monthly_payment("1580");
+        req.set_payments_per_year(12);
+        sensen::finance::PayoffTimingResponse res;
+        const auto ctx = make_context();
+        if (stub.ComputePayoffTiming(ctx.get(), req, &res).ok()) {
+            std::cerr << "ComputePayoffTiming accepted an absent annual_rate rather than "
+                         "refusing it\n";
+            return false;
+        }
+    }
+    {
+        sensen::finance::MortgageRecastRequest req;
+        req.set_current_monthly_payment("2000");
+        req.set_lump_sum_payment("0");
+        req.set_annual_rate("0.055");
+        req.set_remaining_months(240);
+        req.set_payments_per_year(12);
+        sensen::finance::MortgageRecastResponse res;
+        const auto ctx = make_context();
+        if (stub.ComputeMortgageRecast(ctx.get(), req, &res).ok()) {
+            std::cerr << "ComputeMortgageRecast accepted an absent current_loan_balance "
+                         "rather than refusing it\n";
+            return false;
+        }
+    }
+    {
+        sensen::finance::RentalRoiRequest req;
+        req.set_total_cash_invested("100000");
+        req.set_periodic_gross_rent("3000");
+        req.set_periodic_operating_expenses("800");
+        req.set_periods_per_year(12);
+        sensen::finance::RentalRoiResponse res;
+        const auto ctx = make_context();
+        if (stub.ComputeRentalRoi(ctx.get(), req, &res).ok()) {
+            std::cerr << "ComputeRentalRoi accepted an absent property_value rather than "
+                         "refusing it\n";
+            return false;
+        }
+    }
+    {
+        sensen::finance::HomeFutureValueRequest req;
+        req.set_annual_appreciation_rate("0.03");
+        req.set_current_loan_balance("250000");
+        req.set_annual_mortgage_rate("0.045");
+        req.set_current_monthly_payment("1266.71");
+        req.set_target_years(10);
+        req.set_payments_per_year(12);
+        sensen::finance::HomeFutureValueResponse res;
+        const auto ctx = make_context();
+        if (stub.ComputeHomeFutureValue(ctx.get(), req, &res).ok()) {
+            std::cerr << "ComputeHomeFutureValue accepted an absent current_property_value "
+                         "rather than refusing it\n";
+            return false;
+        }
+    }
+    {
+        sensen::finance::RentVsBuyRequest req;
+        req.set_down_payment("80000");
+        req.set_monthly_piti_and_maintenance("2200");
+        req.set_annual_home_appreciation("0.03");
+        req.set_current_monthly_rent("2000");
+        req.set_annual_rent_increase("0.02");
+        req.set_annual_investment_return("0.05");
+        req.set_years(7);
+        sensen::finance::RentVsBuyResponse res;
+        const auto ctx = make_context();
+        if (stub.ComputeRentVsBuy(ctx.get(), req, &res).ok()) {
+            std::cerr << "ComputeRentVsBuy accepted an absent property_price rather than "
+                         "refusing it\n";
+            return false;
+        }
+    }
+    {
+        sensen::finance::HomeNpvRequest req;
+        req.set_down_payment("70000");
+        req.set_closing_costs_buy("5000");
+        req.set_loan_amount("280000");
+        req.set_loan_annual_rate("0.05");
+        req.set_loan_term_years(30);
+        req.set_monthly_taxes_ins_hoa("400");
+        req.set_monthly_maintenance("150");
+        req.set_annual_appreciation_rate("0.03");
+        req.set_selling_closing_cost_percent("0.06");
+        req.set_monthly_rent_saved("1800");
+        req.set_annual_rent_increase("0.03");
+        req.set_annual_discount_rate("0.06");
+        req.set_holding_period_years(7);
+        sensen::finance::HomeNpvResponse res;
+        const auto ctx = make_context();
+        if (stub.ComputeHomeNpv(ctx.get(), req, &res).ok()) {
+            std::cerr << "ComputeHomeNpv accepted an absent property_price rather than "
+                         "refusing it\n";
+            return false;
+        }
+    }
     std::cout << "          refusals  malformed decimal, absent frequency, underspecified "
                  "bond, ragged batch, payoff-timing interest coverage, home-NPV zero holding/"
-                 "loan term\n";
+                 "loan term\n"
+              << "          adversarial  payments_per_year DoS + overflow (refinance/payoff-"
+                 "timing/recast/home-FV/heloc), -100%-per-period silent zero (payoff-timing/"
+                 "recast), extreme-rate BigDecimal overflow (recast/home-FV/heloc), 200-digit "
+                 "magnitude overflow (refinance), home-NPV INT32_MAX holding period, heloc "
+                 "term-years overflow from the other operand -- with an ordinary HELOC still "
+                 "answered as the non-vacuous control\n"
+              << "          absent-required  every RPC with a required decimal field refuses "
+                 "an empty request, a mistyped-field-name shape, and an absent rate/principal/"
+                 "price -- never silently computes on a zero (optional fields -- future_value, "
+                 "PMI, overpayments, cash_out_amount, drawn_amount, extra/lump payments -- "
+                 "still default correctly when genuinely omitted)\n";
     return true;
 }
 

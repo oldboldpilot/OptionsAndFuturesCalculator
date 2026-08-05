@@ -135,8 +135,20 @@ one explicitly set to its default.
   absent while `"0"` means an explicit zero. That difference is one reason they are
   strings rather than numbers.
 
-A fix requiring these fields is in progress; treat the behaviour above as current,
-not intended.
+**Status: fixed in the code, not yet deployed.** Every required decimal field is now
+refused with `INVALID_ARGUMENT` naming the field, rather than parsed as zero — the
+last row above becomes `rate is required and was not supplied`. Genuinely optional
+fields (`future_value`, PMI amounts, overpayments, `cash_out_amount`, `drawn_amount`,
+extra/lump payments) still default to zero, because omitting them is a real question
+and not a mistake.
+
+The table above describes **the currently deployed build**, so treat it as live until
+the deploy lands. Two things do not change either way: the structural cause is
+Envoy's transcoder plus proto3's lack of field presence, so the same trap returns for
+any future field that is added without an explicit required-check; and the advice to
+prefer generated stubs stands, because a compile-time field-name check catches this
+class before the wire, whereas a server-side check only catches the fields someone
+remembered to mark.
 
 ## 4. Quota and identity — the part that surprises people
 

@@ -1,7 +1,9 @@
 module;
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <expected>
 #include <exception>
 #include <string>
@@ -93,6 +95,26 @@ namespace {
 }
 
 /**
+ * The error an ABSENT-but-required decimal field earns.
+ *
+ * Distinct from bad_decimal: this is not a parse failure, it is proto3
+ * scalar non-presence -- an unset string field and one explicitly set to ""
+ * are indistinguishable on the wire, and BOTH read back as "". That
+ * ambiguity is exactly why READ_DECIMAL treats "" as a legitimate zero for
+ * fields the maths can genuinely default (future_value, PMI, overpayments,
+ * ...): a caller who means "$0" can and should say so explicitly. For a
+ * field the computation cannot proceed without -- a rate, a principal, a
+ * price -- the same "" must instead be read as "the caller said nothing",
+ * because silently substituting 0 there is precisely the defect this
+ * service exists to refuse (an absent rate becoming a 0% loan, an absent
+ * principal becoming a free one). See REQUIRE_DECIMAL below.
+ */
+[[nodiscard]] auto missing_field(std::string_view field) -> Status {
+    return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                  std::string(field) + " is required and was not supplied");
+}
+
+/**
  * Reads one decimal field or fails the RPC.
  *
  * A macro rather than a function because it returns from the CALLER on
@@ -104,6 +126,33 @@ namespace {
     BigDecimal dest;                                         \
     do {                                                     \
         const std::string& _s = (expr);                      \
+        if (!parse_decimal(_s, dest)) {                      \
+            return bad_decimal((name), _s);                  \
+        }                                                    \
+    } while (false)
+
+/**
+ * Reads one decimal field the computation cannot proceed without, or fails
+ * the RPC -- and, critically, fails it on an EMPTY string, not just a
+ * malformed one.
+ *
+ * This is READ_DECIMAL's sibling, not a replacement for it: most decimal
+ * fields in this file legitimately default to zero when absent
+ * (future_value, PMI, overpayments, ...) and READ_DECIMAL is exactly right
+ * for those. REQUIRE_DECIMAL is for the other kind -- a rate, a principal, a
+ * price -- where an absent field is a caller who said nothing, and treating
+ * that silence as "$0" or "0%" produces a plausible, confidently wrong
+ * answer (a mortgage payment computed at 0% interest) rather than an
+ * obviously broken one. An explicit "0" still parses and still means
+ * exactly what it says; only emptiness is refused here.
+ */
+#define REQUIRE_DECIMAL(dest, expr, name)                    \
+    BigDecimal dest;                                         \
+    do {                                                     \
+        const std::string& _s = (expr);                      \
+        if (_s.empty()) {                                    \
+            return missing_field((name));                    \
+        }                                                    \
         if (!parse_decimal(_s, dest)) {                      \
             return bad_decimal((name), _s);                  \
         }                                                    \
@@ -129,6 +178,231 @@ namespace {
 template <typename T>
 [[nodiscard]] auto fail(const std::expected<T, std::string>& e) -> Status {
     return Status(grpc::StatusCode::FAILED_PRECONDITION, e.error());
+}
+
+// ---------------------------------------------------------------------------
+// Adversarial-input guards shared by the six home-finance RPCs
+// (ComputeRefinance, ComputePayoffTiming, ComputeMortgageRecast,
+// ComputeHomeFutureValue, ComputeRentVsBuy, ComputeHomeNpv).
+//
+// Three independent hazards, none of them hypothetical -- each was measured
+// against a live engine before this guard was written:
+//
+//   1. `payments_per_year` had a floor (>0) but no ceiling. sensen multiplies
+//      it against a caller-supplied year count to get a period count that
+//      either becomes a loop bound (calculate_refinance_metrics) or a
+//      BigDecimal exponent (pmt/pv/fv). A request with
+//      new_term_years=100, payments_per_year=20,000,000 measured 11.5s of
+//      wall-clock CPU on this engine for ONE call, charged only
+//      cost_amortization(1200) -- 101 compute units against a 120,000/hour
+//      anonymous budget -- because the CHARGE line priced
+//      new_term_years*12, not new_term_years*payments_per_year. A larger
+//      payments_per_year overflows the int32 product outright and returns a
+//      wrong-but-plausible-looking answer instead of an error (observed:
+//      payoff_date_shift_months = -1863463212 from payments_per_year =
+//      2,000,000,000).
+//   2. BigDecimal is exact but not unbounded: __int128 scaled by 1e18 caps a
+//      representable value at roughly 1.7e20 (about 20 integer digits), and
+//      neither its string constructor nor its multiply()/pow() detect an
+//      overflow -- they wrap silently. A 200-digit `current_loan_balance`
+//      measured back as a NEGATIVE new_loan_amount; a 30-digit principal
+//      produced a `new_loan_amount` with no relation to the input. Money
+//      fields are strings specifically so a client is not asked to trust an
+//      inexact double -- silently wrapping past __int128 is the same
+//      failure by a different route.
+//   3. A rate at or below -100% is not a rate this service's models can
+//      price: it zeroes or negates `1 + rate_per_period`, which is either a
+//      domain error for `pow()`/`log()` or, worse, evaluates cleanly to a
+//      wrong answer. Measured: annual_rate=-1 (payments_per_year=1) made
+//      ComputePayoffTiming return original_months_remaining=0 -- "this loan
+//      is already paid off" -- for a loan that is not, because
+//      log(0)/log(1-1) reduces through IEEE floating point to exactly 0.0
+//      rather than raising. And independently, a rate and a term that are
+//      each individually plausible can compound into a factor no fixed-point
+//      type can hold (6% compounded ANNUALLY, not monthly, over 1200
+//      periods) -- neither field alone catches that; only their product does.
+// ---------------------------------------------------------------------------
+
+/**
+ * Refuses `payments_per_year` above a real payment cadence.
+ *
+ * 366 (daily, leap year) is the finest schedule this service's own field
+ * comments name ("12 monthly, 26 bi-weekly"); nothing finer is a real
+ * payment frequency. The ceiling exists because sensen multiplies this value
+ * against a caller-controlled year count -- see the guard header above.
+ */
+[[nodiscard]] auto check_payments_per_year(int payments_per_year) -> Status {
+    if (payments_per_year <= 0) {
+        return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                      "payments_per_year must be positive (12 monthly, 26 bi-weekly)");
+    }
+    if (payments_per_year > 366) {
+        return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                      "payments_per_year exceeds 366 (daily, leap year); no real payment "
+                      "schedule is finer than that");
+    }
+    return Status::OK;
+}
+
+/**
+ * Refuses a decimal field whose magnitude would silently overflow
+ * BigDecimal's exact __int128 range once it enters the request's
+ * add/multiply/pow chains.
+ *
+ * Operates on the RAW WIRE STRING, not on a BigDecimal already constructed
+ * from it -- an overflowed BigDecimal is already garbage, so checking its
+ * own to_double() afterward cannot reliably detect that the overflow
+ * happened. 15 integer digits (up to a quadrillion) is already an absurd
+ * figure for anything this calculator prices and leaves five orders of
+ * magnitude of headroom below BigDecimal's ~20-digit hard ceiling for the
+ * arithmetic that follows.
+ */
+[[nodiscard]] auto check_decimal_string_magnitude(const std::string& s, std::string_view field)
+    -> Status {
+    std::string_view v{s};
+    while (!v.empty() && (std::isspace(static_cast<unsigned char>(v.front())) != 0)) {
+        v.remove_prefix(1);
+    }
+    while (!v.empty() && (std::isspace(static_cast<unsigned char>(v.back())) != 0)) {
+        v.remove_suffix(1);
+    }
+    if (!v.empty() && (v.front() == '-' || v.front() == '+')) v.remove_prefix(1);
+
+    std::size_t int_digits = 0;
+    for (const char c : v) {
+        if (c == '.') break;
+        if (std::isdigit(static_cast<unsigned char>(c)) != 0) ++int_digits;
+    }
+    if (int_digits > 15) {
+        return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                      std::string(field) +
+                          " is too large in magnitude for this calculator (the exact decimal "
+                          "engine has a finite range)");
+    }
+    return Status::OK;
+}
+
+/**
+ * Reads a decimal field AND rejects it if its magnitude cannot safely enter
+ * BigDecimal arithmetic. The magnitude check runs on the raw string, before
+ * `READ_DECIMAL` ever constructs a BigDecimal from it -- see
+ * check_decimal_string_magnitude's own comment for why that ordering is
+ * load-bearing.
+ */
+#define READ_DECIMAL_SAFE(dest, expr, name)                             \
+    do {                                                                \
+        if (auto _m = check_decimal_string_magnitude((expr), (name));   \
+            !_m.ok()) {                                                 \
+            return _m;                                                 \
+        }                                                               \
+    } while (false);                                                    \
+    READ_DECIMAL(dest, expr, name)
+
+/**
+ * REQUIRE_DECIMAL's sibling for the six RPCs guarded by
+ * check_decimal_string_magnitude: refuses an EMPTY field (the caller said
+ * nothing) same as REQUIRE_DECIMAL, then applies the magnitude guard before
+ * parsing, same as READ_DECIMAL_SAFE. An empty string is checked first
+ * because "" has zero magnitude and would otherwise sail through the
+ * magnitude check only to be silently parsed as 0 -- exactly the defect
+ * this macro exists to close.
+ */
+#define REQUIRE_DECIMAL_SAFE(dest, expr, name)                          \
+    do {                                                                \
+        if ((expr).empty()) {                                          \
+            return missing_field((name));                              \
+        }                                                               \
+        if (auto _m = check_decimal_string_magnitude((expr), (name));   \
+            !_m.ok()) {                                                 \
+            return _m;                                                 \
+        }                                                               \
+    } while (false);                                                    \
+    READ_DECIMAL(dest, expr, name)
+
+/**
+ * Refuses a per-period rate at or below -100% (`1 + rate_per_period <= 0`).
+ *
+ * Below this floor sensen's own math either hits a domain error it cannot
+ * always detect (see the header comment's payoff-timing example, where it
+ * silently evaluates to a wrong zero instead) or, for a BigDecimal `pow()`
+ * caller, a zero or negative base raised to a large integer exponent.
+ * Neither is a rate any real financial instrument carries.
+ */
+[[nodiscard]] auto check_rate_floor(double rate_per_period, std::string_view field) -> Status {
+    const double one_plus_r = 1.0 + rate_per_period;
+    if (!(one_plus_r > 0.0) || !std::isfinite(one_plus_r)) {
+        return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                      std::string(field) + ": rate per period must be greater than -100%");
+    }
+    return Status::OK;
+}
+
+/**
+ * Refuses an (annual rate, payment frequency, period count) triple whose
+ * compound growth factor -- (1 + rate/payments_per_year)^periods -- would
+ * overflow BigDecimal's pow() once multiplied against a real principal.
+ *
+ * This is a JOINT check on purpose. `payments_per_year` is already capped at
+ * 366 and every period count this file accepts is already capped at 1200
+ * months / 100 years, and each bound is individually reasonable -- but their
+ * PRODUCT is what sensen's pow() actually raises a rate to, and a rate that
+ * is itself reasonable (6%) compounded over that product with the wrong
+ * frequency (annually, not monthly, over 1200 periods) is already
+ * astronomically outside any fixed-point type's range. 40 natural-log units
+ * of growth (~2.35e17-fold) is already an absurd compounding outcome for any
+ * real financial instrument and sits comfortably under BigDecimal's ~46.6
+ * nat ceiling, leaving headroom for the multiply against principal that the
+ * caller's pmt/pv/fv/recast call performs next.
+ */
+[[nodiscard]] auto check_compound_growth_safe(double annual_rate, int payments_per_year,
+                                              int periods, std::string_view context) -> Status {
+    if (payments_per_year <= 0) return Status::OK;  // caught by check_payments_per_year already
+    const double rate_per_period = annual_rate / static_cast<double>(payments_per_year);
+    if (auto s = check_rate_floor(rate_per_period, context); !s.ok()) return s;
+    if (periods <= 0) return Status::OK;
+
+    const double log_growth = static_cast<double>(periods) * std::log1p(rate_per_period);
+    if (!std::isfinite(log_growth) || log_growth > 40.0 || log_growth < -40.0) {
+        return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                      std::string(context) +
+                          ": rate and term combine to a compounding factor too extreme for "
+                          "this calculator to price (would overflow the exact decimal engine)");
+    }
+    return Status::OK;
+}
+
+/**
+ * Prices ComputeRefinance from the UNVALIDATED request, because CHARGE runs
+ * before the validation below (a refused call must not spend an
+ * unauthenticated caller's allowance on the work it never does).
+ * `new_term_years` and `payments_per_year` are both still caller-controlled
+ * at this point, and their product is exactly the loop bound
+ * calculate_refinance_metrics walks -- computed here in int64 and clamped
+ * before narrowing back to int, because that product can overflow int32
+ * (100 * 20,000,000 already does).
+ */
+[[nodiscard]] auto refinance_charge_months(int current_remaining_months, int new_term_years,
+                                           int payments_per_year) noexcept -> int {
+    constexpr std::int64_t kCeil = 1'000'000'000;
+    const std::int64_t ppy64 = std::clamp<std::int64_t>(payments_per_year, 0, kCeil);
+    const std::int64_t years64 = std::clamp<std::int64_t>(new_term_years, 0, kCeil);
+    const std::int64_t product = std::clamp<std::int64_t>(ppy64 * years64, 0, kCeil);
+    const std::int64_t remaining64 = std::clamp<std::int64_t>(current_remaining_months, 0, kCeil);
+    return static_cast<int>(std::max(remaining64, product));
+}
+
+/**
+ * Prices ComputeHomeNpv the same unvalidated-input-safe way as
+ * refinance_charge_months above: holding_period_years is still
+ * caller-controlled when CHARGE runs, and holding_period_years*12 can
+ * overflow int32 (INT32_MAX*12 does) -- undefined behaviour for a value that
+ * gets refused two lines later regardless. Computed in int64 and clamped.
+ */
+[[nodiscard]] auto home_npv_charge_months(int holding_period_years) noexcept -> int {
+    constexpr std::int64_t kCeil = 1'000'000'000;
+    const std::int64_t years64 = std::clamp<std::int64_t>(holding_period_years, 0, kCeil);
+    const std::int64_t months64 = std::clamp<std::int64_t>(years64 * 12, 0, kCeil);
+    return static_cast<int>(months64);
 }
 
 /**
@@ -192,8 +466,9 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
         CHARGE("ComputePayment", quota::cost_default());
-        READ_DECIMAL(rate, request->rate(), "rate");
-        READ_DECIMAL(pv, request->present_value(), "present_value");
+        if (auto s = check_periods(request->periods()); !s.ok()) return s;
+        REQUIRE_DECIMAL(rate, request->rate(), "rate");
+        REQUIRE_DECIMAL(pv, request->present_value(), "present_value");
         READ_DECIMAL(fv, request->future_value(), "future_value");
         const auto r = sensen::pmt(rate, request->periods(), pv, fv, timing_of(request->timing()));
         response->set_value(r.to_string());
@@ -206,8 +481,9 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
         CHARGE("ComputePresentValue", quota::cost_default());
-        READ_DECIMAL(rate, request->rate(), "rate");
-        READ_DECIMAL(pmt_v, request->payment(), "payment");
+        if (auto s = check_periods(request->periods()); !s.ok()) return s;
+        REQUIRE_DECIMAL(rate, request->rate(), "rate");
+        REQUIRE_DECIMAL(pmt_v, request->payment(), "payment");
         READ_DECIMAL(fv, request->future_value(), "future_value");
         const auto r = sensen::pv(rate, request->periods(), pmt_v, fv, timing_of(request->timing()));
         response->set_value(r.to_string());
@@ -220,8 +496,9 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
         CHARGE("ComputeFutureValue", quota::cost_default());
-        READ_DECIMAL(rate, request->rate(), "rate");
-        READ_DECIMAL(pmt_v, request->payment(), "payment");
+        if (auto s = check_periods(request->periods()); !s.ok()) return s;
+        REQUIRE_DECIMAL(rate, request->rate(), "rate");
+        REQUIRE_DECIMAL(pmt_v, request->payment(), "payment");
         READ_DECIMAL(pv_v, request->present_value(), "present_value");
         const auto r = sensen::fv(rate, request->periods(), pmt_v, pv_v, timing_of(request->timing()));
         response->set_value(r.to_string());
@@ -246,9 +523,9 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         if (request->years() < 0) {
             return Status(grpc::StatusCode::INVALID_ARGUMENT, "years cannot be negative");
         }
-        READ_DECIMAL(rate, request->annual_rate(), "annual_rate");
-        READ_DECIMAL(contrib, request->annual_contribution(), "annual_contribution");
-        READ_DECIMAL(principal, request->current_principal(), "current_principal");
+        REQUIRE_DECIMAL(rate, request->annual_rate(), "annual_rate");
+        REQUIRE_DECIMAL(contrib, request->annual_contribution(), "annual_contribution");
+        REQUIRE_DECIMAL(principal, request->current_principal(), "current_principal");
         READ_DECIMAL(inflation, request->annual_inflation_rate(), "annual_inflation_rate");
 
         const auto s = sensen::calculate_future_value_detailed(
@@ -278,8 +555,9 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
         CHARGE("ComputeRate", quota::cost_default());
-        READ_DECIMAL(pmt_v, request->payment(), "payment");
-        READ_DECIMAL(pv_v, request->present_value(), "present_value");
+        if (auto s = check_periods(request->periods()); !s.ok()) return s;
+        REQUIRE_DECIMAL(pmt_v, request->payment(), "payment");
+        REQUIRE_DECIMAL(pv_v, request->present_value(), "present_value");
         READ_DECIMAL(fv_v, request->future_value(), "future_value");
         READ_DECIMAL(guess, request->guess(), "guess");
         // rate_fn solves iteratively in double, unlike the closed-form annuity
@@ -304,9 +582,9 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
         CHARGE("ComputePeriods", quota::cost_default());
-        READ_DECIMAL(rate, request->rate(), "rate");
-        READ_DECIMAL(pmt_v, request->payment(), "payment");
-        READ_DECIMAL(pv_v, request->present_value(), "present_value");
+        REQUIRE_DECIMAL(rate, request->rate(), "rate");
+        REQUIRE_DECIMAL(pmt_v, request->payment(), "payment");
+        REQUIRE_DECIMAL(pv_v, request->present_value(), "present_value");
         READ_DECIMAL(fv_v, request->future_value(), "future_value");
         // nper_fn is a double-domain closed form, same as rate_fn above.
         const auto r = sensen::nper_fn(rate.to_double(), pmt_v.to_double(), pv_v.to_double(),
@@ -356,8 +634,8 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         }
         CHARGE("ComputeAmortization", quota::cost_amortization(request->term_months()));
         if (auto s = check_term(request->term_months()); !s.ok()) return s;
-        READ_DECIMAL(loan, request->loan_amount(), "loan_amount");
-        READ_DECIMAL(rate, request->annual_rate(), "annual_rate");
+        REQUIRE_DECIMAL(loan, request->loan_amount(), "loan_amount");
+        REQUIRE_DECIMAL(rate, request->annual_rate(), "annual_rate");
         READ_DECIMAL(extra, request->monthly_overpayment(), "monthly_overpayment");
         READ_DECIMAL(pmi, request->pmi_annual_rate(), "pmi_annual_rate");
         READ_DECIMAL(home, request->original_home_value(), "original_home_value");
@@ -394,8 +672,8 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         }
         CHARGE("ComputeDetailedAmortization", quota::cost_amortization(request->term_months()));
         if (auto s = check_term(request->term_months()); !s.ok()) return s;
-        READ_DECIMAL(loan, request->loan_amount(), "loan_amount");
-        READ_DECIMAL(rate, request->annual_rate(), "annual_rate");
+        REQUIRE_DECIMAL(loan, request->loan_amount(), "loan_amount");
+        REQUIRE_DECIMAL(rate, request->annual_rate(), "annual_rate");
         READ_DECIMAL(extra, request->monthly_overpayment(), "monthly_overpayment");
         READ_DECIMAL(pmi, request->pmi_annual_rate(), "pmi_annual_rate");
         READ_DECIMAL(home, request->original_home_value(), "original_home_value");
@@ -488,18 +766,39 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
         CHARGE("ComputeHeloc", quota::cost_default());
-        if (request->payments_per_year() <= 0) {
+        // This RPC predates the six home-finance RPCs below and originally
+        // carried only a >0 floor on both caller-controlled integers. That is
+        // the same shape the adversarial pass found exploitable on
+        // ComputeRefinance, and it is worse here in one respect:
+        // calculate_heloc_metrics computes
+        //     int total_repayment_periods = repayment_term_years * payments_per_year;
+        // (financial.cppm) -- an int32 product of two UNBOUNDED caller inputs,
+        // which is signed overflow, i.e. UB, before the value is ever used.
+        // Unlike refinance this is not a wall-clock DoS (BigDecimal::pow uses
+        // exponentiation by squaring, so ~31 multiplies rather than a walk), so
+        // the damage is UB plus a confidently wrong payment figure -- which is
+        // the worse outcome for a caller who cannot tell.
+        if (auto s = check_payments_per_year(request->payments_per_year()); !s.ok()) return s;
+        if (request->repayment_term_years() <= 0 || request->repayment_term_years() > 100) {
             return Status(grpc::StatusCode::INVALID_ARGUMENT,
-                          "payments_per_year must be positive (12 monthly, 26 bi-weekly)");
+                          "repayment_term_years must be positive and at most 100; no real "
+                          "HELOC repayment period runs longer than a lifetime");
         }
-        if (request->repayment_term_years() <= 0) {
-            return Status(grpc::StatusCode::INVALID_ARGUMENT, "repayment_term_years must be positive");
+        REQUIRE_DECIMAL_SAFE(home, request->home_value(), "home_value");
+        REQUIRE_DECIMAL_SAFE(balance, request->current_mortgage_balance(), "current_mortgage_balance");
+        REQUIRE_DECIMAL_SAFE(ltv, request->max_ltv_rate(), "max_ltv_rate");
+        READ_DECIMAL_SAFE(drawn, request->drawn_amount(), "drawn_amount");
+        REQUIRE_DECIMAL_SAFE(rate, request->annual_rate(), "annual_rate");
+        // Both multiplicands are bounded now (<=366 and <=100), so the product
+        // cannot overflow -- but a bounded product still overflows pmt()'s
+        // BigDecimal pow() at an extreme rate, exactly as it did on recast.
+        if (auto s = check_compound_growth_safe(rate.to_double(), request->payments_per_year(),
+                                                request->repayment_term_years() *
+                                                    request->payments_per_year(),
+                                                "annual_rate");
+            !s.ok()) {
+            return s;
         }
-        READ_DECIMAL(home, request->home_value(), "home_value");
-        READ_DECIMAL(balance, request->current_mortgage_balance(), "current_mortgage_balance");
-        READ_DECIMAL(ltv, request->max_ltv_rate(), "max_ltv_rate");
-        READ_DECIMAL(drawn, request->drawn_amount(), "drawn_amount");
-        READ_DECIMAL(rate, request->annual_rate(), "annual_rate");
 
         const auto s = sensen::calculate_heloc_metrics(home, balance, ltv, drawn, rate,
                                                        request->repayment_term_years(),
@@ -517,10 +816,14 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         }
         // The engine walks max(current_remaining_months, new_term_years*ppy)
         // months building the cash-flow comparison (financial.cppm:1938) --
-        // an amortization walk, twice over.
+        // an amortization walk, twice over. Priced from the raw,
+        // still-unvalidated request (see refinance_charge_months's own
+        // comment for why that is deliberate and why the multiplication
+        // cannot be done directly here).
         CHARGE("ComputeRefinance",
-               quota::cost_amortization(std::max(request->current_remaining_months(),
-                                                 request->new_term_years() * 12)));
+               quota::cost_amortization(refinance_charge_months(
+                   request->current_remaining_months(), request->new_term_years(),
+                   request->payments_per_year())));
         if (request->current_remaining_months() <= 0 || request->current_remaining_months() > 1200) {
             return Status(grpc::StatusCode::INVALID_ARGUMENT,
                           "current_remaining_months must be positive and at most 1200 (a hundred "
@@ -530,10 +833,7 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
             return Status(grpc::StatusCode::INVALID_ARGUMENT,
                           "new_term_years must be positive and at most 100");
         }
-        if (request->payments_per_year() <= 0) {
-            return Status(grpc::StatusCode::INVALID_ARGUMENT,
-                          "payments_per_year must be positive (12 monthly)");
-        }
+        if (auto s = check_payments_per_year(request->payments_per_year()); !s.ok()) return s;
 
         sensen::RefinanceClosingCostType cc_type{};
         switch (request->closing_cost_type()) {
@@ -547,16 +847,44 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
                 return Status(grpc::StatusCode::INVALID_ARGUMENT, "unknown closing cost type");
         }
 
-        READ_DECIMAL(balance, request->current_loan_balance(), "current_loan_balance");
-        READ_DECIMAL(cur_pmt, request->current_monthly_payment(), "current_monthly_payment");
-        READ_DECIMAL(cur_rate, request->current_annual_rate(), "current_annual_rate");
-        READ_DECIMAL(prop_value, request->property_value(), "property_value");
-        READ_DECIMAL(new_rate, request->new_annual_rate(), "new_annual_rate");
-        READ_DECIMAL(closing, request->closing_costs(), "closing_costs");
-        READ_DECIMAL(cash_out, request->cash_out_amount(), "cash_out_amount");
-        READ_DECIMAL(cur_pmi, request->current_pmi_monthly(), "current_pmi_monthly");
-        READ_DECIMAL(new_pmi, request->new_pmi_monthly(), "new_pmi_monthly");
-        READ_DECIMAL(pmi_ltv, request->pmi_drop_off_ltv(), "pmi_drop_off_ltv");
+        REQUIRE_DECIMAL_SAFE(balance, request->current_loan_balance(), "current_loan_balance");
+        REQUIRE_DECIMAL_SAFE(cur_pmt, request->current_monthly_payment(), "current_monthly_payment");
+        REQUIRE_DECIMAL_SAFE(cur_rate, request->current_annual_rate(), "current_annual_rate");
+        REQUIRE_DECIMAL_SAFE(prop_value, request->property_value(), "property_value");
+        REQUIRE_DECIMAL_SAFE(new_rate, request->new_annual_rate(), "new_annual_rate");
+        REQUIRE_DECIMAL_SAFE(closing, request->closing_costs(), "closing_costs");
+        // cash_out_amount is documented "omit for a rate-and-term refinance"
+        // (finance.proto), and current/new_pmi_monthly document 0 as "never
+        // had PMI" -- all three are legitimately, meaningfully absent.
+        // pmi_drop_off_ltv rides along with them: calculate_refinance_metrics
+        // (financial.cppm:1913-1917) forces both *_pmi_drop_off_months to 0
+        // whenever the matching *_pmi_monthly is zero, BEFORE the LTV
+        // threshold this field feeds is ever consulted -- so an absent LTV
+        // is inert precisely when there is no PMI to drop off, and only
+        // matters once a caller has already opted in by stating a real PMI
+        // amount.
+        READ_DECIMAL_SAFE(cash_out, request->cash_out_amount(), "cash_out_amount");
+        READ_DECIMAL_SAFE(cur_pmi, request->current_pmi_monthly(), "current_pmi_monthly");
+        READ_DECIMAL_SAFE(new_pmi, request->new_pmi_monthly(), "new_pmi_monthly");
+        READ_DECIMAL_SAFE(pmi_ltv, request->pmi_drop_off_ltv(), "pmi_drop_off_ltv");
+
+        // current_annual_rate never reaches a BigDecimal pow() in
+        // calculate_refinance_metrics (the old-loan leg is a plain month-by-
+        // month loop, not a closed form), so only the floor matters here.
+        // new_annual_rate DOES feed pmt()'s pow(), against new_term_months --
+        // already bounded above by new_term_years and payments_per_year, but
+        // their PRODUCT is the actual exponent, hence the joint check.
+        if (auto s = check_rate_floor(cur_rate.to_double() / request->payments_per_year(),
+                                      "current_annual_rate");
+            !s.ok()) {
+            return s;
+        }
+        if (auto s = check_compound_growth_safe(
+                new_rate.to_double(), request->payments_per_year(),
+                request->new_term_years() * request->payments_per_year(), "new_annual_rate");
+            !s.ok()) {
+            return s;
+        }
 
         sensen::RefinanceInput input{};
         input.current_loan_balance = balance;
@@ -599,17 +927,30 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
         CHARGE("ComputePayoffTiming", quota::cost_default());
-        if (request->payments_per_year() <= 0) {
-            return Status(grpc::StatusCode::INVALID_ARGUMENT,
-                          "payments_per_year must be positive (12 monthly)");
-        }
-        READ_DECIMAL(balance, request->current_loan_balance(), "current_loan_balance");
-        READ_DECIMAL(rate, request->annual_rate(), "annual_rate");
-        READ_DECIMAL(pmt_v, request->current_monthly_payment(), "current_monthly_payment");
-        READ_DECIMAL(extra, request->extra_monthly_payment(), "extra_monthly_payment");
+        if (auto s = check_payments_per_year(request->payments_per_year()); !s.ok()) return s;
+        REQUIRE_DECIMAL_SAFE(balance, request->current_loan_balance(), "current_loan_balance");
+        REQUIRE_DECIMAL_SAFE(rate, request->annual_rate(), "annual_rate");
+        REQUIRE_DECIMAL_SAFE(pmt_v, request->current_monthly_payment(), "current_monthly_payment");
+        // extra_monthly_payment=0 is a legitimate ask ("what's my timeline
+        // with no extra payment"), and the negative-value check just below
+        // already treats 0 as the valid floor.
+        READ_DECIMAL_SAFE(extra, request->extra_monthly_payment(), "extra_monthly_payment");
         if (extra.is_negative()) {
             return Status(grpc::StatusCode::INVALID_ARGUMENT,
                           "extra_monthly_payment cannot be negative");
+        }
+        // calculate_payoff_timing's own nper_fn detects "payment does not
+        // cover interest" via a numerator/denominator sign mismatch -- but a
+        // rate at or below -100% (1 + rate_per_period <= 0) does not trip
+        // that check; it evaluates cleanly to log(0)/log(<=0), which IEEE
+        // arithmetic can reduce to an in-range value rather than
+        // NaN/Inf (measured: annual_rate=-1, payments_per_year=1 returns
+        // original_months_remaining=0 -- "already paid off" -- for a loan
+        // that is not). This floor is what the engine's own check misses.
+        if (auto s = check_rate_floor(rate.to_double() / request->payments_per_year(),
+                                      "annual_rate");
+            !s.ok()) {
+            return s;
         }
 
         // calculate_payoff_timing returns std::expected<PayoffTimingSummary,
@@ -640,18 +981,27 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
                           "remaining_months must be positive and at most 1200 (a hundred years); "
                           "no real loan runs that long");
         }
-        if (request->payments_per_year() <= 0) {
-            return Status(grpc::StatusCode::INVALID_ARGUMENT,
-                          "payments_per_year must be positive (12 monthly)");
-        }
-        READ_DECIMAL(balance, request->current_loan_balance(), "current_loan_balance");
-        READ_DECIMAL(cur_pmt, request->current_monthly_payment(), "current_monthly_payment");
-        READ_DECIMAL(lump, request->lump_sum_payment(), "lump_sum_payment");
-        READ_DECIMAL(rate, request->annual_rate(), "annual_rate");
+        if (auto s = check_payments_per_year(request->payments_per_year()); !s.ok()) return s;
+        REQUIRE_DECIMAL_SAFE(balance, request->current_loan_balance(), "current_loan_balance");
+        REQUIRE_DECIMAL_SAFE(cur_pmt, request->current_monthly_payment(), "current_monthly_payment");
+        // lump_sum_payment=0 is a legitimate ask ("what would recasting look
+        // like with no extra paydown"), and the negative-value check just
+        // below already treats 0 as the valid floor.
+        READ_DECIMAL_SAFE(lump, request->lump_sum_payment(), "lump_sum_payment");
+        REQUIRE_DECIMAL_SAFE(rate, request->annual_rate(), "annual_rate");
         if (lump.is_negative()) {
             return Status(grpc::StatusCode::INVALID_ARGUMENT,
                           "lump_sum_payment cannot be negative; a recast only pays the balance "
                           "down, and the engine would otherwise happily grow it");
+        }
+        // annual_rate feeds pmt()'s BigDecimal pow(remaining_months) directly
+        // -- remaining_months is already capped at 1200, but an extreme rate
+        // still overflows it (measured: annual_rate=1000000 returned a
+        // new_monthly_payment with no relation to the input).
+        if (auto s = check_compound_growth_safe(rate.to_double(), request->payments_per_year(),
+                                                request->remaining_months(), "annual_rate");
+            !s.ok()) {
+            return s;
         }
 
         const auto s = sensen::calculate_mortgage_recast(balance, cur_pmt, lump, rate,
@@ -1023,10 +1373,13 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
             return Status(grpc::StatusCode::INVALID_ARGUMENT,
                           "periods_per_year must be positive (12 monthly, 26 bi-weekly)");
         }
-        READ_DECIMAL(value, request->property_value(), "property_value");
-        READ_DECIMAL(cash, request->total_cash_invested(), "total_cash_invested");
-        READ_DECIMAL(rent, request->periodic_gross_rent(), "periodic_gross_rent");
-        READ_DECIMAL(opex, request->periodic_operating_expenses(), "periodic_operating_expenses");
+        REQUIRE_DECIMAL(value, request->property_value(), "property_value");
+        REQUIRE_DECIMAL(cash, request->total_cash_invested(), "total_cash_invested");
+        REQUIRE_DECIMAL(rent, request->periodic_gross_rent(), "periodic_gross_rent");
+        REQUIRE_DECIMAL(opex, request->periodic_operating_expenses(), "periodic_operating_expenses");
+        // periodic_mortgage_payment defaults to 0 in sensen's own signature
+        // (calculate_rental_roi) -- an all-cash purchase has no debt service,
+        // and that is exactly what an absent value here means.
         READ_DECIMAL(debt, request->periodic_mortgage_payment(), "periodic_mortgage_payment");
 
         const auto s = sensen::calculate_rental_roi(value, cash, rent, opex, debt,
@@ -1051,15 +1404,26 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
             return Status(grpc::StatusCode::INVALID_ARGUMENT,
                           "target_years must be positive and at most 100");
         }
-        if (request->payments_per_year() <= 0) {
-            return Status(grpc::StatusCode::INVALID_ARGUMENT,
-                          "payments_per_year must be positive (12 monthly)");
+        if (auto s = check_payments_per_year(request->payments_per_year()); !s.ok()) return s;
+        REQUIRE_DECIMAL_SAFE(prop_value, request->current_property_value(),
+                             "current_property_value");
+        REQUIRE_DECIMAL_SAFE(appreciation, request->annual_appreciation_rate(),
+                             "annual_appreciation_rate");
+        REQUIRE_DECIMAL_SAFE(loan_balance, request->current_loan_balance(), "current_loan_balance");
+        REQUIRE_DECIMAL_SAFE(mortgage_rate, request->annual_mortgage_rate(),
+                             "annual_mortgage_rate");
+        REQUIRE_DECIMAL_SAFE(cur_pmt, request->current_monthly_payment(),
+                             "current_monthly_payment");
+        // annual_mortgage_rate feeds fv()'s BigDecimal pow(target_years *
+        // payments_per_year) -- both factors are individually capped
+        // (target_years<=100, payments_per_year<=366) but their product,
+        // not either alone, is the exponent that can overflow it.
+        if (auto s = check_compound_growth_safe(
+                mortgage_rate.to_double(), request->payments_per_year(),
+                request->target_years() * request->payments_per_year(), "annual_mortgage_rate");
+            !s.ok()) {
+            return s;
         }
-        READ_DECIMAL(prop_value, request->current_property_value(), "current_property_value");
-        READ_DECIMAL(appreciation, request->annual_appreciation_rate(), "annual_appreciation_rate");
-        READ_DECIMAL(loan_balance, request->current_loan_balance(), "current_loan_balance");
-        READ_DECIMAL(mortgage_rate, request->annual_mortgage_rate(), "annual_mortgage_rate");
-        READ_DECIMAL(cur_pmt, request->current_monthly_payment(), "current_monthly_payment");
 
         const auto s = sensen::calculate_home_future_value(
             prop_value, appreciation, loan_balance, mortgage_rate, cur_pmt,
@@ -1091,14 +1455,17 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
             return Status(grpc::StatusCode::INVALID_ARGUMENT,
                           "years must be positive and at most 100");
         }
-        READ_DECIMAL(price, request->property_price(), "property_price");
-        READ_DECIMAL(down, request->down_payment(), "down_payment");
-        READ_DECIMAL(piti, request->monthly_piti_and_maintenance(), "monthly_piti_and_maintenance");
-        READ_DECIMAL(appreciation, request->annual_home_appreciation(), "annual_home_appreciation");
-        READ_DECIMAL(rent, request->current_monthly_rent(), "current_monthly_rent");
-        READ_DECIMAL(rent_increase, request->annual_rent_increase(), "annual_rent_increase");
-        READ_DECIMAL(investment_return, request->annual_investment_return(),
-                     "annual_investment_return");
+        REQUIRE_DECIMAL_SAFE(price, request->property_price(), "property_price");
+        REQUIRE_DECIMAL_SAFE(down, request->down_payment(), "down_payment");
+        REQUIRE_DECIMAL_SAFE(piti, request->monthly_piti_and_maintenance(),
+                             "monthly_piti_and_maintenance");
+        REQUIRE_DECIMAL_SAFE(appreciation, request->annual_home_appreciation(),
+                             "annual_home_appreciation");
+        REQUIRE_DECIMAL_SAFE(rent, request->current_monthly_rent(), "current_monthly_rent");
+        REQUIRE_DECIMAL_SAFE(rent_increase, request->annual_rent_increase(),
+                             "annual_rent_increase");
+        REQUIRE_DECIMAL_SAFE(investment_return, request->annual_investment_return(),
+                             "annual_investment_return");
 
         const auto s = sensen::calculate_rent_vs_buy(price, down, piti, appreciation, rent,
                                                       rent_increase, investment_return,
@@ -1121,8 +1488,14 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         }
         // The engine builds holding_period_years*12 monthly cash flows and
         // then Newton-iterates a full NPV per step in xirr -- the same shape
-        // ComputeXirr already prices with cost_cash_flow.
-        CHARGE("ComputeHomeNpv", quota::cost_cash_flow(request->holding_period_years() * 12));
+        // ComputeXirr already prices with cost_cash_flow. Priced from the
+        // raw, still-unvalidated request, like refinance_charge_months --
+        // holding_period_years*12 can overflow int32 on its own
+        // (INT32_MAX*12 does), which is undefined behaviour regardless of
+        // the request being refused two lines later, so the multiply is
+        // done in int64 and clamped rather than directly here.
+        CHARGE("ComputeHomeNpv",
+               quota::cost_cash_flow(home_npv_charge_months(request->holding_period_years())));
         if (request->holding_period_years() <= 0 || request->holding_period_years() > 100) {
             return Status(grpc::StatusCode::INVALID_ARGUMENT,
                           "holding_period_years must be positive and at most 100");
@@ -1131,19 +1504,31 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
             return Status(grpc::StatusCode::INVALID_ARGUMENT,
                           "loan_term_years must be positive and at most 100");
         }
-        READ_DECIMAL(price, request->property_price(), "property_price");
-        READ_DECIMAL(down, request->down_payment(), "down_payment");
-        READ_DECIMAL(closing, request->closing_costs_buy(), "closing_costs_buy");
-        READ_DECIMAL(loan_amt, request->loan_amount(), "loan_amount");
-        READ_DECIMAL(loan_rate, request->loan_annual_rate(), "loan_annual_rate");
-        READ_DECIMAL(taxes, request->monthly_taxes_ins_hoa(), "monthly_taxes_ins_hoa");
-        READ_DECIMAL(maint, request->monthly_maintenance(), "monthly_maintenance");
-        READ_DECIMAL(appreciation, request->annual_appreciation_rate(), "annual_appreciation_rate");
-        READ_DECIMAL(sell_pct, request->selling_closing_cost_percent(),
-                     "selling_closing_cost_percent");
-        READ_DECIMAL(rent_saved, request->monthly_rent_saved(), "monthly_rent_saved");
-        READ_DECIMAL(rent_increase, request->annual_rent_increase(), "annual_rent_increase");
-        READ_DECIMAL(discount, request->annual_discount_rate(), "annual_discount_rate");
+        REQUIRE_DECIMAL_SAFE(price, request->property_price(), "property_price");
+        REQUIRE_DECIMAL_SAFE(down, request->down_payment(), "down_payment");
+        REQUIRE_DECIMAL_SAFE(closing, request->closing_costs_buy(), "closing_costs_buy");
+        REQUIRE_DECIMAL_SAFE(loan_amt, request->loan_amount(), "loan_amount");
+        REQUIRE_DECIMAL_SAFE(loan_rate, request->loan_annual_rate(), "loan_annual_rate");
+        REQUIRE_DECIMAL_SAFE(taxes, request->monthly_taxes_ins_hoa(), "monthly_taxes_ins_hoa");
+        REQUIRE_DECIMAL_SAFE(maint, request->monthly_maintenance(), "monthly_maintenance");
+        REQUIRE_DECIMAL_SAFE(appreciation, request->annual_appreciation_rate(),
+                             "annual_appreciation_rate");
+        REQUIRE_DECIMAL_SAFE(sell_pct, request->selling_closing_cost_percent(),
+                             "selling_closing_cost_percent");
+        REQUIRE_DECIMAL_SAFE(rent_saved, request->monthly_rent_saved(), "monthly_rent_saved");
+        REQUIRE_DECIMAL_SAFE(rent_increase, request->annual_rent_increase(),
+                             "annual_rent_increase");
+        REQUIRE_DECIMAL_SAFE(discount, request->annual_discount_rate(), "annual_discount_rate");
+
+        // loan_annual_rate feeds pmt()'s BigDecimal pow(loan_term_years*12)
+        // -- loan_term_years is already capped at 100 (1200 months), but an
+        // extreme rate still overflows it on its own.
+        if (auto s = check_compound_growth_safe(loan_rate.to_double(), 12,
+                                                request->loan_term_years() * 12,
+                                                "loan_annual_rate");
+            !s.ok()) {
+            return s;
+        }
 
         sensen::HomeNPVInput input{};
         input.property_price = price;
@@ -1390,6 +1775,28 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
     }
 
   private:
+    /**
+     * Refuses a non-positive period count where the closed-form annuity math
+     * (pmt/pv/fv/ipmt/ppmt) genuinely needs one.
+     *
+     * periods=0 does not raise inside sensen's own pmt()/pv()/fv() -- every
+     * BigDecimal divide-by-zero there resolves through .value_or(BigDecimal(0))
+     * to a silent 0, and ipmt() explicitly returns BigDecimal(0) whenever
+     * per > nper (which per<=0<nper never is, and per>=1>nper=0 always is).
+     * So an absent/zero periods count does not fail loudly on its own; it
+     * produces a payment of exactly $0 for a loan that was never described --
+     * the same silent-default failure class as an absent rate, just reached
+     * through an int32 default instead of an empty string.
+     */
+    [[nodiscard]] static auto check_periods(int periods, std::string_view field = "periods")
+        -> Status {
+        if (periods <= 0) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          std::string(field) + " must be positive");
+        }
+        return Status::OK;
+    }
+
     [[nodiscard]] static auto check_term(int term_months) -> Status {
         if (term_months <= 0) {
             return Status(grpc::StatusCode::INVALID_ARGUMENT, "term_months must be positive");
@@ -1463,8 +1870,9 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         // No charge here: this is the shared body of ComputeInterestPayment
         // and ComputePrincipalPayment, and both charge at their own entry
         // point. Charging again would bill one call twice.
-        READ_DECIMAL(rate, request->rate(), "rate");
-        READ_DECIMAL(pv_v, request->present_value(), "present_value");
+        if (auto s = check_periods(request->periods()); !s.ok()) return s;
+        REQUIRE_DECIMAL(rate, request->rate(), "rate");
+        REQUIRE_DECIMAL(pv_v, request->present_value(), "present_value");
         READ_DECIMAL(fv_v, request->future_value(), "future_value");
         const int timing = timing_of(request->timing());
         const auto r = interest ? sensen::ipmt(rate, request->period(), request->periods(), pv_v,
