@@ -128,3 +128,53 @@ JWT route to Pro, in production the whole time.
 Always verify on the **live apex**, never a preview URL. The tell that Pages is serving
 instead of Workers: the apex returns `cf-cache-status: HIT` with none of the Pages
 response headers, and a cache purge does not change it.
+
+---
+
+## 7. Second product: mortgagefvcalculator.com (target architecture)
+
+Recorded 2026-08-05 from the owner. **Current state: hosted on Lovable.** Target
+state mirrors this repo's own architecture:
+
+| Layer | Target |
+| --- | --- |
+| Frontend | Cloudflare Workers static assets |
+| Database | the SAME Railway Postgres instance |
+| Backend calculations | Railway — `sensen.finance.Finance`, the service that already exists for reuse |
+| Subscriptions | Railway, on the SAME shared Stripe account |
+
+This is not a hypothetical. Four consequences follow, and three of them touch work
+already in flight.
+
+**1. The webhook price scoping is now load-bearing, not precautionary.**
+`30151ea` scoped `handleWebhook` to this product's two price IDs because the Stripe
+account is shared and a sibling application *could* have caused OFC Pro licences to
+be minted for its customers. With a second product selling subscriptions on that
+same account, that is no longer hypothetical — the first mortgagefv subscriber
+would have been emailed a working OFC Pro licence and had `tier=pro` written for
+them. The reverse also holds: that product's own webhook must scope to ITS price
+IDs, or an OFC subscriber grants entitlement there.
+
+**2. The Envoy rate limit becomes a capacity constraint.**
+`envoy.yaml` sets `local_ratelimit` to 10 req/s sustained (burst 100), site-wide
+and key-independent. That already sits below every quota tier — `partner` is 40
+req/s, `anonymous` 100. With two products sharing one backend it is the binding
+limit for both, and it refuses with a bare **HTTP 429 and no gRPC status**, so a
+grpc-web client surfaces it as a transport error rather than throttling. Decide
+this deliberately before the second product carries real traffic.
+
+**3. Shared Postgres needs deliberate schema separation.**
+This repo owns `users`, `profiles`, `saved_strategies` in the `railway` database.
+A second product on the same instance must not collide. Note `profiles.tier` is
+dead here — nothing reads or writes it — so it is not an entitlement path to reuse.
+
+**4. The Lovable to Workers migration will meet the trap documented in §6.**
+`wrangler pages deploy` does not deploy a Workers-custom-domain site: it succeeds,
+prints a URL, and changes nothing. That cost five "completed" deploys on this
+project. The second product should be set up as a Workers static-assets deployment
+from the start, and verified on its live apex rather than a preview URL.
+
+**Quota identity.** Per-product API keys are required regardless of the above:
+`quota.cpp` folds every unkeyed caller into one shared `~anonymous` bucket, so two
+products on anonymous traffic degrade each other. See
+`docs/superpowers/specs/2026-08-05-mortgagefv-grpc-integration.md`.
