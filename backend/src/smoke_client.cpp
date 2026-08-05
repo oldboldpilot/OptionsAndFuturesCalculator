@@ -20,6 +20,7 @@
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -97,6 +98,25 @@ auto make_context(std::chrono::seconds deadline = std::chrono::seconds{30})
  * reported as FAILED.
  */
 constexpr std::chrono::seconds kAssistantDeadline{120};
+
+/**
+ * Formats a double as a full-precision decimal string for a BigDecimal wire
+ * field.
+ *
+ * `std::to_string(double)` truncates to 6 fractional digits, which is not
+ * precise enough here: several of the new finance identities (payoff timing
+ * in particular) are constructed so the closed-form answer lands exactly on
+ * an integer month boundary, and a 6-digit-truncated payment can nudge the
+ * engine's nper across that boundary while the test's own math -- computed
+ * from the untruncated double -- does not. Twelve fractional digits is far
+ * inside a double's ~15-17 significant digits, so this is lossless for any
+ * value these tests construct.
+ */
+[[nodiscard]] auto dec(double v) -> std::string {
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(12) << v;
+    return oss.str();
+}
 
 auto check_quote(calculator::OptionsCalculator::Stub& stub, const std::string& symbol,
                  double& spot_out) -> bool {
@@ -1049,6 +1069,631 @@ auto check_finance(sensen::finance::Finance::Stub& stub) -> bool {
         std::cout << "          rental NOI 26400, cash flow 8400, cap rate 6.60%\n";
     }
 
+    // -- ComputeRefinance -----------------------------------------------------
+    {
+        // No-op refinance: refinance a loan into itself (same rate, term
+        // equal to the months remaining, zero closing costs/cash-out/PMI).
+        // Every "savings" figure must collapse to zero/no-shift. The payment
+        // is the closed-form annuity payment computed here, sharing no code
+        // with the engine.
+        const double pv = 300000.0;
+        const double annual_rate = 0.06;
+        const double r = annual_rate / 12.0;
+        const int n = 300;
+        const double payment = pv * r / (1.0 - std::pow(1.0 + r, -static_cast<double>(n)));
+
+        sensen::finance::RefinanceRequest req;
+        req.set_current_loan_balance("300000");
+        req.set_current_monthly_payment(dec(payment));
+        req.set_current_annual_rate("0.06");
+        req.set_current_remaining_months(n);
+        req.set_property_value("300000");
+        req.set_new_annual_rate("0.06");
+        req.set_new_term_years(n / 12);
+        req.set_closing_costs("0");
+        req.set_closing_cost_type(sensen::finance::RefinanceRequest::PAID_IN_CASH);
+        req.set_cash_out_amount("0");
+        req.set_current_pmi_monthly("0");
+        req.set_new_pmi_monthly("0");
+        req.set_pmi_drop_off_ltv("0.80");
+        req.set_payments_per_year(12);
+        sensen::finance::RefinanceResponse res;
+        const auto ctx = make_context();
+        if (const auto s = stub.ComputeRefinance(ctx.get(), req, &res); !s.ok()) {
+            std::cerr << "ComputeRefinance (no-op) FAILED: " << s.error_message() << "\n";
+            return false;
+        }
+        if (std::abs(std::stod(res.new_loan_amount()) - pv) > 1e-6) {
+            std::cerr << "no-op refinance new_loan_amount " << res.new_loan_amount() << " != PV "
+                      << pv << "\n";
+            return false;
+        }
+        if (std::abs(std::stod(res.new_monthly_payment()) - payment) > 1e-6) {
+            std::cerr << "no-op refinance new_monthly_payment " << res.new_monthly_payment()
+                      << " disagrees with the closed form " << payment << "\n";
+            return false;
+        }
+        if (std::abs(std::stod(res.monthly_savings_initial())) > 1e-6) {
+            std::cerr << "no-op refinance monthly_savings_initial "
+                      << res.monthly_savings_initial() << " != 0\n";
+            return false;
+        }
+        if (res.payoff_date_shift_months() != 0) {
+            std::cerr << "no-op refinance payoff_date_shift_months "
+                      << res.payoff_date_shift_months() << " != 0\n";
+            return false;
+        }
+        if (std::abs(res.total_savings_over_life()) > 1e-4) {
+            std::cerr << "no-op refinance total_savings_over_life "
+                      << res.total_savings_over_life() << " != 0\n";
+            return false;
+        }
+        std::cout << "          refinance(no-op) pmt = " << std::setprecision(6) << payment
+                  << " (closed form), loan = PV, shift = 0, lifetime savings ~= 0\n";
+    }
+    {
+        // Simple break-even against its own definition: 6% -> 4.5%, 300k,
+        // 300 months remaining, new 30-year term, 6000 paid-in-cash closing
+        // costs. Both payments are the closed-form annuity, computed here.
+        const double pv = 300000.0;
+        const double old_r = 0.06 / 12.0;
+        const double new_r = 0.045 / 12.0;
+        const int old_n = 300;
+        const int new_n = 360;
+        const double old_pmt = pv * old_r / (1.0 - std::pow(1.0 + old_r, -static_cast<double>(old_n)));
+        const double new_pmt = pv * new_r / (1.0 - std::pow(1.0 + new_r, -static_cast<double>(new_n)));
+        const double savings = old_pmt - new_pmt;
+        const int expected_be = static_cast<int>(std::ceil(6000.0 / savings));
+
+        sensen::finance::RefinanceRequest req;
+        req.set_current_loan_balance("300000");
+        req.set_current_monthly_payment(dec(old_pmt));
+        req.set_current_annual_rate("0.06");
+        req.set_current_remaining_months(old_n);
+        req.set_property_value("300000");
+        req.set_new_annual_rate("0.045");
+        req.set_new_term_years(30);
+        req.set_closing_costs("6000");
+        req.set_closing_cost_type(sensen::finance::RefinanceRequest::PAID_IN_CASH);
+        req.set_payments_per_year(12);
+        sensen::finance::RefinanceResponse res;
+        const auto ctx = make_context();
+        if (const auto s = stub.ComputeRefinance(ctx.get(), req, &res); !s.ok()) {
+            std::cerr << "ComputeRefinance (break-even) FAILED: " << s.error_message() << "\n";
+            return false;
+        }
+        if (res.simple_break_even_months() != expected_be) {
+            std::cerr << "simple_break_even_months " << res.simple_break_even_months()
+                      << " != ceil(6000/savings) = " << expected_be << "\n";
+            return false;
+        }
+        std::cout << "          refinance 6%->4.5% break-even = " << res.simple_break_even_months()
+                  << " months (savings " << std::setprecision(2) << savings << "/mo)\n";
+
+        // Closing-cost funding identity: the same request, PAID_IN_CASH vs
+        // ROLLED_INTO_LOAN. new_loan_amount must differ by exactly
+        // closing_costs, and the rolled variant's payment must be strictly
+        // higher.
+        sensen::finance::RefinanceRequest rolled = req;
+        rolled.set_closing_cost_type(sensen::finance::RefinanceRequest::ROLLED_INTO_LOAN);
+        sensen::finance::RefinanceResponse rolled_res;
+        const auto ctx2 = make_context();
+        if (const auto s = stub.ComputeRefinance(ctx2.get(), rolled, &rolled_res); !s.ok()) {
+            std::cerr << "ComputeRefinance (rolled-in) FAILED: " << s.error_message() << "\n";
+            return false;
+        }
+        const double cash_loan = std::stod(res.new_loan_amount());
+        const double rolled_loan = std::stod(rolled_res.new_loan_amount());
+        if (std::abs((rolled_loan - cash_loan) - 6000.0) > 1e-6) {
+            std::cerr << "rolled - cash new_loan_amount = " << (rolled_loan - cash_loan)
+                      << " != closing_costs 6000\n";
+            return false;
+        }
+        if (std::stod(rolled_res.new_monthly_payment()) <= std::stod(res.new_monthly_payment())) {
+            std::cerr << "rolling closing costs into the loan did not raise the payment\n";
+            return false;
+        }
+        std::cout << "          refinance funding: rolled loan - cash loan = 6000 exactly, "
+                     "rolled payment > cash payment\n";
+
+        // Never-break-even sentinel: refinance to a rate high enough that
+        // the new payment EXCEEDS the old one, so savings are negative.
+        sensen::finance::RefinanceRequest worse = req;
+        worse.set_new_annual_rate("0.08");
+        sensen::finance::RefinanceResponse worse_res;
+        const auto ctx3 = make_context();
+        if (const auto s = stub.ComputeRefinance(ctx3.get(), worse, &worse_res); !s.ok()) {
+            std::cerr << "ComputeRefinance (worse rate) FAILED: " << s.error_message() << "\n";
+            return false;
+        }
+        if (worse_res.simple_break_even_months() != -1) {
+            std::cerr << "refinancing to a higher rate produced break-even "
+                      << worse_res.simple_break_even_months() << ", expected -1 (never)\n";
+            return false;
+        }
+        std::cout << "          refinance to a higher rate never breaks even (-1)\n";
+    }
+    {
+        // PMI drop-off zero case: the starting balance is already below the
+        // LTV threshold on both loans, so both drop-off fields are 0 from
+        // the lambda's early return (financial.cppm:1907) -- independent of
+        // whether the PMI amount itself is zero.
+        sensen::finance::RefinanceRequest req;
+        req.set_current_loan_balance("300000");
+        req.set_current_monthly_payment("1932.904204456543");
+        req.set_current_annual_rate("0.06");
+        req.set_current_remaining_months(300);
+        req.set_property_value("1000000");   // threshold = 800000 at 80% LTV
+        req.set_new_annual_rate("0.06");
+        req.set_new_term_years(30);
+        req.set_closing_costs("0");
+        req.set_current_pmi_monthly("100");
+        req.set_new_pmi_monthly("100");
+        req.set_pmi_drop_off_ltv("0.80");
+        req.set_payments_per_year(12);
+        sensen::finance::RefinanceResponse res;
+        const auto ctx = make_context();
+        if (const auto s = stub.ComputeRefinance(ctx.get(), req, &res); !s.ok()) {
+            std::cerr << "ComputeRefinance (PMI zero) FAILED: " << s.error_message() << "\n";
+            return false;
+        }
+        if (res.current_loan_pmi_drop_off_months() != 0 || res.new_loan_pmi_drop_off_months() != 0) {
+            std::cerr << "PMI drop-off months " << res.current_loan_pmi_drop_off_months() << "/"
+                      << res.new_loan_pmi_drop_off_months()
+                      << " != 0/0 for a balance already below the LTV threshold\n";
+            return false;
+        }
+        std::cout << "          refinance PMI drop-off = 0/0 when the balance already sits "
+                     "below the LTV threshold\n";
+    }
+
+    // -- ComputePayoffTiming: the annuity inversion ----------------------------
+    {
+        const double pv = 200000.0;
+        const double r = 0.05 / 12.0;
+        const int n = 180;
+        const double pmt = pv * r / (1.0 - std::pow(1.0 + r, -static_cast<double>(n)));
+        const double extra = 300.0;
+        const auto nper_of = [&](double payment) {
+            return -std::log(1.0 - pv * r / payment) / std::log(1.0 + r);
+        };
+        const int expected_orig = static_cast<int>(std::ceil(nper_of(pmt)));
+        const int expected_new = static_cast<int>(std::ceil(nper_of(pmt + extra)));
+        const double expected_interest_saved =
+            (pmt * expected_orig - pv) - ((pmt + extra) * expected_new - pv);
+
+        sensen::finance::PayoffTimingRequest req;
+        req.set_current_loan_balance("200000");
+        req.set_annual_rate("0.05");
+        req.set_current_monthly_payment(dec(pmt));
+        req.set_extra_monthly_payment(dec(extra));
+        req.set_payments_per_year(12);
+        sensen::finance::PayoffTimingResponse res;
+        const auto ctx = make_context();
+        if (const auto s = stub.ComputePayoffTiming(ctx.get(), req, &res); !s.ok()) {
+            std::cerr << "ComputePayoffTiming FAILED: " << s.error_message() << "\n";
+            return false;
+        }
+        if (res.original_months_remaining() != expected_orig) {
+            std::cerr << "original_months_remaining " << res.original_months_remaining()
+                      << " != closed-form nper " << expected_orig << "\n";
+            return false;
+        }
+        if (res.new_months_remaining() != expected_new) {
+            std::cerr << "new_months_remaining " << res.new_months_remaining()
+                      << " != closed-form nper " << expected_new << "\n";
+            return false;
+        }
+        if (res.months_saved() != expected_orig - expected_new) {
+            std::cerr << "months_saved " << res.months_saved() << " != "
+                      << (expected_orig - expected_new) << "\n";
+            return false;
+        }
+        if (std::abs(std::stod(res.total_interest_saved()) - expected_interest_saved) > 1e-6) {
+            std::cerr << "total_interest_saved " << res.total_interest_saved() << " != "
+                      << expected_interest_saved << "\n";
+            return false;
+        }
+        std::cout << "          payoff timing " << expected_orig << " -> " << expected_new
+                  << " months (+" << extra << "/mo), interest saved " << std::setprecision(2)
+                  << expected_interest_saved << "\n";
+    }
+
+    // -- ComputeMortgageRecast: pmt linearity in principal ---------------------
+    {
+        const double balance = 300000.0;
+        const double lump = 80000.0;
+        const double rate = 0.055;
+        const int months = 240;
+        const double r = rate / 12.0;
+        const double expected_a = balance * r / (1.0 - std::pow(1.0 + r, -static_cast<double>(months)));
+
+        sensen::finance::MortgageRecastRequest req_a;
+        req_a.set_current_loan_balance(dec(balance));
+        req_a.set_current_monthly_payment("2000");
+        req_a.set_lump_sum_payment("0");
+        req_a.set_annual_rate(dec(rate));
+        req_a.set_remaining_months(months);
+        req_a.set_payments_per_year(12);
+        sensen::finance::MortgageRecastResponse res_a;
+        const auto ctx_a = make_context();
+        if (const auto s = stub.ComputeMortgageRecast(ctx_a.get(), req_a, &res_a); !s.ok()) {
+            std::cerr << "ComputeMortgageRecast(A) FAILED: " << s.error_message() << "\n";
+            return false;
+        }
+        const double payment_a = std::stod(res_a.new_monthly_payment());
+        if (std::abs(payment_a - expected_a) > 1e-4) {
+            std::cerr << "recast(no lump) payment " << payment_a << " != closed form "
+                      << expected_a << "\n";
+            return false;
+        }
+        if (std::abs(std::stod(res_a.monthly_savings()) - (2000.0 - payment_a)) > 1e-4) {
+            std::cerr << "recast monthly_savings " << res_a.monthly_savings()
+                      << " != current_payment - new_payment\n";
+            return false;
+        }
+
+        sensen::finance::MortgageRecastRequest req_b = req_a;
+        req_b.set_lump_sum_payment(dec(lump));
+        sensen::finance::MortgageRecastResponse res_b;
+        const auto ctx_b = make_context();
+        if (const auto s = stub.ComputeMortgageRecast(ctx_b.get(), req_b, &res_b); !s.ok()) {
+            std::cerr << "ComputeMortgageRecast(B) FAILED: " << s.error_message() << "\n";
+            return false;
+        }
+        const double payment_b = std::stod(res_b.new_monthly_payment());
+
+        sensen::finance::MortgageRecastRequest req_c;
+        req_c.set_current_loan_balance(dec(lump));
+        req_c.set_current_monthly_payment("2000");
+        req_c.set_lump_sum_payment("0");
+        req_c.set_annual_rate(dec(rate));
+        req_c.set_remaining_months(months);
+        req_c.set_payments_per_year(12);
+        sensen::finance::MortgageRecastResponse res_c;
+        const auto ctx_c = make_context();
+        if (const auto s = stub.ComputeMortgageRecast(ctx_c.get(), req_c, &res_c); !s.ok()) {
+            std::cerr << "ComputeMortgageRecast(C) FAILED: " << s.error_message() << "\n";
+            return false;
+        }
+        const double payment_c = std::stod(res_c.new_monthly_payment());
+
+        // pmt is linear in principal at a fixed rate/term: payment(balance)
+        // - payment(balance-lump) == payment(lump). An identity no cached
+        // constant can fake -- it takes three independent recasts to agree.
+        if (std::abs((payment_a - payment_b) - payment_c) > 1e-4) {
+            std::cerr << "pmt linearity violated: payment(B)-payment(B-L) = "
+                      << (payment_a - payment_b) << " != payment(L) = " << payment_c << "\n";
+            return false;
+        }
+        std::cout << "          recast pmt linearity: payment(B)-payment(B-L) = payment(L) = "
+                  << std::setprecision(6) << payment_c << "\n";
+
+        // Full-payoff edge: lump == balance -> new payment is exactly 0.
+        sensen::finance::MortgageRecastRequest req_d = req_a;
+        req_d.set_lump_sum_payment(dec(balance));
+        sensen::finance::MortgageRecastResponse res_d;
+        const auto ctx_d = make_context();
+        if (const auto s = stub.ComputeMortgageRecast(ctx_d.get(), req_d, &res_d); !s.ok()) {
+            std::cerr << "ComputeMortgageRecast(full payoff) FAILED: " << s.error_message() << "\n";
+            return false;
+        }
+        if (std::abs(std::stod(res_d.new_monthly_payment())) > 1e-9) {
+            std::cerr << "a lump sum equal to the balance left a payment of "
+                      << res_d.new_monthly_payment() << ", expected exactly 0\n";
+            return false;
+        }
+        std::cout << "          recast full payoff: lump == balance -> payment = 0\n";
+    }
+
+    // -- ComputeHomeFutureValue: both legs have closed forms -------------------
+    {
+        const double prop_value = 500000.0;
+        const double appreciation = 0.03;
+        const double loan_balance = 250000.0;
+        const double mortgage_rate = 0.045;
+        const int years = 10;
+        const double r = mortgage_rate / 12.0;
+        const int term_months = 360;
+        const double pmt =
+            loan_balance * r / (1.0 - std::pow(1.0 + r, -static_cast<double>(term_months)));
+        const int m = years * 12;
+        const double expected_future_prop = prop_value * std::pow(1.0 + appreciation, years);
+        const double expected_balance =
+            loan_balance * std::pow(1.0 + r, m) - pmt * (std::pow(1.0 + r, m) - 1.0) / r;
+
+        sensen::finance::HomeFutureValueRequest req;
+        req.set_current_property_value(dec(prop_value));
+        req.set_annual_appreciation_rate("0.03");
+        req.set_current_loan_balance(dec(loan_balance));
+        req.set_annual_mortgage_rate("0.045");
+        req.set_current_monthly_payment(dec(pmt));
+        req.set_target_years(years);
+        req.set_payments_per_year(12);
+        sensen::finance::HomeFutureValueResponse res;
+        const auto ctx = make_context();
+        if (const auto s = stub.ComputeHomeFutureValue(ctx.get(), req, &res); !s.ok()) {
+            std::cerr << "ComputeHomeFutureValue FAILED: " << s.error_message() << "\n";
+            return false;
+        }
+        if (std::abs(res.future_property_value() - expected_future_prop) > 1e-4) {
+            std::cerr << "future_property_value " << res.future_property_value() << " != "
+                      << expected_future_prop << "\n";
+            return false;
+        }
+        if (std::abs(std::stod(res.future_loan_balance()) - expected_balance) > 1e-2) {
+            std::cerr << "future_loan_balance " << res.future_loan_balance()
+                      << " disagrees with the independent closed-form remaining balance "
+                      << expected_balance << "\n";
+            return false;
+        }
+        const double cross_equity =
+            res.future_property_value() - std::stod(res.future_loan_balance());
+        if (std::abs(std::stod(res.future_equity()) - cross_equity) > 1e-6) {
+            std::cerr << "future_equity " << res.future_equity()
+                      << " != future_property_value - future_loan_balance = " << cross_equity
+                      << "\n";
+            return false;
+        }
+        std::cout << "          home FV: property " << std::setprecision(2)
+                  << res.future_property_value() << ", balance "
+                  << std::stod(res.future_loan_balance()) << " (closed form " << expected_balance
+                  << ")\n";
+
+        // Retirement identity: payment = the exact annuity payment over the
+        // FULL target_years term -> the balance must clamp to exactly 0.
+        const double pmt_full =
+            loan_balance * r / (1.0 - std::pow(1.0 + r, -static_cast<double>(m)));
+        sensen::finance::HomeFutureValueRequest retire = req;
+        retire.set_current_monthly_payment(dec(pmt_full));
+        sensen::finance::HomeFutureValueResponse retire_res;
+        const auto ctx2 = make_context();
+        if (const auto s = stub.ComputeHomeFutureValue(ctx2.get(), retire, &retire_res); !s.ok()) {
+            std::cerr << "ComputeHomeFutureValue (retirement) FAILED: " << s.error_message()
+                      << "\n";
+            return false;
+        }
+        if (std::abs(std::stod(retire_res.future_loan_balance())) > 1e-4) {
+            std::cerr << "a loan paid off exactly over its term left a balance of "
+                      << retire_res.future_loan_balance() << "\n";
+            return false;
+        }
+        std::cout << "          home FV retirement identity: exact annuity payment -> balance "
+                     "= 0\n";
+    }
+
+    // -- ComputeRentVsBuy: no arbitrage identity, so an independent closed ----
+    // -- form plus invariants and a degenerate control ------------------------
+    {
+        const double price = 400000.0, down = 80000.0, piti = 2200.0;
+        const double appreciation = 0.03, rent0 = 2000.0, rent_growth = 0.02, inv_return = 0.05;
+        const int years = 7;
+
+        const double total_monthly_buy = piti * years * 12;
+        const double fv_home = price * std::pow(1.0 + appreciation, years);
+        const double equity = fv_home - (price - down);
+        const double expected_buy = down + total_monthly_buy - equity;
+
+        double rent_cost = 0.0;
+        double cur_rent = rent0;
+        for (int y = 0; y < years; ++y) {
+            rent_cost += cur_rent * 12.0;
+            cur_rent *= (1.0 + rent_growth);
+        }
+        const double dp_investment = down * std::pow(1.0 + inv_return, years);
+        const double investment_gain = dp_investment - down;
+        const double expected_rent = rent_cost - investment_gain;
+
+        sensen::finance::RentVsBuyRequest req;
+        req.set_property_price(dec(price));
+        req.set_down_payment(dec(down));
+        req.set_monthly_piti_and_maintenance(dec(piti));
+        req.set_annual_home_appreciation(dec(appreciation));
+        req.set_current_monthly_rent(dec(rent0));
+        req.set_annual_rent_increase(dec(rent_growth));
+        req.set_annual_investment_return(dec(inv_return));
+        req.set_years(years);
+        sensen::finance::RentVsBuyResponse res;
+        const auto ctx = make_context();
+        if (const auto s = stub.ComputeRentVsBuy(ctx.get(), req, &res); !s.ok()) {
+            std::cerr << "ComputeRentVsBuy FAILED: " << s.error_message() << "\n";
+            return false;
+        }
+        if (std::abs(res.total_cost_of_buying() - expected_buy) > 1e-4) {
+            std::cerr << "total_cost_of_buying " << res.total_cost_of_buying()
+                      << " != independent closed form " << expected_buy << "\n";
+            return false;
+        }
+        if (std::abs(res.total_cost_of_renting() - expected_rent) > 1e-4) {
+            std::cerr << "total_cost_of_renting " << res.total_cost_of_renting()
+                      << " != independent closed form " << expected_rent << "\n";
+            return false;
+        }
+        if (std::abs(res.buying_advantage() -
+                     (res.total_cost_of_renting() - res.total_cost_of_buying())) > 1e-6) {
+            std::cerr << "buying_advantage != total_cost_of_renting - total_cost_of_buying\n";
+            return false;
+        }
+        if (res.is_buying_better() != (res.buying_advantage() > 0.0)) {
+            std::cerr << "is_buying_better disagrees with the sign of buying_advantage\n";
+            return false;
+        }
+        std::cout << "          rent-vs-buy: buy " << std::setprecision(2)
+                  << res.total_cost_of_buying() << ", rent " << res.total_cost_of_renting()
+                  << ", advantage " << res.buying_advantage() << " (closed form "
+                  << (expected_rent - expected_buy) << ")\n";
+
+        // Monotonicity: a higher starting rent must strictly favor buying.
+        sensen::finance::RentVsBuyRequest higher_rent = req;
+        higher_rent.set_current_monthly_rent("2500");
+        sensen::finance::RentVsBuyResponse higher_res;
+        const auto ctx2 = make_context();
+        if (const auto s = stub.ComputeRentVsBuy(ctx2.get(), higher_rent, &higher_res); !s.ok()) {
+            std::cerr << "ComputeRentVsBuy (higher rent) FAILED: " << s.error_message() << "\n";
+            return false;
+        }
+        if (higher_res.buying_advantage() <= res.buying_advantage()) {
+            std::cerr << "raising current_monthly_rent did not strictly increase "
+                         "buying_advantage\n";
+            return false;
+        }
+        std::cout << "          rent-vs-buy monotonicity: higher rent -> higher buying_advantage\n";
+
+        // Degenerate control: zero appreciation, zero rent growth, zero
+        // investment return collapse both sides to hand arithmetic.
+        sensen::finance::RentVsBuyRequest degen;
+        degen.set_property_price(dec(price));
+        degen.set_down_payment(dec(down));
+        degen.set_monthly_piti_and_maintenance(dec(piti));
+        degen.set_annual_home_appreciation("0");
+        degen.set_current_monthly_rent(dec(rent0));
+        degen.set_annual_rent_increase("0");
+        degen.set_annual_investment_return("0");
+        degen.set_years(years);
+        sensen::finance::RentVsBuyResponse degen_res;
+        const auto ctx3 = make_context();
+        if (const auto s = stub.ComputeRentVsBuy(ctx3.get(), degen, &degen_res); !s.ok()) {
+            std::cerr << "ComputeRentVsBuy (degenerate) FAILED: " << s.error_message() << "\n";
+            return false;
+        }
+        if (std::abs(degen_res.total_cost_of_buying() - total_monthly_buy) > 1e-6) {
+            std::cerr << "degenerate buy cost " << degen_res.total_cost_of_buying()
+                      << " != 12*years*M = " << total_monthly_buy << "\n";
+            return false;
+        }
+        if (std::abs(degen_res.total_cost_of_renting() - (rent0 * 12.0 * years)) > 1e-6) {
+            std::cerr << "degenerate rent cost " << degen_res.total_cost_of_renting()
+                      << " != 12*years*R = " << (rent0 * 12.0 * years) << "\n";
+            return false;
+        }
+        std::cout << "          rent-vs-buy degenerate control: buy = 12yM, rent = 12yR exactly\n";
+    }
+
+    // -- ComputeHomeNpv: NPV(IRR) == 0 as the identity -------------------------
+    {
+        const double property_price = 350000.0, down_payment = 70000.0, closing_buy = 5000.0;
+        const double loan_amount = 280000.0, loan_rate = 0.05;
+        const int loan_term_years = 30;
+        const double taxes = 400.0, maintenance = 150.0;
+        const double appreciation = 0.03, selling_pct = 0.06;
+        const double rent_saved0 = 1800.0, rent_increase = 0.03, discount_rate = 0.06;
+        const int holding_years = 7;
+
+        sensen::finance::HomeNpvRequest req;
+        req.set_property_price(dec(property_price));
+        req.set_down_payment(dec(down_payment));
+        req.set_closing_costs_buy(dec(closing_buy));
+        req.set_loan_amount(dec(loan_amount));
+        req.set_loan_annual_rate(dec(loan_rate));
+        req.set_loan_term_years(loan_term_years);
+        req.set_monthly_taxes_ins_hoa(dec(taxes));
+        req.set_monthly_maintenance(dec(maintenance));
+        req.set_annual_appreciation_rate(dec(appreciation));
+        req.set_selling_closing_cost_percent(dec(selling_pct));
+        req.set_monthly_rent_saved(dec(rent_saved0));
+        req.set_annual_rent_increase(dec(rent_increase));
+        req.set_annual_discount_rate(dec(discount_rate));
+        req.set_holding_period_years(holding_years);
+        sensen::finance::HomeNpvResponse res;
+        const auto ctx = make_context();
+        if (const auto s = stub.ComputeHomeNpv(ctx.get(), req, &res); !s.ok()) {
+            std::cerr << "ComputeHomeNpv FAILED: " << s.error_message() << "\n";
+            return false;
+        }
+
+        // Reconstruct the cash-flow stream independently from the request,
+        // per the model calculate_home_npv specifies
+        // (financial.cppm:2196-2260): initial outflow D+closing at t=0;
+        // monthly rent_saved - (pmt+taxes+maintenance) with rent bumped
+        // every 12 months; terminal +sale - selling costs - remaining
+        // balance. DATE-UNIT TRAP: dates are seconds on a 365-day year,
+        // seconds_per_month = 31536000/12, so each month's exponent reduces
+        // to m/12 years -- this reconstruction must use that, not day
+        // offsets, or the discounting is wrong by a units mismatch that
+        // still "looks" plausible.
+        const double loan_rate_period = loan_rate / 12.0;
+        const int total_loan_months = loan_term_years * 12;
+        const double pmt_val =
+            loan_amount * loan_rate_period /
+            (1.0 - std::pow(1.0 + loan_rate_period, -static_cast<double>(total_loan_months)));
+        const double seconds_per_month = 31536000.0 / 12.0;
+
+        std::vector<double> cash_flows{-(down_payment + closing_buy)};
+        std::vector<double> dates{0.0};
+        double current_time = 0.0;
+        double current_balance = loan_amount;
+        double current_rent = rent_saved0;
+        for (int m = 1; m <= holding_years * 12; ++m) {
+            current_time += seconds_per_month;
+            const double interest = current_balance * loan_rate_period;
+            const double principal = pmt_val - interest;
+            current_balance -= principal;
+            if (current_balance < 0.0) current_balance = 0.0;
+            const double monthly_outflow = pmt_val + taxes + maintenance;
+            if (m > 1 && m % 12 == 1) {
+                current_rent *= (1.0 + rent_increase);
+            }
+            cash_flows.push_back(current_rent - monthly_outflow);
+            dates.push_back(current_time);
+        }
+        const double fv_home = property_price * std::pow(1.0 + appreciation, holding_years);
+        const double selling_costs = fv_home * selling_pct;
+        const double net_sale = fv_home - selling_costs - current_balance;
+        cash_flows.back() += net_sale;
+
+        // NPV(IRR) == 0 by definition of IRR, regardless of how it was
+        // computed -- this catches a wrong IRR AND a divergent
+        // reconstruction in one assertion.
+        double npv_at_irr = 0.0;
+        for (std::size_t i = 0; i < cash_flows.size(); ++i) {
+            const double year_frac = (dates[i] - dates[0]) / 31536000.0;
+            npv_at_irr += cash_flows[i] / std::pow(1.0 + res.internal_rate_of_return(), year_frac);
+        }
+        if (std::abs(npv_at_irr) > 1.0) {
+            std::cerr << "NPV at the returned IRR " << res.internal_rate_of_return() << " is "
+                      << npv_at_irr << ", expected ~0 on a six-figure model\n";
+            return false;
+        }
+
+        // Cross-check against the already-served ComputeXnpv, at the
+        // request's own discount rate, over this same reconstructed stream.
+        sensen::finance::DatedCashFlowRequest xnpv_req;
+        xnpv_req.set_rate(discount_rate);
+        for (const double v : cash_flows) xnpv_req.add_values(v);
+        for (const double d : dates) xnpv_req.add_dates(d);
+        sensen::finance::DoubleResponse xnpv_res;
+        const auto ctx2 = make_context();
+        if (const auto s = stub.ComputeXnpv(ctx2.get(), xnpv_req, &xnpv_res); !s.ok()) {
+            std::cerr << "ComputeXnpv (cross-check) FAILED: " << s.error_message() << "\n";
+            return false;
+        }
+        const double rel_gap = std::abs(xnpv_res.value() - res.net_present_value()) /
+                               std::max(1.0, std::abs(res.net_present_value()));
+        if (rel_gap > 1e-6) {
+            std::cerr << "ComputeHomeNpv net_present_value " << res.net_present_value()
+                      << " disagrees with ComputeXnpv on the same reconstructed stream: "
+                      << xnpv_res.value() << "\n";
+            return false;
+        }
+
+        // Terminal legs.
+        if (std::abs(res.future_sale_price() - fv_home) > 1e-4) {
+            std::cerr << "future_sale_price " << res.future_sale_price() << " != P(1+a)^y "
+                      << fv_home << "\n";
+            return false;
+        }
+        const double expected_equity = fv_home - current_balance;
+        if (std::abs(res.future_equity() - expected_equity) > 1e-2) {
+            std::cerr << "future_equity " << res.future_equity() << " != sale - balance "
+                      << expected_equity << "\n";
+            return false;
+        }
+        std::cout << "          home NPV " << std::setprecision(2) << res.net_present_value()
+                  << ", IRR " << std::setprecision(4) << (res.internal_rate_of_return() * 100.0)
+                  << "%, NPV(IRR) = " << std::setprecision(6) << npv_at_irr
+                  << ", matches ComputeXnpv\n";
+    }
+
     // -- Refusals: malformed input must be rejected, not coerced ------------
     //
     // BigDecimal's own parser skips every non-digit, so "12x3" would silently
@@ -1108,8 +1753,81 @@ auto check_finance(sensen::finance::Finance::Stub& stub) -> bool {
             return false;
         }
     }
+    {
+        // ComputePayoffTiming: a payment below the periodic interest can
+        // never amortize. sensen's calculate_payoff_timing returns
+        // std::expected and refuses this (commit 4d4b4cbd) rather than
+        // reporting "0 months remaining" -- this probe pins that fix
+        // through the new RPC, not just inside sensen's own test suite.
+        sensen::finance::PayoffTimingRequest req;
+        req.set_current_loan_balance("200000");
+        req.set_annual_rate("0.05");
+        req.set_current_monthly_payment("500");   // < 200000*0.05/12 = 833.33 interest
+        req.set_payments_per_year(12);
+        sensen::finance::PayoffTimingResponse res;
+        const auto ctx = make_context();
+        if (stub.ComputePayoffTiming(ctx.get(), req, &res).ok()) {
+            std::cerr << "a payoff-timing payment below the periodic interest was accepted "
+                         "rather than refused\n";
+            return false;
+        }
+    }
+    {
+        // ComputeHomeNpv: zero holding_period_years is refused rather than
+        // silently producing an empty cash-flow stream.
+        sensen::finance::HomeNpvRequest req;
+        req.set_property_price("350000");
+        req.set_down_payment("70000");
+        req.set_loan_amount("280000");
+        req.set_loan_annual_rate("0.05");
+        req.set_loan_term_years(30);
+        req.set_holding_period_years(0);
+        sensen::finance::HomeNpvResponse res;
+        const auto ctx = make_context();
+        if (stub.ComputeHomeNpv(ctx.get(), req, &res).ok()) {
+            std::cerr << "a zero holding_period_years was accepted rather than refused\n";
+            return false;
+        }
+    }
+    {
+        // ComputeHomeNpv: zero loan_term_years makes the internal pmt()
+        // call meaningless (nper=0).
+        sensen::finance::HomeNpvRequest req;
+        req.set_property_price("350000");
+        req.set_down_payment("70000");
+        req.set_loan_amount("280000");
+        req.set_loan_annual_rate("0.05");
+        req.set_loan_term_years(0);
+        req.set_holding_period_years(7);
+        sensen::finance::HomeNpvResponse res;
+        const auto ctx = make_context();
+        if (stub.ComputeHomeNpv(ctx.get(), req, &res).ok()) {
+            std::cerr << "a zero loan_term_years was accepted rather than refused\n";
+            return false;
+        }
+    }
+    {
+        // ComputeHomeNpv: the same malformed-decimal probe as ComputePayment
+        // above, reused on a new field -- "12x3" must not silently become
+        // 123.
+        sensen::finance::HomeNpvRequest req;
+        req.set_property_price("350000");
+        req.set_down_payment("70000");
+        req.set_loan_amount("280000");
+        req.set_loan_annual_rate("0.05");
+        req.set_loan_term_years(30);
+        req.set_holding_period_years(7);
+        req.set_annual_discount_rate("12x3");
+        sensen::finance::HomeNpvResponse res;
+        const auto ctx = make_context();
+        if (stub.ComputeHomeNpv(ctx.get(), req, &res).ok()) {
+            std::cerr << "\"12x3\" was accepted as annual_discount_rate\n";
+            return false;
+        }
+    }
     std::cout << "          refusals  malformed decimal, absent frequency, underspecified "
-                 "bond, ragged batch\n";
+                 "bond, ragged batch, payoff-timing interest coverage, home-NPV zero holding/"
+                 "loan term\n";
     return true;
 }
 

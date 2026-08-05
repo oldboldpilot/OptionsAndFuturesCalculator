@@ -1,4 +1,5 @@
 module;
+#include <algorithm>
 #include <cctype>
 #include <cstddef>
 #include <expected>
@@ -509,6 +510,158 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         return Status::OK;
     }
 
+    auto ComputeRefinance(ServerContext* context, const sensen::finance::RefinanceRequest* request,
+                         sensen::finance::RefinanceResponse* response) -> Status override {
+        if (request == nullptr || response == nullptr) {
+            return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
+        }
+        // The engine walks max(current_remaining_months, new_term_years*ppy)
+        // months building the cash-flow comparison (financial.cppm:1938) --
+        // an amortization walk, twice over.
+        CHARGE("ComputeRefinance",
+               quota::cost_amortization(std::max(request->current_remaining_months(),
+                                                 request->new_term_years() * 12)));
+        if (request->current_remaining_months() <= 0 || request->current_remaining_months() > 1200) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "current_remaining_months must be positive and at most 1200 (a hundred "
+                          "years); no real loan runs that long");
+        }
+        if (request->new_term_years() <= 0 || request->new_term_years() > 100) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "new_term_years must be positive and at most 100");
+        }
+        if (request->payments_per_year() <= 0) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "payments_per_year must be positive (12 monthly)");
+        }
+
+        sensen::RefinanceClosingCostType cc_type{};
+        switch (request->closing_cost_type()) {
+            case sensen::finance::RefinanceRequest::PAID_IN_CASH:
+                cc_type = sensen::RefinanceClosingCostType::PaidInCash;
+                break;
+            case sensen::finance::RefinanceRequest::ROLLED_INTO_LOAN:
+                cc_type = sensen::RefinanceClosingCostType::RolledIntoLoan;
+                break;
+            default:
+                return Status(grpc::StatusCode::INVALID_ARGUMENT, "unknown closing cost type");
+        }
+
+        READ_DECIMAL(balance, request->current_loan_balance(), "current_loan_balance");
+        READ_DECIMAL(cur_pmt, request->current_monthly_payment(), "current_monthly_payment");
+        READ_DECIMAL(cur_rate, request->current_annual_rate(), "current_annual_rate");
+        READ_DECIMAL(prop_value, request->property_value(), "property_value");
+        READ_DECIMAL(new_rate, request->new_annual_rate(), "new_annual_rate");
+        READ_DECIMAL(closing, request->closing_costs(), "closing_costs");
+        READ_DECIMAL(cash_out, request->cash_out_amount(), "cash_out_amount");
+        READ_DECIMAL(cur_pmi, request->current_pmi_monthly(), "current_pmi_monthly");
+        READ_DECIMAL(new_pmi, request->new_pmi_monthly(), "new_pmi_monthly");
+        READ_DECIMAL(pmi_ltv, request->pmi_drop_off_ltv(), "pmi_drop_off_ltv");
+
+        sensen::RefinanceInput input{};
+        input.current_loan_balance = balance;
+        input.current_monthly_payment = cur_pmt;
+        input.current_annual_rate = cur_rate;
+        input.current_remaining_months = request->current_remaining_months();
+        input.property_value = prop_value;
+        input.new_annual_rate = new_rate;
+        input.new_term_years = request->new_term_years();
+        input.closing_costs = closing;
+        input.closing_cost_type = cc_type;
+        input.cash_out_amount = cash_out;
+        input.current_pmi_monthly = cur_pmi;
+        input.new_pmi_monthly = new_pmi;
+        input.pmi_drop_off_ltv = pmi_ltv;
+        input.payments_per_year = request->payments_per_year();
+
+        const auto s = sensen::calculate_refinance_metrics(input);
+        response->set_new_loan_amount(s.new_loan_amount.to_string());
+        response->set_new_monthly_payment(s.new_monthly_payment.to_string());
+        response->set_monthly_savings_initial(s.monthly_savings_initial.to_string());
+        response->set_current_loan_pmi_drop_off_months(s.current_loan_pmi_drop_off_months);
+        response->set_new_loan_pmi_drop_off_months(s.new_loan_pmi_drop_off_months);
+        response->set_payoff_date_shift_months(s.payoff_date_shift_months);
+        response->set_simple_break_even_months(s.simple_break_even_months);
+        response->set_cash_flow_break_even_months(s.cash_flow_break_even_months);
+        response->set_equity_adjusted_break_even_months(s.equity_adjusted_break_even_months);
+        // Double, not a decimal string: the engine accumulates this over the
+        // whole month-by-month comparison loop in double
+        // (financial.cppm:1932-1980, total_old_paid/total_new_paid are
+        // double). An 18-place string here would claim digits the
+        // computation never had.
+        response->set_total_savings_over_life(s.total_savings_over_life.to_double());
+        return Status::OK;
+    }
+
+    auto ComputePayoffTiming(ServerContext* context, const sensen::finance::PayoffTimingRequest* request,
+                            sensen::finance::PayoffTimingResponse* response) -> Status override {
+        if (request == nullptr || response == nullptr) {
+            return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
+        }
+        CHARGE("ComputePayoffTiming", quota::cost_default());
+        if (request->payments_per_year() <= 0) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "payments_per_year must be positive (12 monthly)");
+        }
+        READ_DECIMAL(balance, request->current_loan_balance(), "current_loan_balance");
+        READ_DECIMAL(rate, request->annual_rate(), "annual_rate");
+        READ_DECIMAL(pmt_v, request->current_monthly_payment(), "current_monthly_payment");
+        READ_DECIMAL(extra, request->extra_monthly_payment(), "extra_monthly_payment");
+        if (extra.is_negative()) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "extra_monthly_payment cannot be negative");
+        }
+
+        // calculate_payoff_timing returns std::expected<PayoffTimingSummary,
+        // std::string> (sensen commit 4d4b4cbd): a payment that does not
+        // cover one period's interest can never amortize, and nper_fn fails
+        // rather than the caller being told "0 months remaining". That
+        // failure is mapped straight to a gRPC refusal below -- computing a
+        // guess here would reintroduce exactly the defect the sensen fix
+        // removed, through this RPC.
+        const auto r = sensen::calculate_payoff_timing(balance, rate, pmt_v, extra,
+                                                        request->payments_per_year());
+        if (!r) return fail(r);
+        response->set_original_months_remaining(r->original_months_remaining);
+        response->set_new_months_remaining(r->new_months_remaining);
+        response->set_months_saved(r->months_saved);
+        response->set_total_interest_saved(r->total_interest_saved.to_string());
+        return Status::OK;
+    }
+
+    auto ComputeMortgageRecast(ServerContext* context, const sensen::finance::MortgageRecastRequest* request,
+                              sensen::finance::MortgageRecastResponse* response) -> Status override {
+        if (request == nullptr || response == nullptr) {
+            return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
+        }
+        CHARGE("ComputeMortgageRecast", quota::cost_default());
+        if (request->remaining_months() <= 0 || request->remaining_months() > 1200) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "remaining_months must be positive and at most 1200 (a hundred years); "
+                          "no real loan runs that long");
+        }
+        if (request->payments_per_year() <= 0) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "payments_per_year must be positive (12 monthly)");
+        }
+        READ_DECIMAL(balance, request->current_loan_balance(), "current_loan_balance");
+        READ_DECIMAL(cur_pmt, request->current_monthly_payment(), "current_monthly_payment");
+        READ_DECIMAL(lump, request->lump_sum_payment(), "lump_sum_payment");
+        READ_DECIMAL(rate, request->annual_rate(), "annual_rate");
+        if (lump.is_negative()) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "lump_sum_payment cannot be negative; a recast only pays the balance "
+                          "down, and the engine would otherwise happily grow it");
+        }
+
+        const auto s = sensen::calculate_mortgage_recast(balance, cur_pmt, lump, rate,
+                                                          request->remaining_months(),
+                                                          request->payments_per_year());
+        response->set_new_monthly_payment(s.new_monthly_payment.to_string());
+        response->set_monthly_savings(s.monthly_savings.to_string());
+        return Status::OK;
+    }
+
     // -- Cash flow -----------------------------------------------------------
 
     auto ComputeNpv(ServerContext* context, const sensen::finance::NpvRequest* request,
@@ -883,6 +1036,145 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         response->set_cash_on_cash_return(s.cash_on_cash_return.to_string());
         response->set_cap_rate(s.cap_rate.to_string());
         response->set_gross_rent_multiplier(s.gross_rent_multiplier.to_string());
+        return Status::OK;
+    }
+
+    auto ComputeHomeFutureValue(ServerContext* context,
+                               const sensen::finance::HomeFutureValueRequest* request,
+                               sensen::finance::HomeFutureValueResponse* response)
+        -> Status override {
+        if (request == nullptr || response == nullptr) {
+            return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
+        }
+        CHARGE("ComputeHomeFutureValue", quota::cost_default());
+        if (request->target_years() <= 0 || request->target_years() > 100) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "target_years must be positive and at most 100");
+        }
+        if (request->payments_per_year() <= 0) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "payments_per_year must be positive (12 monthly)");
+        }
+        READ_DECIMAL(prop_value, request->current_property_value(), "current_property_value");
+        READ_DECIMAL(appreciation, request->annual_appreciation_rate(), "annual_appreciation_rate");
+        READ_DECIMAL(loan_balance, request->current_loan_balance(), "current_loan_balance");
+        READ_DECIMAL(mortgage_rate, request->annual_mortgage_rate(), "annual_mortgage_rate");
+        READ_DECIMAL(cur_pmt, request->current_monthly_payment(), "current_monthly_payment");
+
+        const auto s = sensen::calculate_home_future_value(
+            prop_value, appreciation, loan_balance, mortgage_rate, cur_pmt,
+            request->target_years(), request->payments_per_year());
+        // Double: compound appreciation is computed in std::pow double
+        // (financial.cppm:2067-2068).
+        response->set_future_property_value(s.future_property_value.to_double());
+        // Exact: the remaining balance is a BigDecimal closed form (fv()),
+        // clamped to 0 once the loan would have retired.
+        response->set_future_loan_balance(s.future_loan_balance.to_string());
+        // Exact BigDecimal subtraction of the two fields above, but the
+        // property leg entered in double -- the string carries the
+        // arithmetic faithfully, not 18 fresh digits.
+        response->set_future_equity(s.future_equity.to_string());
+        return Status::OK;
+    }
+
+    auto ComputeRentVsBuy(ServerContext* context, const sensen::finance::RentVsBuyRequest* request,
+                         sensen::finance::RentVsBuyResponse* response) -> Status override {
+        if (request == nullptr || response == nullptr) {
+            return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
+        }
+        // The engine loops `years` iterations (financial.cppm:2144) -- a
+        // trivial double loop, bounded to <=100 by the validation below, so
+        // cost_default() prices it honestly rather than reaching for a new
+        // helper for an O(<=100) walk.
+        CHARGE("ComputeRentVsBuy", quota::cost_default());
+        if (request->years() <= 0 || request->years() > 100) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "years must be positive and at most 100");
+        }
+        READ_DECIMAL(price, request->property_price(), "property_price");
+        READ_DECIMAL(down, request->down_payment(), "down_payment");
+        READ_DECIMAL(piti, request->monthly_piti_and_maintenance(), "monthly_piti_and_maintenance");
+        READ_DECIMAL(appreciation, request->annual_home_appreciation(), "annual_home_appreciation");
+        READ_DECIMAL(rent, request->current_monthly_rent(), "current_monthly_rent");
+        READ_DECIMAL(rent_increase, request->annual_rent_increase(), "annual_rent_increase");
+        READ_DECIMAL(investment_return, request->annual_investment_return(),
+                     "annual_investment_return");
+
+        const auto s = sensen::calculate_rent_vs_buy(price, down, piti, appreciation, rent,
+                                                      rent_increase, investment_return,
+                                                      request->years());
+        // All doubles: the rent escalation, appreciation and investment legs
+        // are all computed in double (financial.cppm:2135-2153), and the
+        // buy/rent figures are only meaningful against each other -- quoting
+        // one side to 18 places would misstate which digits are real.
+        response->set_total_cost_of_buying(s.total_cost_of_buying.to_double());
+        response->set_total_cost_of_renting(s.total_cost_of_renting.to_double());
+        response->set_is_buying_better(s.is_buying_better);
+        response->set_buying_advantage(s.buying_advantage.to_double());
+        return Status::OK;
+    }
+
+    auto ComputeHomeNpv(ServerContext* context, const sensen::finance::HomeNpvRequest* request,
+                       sensen::finance::HomeNpvResponse* response) -> Status override {
+        if (request == nullptr || response == nullptr) {
+            return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
+        }
+        // The engine builds holding_period_years*12 monthly cash flows and
+        // then Newton-iterates a full NPV per step in xirr -- the same shape
+        // ComputeXirr already prices with cost_cash_flow.
+        CHARGE("ComputeHomeNpv", quota::cost_cash_flow(request->holding_period_years() * 12));
+        if (request->holding_period_years() <= 0 || request->holding_period_years() > 100) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "holding_period_years must be positive and at most 100");
+        }
+        if (request->loan_term_years() <= 0 || request->loan_term_years() > 100) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "loan_term_years must be positive and at most 100");
+        }
+        READ_DECIMAL(price, request->property_price(), "property_price");
+        READ_DECIMAL(down, request->down_payment(), "down_payment");
+        READ_DECIMAL(closing, request->closing_costs_buy(), "closing_costs_buy");
+        READ_DECIMAL(loan_amt, request->loan_amount(), "loan_amount");
+        READ_DECIMAL(loan_rate, request->loan_annual_rate(), "loan_annual_rate");
+        READ_DECIMAL(taxes, request->monthly_taxes_ins_hoa(), "monthly_taxes_ins_hoa");
+        READ_DECIMAL(maint, request->monthly_maintenance(), "monthly_maintenance");
+        READ_DECIMAL(appreciation, request->annual_appreciation_rate(), "annual_appreciation_rate");
+        READ_DECIMAL(sell_pct, request->selling_closing_cost_percent(),
+                     "selling_closing_cost_percent");
+        READ_DECIMAL(rent_saved, request->monthly_rent_saved(), "monthly_rent_saved");
+        READ_DECIMAL(rent_increase, request->annual_rent_increase(), "annual_rent_increase");
+        READ_DECIMAL(discount, request->annual_discount_rate(), "annual_discount_rate");
+
+        sensen::HomeNPVInput input{};
+        input.property_price = price;
+        input.down_payment = down;
+        input.closing_costs_buy = closing;
+        input.loan_amount = loan_amt;
+        input.loan_annual_rate = loan_rate;
+        input.loan_term_years = request->loan_term_years();
+        input.monthly_taxes_ins_hoa = taxes;
+        input.monthly_maintenance = maint;
+        input.annual_appreciation_rate = appreciation;
+        input.selling_closing_cost_percent = sell_pct;
+        input.monthly_rent_saved = rent_saved;
+        input.annual_rent_increase = rent_increase;
+        input.annual_discount_rate = discount;
+        input.holding_period_years = request->holding_period_years();
+
+        // calculate_home_npv returns std::expected<HomeNPVSummary,
+        // std::string> (sensen commit 4d4b4cbd): an xnpv/xirr failure inside
+        // the model is refused rather than silently reported as NPV 0.0 or
+        // IRR 0.0, either of which is indistinguishable from a genuine
+        // breakeven. Residual: xirr non-convergence that sensen's own solver
+        // does not detect as failure is outside what this wrapper can catch
+        // -- see docs/superpowers/specs/2026-08-05-finance-proto-extension.md
+        // open item 3.
+        const auto r = sensen::calculate_home_npv(input);
+        if (!r) return fail(r);
+        response->set_net_present_value(r->net_present_value.to_double());
+        response->set_internal_rate_of_return(r->internal_rate_of_return.to_double());
+        response->set_future_sale_price(r->future_sale_price.to_double());
+        response->set_future_equity(r->future_equity.to_double());
         return Status::OK;
     }
 

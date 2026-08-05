@@ -55,6 +55,9 @@ service Finance {
   rpc ComputeDetailedAmortization (DetailedAmortizationRequest) returns (DetailedAmortizationResponse);
   rpc ComputeAmortizationBatch (AmortizationBatchRequest) returns (AmortizationBatchResponse);
   rpc ComputeHeloc (HelocRequest) returns (HelocResponse);
+  rpc ComputeRefinance (RefinanceRequest) returns (RefinanceResponse);
+  rpc ComputePayoffTiming (PayoffTimingRequest) returns (PayoffTimingResponse);
+  rpc ComputeMortgageRecast (MortgageRecastRequest) returns (MortgageRecastResponse);
 
   // -- Cash-flow analysis ----------------------------------------------------
   rpc ComputeNpv (NpvRequest) returns (DoubleResponse);
@@ -80,6 +83,9 @@ service Finance {
 
   // -- Real estate -----------------------------------------------------------
   rpc ComputeRentalRoi (RentalRoiRequest) returns (RentalRoiResponse);
+  rpc ComputeHomeFutureValue (HomeFutureValueRequest) returns (HomeFutureValueResponse);
+  rpc ComputeRentVsBuy (RentVsBuyRequest) returns (RentVsBuyResponse);
+  rpc ComputeHomeNpv (HomeNpvRequest) returns (HomeNpvResponse);
 
   // -- Options ---------------------------------------------------------------
   rpc PriceOptionTree (OptionTreeRequest) returns (OptionPricingResponse);
@@ -324,6 +330,83 @@ message HelocResponse {
   string repayment_period_payment = 3; // fully amortizing
 }
 
+message RefinanceRequest {
+  string current_loan_balance = 1;
+  string current_monthly_payment = 2;   // P&I only -- PMI goes in its own field
+  string current_annual_rate = 3;
+  int32 current_remaining_months = 4;
+  string property_value = 5;            // PMI drop-off is measured against this
+  string new_annual_rate = 6;
+  int32 new_term_years = 7;
+  string closing_costs = 8;
+  // How the closing costs are funded changes the new loan's size, so the
+  // caller states it. PAID_IN_CASH is the zero value because proto3 makes the
+  // first enumerator the default for an unset field, and "the loan did not
+  // silently grow" is the only safe reading of a caller who said nothing.
+  enum ClosingCostType {
+    PAID_IN_CASH = 0;
+    ROLLED_INTO_LOAN = 1;
+  }
+  ClosingCostType closing_cost_type = 9;
+  string cash_out_amount = 10;          // omit for a rate-and-term refinance
+  string current_pmi_monthly = 11;
+  string new_pmi_monthly = 12;
+  string pmi_drop_off_ltv = 13;         // 0.80 for the standard 80% LTV
+  int32 payments_per_year = 14;         // 12 monthly; zero is rejected
+}
+
+message RefinanceResponse {
+  string new_loan_amount = 1;
+  string new_monthly_payment = 2;       // P&I only
+  string monthly_savings_initial = 3;   // (old P&I + PMI) - (new P&I + PMI)
+  // Months until each loan's balance amortizes below the PMI drop-off LTV.
+  // 0 = never had PMI (or already below the threshold); -1 = never reached.
+  int32 current_loan_pmi_drop_off_months = 4;
+  int32 new_loan_pmi_drop_off_months = 5;
+  // Positive when the refinance pushes the payoff date out, negative when it
+  // pulls it in: new term minus months remaining on the old loan.
+  int32 payoff_date_shift_months = 6;
+  // Three break-evens, three questions: closing costs / initial savings;
+  // cumulative cash outlay parity; cash parity plus the equity difference.
+  // Each is -1 when it never occurs over the compared horizons.
+  int32 simple_break_even_months = 7;
+  int32 cash_flow_break_even_months = 8;
+  int32 equity_adjusted_break_even_months = 9;
+  // A double, not a decimal string: the engine accumulates this over the whole
+  // payment horizon in double (the month-by-month comparison loop), so a
+  // decimal string here would claim digits the computation never had.
+  double total_savings_over_life = 10;
+}
+
+message PayoffTimingRequest {
+  string current_loan_balance = 1;
+  string annual_rate = 2;
+  string current_monthly_payment = 3;   // P&I only
+  string extra_monthly_payment = 4;
+  int32 payments_per_year = 5;          // 12 monthly; zero is rejected
+}
+
+message PayoffTimingResponse {
+  int32 original_months_remaining = 1;
+  int32 new_months_remaining = 2;
+  int32 months_saved = 3;
+  string total_interest_saved = 4;
+}
+
+message MortgageRecastRequest {
+  string current_loan_balance = 1;
+  string current_monthly_payment = 2;
+  string lump_sum_payment = 3;
+  string annual_rate = 4;
+  int32 remaining_months = 5;           // term is unchanged by a recast
+  int32 payments_per_year = 6;          // 12 monthly; zero is rejected
+}
+
+message MortgageRecastResponse {
+  string new_monthly_payment = 1;
+  string monthly_savings = 2;
+}
+
 // ============================================================================
 // Cash-flow analysis
 // ============================================================================
@@ -543,6 +626,78 @@ message RentalRoiResponse {
   string cash_on_cash_return = 3;
   string cap_rate = 4;
   string gross_rent_multiplier = 5;
+}
+
+message HomeFutureValueRequest {
+  string current_property_value = 1;
+  string annual_appreciation_rate = 2;
+  string current_loan_balance = 3;
+  string annual_mortgage_rate = 4;
+  string current_monthly_payment = 5;   // P&I only
+  int32 target_years = 6;
+  int32 payments_per_year = 7;          // 12 monthly; zero is rejected
+}
+
+message HomeFutureValueResponse {
+  // Double: compound appreciation is computed in double.
+  double future_property_value = 1;
+  // Exact: the remaining balance is a BigDecimal closed form. Clamped to 0
+  // once the loan would have retired.
+  string future_loan_balance = 2;
+  // Exact subtraction, but the property leg above entered in double -- the
+  // string carries the arithmetic faithfully, not 18 fresh digits.
+  string future_equity = 3;
+}
+
+message RentVsBuyRequest {
+  string property_price = 1;
+  string down_payment = 2;
+  string monthly_piti_and_maintenance = 3;
+  string annual_home_appreciation = 4;
+  string current_monthly_rent = 5;
+  string annual_rent_increase = 6;
+  // What the down payment would have earned invested instead -- the
+  // opportunity cost side of the comparison.
+  string annual_investment_return = 7;
+  int32 years = 8;
+}
+
+// All doubles: the rent escalation, appreciation and investment legs are all
+// computed in double, and the buy/rent figures are only meaningful against
+// each other -- quoting one side to 18 places would misstate which digits
+// are real.
+message RentVsBuyResponse {
+  double total_cost_of_buying = 1;
+  double total_cost_of_renting = 2;
+  bool is_buying_better = 3;
+  double buying_advantage = 4;          // rent cost minus buy cost
+}
+
+message HomeNpvRequest {
+  string property_price = 1;
+  string down_payment = 2;
+  string closing_costs_buy = 3;
+  string loan_amount = 4;
+  string loan_annual_rate = 5;
+  int32 loan_term_years = 6;
+  string monthly_taxes_ins_hoa = 7;
+  string monthly_maintenance = 8;
+  string annual_appreciation_rate = 9;
+  string selling_closing_cost_percent = 10;  // 0.06 for 6% of the sale price
+  string monthly_rent_saved = 11;            // imputed rent the purchase displaces
+  string annual_rent_increase = 12;
+  string annual_discount_rate = 13;
+  int32 holding_period_years = 14;
+}
+
+// All doubles, matching ComputeXnpv/ComputeXirr above: this RPC is a cash-flow
+// model over the same xnpv/xirr primitives, which this service already serves
+// as doubles because that is what they compute in.
+message HomeNpvResponse {
+  double net_present_value = 1;
+  double internal_rate_of_return = 2;
+  double future_sale_price = 3;
+  double future_equity = 4;
 }
 
 // ============================================================================
