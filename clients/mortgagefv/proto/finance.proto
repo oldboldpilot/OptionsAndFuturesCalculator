@@ -1,0 +1,895 @@
+// ============================================================================
+// VENDORED COPY -- do not edit by hand.
+//
+// Source:  https://github.com/oldboldpilot/OptionsAndFuturesCalculator
+//          backend/proto/finance.proto
+// Commit:  6764749c6b3cc910bfe240dfc1584a51147d9d29  (2026-08-05)
+//
+// This file is self-contained (no imports), so it travels as a single copy.
+// There is no published package for it (npm, BSR, etc.) -- re-vendoring on
+// update means: pull the file at a newer commit, update the commit hash
+// above, and re-run gen_proto.sh. See ../README.md.
+//
+// NOT YET LIVE IN PRODUCTION as of the commit above: ComputeRefinance,
+// ComputePayoffTiming, ComputeMortgageRecast, ComputeHomeFutureValue,
+// ComputeRentVsBuy, ComputeHomeNpv. They are declared in this contract (the
+// server that will eventually run them shares this same .proto) but the
+// engine currently deployed at api.optionsandfuturescalculator.com predates
+// them and answers UNIMPLEMENTED (grpc-status 12) for all six. Verify
+// against the live endpoint before shipping a UI that depends on them --
+// see ../README.md "RPCs not yet live".
+// ============================================================================
+
+syntax = "proto3";
+
+package sensen.finance;
+
+// ============================================================================
+// The sensen financial library, over gRPC.
+//
+// This contract is deliberately SEPARATE from calculator.proto. That file is
+// the Options & Futures Calculator's own API -- it speaks in strategies, legs
+// and payoff curves, which are this application's concepts. What follows is
+// the general-purpose financial library underneath, exposed so other
+// applications can call it without inheriting a calculator's vocabulary.
+//
+// Everything here is a thin, faithful wrapper over sensen's own functions.
+// No RPC invents a figure, re-derives one a different way, or silently
+// substitutes a default for a missing input. Where sensen returns an error,
+// the RPC returns a gRPC error carrying that message rather than a zero.
+//
+// ---------------------------------------------------------------------------
+// ON NUMERIC TYPES -- read this before adding a field.
+//
+// Two wire types appear here and the choice is not stylistic. It mirrors what
+// the engine actually computes in:
+//
+//   string  -- sensen::BigDecimal. A genuine fixed-point decimal: __int128
+//              scaled by 1e18, eighteen decimal places, exact. Carried as its
+//              exact decimal string so nothing is lost in transit.
+//
+//   double  -- sensen computes this value in double natively (bonds, T-bills,
+//              futures, options, portfolio statistics). Widening it to a
+//              string would imply a precision the engine never had.
+//
+// Money is a string here for two concrete reasons, not as ceremony. Rounding
+// an 18-decimal-place amortization to double compounds over 360 periods. And
+// this service is reachable from browsers, where JavaScript's `number` IS a
+// float64 -- a double money field is lossy on the client before the developer
+// has written a line of code. A decimal string is exact in both places.
+// ============================================================================
+
+service Finance {
+  // -- Time value of money ---------------------------------------------------
+  rpc ComputePayment (PaymentRequest) returns (DecimalResponse);
+  rpc ComputePresentValue (PresentValueRequest) returns (DecimalResponse);
+  rpc ComputeFutureValue (FutureValueRequest) returns (DecimalResponse);
+  rpc ComputeFutureValueDetailed (FutureValueDetailedRequest) returns (FutureValueDetailedResponse);
+  rpc ComputeInterestPayment (PeriodPaymentRequest) returns (DecimalResponse);
+  rpc ComputePrincipalPayment (PeriodPaymentRequest) returns (DecimalResponse);
+  rpc ComputeRate (RateRequest) returns (DecimalResponse);
+  rpc ComputePeriods (PeriodsRequest) returns (DecimalResponse);
+  rpc ConvertInterestRate (RateConversionRequest) returns (DoubleResponse);
+  rpc ComputeFisherRate (FisherRequest) returns (DoubleResponse);
+
+  // -- Mortgages, HELOC ------------------------------------------------------
+  rpc ComputeAmortization (AmortizationRequest) returns (AmortizationResponse);
+  rpc ComputeDetailedAmortization (DetailedAmortizationRequest) returns (DetailedAmortizationResponse);
+  rpc ComputeAmortizationBatch (AmortizationBatchRequest) returns (AmortizationBatchResponse);
+  rpc ComputeHeloc (HelocRequest) returns (HelocResponse);
+  rpc ComputeRefinance (RefinanceRequest) returns (RefinanceResponse);
+  rpc ComputePayoffTiming (PayoffTimingRequest) returns (PayoffTimingResponse);
+  rpc ComputeMortgageRecast (MortgageRecastRequest) returns (MortgageRecastResponse);
+
+  // -- Cash-flow analysis ----------------------------------------------------
+  rpc ComputeNpv (NpvRequest) returns (DoubleResponse);
+  rpc ComputeIrr (IrrRequest) returns (DoubleResponse);
+  rpc ComputeXnpv (DatedCashFlowRequest) returns (DoubleResponse);
+  rpc ComputeXirr (DatedCashFlowRequest) returns (DoubleResponse);
+  rpc ComputePaybackPeriod (PaybackRequest) returns (DoubleResponse);
+  rpc ComputeCumulative (CumulativeRequest) returns (DoubleResponse);
+
+  // -- Depreciation ----------------------------------------------------------
+  rpc ComputeDepreciation (DepreciationRequest) returns (DoubleResponse);
+
+  // -- Fixed income ----------------------------------------------------------
+  rpc AnalyzeBond (BondRequest) returns (BondResponse);
+  rpc AnalyzeTreasuryBill (TreasuryBillRequest) returns (TreasuryBillResponse);
+
+  // -- Futures, margin, hedging ---------------------------------------------
+  rpc PriceFutures (FuturesPricingRequest) returns (DoubleResponse);
+  rpc ValueFutures (FuturesValuationRequest) returns (DoubleResponse);
+  rpc SimulateMarginAccount (MarginSimulationRequest) returns (MarginSimulationResponse);
+  rpc ComputeHedge (HedgeRequest) returns (HedgeResponse);
+  rpc ComputeCommoditySpread (CommoditySpreadRequest) returns (DoubleResponse);
+
+  // -- Real estate -----------------------------------------------------------
+  rpc ComputeRentalRoi (RentalRoiRequest) returns (RentalRoiResponse);
+  rpc ComputeHomeFutureValue (HomeFutureValueRequest) returns (HomeFutureValueResponse);
+  rpc ComputeRentVsBuy (RentVsBuyRequest) returns (RentVsBuyResponse);
+  rpc ComputeHomeNpv (HomeNpvRequest) returns (HomeNpvResponse);
+
+  // -- Options ---------------------------------------------------------------
+  rpc PriceOptionTree (OptionTreeRequest) returns (OptionPricingResponse);
+  rpc PriceBlackScholes (BlackScholesRequest) returns (BlackScholesResponse);
+  rpc PriceOptionMonteCarlo (MonteCarloRequest) returns (DoubleResponse);
+  rpc ComputeProbabilityTree (ProbabilityTreeRequest) returns (ProbabilityTreeResponse);
+
+  // -- Portfolio -------------------------------------------------------------
+  rpc ComputePortfolioStats (PortfolioStatsRequest) returns (PortfolioStatsResponse);
+  rpc OptimizePortfolio (PortfolioOptimizeRequest) returns (PortfolioOptimizeResponse);
+  rpc ComputeRiskContributions (RiskContributionRequest) returns (RiskContributionResponse);
+}
+
+// ============================================================================
+// Shared
+// ============================================================================
+
+// A single exact decimal. `value` is BigDecimal's own 18-decimal-place string.
+message DecimalResponse {
+  string value = 1;
+}
+
+message DoubleResponse {
+  double value = 1;
+}
+
+// Excel's annuity-timing convention, carried through unchanged: payments fall
+// at the END of each period (ordinary annuity) or the BEGINNING (annuity-due).
+enum AnnuityTiming {
+  END_OF_PERIOD = 0;
+  BEGINNING_OF_PERIOD = 1;
+}
+
+// ============================================================================
+// Time value of money
+// ============================================================================
+
+message PaymentRequest {
+  string rate = 1;              // per-period rate, decimal (0.004166... monthly)
+  int32 periods = 2;
+  string present_value = 3;
+  string future_value = 4;      // omit for 0
+  AnnuityTiming timing = 5;
+}
+
+message PresentValueRequest {
+  string rate = 1;
+  int32 periods = 2;
+  string payment = 3;
+  string future_value = 4;
+  AnnuityTiming timing = 5;
+}
+
+message FutureValueRequest {
+  string rate = 1;
+  int32 periods = 2;
+  string payment = 3;
+  string present_value = 4;
+  AnnuityTiming timing = 5;
+}
+
+message FutureValueDetailedRequest {
+  string annual_rate = 1;
+  int32 years = 2;
+  string annual_contribution = 3;
+  string current_principal = 4;
+  string annual_inflation_rate = 5;
+  // 12 = monthly, 4 = quarterly, 1 = annual. Zero is rejected rather than
+  // defaulted -- a compounding frequency the caller did not state is an
+  // assumption this service will not make on their behalf.
+  int32 compound_frequency = 6;
+}
+
+message FutureValueDetailedResponse {
+  string nominal_fv = 1;
+  // The same figure in today's money. Present only because an inflation rate
+  // was supplied; with none given it equals nominal_fv exactly.
+  string inflation_adjusted_fv = 2;
+  string total_contributions = 3;
+  string total_interest_earned = 4;
+}
+
+message PeriodPaymentRequest {
+  string rate = 1;
+  int32 period = 2;             // 1-based; outside [1, periods] returns 0
+  int32 periods = 3;
+  string present_value = 4;
+  string future_value = 5;
+  AnnuityTiming timing = 6;
+}
+
+message RateRequest {
+  int32 periods = 1;
+  string payment = 2;
+  string present_value = 3;
+  string future_value = 4;
+  AnnuityTiming timing = 5;
+  string guess = 6;             // omit for the engine's own starting guess
+}
+
+message PeriodsRequest {
+  string rate = 1;
+  string payment = 2;
+  string present_value = 3;
+  string future_value = 4;
+  AnnuityTiming timing = 5;
+}
+
+message RateConversionRequest {
+  // Nominal -> effective, or effective -> nominal. The direction is explicit
+  // because the two are trivially confusable and the arithmetic is not
+  // symmetric in a way that would let the service infer intent.
+  enum Direction {
+    NOMINAL_TO_EFFECTIVE = 0;
+    EFFECTIVE_TO_NOMINAL = 1;
+  }
+  Direction direction = 1;
+  double rate = 2;
+  double periods_per_year = 3;
+}
+
+message FisherRequest {
+  // The Fisher relation, exact form: (1+n) = (1+r)(1+i).
+  enum Direction {
+    NOMINAL_TO_REAL = 0;
+    REAL_TO_NOMINAL = 1;
+  }
+  Direction direction = 1;
+  double rate = 2;
+  double inflation_rate = 3;
+}
+
+// ============================================================================
+// Mortgages
+// ============================================================================
+
+message AmortizationRequest {
+  string loan_amount = 1;
+  string annual_rate = 2;
+  int32 term_months = 3;
+  string monthly_overpayment = 4;
+  string pmi_annual_rate = 5;
+  string original_home_value = 6;   // PMI drops off against this, not the loan
+}
+
+message AmortizationRow {
+  int32 period = 1;
+  string start_balance = 2;
+  string scheduled_payment = 3;
+  string extra_payment = 4;
+  string interest_paid = 5;
+  string principal_paid = 6;
+  string pmi_paid = 7;
+  string end_balance = 8;
+}
+
+message MortgageSummary {
+  string total_principal_paid = 1;
+  string total_interest_paid = 2;
+  string total_pmi_paid = 3;
+  string total_payments_paid = 4;
+  // Shorter than term_months when overpayments retire the loan early. This is
+  // the answer to "when am I actually done", which the requested term is not.
+  int32 actual_term_months = 5;
+}
+
+message AmortizationResponse {
+  repeated AmortizationRow schedule = 1;
+  MortgageSummary summary = 2;
+}
+
+message DetailedAmortizationRequest {
+  string loan_amount = 1;
+  string annual_rate = 2;
+  int32 term_months = 3;
+  string monthly_overpayment = 4;
+  string pmi_annual_rate = 5;
+  string original_home_value = 6;
+  // Marginal rate applied to deductible interest. Whether the interest is
+  // deductible at all is a matter of the caller's jurisdiction and filing
+  // position; this service applies the rate it is given and does not opine.
+  string annual_tax_rate = 7;
+}
+
+message DetailedAmortizationRow {
+  int32 period = 1;
+  string start_balance = 2;
+  string scheduled_payment = 3;
+  string extra_payment = 4;
+  string interest_paid = 5;
+  string principal_paid = 6;
+  string pmi_paid = 7;
+  string tax_savings = 8;
+  string end_balance = 9;
+}
+
+message DetailedMortgageSummary {
+  string total_principal_paid = 1;
+  string total_interest_paid = 2;
+  string total_pmi_paid = 3;
+  string total_payments_paid = 4;
+  string total_tax_savings = 5;
+  int32 actual_term_months = 6;
+}
+
+message DetailedAmortizationResponse {
+  repeated DetailedAmortizationRow schedule = 1;
+  DetailedMortgageSummary summary = 2;
+}
+
+// Many loans at once. Every repeated field must be the same length; a ragged
+// request is refused rather than silently truncated to the shortest.
+// Summaries only -- returning full schedules for a large batch would be a
+// response measured in megabytes.
+message AmortizationBatchRequest {
+  repeated double loan_amounts = 1;
+  repeated double annual_rates = 2;
+  repeated int32 term_months = 3;
+  repeated double extra_payments = 4;
+  repeated double pmi_rates = 5;
+  repeated double home_values = 6;
+}
+
+message AmortizationBatchResponse {
+  repeated MortgageSummary summaries = 1;
+}
+
+message HelocRequest {
+  string home_value = 1;
+  string current_mortgage_balance = 2;
+  string max_ltv_rate = 3;          // 0.80 for an 80% LTV ceiling
+  string drawn_amount = 4;
+  string annual_rate = 5;
+  int32 repayment_term_years = 6;
+  int32 payments_per_year = 7;      // 12 monthly, 26 bi-weekly
+}
+
+message HelocResponse {
+  // What remains borrowable after the LTV ceiling and the existing draw.
+  string available_equity = 1;
+  string draw_period_payment = 2;      // interest only
+  string repayment_period_payment = 3; // fully amortizing
+}
+
+message RefinanceRequest {
+  string current_loan_balance = 1;
+  string current_monthly_payment = 2;   // P&I only -- PMI goes in its own field
+  string current_annual_rate = 3;
+  int32 current_remaining_months = 4;
+  string property_value = 5;            // PMI drop-off is measured against this
+  string new_annual_rate = 6;
+  int32 new_term_years = 7;
+  string closing_costs = 8;
+  // How the closing costs are funded changes the new loan's size, so the
+  // caller states it. PAID_IN_CASH is the zero value because proto3 makes the
+  // first enumerator the default for an unset field, and "the loan did not
+  // silently grow" is the only safe reading of a caller who said nothing.
+  enum ClosingCostType {
+    PAID_IN_CASH = 0;
+    ROLLED_INTO_LOAN = 1;
+  }
+  ClosingCostType closing_cost_type = 9;
+  string cash_out_amount = 10;          // omit for a rate-and-term refinance
+  string current_pmi_monthly = 11;
+  string new_pmi_monthly = 12;
+  string pmi_drop_off_ltv = 13;         // 0.80 for the standard 80% LTV
+  int32 payments_per_year = 14;         // 12 monthly; zero is rejected
+}
+
+message RefinanceResponse {
+  string new_loan_amount = 1;
+  string new_monthly_payment = 2;       // P&I only
+  string monthly_savings_initial = 3;   // (old P&I + PMI) - (new P&I + PMI)
+  // Months until each loan's balance amortizes below the PMI drop-off LTV.
+  // 0 = never had PMI (or already below the threshold); -1 = never reached.
+  int32 current_loan_pmi_drop_off_months = 4;
+  int32 new_loan_pmi_drop_off_months = 5;
+  // Positive when the refinance pushes the payoff date out, negative when it
+  // pulls it in: new term minus months remaining on the old loan.
+  int32 payoff_date_shift_months = 6;
+  // Three break-evens, three questions: closing costs / initial savings;
+  // cumulative cash outlay parity; cash parity plus the equity difference.
+  // Each is -1 when it never occurs over the compared horizons.
+  int32 simple_break_even_months = 7;
+  int32 cash_flow_break_even_months = 8;
+  int32 equity_adjusted_break_even_months = 9;
+  // A double, not a decimal string: the engine accumulates this over the whole
+  // payment horizon in double (the month-by-month comparison loop), so a
+  // decimal string here would claim digits the computation never had.
+  double total_savings_over_life = 10;
+}
+
+message PayoffTimingRequest {
+  string current_loan_balance = 1;
+  string annual_rate = 2;
+  string current_monthly_payment = 3;   // P&I only
+  string extra_monthly_payment = 4;
+  int32 payments_per_year = 5;          // 12 monthly; zero is rejected
+}
+
+message PayoffTimingResponse {
+  int32 original_months_remaining = 1;
+  int32 new_months_remaining = 2;
+  int32 months_saved = 3;
+  string total_interest_saved = 4;
+}
+
+message MortgageRecastRequest {
+  string current_loan_balance = 1;
+  string current_monthly_payment = 2;
+  string lump_sum_payment = 3;
+  string annual_rate = 4;
+  int32 remaining_months = 5;           // term is unchanged by a recast
+  int32 payments_per_year = 6;          // 12 monthly; zero is rejected
+}
+
+message MortgageRecastResponse {
+  string new_monthly_payment = 1;
+  string monthly_savings = 2;
+}
+
+// ============================================================================
+// Cash-flow analysis
+// ============================================================================
+
+message NpvRequest {
+  double rate = 1;
+  repeated double values = 2;
+}
+
+message IrrRequest {
+  repeated double values = 1;
+  double guess = 2;
+}
+
+// XNPV/XIRR: cash flows on their actual dates rather than on a regular period
+// grid. `dates` are day offsets from an arbitrary common epoch and must be the
+// same length as `values`.
+message DatedCashFlowRequest {
+  double rate = 1;              // XNPV only; ignored by XIRR
+  repeated double values = 2;
+  repeated double dates = 3;
+  double guess = 4;             // XIRR only
+}
+
+message PaybackRequest {
+  repeated double values = 1;
+  // With a rate supplied this is the DISCOUNTED payback period; without one,
+  // the plain undiscounted period. Two genuinely different questions, so the
+  // caller states which by whether they set a rate.
+  bool discounted = 2;
+  double rate = 3;
+}
+
+message CumulativeRequest {
+  enum Component {
+    INTEREST = 0;
+    PRINCIPAL = 1;
+  }
+  Component component = 1;
+  double rate = 2;
+  int32 periods = 3;
+  double present_value = 4;
+  int32 start_period = 5;
+  int32 end_period = 6;
+  AnnuityTiming timing = 7;
+}
+
+// ============================================================================
+// Depreciation
+// ============================================================================
+
+message DepreciationRequest {
+  enum Method {
+    STRAIGHT_LINE = 0;          // SLN
+    SUM_OF_YEARS_DIGITS = 1;    // SYD
+    DECLINING_BALANCE = 2;      // DDB
+    MACRS = 3;                  // US tax tables
+  }
+  Method method = 1;
+  double cost = 2;
+  double salvage = 3;           // unused by MACRS
+  double life = 4;              // years; MACRS uses recovery_period instead
+  double period = 5;            // which period's charge; unused by SLN
+  double factor = 6;            // DDB only, 2.0 = double-declining
+  int32 recovery_period = 7;    // MACRS only
+  int32 year = 8;               // MACRS only
+}
+
+// ============================================================================
+// Fixed income
+// ============================================================================
+
+// Every bond figure at once -- price, yield, duration, convexity -- because a
+// caller asking about a bond almost always wants the set, and four round trips
+// to re-supply the same six parameters is a worse API than one.
+message BondRequest {
+  double par = 1;
+  double coupon_rate = 2;
+  int32 frequency = 3;              // coupons per year
+  double years_to_maturity = 4;
+  double redemption = 5;            // percent of par, 100.0 at par
+  // Supply exactly one. Given a yield, price is computed; given a price, yield
+  // is solved for. Supplying both would let the two disagree, and there would
+  // be no honest way to choose between them.
+  oneof known {
+    double yield = 6;
+    double price = 7;
+  }
+  double yield_guess = 8;           // solver seed when price was supplied
+}
+
+message BondResponse {
+  double price = 1;
+  double yield = 2;
+  double macaulay_duration = 3;
+  double convexity = 4;
+}
+
+message TreasuryBillRequest {
+  double face_value = 1;
+  int32 days_to_maturity = 2;
+  // As with bonds: state either the discount rate or the price, not both.
+  oneof known {
+    double discount_rate = 3;
+    double price = 4;
+  }
+}
+
+message TreasuryBillResponse {
+  double price = 1;
+  // Three conventions, all reported, because they are not interchangeable and
+  // quoting the wrong one misstates the return. BEY is comparable to a coupon
+  // bond; MMY assumes a 360-day year; BDY is the discount basis.
+  double bond_equivalent_yield = 2;
+  double money_market_yield = 3;
+  double bank_discount_yield = 4;
+}
+
+// ============================================================================
+// Futures
+// ============================================================================
+
+message FuturesPricingRequest {
+  double spot = 1;
+  double rate = 2;
+  // Storage adds, convenience yield and dividends subtract. Net it yourself;
+  // the sign convention is the caller's to own because only they know which
+  // components apply to their commodity.
+  double cost_of_carry = 3;
+  double years_to_maturity = 4;
+  bool continuous = 5;          // continuous compounding vs discrete
+}
+
+message FuturesValuationRequest {
+  double current_spot = 1;
+  double delivery_price = 2;    // the price locked in at entry
+  double rate = 3;
+  double years_to_maturity = 4;
+  bool is_long = 5;
+}
+
+message MarginSimulationRequest {
+  double initial_deposit = 1;
+  double initial_margin_requirement = 2;
+  double maintenance_margin_requirement = 3;
+  int32 contract_size = 4;
+  double entry_price = 5;
+  repeated double daily_prices = 6;   // mark-to-market path
+  bool is_long = 7;
+}
+
+message MarginSimulationResponse {
+  double balance = 1;
+  double initial_margin = 2;
+  double maintenance_margin = 3;
+  int32 contract_size = 4;
+  // True if the balance fell below maintenance at any point on the path. The
+  // single most consequential output here, and the reason a path is simulated
+  // rather than only the endpoint valued.
+  bool margin_call = 5;
+}
+
+message HedgeRequest {
+  double asset_volatility = 1;
+  double futures_volatility = 2;
+  double correlation = 3;
+  // Supply these to also get a contract count. Left at zero, only the ratio
+  // is returned -- a contract count computed from an unstated position size
+  // would be fiction.
+  double spot_value = 4;
+  double contract_multiplier = 5;
+  double futures_price = 6;
+}
+
+message HedgeResponse {
+  double hedge_ratio = 1;
+  // Zero when the position inputs above were not supplied. Not a computed
+  // zero -- a not-asked.
+  double contracts = 2;
+  bool contracts_computed = 3;
+}
+
+message CommoditySpreadRequest {
+  enum Spread {
+    CRACK_321 = 0;   // 3 crude : 2 gasoline : 1 heating oil
+    SPARK = 1;       // power vs gas at a stated heat rate
+    CRUSH = 2;       // soybeans vs oil and meal
+  }
+  Spread spread = 1;
+  // Crack: crude, gasoline, heating_oil.
+  // Spark: power_price = a, gas_price = b, heat_rate = c.
+  // Crush: soybean = a, oil = b, meal = c.
+  double a = 2;
+  double b = 3;
+  double c = 4;
+}
+
+// ============================================================================
+// Real estate
+// ============================================================================
+
+message RentalRoiRequest {
+  string property_value = 1;
+  string total_cash_invested = 2;
+  string periodic_gross_rent = 3;
+  // Taxes, insurance, maintenance -- but NOT debt service. Mortgage payments
+  // go in the next field. Mixing them collapses NOI into cash flow and makes
+  // the cap rate wrong.
+  string periodic_operating_expenses = 4;
+  string periodic_mortgage_payment = 5;
+  int32 periods_per_year = 6;       // 12 monthly, 26 bi-weekly
+}
+
+message RentalRoiResponse {
+  string net_operating_income = 1;  // before debt service
+  string annual_cash_flow = 2;      // after debt service
+  string cash_on_cash_return = 3;
+  string cap_rate = 4;
+  string gross_rent_multiplier = 5;
+}
+
+message HomeFutureValueRequest {
+  string current_property_value = 1;
+  string annual_appreciation_rate = 2;
+  string current_loan_balance = 3;
+  string annual_mortgage_rate = 4;
+  string current_monthly_payment = 5;   // P&I only
+  int32 target_years = 6;
+  int32 payments_per_year = 7;          // 12 monthly; zero is rejected
+}
+
+message HomeFutureValueResponse {
+  // Double: compound appreciation is computed in double.
+  double future_property_value = 1;
+  // Exact: the remaining balance is a BigDecimal closed form. Clamped to 0
+  // once the loan would have retired.
+  string future_loan_balance = 2;
+  // Exact subtraction, but the property leg above entered in double -- the
+  // string carries the arithmetic faithfully, not 18 fresh digits.
+  string future_equity = 3;
+}
+
+message RentVsBuyRequest {
+  string property_price = 1;
+  string down_payment = 2;
+  string monthly_piti_and_maintenance = 3;
+  string annual_home_appreciation = 4;
+  string current_monthly_rent = 5;
+  string annual_rent_increase = 6;
+  // What the down payment would have earned invested instead -- the
+  // opportunity cost side of the comparison.
+  string annual_investment_return = 7;
+  int32 years = 8;
+}
+
+// All doubles: the rent escalation, appreciation and investment legs are all
+// computed in double, and the buy/rent figures are only meaningful against
+// each other -- quoting one side to 18 places would misstate which digits
+// are real.
+message RentVsBuyResponse {
+  double total_cost_of_buying = 1;
+  double total_cost_of_renting = 2;
+  bool is_buying_better = 3;
+  double buying_advantage = 4;          // rent cost minus buy cost
+}
+
+message HomeNpvRequest {
+  string property_price = 1;
+  string down_payment = 2;
+  string closing_costs_buy = 3;
+  string loan_amount = 4;
+  string loan_annual_rate = 5;
+  int32 loan_term_years = 6;
+  string monthly_taxes_ins_hoa = 7;
+  string monthly_maintenance = 8;
+  string annual_appreciation_rate = 9;
+  string selling_closing_cost_percent = 10;  // 0.06 for 6% of the sale price
+  string monthly_rent_saved = 11;            // imputed rent the purchase displaces
+  string annual_rent_increase = 12;
+  string annual_discount_rate = 13;
+  int32 holding_period_years = 14;
+}
+
+// All doubles, matching ComputeXnpv/ComputeXirr above: this RPC is a cash-flow
+// model over the same xnpv/xirr primitives, which this service already serves
+// as doubles because that is what they compute in.
+message HomeNpvResponse {
+  double net_present_value = 1;
+  double internal_rate_of_return = 2;
+  double future_sale_price = 3;
+  double future_equity = 4;
+}
+
+// ============================================================================
+// Options
+// ============================================================================
+
+enum OptionType {
+  CALL = 0;
+  PUT = 1;
+}
+
+enum ExerciseType {
+  EUROPEAN = 0;
+  AMERICAN = 1;
+  BERMUDAN = 2;
+}
+
+enum AsianType {
+  NOT_ASIAN = 0;
+  AVERAGE_PRICE = 1;
+  AVERAGE_STRIKE = 2;
+}
+
+// Trinomial tree. Handles the cases closed-form Black-Scholes cannot: early
+// exercise (American), discrete exercise dates (Bermudan), and path-dependent
+// averaging (Asian).
+message OptionTreeRequest {
+  double spot = 1;
+  double strike = 2;
+  double rate = 3;
+  double volatility = 4;
+  double years_to_expiry = 5;
+  int32 steps = 6;
+  OptionType option_type = 7;
+  ExerciseType exercise_type = 8;
+  repeated double bermudan_dates = 9;   // required when exercise is BERMUDAN
+  AsianType asian_type = 10;
+  int32 averaging_states = 11;          // Asian discretization, 50 is typical
+  double lambda = 12;                   // tree spacing; 0 uses sqrt(1.5)
+}
+
+message OptionPricingResponse {
+  double value = 1;
+  double delta = 2;
+  double gamma = 3;
+  double theta = 4;
+}
+
+message BlackScholesRequest {
+  double spot = 1;
+  double strike = 2;
+  double rate = 3;
+  double volatility = 4;
+  double years_to_expiry = 5;
+  OptionType option_type = 6;
+}
+
+// The full Greek surface sensen computes, first- through third-order. Returned
+// whole rather than behind a selector: they come from one closed-form pass, so
+// there is nothing to save by asking for a subset.
+message BlackScholesResponse {
+  double value = 1;
+  double delta = 2;
+  double gamma = 3;
+  double theta = 4;
+  double vega = 5;
+  double rho = 6;
+  double vanna = 7;
+  double volga = 8;
+  double charm = 9;
+  double color = 10;
+  double speed = 11;
+}
+
+message MonteCarloRequest {
+  double spot = 1;
+  double strike = 2;
+  double rate = 3;
+  double volatility = 4;
+  double years_to_expiry = 5;
+  int32 paths = 6;
+  int32 steps = 7;
+  OptionType option_type = 8;
+  AsianType asian_type = 9;
+  int32 num_threads = 10;   // -1 for the engine's own parallelism
+}
+
+message ProbabilityTreeRequest {
+  double rate = 1;
+  double volatility = 2;
+  double years_to_expiry = 3;
+  int32 steps = 4;
+  double lambda = 5;
+}
+
+message ProbabilityTreeResponse {
+  repeated double stock_prices = 1;
+  repeated double state_probabilities = 2;
+  int32 steps = 3;
+}
+
+// ============================================================================
+// Portfolio
+// ============================================================================
+
+message PortfolioStatsRequest {
+  repeated double portfolio_returns = 1;
+  // Needed for beta, alpha, Treynor, information ratio and tracking error.
+  // Omit it and those come back zero -- they are undefined without a
+  // benchmark, and zero here means not-computed, not a measured zero.
+  repeated double market_returns = 2;
+  double risk_free_rate = 3;
+}
+
+message PortfolioStatsResponse {
+  double sharpe_ratio = 1;
+  double sortino_ratio = 2;
+  double treynor_ratio = 3;
+  double beta = 4;
+  double alpha = 5;
+  double max_drawdown = 6;
+  // Historical VaR/CVaR read straight off the empirical return distribution;
+  // parametric assumes normality. Both are reported because they disagree
+  // exactly when it matters most -- in the tail.
+  double var_historical_95 = 7;
+  double var_historical_99 = 8;
+  double cvar_historical_95 = 9;
+  double cvar_historical_99 = 10;
+  double var_parametric_95 = 11;
+  double var_parametric_99 = 12;
+  double cvar_parametric_95 = 13;
+  double cvar_parametric_99 = 14;
+  double omega_ratio = 15;
+  double calmar_ratio = 16;
+  double information_ratio = 17;
+  double tracking_error = 18;
+  // False when no benchmark was supplied, so a caller can tell an
+  // absent beta from a beta of zero.
+  bool benchmark_supplied = 19;
+}
+
+// Covariance is a square matrix sent row-major. `size` is its side length and
+// must equal the length of expected_returns; covariance must hold size*size
+// entries. A mismatch is refused rather than reshaped.
+message PortfolioOptimizeRequest {
+  repeated double expected_returns = 1;
+  repeated double covariance = 2;
+  int32 size = 3;
+  double risk_free_rate = 4;
+  // True maximizes the Sharpe ratio; false finds the minimum-variance
+  // portfolio. Different objectives, different answers.
+  bool max_sharpe = 5;
+}
+
+message PortfolioOptimizeResponse {
+  repeated double weights = 1;
+  double expected_return = 2;
+  double volatility = 3;
+  double sharpe_ratio = 4;
+}
+
+message RiskContributionRequest {
+  repeated double weights = 1;
+  repeated double covariance = 2;
+  int32 size = 3;
+}
+
+message RiskContributionResponse {
+  // Each holding's share of total portfolio risk. Sums to the portfolio
+  // volatility, which is what makes this a decomposition rather than a
+  // collection of standalone volatilities.
+  repeated double contributions = 1;
+}

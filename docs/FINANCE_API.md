@@ -6,16 +6,27 @@ The sensen financial library is served at:
 https://api.optionsandfuturescalculator.com
 ```
 
-Both call styles work against that one URL, verified live:
+Two call styles reach the container through that URL, verified live. **Native
+gRPC over HTTP/2 is not one of them** — see the note below the table.
 
 | Caller | Protocol | `content-type` |
 | --- | --- | --- |
 | Browser / any JS frontend | gRPC-Web | `application/grpc-web-text` or `application/grpc-web+proto` |
-| Backend service, any language | native gRPC over HTTP/2 | `application/grpc` |
+| Backend service, any language | JSON, via Envoy's gRPC-JSON transcoder | `application/json` |
 
-There is no separate host, port or auth for the two. Envoy fronts the engine and
-routes by path prefix, so the same `/sensen.finance.Finance/<Method>` path serves
-both.
+**Native gRPC does not survive the Railway ingress on this hostname.** A
+native `grpc.secure_channel("api.optionsandfuturescalculator.com:443", ...)`
+call fails with `Stream removed`, and no corresponding request appears in
+`railway logs` — only gRPC-Web and the JSON transcoder actually reach the
+container through the public custom domain. Native gRPC does work against the
+engine directly (e.g. `localhost:50051` in local dev) and against Railway's
+own TCP proxy (`*.proxy.rlwy.net:<port>`) — just not through
+`api.optionsandfuturescalculator.com`. Backend/server-side callers should use
+the JSON surface in §3 instead of a native gRPC stub.
+
+There is no separate host, port or auth for gRPC-Web vs. JSON. Envoy fronts
+the engine and routes by path prefix, so the same
+`/sensen.finance.Finance/<Method>` path serves both.
 
 **CORS is open.** A preflight from an arbitrary origin is answered with that
 origin echoed back, so a third-party site can call this directly from the
@@ -45,6 +56,15 @@ backend/proto/finance.proto      package sensen.finance, service Finance
 ```
 
 Copy it into your project. It has no imports, so nothing else travels with it.
+This is the canonical copy — there is no published package for it (no npm
+registry entry, no Buf Schema Registry) and none is planned for a single
+consumer. **Vendor it**: commit the copy into your own project and note the
+source commit hash in a comment at the top of the file, so a future update is
+a deliberate "pull the file at a newer commit, bump the comment, regenerate"
+rather than a silent drift from this repo's contract. `clients/mortgagefv/`
+in this repo is a worked example of the whole pattern — vendored proto with a
+commit-hash header, a cloned `gen_proto.sh`, generated stubs, and a runnable
+example — for a real external consumer of this service.
 
 ---
 
@@ -90,46 +110,53 @@ number on screen.
 
 ---
 
-## 3. Backend service (native gRPC)
+## 3. Backend service (JSON, via the gRPC-JSON transcoder)
 
-Any gRPC language works. Use TLS on port 443 and the public hostname.
+**Native gRPC over HTTP/2 does not survive the Railway ingress on the public
+custom domain** — see the note at the top of this document. Envoy's
+`grpc_json_transcoder` filter maps `POST /sensen.finance.Finance/<Method>`
+with `content-type: application/json` onto the same service descriptor, so
+any HTTP client in any language works with no generated stub at all. Field
+names are proto-JSON lowerCamelCase, decimal fields are JSON *strings* (not
+numbers — the same exactness reasons as §4 apply on the wire, not just in a
+gRPC client), and `x-api-key` passes through the transcoder unchanged.
 
 **Python**
 
-```bash
-pip install grpcio grpcio-tools
-python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. finance.proto
-```
-
 ```python
-import grpc
-import finance_pb2 as pb
-import finance_pb2_grpc as rpc
+import requests
 
-channel = grpc.secure_channel(
-    "api.optionsandfuturescalculator.com:443", grpc.ssl_channel_credentials()
-)
-stub = rpc.FinanceStub(channel)
-
-res = stub.ComputeAmortization(pb.AmortizationRequest(
-    loan_amount="300000", annual_rate="0.06", term_months=360,
-    monthly_overpayment="500",
-))
-print(res.summary.actual_term_months)      # 212 -- retired early
-print(res.summary.total_interest_paid)     # exact decimal string
+res = requests.post(
+    "https://api.optionsandfuturescalculator.com/sensen.finance.Finance/ComputeAmortization",
+    json={
+        "loanAmount": "300000", "annualRate": "0.06", "termMonths": 360,
+        "monthlyOverpayment": "500",
+    },
+    headers={"content-type": "application/json"},
+).json()
+print(res["summary"]["actualTermMonths"])      # 212 -- retired early
+print(res["summary"]["totalInterestPaid"])     # exact decimal string
 ```
 
 **Go**
 
 ```go
-conn, _ := grpc.NewClient("api.optionsandfuturescalculator.com:443",
-    grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{})))
-client := pb.NewFinanceClient(conn)
-res, _ := client.PriceBlackScholes(ctx, &pb.BlackScholesRequest{
-    Spot: 100, Strike: 100, Rate: 0.05, Volatility: 0.2, YearsToExpiry: 1,
+body, _ := json.Marshal(map[string]any{
+    "spot": 100, "strike": 100, "rate": 0.05, "volatility": 0.2, "yearsToExpiry": 1,
 })
-fmt.Println(res.Value, res.Delta, res.Vega)
+resp, _ := http.Post(
+    "https://api.optionsandfuturescalculator.com/sensen.finance.Finance/PriceBlackScholes",
+    "application/json", bytes.NewReader(body),
+)
 ```
+
+If your server-side language has a real gRPC stub and you specifically need
+native framing rather than JSON, generate it from `finance.proto` and point
+it at the engine directly (e.g. `localhost:50051` in local dev) or at
+Railway's own TCP proxy — never at `api.optionsandfuturescalculator.com`,
+which only the gRPC-Web and JSON-transcoder paths reach. `smoke_client`
+demonstrates exactly this split: it works locally and against the Railway TCP
+proxy, and fails with `Stream removed` against the custom domain.
 
 ---
 

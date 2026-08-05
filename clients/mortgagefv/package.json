@@ -1,0 +1,19 @@
+{
+  "name": "@mortgagefvcalculator/sensen-finance-client",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Vendored gRPC-Web client for sensen.finance.Finance, generated from OptionsAndFuturesCalculator's backend/proto/finance.proto. See README.md.",
+  "main": "src/grpc/FinanceServiceClientPb.ts",
+  "scripts": {
+    "gen-proto": "bash scripts/gen_proto.sh",
+    "example": "node example/compute-payment.js"
+  },
+  "dependencies": {
+    "google-protobuf": "3.21.4",
+    "grpc-web": "^2.0.2"
+  },
+  "devDependencies": {
+    "grpc-tools": "1.13.1",
+    "xhr2": "^0.2.1"
+  }
+}

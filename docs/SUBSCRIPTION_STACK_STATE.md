@@ -133,27 +133,54 @@ response headers, and a cache purge does not change it.
 
 ## 7. Second product: mortgagefvcalculator.com (target architecture)
 
-Recorded 2026-08-05 from the owner. **Current state: hosted on Lovable.** Target
-state mirrors this repo's own architecture:
+Recorded 2026-08-05 from the owner, and **corrected the same day** — the first
+version of this section was wrong in a way that would have mis-sequenced the work.
 
-| Layer | Target |
-| --- | --- |
-| Frontend | Cloudflare Workers static assets |
-| Database | the SAME Railway Postgres instance |
-| Backend calculations | Railway — `sensen.finance.Finance`, the service that already exists for reuse |
-| Subscriptions | Railway, on the SAME shared Stripe account |
+**Current state: hosted on Lovable, with Stripe subscriptions and a database
+ALREADY WIRED THERE.** This is not a greenfield build. The earlier draft of this
+section listed subscriptions and the database as things to construct on Railway;
+they exist and are working today, and migrating them is not step one.
 
-This is not a hypothetical. Four consequences follow, and three of them touch work
-already in flight.
+**Migration order, as specified by the owner:**
 
-**1. The webhook price scoping is now load-bearing, not precautionary.**
-`30151ea` scoped `handleWebhook` to this product's two price IDs because the Stripe
-account is shared and a sibling application *could* have caused OFC Pro licences to
-be minted for its customers. With a second product selling subscriptions on that
-same account, that is no longer hypothetical — the first mortgagefv subscriber
-would have been emailed a working OFC Pro licence and had `tier=pro` written for
-them. The reverse also holds: that product's own webhook must scope to ITS price
-IDs, or an OFC subscriber grants entitlement there.
+| Step | Move | Stays put |
+| --- | --- | --- |
+| **1 — now** | Calculation engine → Railway, reached by **gRPC-Web** | UI on Lovable, Stripe subscriptions, database |
+| **2 — later** | UI → Cloudflare Workers; backend → Railway | — |
+
+The order is the point. Step 1 changes only where arithmetic is computed, so it
+can ship without touching the two things that are already earning money (the
+subscription flow and the customer database). Anything that couples step 1 to
+billing or persistence has mis-scoped it.
+
+**Step 1's real gate is a deploy, not new code.** The six mortgage RPCs
+(`ComputeRefinance`, `ComputePayoffTiming`, `ComputeMortgageRecast`,
+`ComputeHomeFutureValue`, `ComputeRentVsBuy`, `ComputeHomeNpv`) are committed at
+`6764749` and hardened at `0162597`, but the engine deployed at
+`api.optionsandfuturescalculator.com` predates them and answers **UNIMPLEMENTED
+(grpc-status 12)** for all six. `clients/mortgagefv/` is generated against that
+contract and its vendored proto says so in a header comment. Until the deploy
+lands, a mortgagefv UI wired to those six methods fails on every call.
+
+Four consequences follow. Three of them touch work already in flight, and the
+first one changed character once the owner confirmed Lovable already sells
+subscriptions.
+
+**1. The webhook price scoping may already be load-bearing today — this needs
+checking, not assuming.** `30151ea` scoped `handleWebhook` to this product's two
+price IDs because the Stripe account is shared and a sibling application *could*
+have caused OFC Pro licences to be minted for its customers. The earlier draft of
+this section treated a mortgagefv Stripe integration as future work. It is not:
+Lovable is selling subscriptions **now**.
+
+**The open question is whether it sells them on the same Stripe account.** If it
+does, then before `30151ea` every mortgagefv subscriber would have been emailed a
+working OFC Pro licence and had `tier=pro` written for them — and the reverse
+still holds in the untested direction, since that product's own webhook must
+scope to ITS price IDs or an OFC subscriber silently grants entitlement there.
+If it is a separate account, neither applies. Confirm which before step 2 moves
+billing anywhere, and note that step 1 (calculations only) does not touch this
+either way — which is part of why the owner's ordering is the safe one.
 
 **2. The Envoy rate limit becomes a capacity constraint.**
 `envoy.yaml` sets `local_ratelimit` to 10 req/s sustained (burst 100), site-wide
@@ -163,10 +190,14 @@ limit for both, and it refuses with a bare **HTTP 429 and no gRPC status**, so a
 grpc-web client surfaces it as a transport error rather than throttling. Decide
 this deliberately before the second product carries real traffic.
 
-**3. Shared Postgres needs deliberate schema separation.**
-This repo owns `users`, `profiles`, `saved_strategies` in the `railway` database.
-A second product on the same instance must not collide. Note `profiles.tier` is
-dead here — nothing reads or writes it — so it is not an entitlement path to reuse.
+**3. Shared Postgres is a step-2 concern, not a step-1 one.**
+mortgagefv has its own database on Lovable today and keeps it through step 1.
+*If* step 2 consolidates onto this repo's Railway instance, note that this repo
+owns `users`, `profiles`, `saved_strategies` in the `railway` database and a
+second product must not collide — and that `profiles.tier` is dead here (nothing
+reads or writes it), so it is not an entitlement path to reuse. Consolidating is
+a choice, not a requirement; two databases on one Railway project is also fine
+and avoids the collision surface entirely.
 
 **4. The Lovable to Workers migration will meet the trap documented in §6.**
 `wrangler pages deploy` does not deploy a Workers-custom-domain site: it succeeds,
