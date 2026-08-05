@@ -53,3 +53,6 @@ agent/dataset/out/
 # Cloudflare Worker local secrets (wrangler dev). Never committable.
 .dev.vars
 **/.dev.vars
+
+# Generated training datasets (regenerate deterministically with --seed)
+agent/dataset/data_mortgage/
