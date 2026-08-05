@@ -155,7 +155,7 @@ export function authMetadata(): Record<string, string> {
 }
 
 const BILLING_URL =
-  process.env.NEXT_PUBLIC_BILLING_URL || 'https://ofc-billing.optionsandfuturescalculator.workers.dev';
+  process.env.NEXT_PUBLIC_BILLING_URL || 'https://ofc-billing.muyiwamc2.workers.dev';
 
 /** Starts Stripe Checkout and returns the URL to send the browser to. */
 export async function startCheckout(plan: 'monthly' | 'annual'): Promise<string> {

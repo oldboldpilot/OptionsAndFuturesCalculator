@@ -49,3 +49,7 @@ __pycache__/
 # the model trained on data/'s 28,500, and dataset statistics were once reported
 # from out/ for a run that never read it.
 agent/dataset/out/
+
+# Cloudflare Worker local secrets (wrangler dev). Never committable.
+.dev.vars
+**/.dev.vars

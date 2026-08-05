@@ -291,6 +291,77 @@ async function setSupabaseTier(env: Env, email: string, tier: string): Promise<b
   }
 }
 
+/**
+ * Resolves the Stripe Price id(s) an event is about, so the webhook can be
+ * scoped to THIS product's subscription. The Stripe account is SHARED across
+ * several of the author's applications (see CLAUDE.md, "Pro tier and
+ * quota") -- sibling apps' webhook endpoints coexist on the same account, so a
+ * sibling app's `checkout.session.completed` or `customer.subscription.*`
+ * event arrives here type-for-type identical to one of ours. The only thing
+ * that distinguishes "ours" from "theirs" is which price was purchased, and
+ * different event types expose that differently:
+ *
+ *   - `checkout.session.completed`: the Session object on the webhook payload
+ *     does NOT carry line items -- that needs either `expand` on the original
+ *     request (this Worker's checkout creation doesn't ask for it, and
+ *     shouldn't just to serve this check) or a follow-up call. This fetches
+ *     the session's line items directly.
+ *   - `customer.subscription.*`: the Price is embedded inline on each
+ *     subscription item; no follow-up call needed or possible advantage to
+ *     make one.
+ *
+ * Returns:
+ *   - string[]  the price id(s) found. Empty is possible (e.g. a checkout
+ *     session with zero line items) and is treated by the caller as "not
+ *     ours", same as a non-matching id.
+ *   - null      the price could not be determined from this payload/shape at
+ *     all -- an API error, a malformed object, or an event type this
+ *     function was never taught. The caller MUST fail closed on null:
+ *     granting on an unrecognised shape is exactly the bug this exists to
+ *     prevent.
+ */
+async function resolveEventPriceIds(env: Env, event: any): Promise<string[] | null> {
+  const obj = event.data.object;
+
+  if (event.type === 'checkout.session.completed') {
+    if (typeof obj?.id !== 'string') return null;
+    try {
+      const lineItems = await stripe(env, `checkout/sessions/${obj.id}/line_items`, 'GET', {
+        limit: '100',
+      });
+      if (lineItems?.error || !Array.isArray(lineItems?.data)) {
+        console.error(
+          `could not list line items for checkout session ${obj.id}: ` +
+            (lineItems?.error?.message ?? 'malformed response'),
+        );
+        return null;
+      }
+      return lineItems.data
+        .map((li: any) => li.price?.id)
+        .filter((id: unknown): id is string => typeof id === 'string');
+    } catch (err) {
+      console.error(`line items lookup threw for checkout session ${obj.id}`, err);
+      return null;
+    }
+  }
+
+  if (event.type.startsWith('customer.subscription.')) {
+    const items = obj?.items?.data;
+    if (!Array.isArray(items)) return null;
+    const ids = items
+      .map((it: any) => it.price?.id)
+      .filter((id: unknown): id is string => typeof id === 'string');
+    // An items array that yielded no ids is malformed, not "no items" -- a
+    // real subscription always carries at least one priced item. Treat it the
+    // same as an undeterminable shape rather than as "zero matches".
+    return ids.length > 0 ? ids : null;
+  }
+
+  // Any other event type reaching here is a shape this function was never
+  // taught -- fail closed rather than guess.
+  return null;
+}
+
 async function handleWebhook(req: Request, env: Env): Promise<Response> {
   const body = await req.text();
   const sig = req.headers.get('Stripe-Signature');
@@ -316,6 +387,51 @@ async function handleWebhook(req: Request, env: Env): Promise<Response> {
   // and eventually disable the endpoint, so "not interested" must not look
   // like "failed".
   if (!relevant.includes(event.type)) return new Response('ignored', { status: 200 });
+
+  // ---------------------------------------------------------------------
+  // Cross-application entitlement guard.
+  //
+  // Everything below this point -- minting a licence, writing the Supabase
+  // tier, and ALSO revoking it on cancellation -- is gated on the event being
+  // about one of THIS product's two prices. Without this, a sibling app's
+  // subscription on the shared Stripe account would mint this app's Pro
+  // licence (event type alone matched), or a sibling app's cancellation would
+  // wrongly downgrade an OFC customer who happens to share a Stripe customer
+  // record. Read from env rather than hardcoded so this can never drift from
+  // the prices Checkout actually uses.
+  // ---------------------------------------------------------------------
+  const ourPrices = new Set([env.PRICE_MONTHLY, env.PRICE_ANNUAL].filter(Boolean));
+  if (ourPrices.size === 0) {
+    console.error(
+      `CONFIG ERROR: PRICE_MONTHLY/PRICE_ANNUAL not set on this Worker; failing closed for ` +
+        `${event.type} (${event.id}) -- granting nothing.`,
+    );
+    return new Response('ok', { status: 200 });
+  }
+
+  const priceIds = await resolveEventPriceIds(env, event);
+  if (priceIds === null) {
+    // Loud and distinct from "not ours" below: this is the exact failure mode
+    // this guard exists to prevent -- an event shape it could not evaluate.
+    // Silently granting here would be silently reopening the leak; silently
+    // skipping would drop a legitimate purchase without a trace. Fail closed
+    // AND say so.
+    console.error(
+      `SECURITY: could not determine the Stripe price for ${event.type} (${event.id}); ` +
+        'failing closed -- granting/revoking nothing. This should not happen for a ' +
+        'well-formed checkout.session.completed or customer.subscription.* event; ' +
+        'investigate the payload shape before assuming this is just noise.',
+    );
+    return new Response('ok', { status: 200 });
+  }
+  if (!priceIds.some((id) => ourPrices.has(id))) {
+    console.log(
+      `skipping ${event.type} (${event.id}): price(s) [${priceIds.join(', ') || 'none'}] do ` +
+        'not match this product (PRICE_MONTHLY/PRICE_ANNUAL) -- likely a sibling application ' +
+        'on the shared Stripe account. Granting nothing.',
+    );
+    return new Response('ok', { status: 200 });
+  }
 
   const obj = event.data.object;
   const customerId = String(obj.customer ?? '');
