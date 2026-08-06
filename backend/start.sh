@@ -147,7 +147,27 @@ for _mv in MODEL_PATH MORTGAGE_MODEL_PATH; do
     fi
 done
 
-/app/calculator_engine &
+# Line-buffered, because the engine's stdout here is a PIPE, not a terminal, and
+# libc therefore block-buffers it in 4 KB chunks. Startup is verbose enough to
+# flush those chunks, so the early lines arrive and the LAST few sit in the
+# buffer indefinitely -- and the last few are exactly the ones that say whether
+# an optional subsystem came up.
+#
+# Concretely: "constrained decoding armed on '<params>'" never appeared in
+# `railway logs` while the feature was demonstrably working, and its absence
+# reads identically to the feature having failed to start. It cost an hour of
+# chasing a phantom locally before the same trick (stdbuf -oL) showed the line
+# had been there all along. A log you cannot trust for absence is worse than no
+# log, because it invites exactly the wrong conclusion.
+#
+# `stdbuf` is coreutils and is already in the image. If it were ever missing,
+# fall through to the unbuffered-but-present binary rather than not starting.
+if command -v stdbuf >/dev/null 2>&1; then
+    stdbuf -oL -eL /app/calculator_engine &
+else
+    echo "start.sh: stdbuf not found -- engine logs will be block-buffered and may appear truncated."
+    /app/calculator_engine &
+fi
 BACKEND_PID=$!
 
 echo "Starting Envoy on :8080..."
