@@ -1561,9 +1561,34 @@ auto lex_numeric_literals(std::string_view text) -> std::vector<NumericLiteral> 
             continue;
         }
 
+        // A leading '-' belongs to the literal, exactly as '$' does above.
+        //
+        // Without this the lexer produced a MAGNITUDE and threw the sign away,
+        // so "-$250,000" and "$250,000" were the same literal. A model that
+        // silently dropped the minus -- which is what the deployed one does --
+        // then emitted `loan_amount = 250000.00`, and the gate grounded it
+        // against the digits it had lexed and returned Proven. The user asked
+        // about one thing and was priced another, with every gate satisfied.
+        //
+        // That is a REPAIR, and §5.1 of the pipeline doc is explicit that
+        // nothing is repaired. Carrying the sign makes the repair visible:
+        // every map below now operates on a signed value, so a positive
+        // emission no longer grounds against a negative literal. M8 is
+        // unaffected -- it adds `-v` for the `values` field only, which for a
+        // negative literal yields the positive back, which is the one place a
+        // cash-flow sign legitimately flips.
+        bool negative_prefix = false;
+        {
+            std::size_t back = start;
+            if (back > 0 && text[back - 1] == ' ') --back;
+            if (back > 0 && text[back - 1] == '$') --back;
+            if (back > 0 && text[back - 1] == ' ') --back;
+            if (back > 0 && text[back - 1] == '-') negative_prefix = true;
+        }
+
         NumericLiteral lit;
         lit.text = digits;
-        lit.value = *value;
+        lit.value = negative_prefix ? value->negated() : *value;
         lit.offset = start;
         lit.tag = currency_prefix ? LiteralTag::Money : LiteralTag::Untagged;
 

@@ -630,6 +630,30 @@ auto main() -> int {
         const auto money_year = mv::lex_numeric_literals("add $6,000 a year");
         check(money_year.size() == 1 && money_year[0].tag == mv::LiteralTag::Money,
               "\"$6,000 a year\" stays MONEY -- a currency prefix beats a trailing unit word");
+
+        // A leading minus is part of the literal, not decoration on it.
+        //
+        // Found by scripts/probe_mortgage_adversarial.py against a live engine:
+        // the lexer looked back for '$' and not for '-', so "-$250,000" and
+        // "$250,000" lexed to the SAME literal. The deployed model silently
+        // drops the minus, emitted `loan_amount = 250000.00`, and the gate
+        // grounded it against the digits and returned Proven -- a repair the
+        // verifier could not see, on a module whose stated rule is that nothing
+        // is repaired.
+        const auto neg = mv::lex_numeric_literals("Amortize -$250,000 at 5% over 30 years.");
+        check(!neg.empty() && neg[0].value.to_string() == "-250000",
+              "\"-$250,000\" lexes as -250000, sign carried (got " +
+                  (neg.empty() ? std::string{"nothing"} : neg[0].value.to_string()) + ")");
+        check(!neg.empty() && neg[0].tag == mv::LiteralTag::Money,
+              "a negative currency literal is still tagged MONEY");
+
+        const auto pos = mv::lex_numeric_literals("Amortize $250,000 at 5% over 30 years.");
+        check(!pos.empty() && !neg.empty() && pos[0].value.to_string() != neg[0].value.to_string(),
+              "the signed and unsigned forms no longer lex identically");
+
+        const auto spaced = mv::lex_numeric_literals("a balance of - $1,200 this month");
+        check(!spaced.empty() && spaced[0].value.to_string() == "-1200",
+              "the minus is found across '$' and a space, the same lookback '$' itself uses");
     }
 
     // ===================================================================
