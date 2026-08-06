@@ -142,7 +142,7 @@ Reaching for llama.cpp out of habit cost real work on 2026-08-03: it produced a
 phantom regression that triggered an unnecessary retrain, and a conversion step
 orders of magnitude slower than the one already in the tree.
 
-Three things about it are load-bearing and easy to get wrong:
+Four things about it are load-bearing and easy to get wrong:
 
 1. **The model requires its training system prompt.** Without it, it reverts to
    stock Qwen3 and emits no `<params>` block at all.
@@ -154,6 +154,70 @@ Three things about it are load-bearing and easy to get wrong:
    enables `on_device_sampling`, a contract only the CUDA decode block honours,
    and the CPU path then casts a raw float logit to a token id. Fixed upstream
    in sensen and independently here, so it does not depend on the pinned commit.
+4. **`repetition_penalty` must be 1.0, and "greedy" does not exempt you.**
+   `sensen::Sampler::sample` applies the penalty to the logits **before** the
+   greedy argmax, so `GREEDY` is argmax of *penalised* logits, not of the
+   model's own. `GenerationConfig` defaults the penalty to **1.1** over a
+   **64-token** window (`llm_interfaces.cppm:104,107`), so a caller who never
+   asked for a penalty gets one on every decode. Worse, sensen's
+   `applyRepetitionPenalty` compounded it **per occurrence** — a token seen *k*
+   times in the window was divided by `penalty^k` — where HuggingFace and
+   llama.cpp both deduplicate and penalise once per **unique** token. Both
+   services now pin `config.repetition_penalty = 1.0F`
+   (`assistant_service.cpp:660`, `mortgage_assistant_service.cpp:586`) as
+   defence in depth even though the library is fixed, for the same reason the
+   `n_gpu_layers = 0` line above it exists.
+
+The per-occurrence compounding is fixed in sensen as of `fb2723cd`, but it is
+recorded here because of how it presented — as everything except a sampler bug.
+
+It is invisible on prose and lethal on JSON. Qwen3 tokenises **one digit per
+token**, so on digit-dense structured output ASCII `'0'` lands in a 64-token
+window 8–12 times, and `1.1^7 = 1.95` nearly halves that token's logit — more
+than enough to drop the model's own top choice below a rival. Measured purely by
+moving the penalty from 1.1 to 1.0, on two independent harnesses: params
+exact-match **0/90 → 25/90** and **0/120 → 33/120**. Across 120/120 rows there
+were **1,272** decode steps where the sampler disagreed with the raw argmax at
+1.1, and **zero** at 1.0.
+
+It also emitted **fullwidth zero (U+FF10)** inside numeric literals — a
+*different token id* that escaped the penalty while ASCII `'0'` was being crushed
+by `1.1^7`. 2/100 and 4/120 rows before the fix, **0** after. Mojibake in a
+number reads exactly like decode corruption or a bad GGUF quantisation, and it
+was neither: an independent llama.cpp rollout on the same GGUF agreed with
+sensen at 8/30 in both directions. If you see a wrong digit or a strange
+codepoint in generated JSON, **check the sampler before you blame the weights,
+the quantisation, or the KV cache.**
+
+**Greedy staying penalisable is a design choice, not the bug.** HuggingFace runs
+its `LogitsProcessorList` before the greedy argmax and llama.cpp runs its
+penalty sampler before its greedy sampler; sensen's ordering matches both. The
+trap was the **1.1 default**, not the ordering — do not "fix" this by moving the
+penalty after the argmax.
+
+Two earlier worries about this fix were checked and are closed:
+
+- **The DiffusionGemma concern is provably moot.** Diffusion sampling never
+  reaches this code: it goes through `dlm::EntropyBoundSampler` /
+  `sensen_cuda_eb_sample`, and `dlm.cppm` imports only `std`,
+  `sensen.diffusion_core`, `sensen.cpu_features` and `sensen.parallel` — it
+  cannot even name `Sampler`. (Its `MaskedUnmaskSampler` is its own type.) The
+  chronology settles it independently: the penalty was introduced in `ad60b068`
+  (2026-01-29) and the diffusion stack did not exist until 2026-06-11.
+- **The options assistant's defect holdout is penalty-independent.** A/B on the
+  same binary and the same model scores **6/14 params + 2/2 non-params at both
+  1.1 and 1.0**. The penalty fix did not regress it, and its failures are the
+  already-documented bare-futures-directive rows (`Long NQ`, `Short GC`, `gold
+  outright long`). Its documented 13/16 differs from 6/14 by **harness
+  denominator, not lost capability** — which is the whole reason every score in
+  this file names its harness.
+
+**Residual, untested:** the mirrored CUDA kernel `apply_rep_penalty_batch_kernel`
+(`backend/sensen/src/cuda/cuda_llm_prefill.cu`) received the same dedup fix and
+has been **compiled by nobody** — this machine builds `ENABLE_CUDA=OFF` and has
+no `nvcc`. Every number above is CPU. The device-parity gates
+(`test_gpu_batched_decode` Test 7, `test_gpu_argmax_softcap`) must run on a CUDA
+build before that half is trusted.
 
 Concurrency comes from sensen's iteration-level scheduler, not threads —
 `generate()` cannot be called concurrently, because `FeedForwardNetwork` holds
@@ -202,18 +266,36 @@ neither is a supported image.
 
 Two things to hold on to before trusting its output:
 
-- **It measures 31.7% params exact-match (59/186)** on held-out data, against the
-  strategy model's 95.0%. Its dangerous failure is a CORRUPTED VALUE — it emitted
-  `5379.00` for a stated `5378.63`, which names a real operation, sits in a real
-  field, parses, satisfies every bound, and prices a different loan. Nothing in
-  the output is wrong on its own terms, so only the user's own utterance can
-  falsify it.
-- **`mortgage_verification.cppm` catches exactly that and is NOT yet wired into
-  the serving path.** Its five gates pass 72 checks / 0 failures, but today its
-  only consumer is `test_mortgage_verification` — nothing in
-  `mortgage_assistant_service.cpp` imports it. Until that call exists,
-  `ParseOperation`'s own structural checks are all that guard the RPC, and the
-  test proves those alone return Proven on `5379.00`.
+- **It measures 27.8% params exact-match (25/90) through the real RPC**, against
+  the strategy model's 95.0%. **Quote that number, not `evaluate.py`'s.**
+  `agent/train/evaluate.py` scores **transformers on the merged bf16
+  intermediate** — an artefact that never ships — and reports 31.7% (59/186) for
+  the same weights. What ships is the Q8_0 GGUF on sensen, and that is the 27.8%.
+  An independent llama.cpp rollout on the same GGUF puts the raw-decode ceiling
+  at 8/30, agreeing with sensen. Three harnesses, three denominators: cite which
+  one produced a figure or the figure means nothing. This project has already
+  eaten one unnecessary retrain from trusting the wrong harness (see the
+  strategy-assistant `llama-cli` phantom above); the bf16-vs-Q8_0 gap is the
+  same mistake wearing different clothes.
+
+  That 25/90 is **post-`repetition_penalty` fix**. The same model on the same
+  harness scored **0/90** before it — see item 4 of the strategy-assistant list
+  above. A near-zero RPC score against a non-zero `evaluate.py` score is the
+  signature of a serving-path defect, not a bad checkpoint; do not retrain on
+  one.
+
+  Its dangerous failure is a CORRUPTED VALUE — it emitted `5379.00` for a stated
+  `5378.63`, which names a real operation, sits in a real field, parses,
+  satisfies every bound, and prices a different loan. Nothing in the output is
+  wrong on its own terms, so only the user's own utterance can falsify it.
+- **`mortgage_verification.cppm` catches exactly that, and since `c873f9e` it IS
+  wired into the serving path.** `mortgage_assistant_service.cpp` imports it and
+  `ParseOperation` gates on the verdict: `Proven` is the only path to a
+  `FinanceParams`, and `Unsafe` / `Indeterminate` refuse. Its five gates pass 72
+  checks / 0 failures. Before that commit its only consumer was
+  `test_mortgage_verification`, and `ParseOperation`'s own structural checks —
+  which the test proves return Proven on `5379.00` — were all that guarded the
+  RPC.
 
 ## Pro tier and quota
 
