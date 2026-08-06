@@ -811,7 +811,7 @@ add_subdirectory(external/SGEE sgee EXCLUDE_FROM_ALL)
 
 # Core engine binary
 add_executable(calculator_engine src/main.cpp src/issue_key.cpp src/modules/calculator_service.cpp src/modules/finance_service.cpp src/modules/quota.cpp src/modules/api_key.cpp src/modules/assistant_service.cpp src/modules/mortgage_assistant_service.cpp)
-target_sources(calculator_engine PUBLIC FILE_SET CXX_MODULES FILES src/modules/calculator_service.cppm src/modules/market_data.cppm src/modules/finance_service.cppm src/modules/quota.cppm src/modules/api_key.cppm src/modules/strategy_catalogue.cppm src/modules/assistant_verification.cppm src/modules/assistant_service.cppm src/modules/mortgage_assistant_service.cppm)
+target_sources(calculator_engine PUBLIC FILE_SET CXX_MODULES FILES src/modules/calculator_service.cppm src/modules/market_data.cppm src/modules/finance_service.cppm src/modules/quota.cppm src/modules/api_key.cppm src/modules/strategy_catalogue.cppm src/modules/assistant_verification.cppm src/modules/assistant_service.cppm src/modules/mortgage_verification.cppm src/modules/mortgage_assistant_service.cppm)
 target_link_libraries(calculator_engine PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto sgee)
 
 
@@ -872,6 +872,27 @@ target_sources(test_assistant_verification
 )
 
 add_test(NAME AssistantVerificationTest COMMAND test_assistant_verification)
+
+# GP-ARA mandatory verification stage for the MORTGAGE assistant. Same
+# rationale as the options block above: proto- and gRPC-free, and deliberately
+# NOT linked against sensen_slim -- the only sensen module it needs,
+# sensen.gp_ara_interfaces, has no dependencies beyond std, so it is compiled
+# here as this target's own FILE_SET source.
+add_executable(test_mortgage_verification tests/test_mortgage_verification.cpp)
+target_sources(test_mortgage_verification
+    PRIVATE
+    FILE_SET CXX_MODULES FILES
+        sensen/src/gp_ara_interfaces.cppm
+        src/modules/mortgage_verification.cppm
+)
+# The label-space drift check re-parses finance.proto at RUN time, so the test
+# fails rather than silently skipping if the path is wrong. The test also falls
+# back to $FINANCE_PROTO_PATH and to ../proto/finance.proto (which resolves when
+# ctest runs from the build dir); this define is belt and braces.
+target_compile_definitions(test_mortgage_verification PRIVATE
+    MORTGAGE_FINANCE_PROTO_PATH="${CMAKE_CURRENT_SOURCE_DIR}/proto/finance.proto")
+
+add_test(NAME MortgageVerificationTest COMMAND test_mortgage_verification)
 
 # End-to-end smoke client. Verifies a running engine returns live data on all
 # three RPCs; used as the deploy gate.
