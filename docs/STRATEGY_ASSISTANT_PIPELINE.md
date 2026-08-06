@@ -176,6 +176,13 @@ CLI enforces an upload deadline that a 62 MB payload already failed, and the
 GGUF here is roughly ten times that. `MODEL_URL`, `MODEL_SHA256` and
 `MODEL_TOKEN` are Railway build variables, never committed.
 
+The same `model` stage now fetches a SECOND model on the same terms -- the
+mortgage assistant's GGUF, under `MORTGAGE_MODEL_URL` /
+`MORTGAGE_MODEL_SHA256` / `MORTGAGE_MODEL_PATH`. Everything in this section
+applies to it unchanged; its own publish-and-pin procedure, checksum and token
+scoping are in `MORTGAGE_MODEL_DISTRIBUTION.md`. Nothing else on this page is
+about that model -- "the model" here always means this one.
+
 **The trap in the build-time fetch**: `backend/Dockerfile`'s `model` stage
 takes `MODEL_TOKEN` as a build ARG, not a `--mount=type=secret`. Railway's
 Metal builder accepts only `type=cache` mounts and rejects the ENTIRE

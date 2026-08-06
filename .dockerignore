@@ -39,3 +39,34 @@ backend/sensen/docs
 **/*.sqlite
 **/perf.data*
 **/core.*
+
+# Both assistants' fine-tuned Qwen3-0.6B GGUFs (Q8_0, ~639 MB each) are fetched
+# during the build from MODEL_URL / MORTGAGE_MODEL_URL and verified against
+# MODEL_SHA256 / MORTGAGE_MODEL_SHA256 in backend/Dockerfile's `model` stage.
+# They must never arrive through the build context instead: `COPY backend/
+# /src/backend/` in the builder stage has no verification step of its own and
+# would carry whatever it found, unchecked, into the image -- which is exactly
+# the substituted-or-truncated-GGUF failure the `model` stage exists to make
+# impossible.
+#
+# backend/.dockerignore says the same thing and CANNOT enforce it here.
+# railway.json sets `dockerfilePath: backend/Dockerfile` and leaves the context
+# at the repository root, so the ignore file that applies is
+# <dockerfile>.dockerignore (backend/Dockerfile.dockerignore, which does not
+# exist) falling back to <context>/.dockerignore -- this file. backend/
+# .dockerignore is only consulted by a build whose context is backend/, which
+# this build is not. This entry is what actually keeps a .gguf out of the
+# context, and it matters now rather than in the abstract:
+# backend/models/mortgagefv-assistant-q8_0.gguf is 639 MB and is sitting in the
+# tree today. .railwayignore excludes it from the `railway up` payload for the
+# same reason (with its own note on the ~30 s upload deadline).
+**/*.gguf
+
+# EXCEPTION, added deliberately: the two fine-tuned assistant models are
+# staged into backend/models/ and SHIP IN THE BUILD CONTEXT. They are the
+# owner's proprietary weights and are deliberately not hosted on any external
+# model registry, so the context is how they reach the image. The blanket
+# rule above still catches a .gguf dropped anywhere else in the tree, which
+# is the case it was written for.
+!backend/models/*.gguf
+

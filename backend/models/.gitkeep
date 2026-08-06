@@ -1,0 +1,7 @@
+Keeps backend/models/ present in the build context even when no model is staged.
+
+backend/Dockerfile does `COPY backend/models/ /model-staged/`, and a directory
+that contains only gitignored files is not carried by every packaging path --
+an absent source makes that COPY fail and takes the whole build down, which is
+how deployment 54b88bf9 failed on 2026-08-05. The models themselves stay
+gitignored (**/*.gguf); this file only guarantees the directory exists.

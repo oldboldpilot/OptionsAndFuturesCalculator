@@ -132,6 +132,21 @@ else
 fi
 
 echo "Starting OptionsCalculatorEngine on :50051..."
+
+# A model path that names a file which is not there is worse than an unset one:
+# the engine's own contract is "unset means no model, answer MODEL_UNAVAILABLE",
+# and a dangling path takes some less legible failure route instead. The image
+# now sets both paths UNCONDITIONALLY (a model can arrive either by URL fetch or
+# by being staged into the build context, and the Dockerfile cannot test for a
+# file's existence when it sets ENV), so the existence check belongs here.
+for _mv in MODEL_PATH MORTGAGE_MODEL_PATH; do
+    eval "_mp=\${$_mv:-}"
+    if [ -n "${_mp}" ] && [ ! -f "${_mp}" ]; then
+        echo "start.sh: ${_mv}=${_mp} does not exist -- unsetting it so the service reports its model unavailable rather than failing on a dangling path."
+        unset "${_mv}"
+    fi
+done
+
 /app/calculator_engine &
 BACKEND_PID=$!
 
