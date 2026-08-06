@@ -159,6 +159,7 @@ static_resources:
                       - calculator.OptionsCalculator
                       - sensen.finance.Finance
                       - calculator.assistant.StrategyAssistant
+                      - mortgage.assistant.MortgageAssistant
                     auto_mapping: true
                     # Without this a refusal arrives as an empty body with a
                     # header the caller has to know to look for. With it, a

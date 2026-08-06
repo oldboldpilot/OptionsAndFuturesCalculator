@@ -1,0 +1,261 @@
+syntax = "proto3";
+
+package mortgage.assistant;
+
+// ============================================================================
+// The LLM-backed MORTGAGE / time-value-of-money assistant, over gRPC.
+//
+// @author Olumuyiwa Oluwasanmi
+//
+// This is the SECOND assistant contract in this binary and the fourth service
+// on the port. It is the exact sibling of calculator.assistant.StrategyAssistant
+// (proto/assistant.proto) -- same three-outcome shape, same reasoning about why
+// two of those three outcomes are gRPC OK -- pointed at a different domain and
+// backed by a DIFFERENT fine-tuned model.
+//
+// The two are deliberately separate contracts rather than one assistant with a
+// mode flag. They emit different schemas from different training sets: the
+// strategy model produces a symbol, an asset class and one of 48 catalogued
+// option/futures strategies; this one produces the NAME OF A FINANCE RPC plus
+// that RPC's own parameters. Folding them together would mean a `oneof` over
+// two unrelated payloads guarded by a mode field nothing enforces, and a single
+// misrouted request would be answered by a model that was never taught the
+// question.
+//
+// WHAT THIS SERVICE IS FOR, precisely: turning "I have $172,300 saved and add
+// $12,000 a year at 3.85%, over 37 years" into the arguments
+// sensen.finance.Finance's ComputeFutureValueDetailed already accepts. It
+// computes nothing. Every figure a caller ultimately shows a user comes from
+// the Finance service actually running the operation this service named -- the
+// same division of labour StrategyAssistant has with CalculateStrategy.
+//
+// It also gives no financial, tax or legal advice, and that is not a disclaimer
+// bolted on here: it is in the model's own training system prompt, and the
+// dataset that produced the model (agent/dataset/build_mortgage_dataset.py)
+// teaches it to decline advice explicitly. A 0.6B model improvising an opinion
+// on whether someone should refinance, on a page that computes real loan
+// numbers, is the worst thing this could become.
+//
+// ---------------------------------------------------------------------------
+// ON THE oneof IN ParseResponse -- read this before adding a branch.
+//
+// A single ParseRequest can end in exactly three ways, and they are not
+// gradations of the same outcome:
+//
+//   1. The model understood the request well enough to name an operation and
+//      fill in its parameters.
+//   2. The model understood there IS a calculation in there somewhere, but is
+//      missing one fact it cannot honestly default (over how many years? what
+//      rate?), so it asks a single clarifying question instead of guessing.
+//   3. The request cannot be turned into one of these operations at all -- an
+//      unsupported calculation, a request for advice, or something that was
+//      never about a loan or a cash flow in the first place -- and the honest
+//      response is a refusal, not a fabricated guess.
+//
+// Both (2) and (3) return gRPC status OK, for the reason assistant.proto's own
+// banner gives and which applies here unchanged: a clarifying question is the
+// model doing its job correctly, and so is a refusal when the alternative is
+// inventing an interest rate, a term or a principal that was never stated. A
+// fabricated PARAMETER is worse here than a fabricated symbol is there, because
+// nothing downstream can catch it -- ComputeAmortization will happily amortize
+// a principal the borrower never mentioned and return an exact, auditable,
+// completely wrong schedule. Real-data-only policy is what forbids that, and
+// this contract is where it is expressed.
+//
+// If either branch were instead encoded as a gRPC error, every well-behaved
+// back-and-forth would register as a failure in gRPC metrics, in Envoy's access
+// logs and in the browser client's error handling -- indistinguishable from the
+// model being down. The oneof keeps "succeeded, asked a question" and
+// "succeeded, declined" distinguishable from each other and from "the RPC
+// itself failed", which is the only case that should still surface as a gRPC
+// error (a full admission queue, a malformed request, and so on).
+// ============================================================================
+
+service MortgageAssistant {
+  rpc ParseOperation (ParseRequest) returns (ParseResponse);
+}
+
+message ParseRequest {
+  // The user's own words, verbatim. Nothing here is pre-parsed or normalized
+  // before it reaches the model -- that normalization is the model's job, and
+  // doing it twice (once heuristically here, once inside the model) would let
+  // the two disagree about what was meant.
+  string utterance = 1;
+
+  // The single short question this service asked on the PRIOR turn, if any.
+  // Present only when this request is the user's answer to a Clarification this
+  // same RPC returned a moment ago ("37 years", "30-year fixed"). Without it
+  // the model would have to re-derive missing context from a fragment that
+  // reads as nonsense in isolation.
+  //
+  // Deliberately just the one prior question -- not a full conversation
+  // transcript -- because that is the only prior state ParseOperation's own
+  // contract ever produces. This mirrors the model's training shape exactly:
+  // every clarification example in agent/dataset/build_mortgage_dataset.py is
+  // `user(full request) -> assistant(one short question) -> user(one short
+  // reply) -> assistant(final answer)`, so the reply belongs in a USER turn
+  // AFTER the original request, never in an assistant turn before it. Getting
+  // that backwards on the sibling service was a production defect
+  // (assistant_service.cpp's `build_prompt` documents it); this service's
+  // prompt builder was written from that conclusion rather than rediscovering
+  // it.
+  string prior_clarification = 2;
+}
+
+message ParseResponse {
+  // Exactly one of these is set. See the file banner for why a clarifying
+  // question and a refusal are both successful outcomes of this RPC.
+  oneof outcome {
+    FinanceParams params = 1;
+    Clarification clarification = 2;
+    Refusal refusal = 3;
+  }
+}
+
+// ============================================================================
+// The structured parameters the fine-tuned model emits inside its `<params>`
+// JSON block, carried in the ONE shape that cannot drift away from what the
+// Finance service actually accepts.
+//
+// WHY `string operation` + `map<string, string> params` AND NOT 26 MESSAGES.
+//
+// The model's label space is not a fixed schema like StrategyParams'. It is
+// "one of 26 RPCs on sensen.finance.Finance, plus that RPC's own request
+// fields" -- 160 fields across 26 request messages, and the training set
+// (build_mortgage_dataset.py) derives BOTH halves of that by parsing
+// finance.proto's service block directly rather than hand-listing them. A
+// mirrored `oneof` of 26 message types here would be a hand-maintained SECOND
+// COPY of finance.proto's request messages, in a file nothing regenerates. Add
+// a field to RefinanceRequest and the dataset picks it up automatically on its
+// next run, the Finance service picks it up at codegen, and this file silently
+// would not -- the exact drift StrategyParams' own comment warns about, except
+// 26 times over and without the excuse of being small enough to notice.
+//
+// So the schema stays where it already is -- finance.proto -- and this message
+// carries a NAME and a BAG OF NAMED VALUES that address it.
+//
+// WHY THE VALUES ARE STRINGS.
+//
+// Read finance.proto's own numeric-contract banner first; this follows from it
+// rather than reinventing it. Money and rates there are `string`, because
+// sensen computes them in BigDecimal (an exact __int128 fixed-point decimal,
+// eighteen places) and because this service is reachable from browsers, where
+// JavaScript's `number` IS a float64 -- a `double` money field is lossy on the
+// client before anyone writes a line of code. The majority of the 160 fields
+// are exactly those decimal strings, and for them a `map<string, string>` is
+// not a compromise at all: it is the same representation, unchanged, all the
+// way from the model's JSON to the Finance request.
+//
+// The remaining fields are genuine int32, double, bool and repeated-double.
+// Carrying those as TEXT rather than as a variant-of-scalars is deliberate and
+// buys the same thing the decimal strings buy: the model emits a JSON numeric
+// LITERAL, and the literal is what is exact. Round it through a double to put
+// it in a `double` map value and a client reading it back in a browser has
+// already lost the same precision finance.proto's banner refuses to lose. Text
+// preserves the model's own digits, and the caller converts once, at the point
+// where it knows which field it is filling in and therefore what type that
+// field has -- which finance.proto already told it.
+//
+// A `map<string, google.protobuf.Value>` was the other candidate and was
+// rejected: it makes every numeric value a float64 by construction (Value's
+// number_value IS a double), which is precisely the loss this avoids, and it
+// buys type information the caller does not need because finance.proto is
+// already the authority on each field's type.
+// ============================================================================
+message FinanceParams {
+  // The Finance RPC this request resolves to, spelled EXACTLY as the method is
+  // named in finance.proto's `service Finance` block -- "ComputeAmortization",
+  // "ComputeRefinance", "ComputeFutureValueDetailed". Not a lowercase or
+  // snake_case rendering of it: the wire value is the method name, so a caller
+  // can dispatch on it directly without a translation table that could itself
+  // fall out of date.
+  //
+  // The service validates this against the same 26 in-scope operations the
+  // training set was generated from, and refuses anything else with
+  // UNSUPPORTED_OPERATION rather than passing an unknown method name through.
+  string operation = 1;
+
+  // The named parameters for that operation, as described at length above.
+  //
+  // ENCODING, stated exactly, because a caller has to be able to convert these
+  // without guessing. The key is the request message's field name from
+  // finance.proto. The value is:
+  //
+  //   proto `string`  (BigDecimal)  -- the decimal string verbatim, e.g.
+  //                                    "420000.00", "0.0625". Untouched from
+  //                                    the model's own output.
+  //   proto `int32`                 -- decimal digits, e.g. "360". No sign
+  //                                    unless the field genuinely carries one.
+  //   proto `double`                -- shortest round-trip decimal text, e.g.
+  //                                    "0.0385", "27.5".
+  //   proto `bool`                  -- "true" or "false", lowercase.
+  //   proto `enum`                  -- the enum CONSTANT's name from
+  //                                    finance.proto, e.g. "END_OF_PERIOD",
+  //                                    "MACRS". Validated against that enum's
+  //                                    own constants.
+  //   proto `repeated`              -- a JSON array of the element encoding
+  //                                    above, e.g. "[-50000,12000,12000]".
+  //                                    Arrays are the only nested shape any of
+  //                                    these 26 requests has.
+  //
+  // Every field of the named operation's request message is present. That is
+  // not an accident of the model's phrasing -- the service REQUIRES it and
+  // refuses a partial object with INVALID_PARAMETERS. The reason is that proto3
+  // has no "absent": a missing `term_months` arrives at ComputeAmortization as
+  // zero, and the response is then an exact, auditable amortization of a loan
+  // with a term nobody stated. A fabricated input is as much a fabrication as a
+  // fabricated output, and it is far harder to notice.
+  map<string, string> params = 2;
+}
+
+// The one short question the model needs answered before it can commit to a
+// FinanceParams. Kept to a single field on purpose: a multi-question
+// clarification would mean the model is guessing at more than one thing at
+// once, which is the same dishonesty a fabricated parameter would be, just
+// spread across more fields.
+message Clarification {
+  string question = 1;
+}
+
+// A machine-readable reason plus a human-readable message, because the two
+// serve different consumers. The UI shows `message` to the user as-is; the enum
+// lets the calling code branch without parsing English out of a string.
+message Refusal {
+  enum Reason {
+    // Proto3 requires a zero value; it is never a reason this service actually
+    // gives, only the value an uninitialized Refusal would carry.
+    REASON_UNSPECIFIED = 0;
+
+    // The request names a calculation outside the 26 Finance operations this
+    // assistant covers -- or the model named a method that does not exist on
+    // sensen.finance.Finance at all. Inventing the nearest match would
+    // misrepresent a calculation the user never asked for, and the nearest
+    // match among these particular operations is rarely benign: ComputeNpv and
+    // ComputeXnpv take different arguments and answer different questions.
+    UNSUPPORTED_OPERATION = 1;
+
+    // The operation was recognised but its parameters were not usable: a field
+    // missing, a field the request message does not have, a value of the wrong
+    // shape (text where a number belongs), an enum constant that is not one of
+    // that enum's own values, or a number outside any sane range. This is the
+    // guard that stands between a hallucinated figure and an exact wrong
+    // answer computed from it.
+    INVALID_PARAMETERS = 2;
+
+    // The request was never about one of these calculations in the first
+    // place, INCLUDING the case where it asked for advice, a prediction or a
+    // recommendation. Declining advice is a first-class, correct outcome here,
+    // not a failure to understand.
+    OUT_OF_SCOPE = 3;
+
+    // The inference backend itself could not be reached, was never configured
+    // (MORTGAGE_MODEL_PATH unset), or failed mid-generation. Not a gRPC error,
+    // because the RPC to THIS service still completed correctly -- it is the
+    // model behind it that is unavailable, and the caller needs that
+    // distinction to decide whether retrying is even worthwhile.
+    MODEL_UNAVAILABLE = 4;
+  }
+
+  Reason reason = 1;
+  string message = 2;
+}

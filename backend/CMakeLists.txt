@@ -338,7 +338,27 @@ add_custom_command(
     DEPENDS ${ASSISTANT_PROTO_FILE}
 )
 
-# One descriptor set covering ALL THREE contracts, for Envoy's gRPC-JSON transcoder.
+# The MORTGAGE assistant's contract: free-text mortgage / time-value-of-money /
+# cash-flow requests in, the NAME OF A sensen.finance.Finance RPC plus that
+# RPC's own parameters (or a clarifying question, or a refusal) out. A separate
+# file from assistant.proto rather than a second service inside it, because the
+# two assistants are backed by two different fine-tuned models with two
+# different label spaces -- see that file's own banner. Same binary, same port,
+# fourth contract.
+set(MORTGAGE_ASSISTANT_PROTO_FILE "${CMAKE_CURRENT_SOURCE_DIR}/proto/mortgage_assistant.proto")
+
+add_custom_command(
+    OUTPUT "${PROTO_GEN_DIR}/mortgage_assistant.pb.cc" "${PROTO_GEN_DIR}/mortgage_assistant.pb.h" "${PROTO_GEN_DIR}/mortgage_assistant.grpc.pb.cc" "${PROTO_GEN_DIR}/mortgage_assistant.grpc.pb.h"
+    COMMAND $<TARGET_FILE:protoc>
+    ARGS --cpp_out=${PROTO_GEN_DIR}
+         --grpc_out=${PROTO_GEN_DIR}
+         --plugin=protoc-gen-grpc=$<TARGET_FILE:grpc_cpp_plugin>
+         -I${CMAKE_CURRENT_SOURCE_DIR}/proto
+         ${MORTGAGE_ASSISTANT_PROTO_FILE}
+    DEPENDS ${MORTGAGE_ASSISTANT_PROTO_FILE}
+)
+
+# One descriptor set covering ALL FOUR contracts, for Envoy's gRPC-JSON transcoder.
 #
 # Envoy resolves method names, field names and types from this at runtime, which
 # is what lets a caller POST JSON without holding a .proto or running codegen.
@@ -355,8 +375,8 @@ add_custom_command(
     ARGS --include_imports
          --descriptor_set_out=${PROTO_DESCRIPTOR}
          -I${CMAKE_CURRENT_SOURCE_DIR}/proto
-         ${PROTO_FILE} ${FINANCE_PROTO_FILE} ${ASSISTANT_PROTO_FILE}
-    DEPENDS ${PROTO_FILE} ${FINANCE_PROTO_FILE} ${ASSISTANT_PROTO_FILE}
+         ${PROTO_FILE} ${FINANCE_PROTO_FILE} ${ASSISTANT_PROTO_FILE} ${MORTGAGE_ASSISTANT_PROTO_FILE}
+    DEPENDS ${PROTO_FILE} ${FINANCE_PROTO_FILE} ${ASSISTANT_PROTO_FILE} ${MORTGAGE_ASSISTANT_PROTO_FILE}
     COMMENT "Generating proto descriptor set for Envoy JSON transcoding"
 )
 add_custom_target(proto_descriptor ALL DEPENDS ${PROTO_DESCRIPTOR})
@@ -368,6 +388,8 @@ add_library(proto_lib STATIC
     "${PROTO_GEN_DIR}/finance.grpc.pb.cc"
     "${PROTO_GEN_DIR}/assistant.pb.cc"
     "${PROTO_GEN_DIR}/assistant.grpc.pb.cc"
+    "${PROTO_GEN_DIR}/mortgage_assistant.pb.cc"
+    "${PROTO_GEN_DIR}/mortgage_assistant.grpc.pb.cc"
 )
 target_include_directories(proto_lib PUBLIC ${PROTO_GEN_DIR})
 target_link_libraries(proto_lib PUBLIC grpc++ libprotobuf)
@@ -788,8 +810,8 @@ add_subdirectory(external/SGEE sgee EXCLUDE_FROM_ALL)
 # add_subdirectory(nanobind EXCLUDE_FROM_ALL)
 
 # Core engine binary
-add_executable(calculator_engine src/main.cpp src/issue_key.cpp src/modules/calculator_service.cpp src/modules/finance_service.cpp src/modules/quota.cpp src/modules/api_key.cpp src/modules/assistant_service.cpp)
-target_sources(calculator_engine PUBLIC FILE_SET CXX_MODULES FILES src/modules/calculator_service.cppm src/modules/market_data.cppm src/modules/finance_service.cppm src/modules/quota.cppm src/modules/api_key.cppm src/modules/strategy_catalogue.cppm src/modules/assistant_verification.cppm src/modules/assistant_service.cppm)
+add_executable(calculator_engine src/main.cpp src/issue_key.cpp src/modules/calculator_service.cpp src/modules/finance_service.cpp src/modules/quota.cpp src/modules/api_key.cpp src/modules/assistant_service.cpp src/modules/mortgage_assistant_service.cpp)
+target_sources(calculator_engine PUBLIC FILE_SET CXX_MODULES FILES src/modules/calculator_service.cppm src/modules/market_data.cppm src/modules/finance_service.cppm src/modules/quota.cppm src/modules/api_key.cppm src/modules/strategy_catalogue.cppm src/modules/assistant_verification.cppm src/modules/assistant_service.cppm src/modules/mortgage_assistant_service.cppm)
 target_link_libraries(calculator_engine PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto sgee)
 
 
