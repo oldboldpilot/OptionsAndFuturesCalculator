@@ -1,5 +1,7 @@
 // numeric_audit_probe.cpp -- THROWAWAY correctness audit harness.
 //
+// @author Olumuyiwa Oluwasanmi
+//
 // Loads the SAME Q8_0 GGUF twice in one process: once through upstream
 // llama.cpp (reference) and once through sensen's LlamaModel CPU path, feeds
 // both the SAME token ids, and compares full-vocab logits.
@@ -8,13 +10,31 @@
 // inference numerically the same thing llama.cpp computes?".
 //
 // Usage: ./numeric_audit_probe <model.gguf> [n_rollout] [n_threads]
+//
+// The system prompt and the utterance battery default to the STRATEGY
+// assistant's, which is what every earlier run of this probe measured. Both are
+// overridable so the same harness covers any assistant on this architecture --
+// via FILES rather than inline env strings, because the mortgage system prompt
+// contains apostrophes and the utterances contain '$' and quotes, all of which
+// a shell would mangle:
+//
+//   AUDIT_SYSTEM_FILE=<path>      whole file (one trailing newline stripped)
+//                                 replaces the system prompt verbatim
+//   AUDIT_UTTERANCE_FILE=<path>   one utterance per line; each is run through
+//                                 the full prefill compare + greedy rollout
+//                                 against a freshly cleared cache on both sides
+//
+// AUDIT_PAD/AUDIT_SHIFT (RoPE padding) and AUDIT_POSITIONS (the per-position
+// sweep) apply to the FIRST utterance only, preserving their original meaning.
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <numeric>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -26,22 +46,71 @@ import sensen.llm_interfaces;
 
 namespace {
 
-constexpr const char* kSystemPrompt =
+constexpr const char* kStrategySystemPrompt =
     "You turn a trader's request into parameters for the Options & Futures "
     "Calculator. Reply with a single JSON object inside <params></params> "
     "when you have enough to act, or ask exactly one short question when you "
     "do not. You do not give trading advice.";
 
-std::string build_prompt(const std::string& utterance) {
+std::string build_prompt(const std::string& system_prompt, const std::string& utterance) {
     std::string p;
     p += "<|im_start|>system\n";
-    p += kSystemPrompt;
+    p += system_prompt;
     p += "<|im_end|>\n";
     p += "<|im_start|>user\n";
     p += utterance;
     p += "<|im_end|>\n";
     p += "<|im_start|>assistant\n";
     return p;
+}
+
+// Whole-file read, with exactly one trailing newline stripped: a system prompt
+// stored in a file almost always ends with one, and it is NOT part of the
+// prompt the model was trained on.
+std::string read_file_trimmed(const char* path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) { std::fprintf(stderr, "FATAL: cannot read %s\n", path); std::exit(1); }
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    std::string s = ss.str();
+    if (!s.empty() && s.back() == '\n') s.pop_back();
+    return s;
+}
+
+std::vector<std::string> read_lines(const char* path) {
+    std::ifstream in(path);
+    if (!in) { std::fprintf(stderr, "FATAL: cannot read %s\n", path); std::exit(1); }
+    std::vector<std::string> out;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (!line.empty()) out.push_back(line);
+    }
+    return out;
+}
+
+// The whole point of this run: a homoglyph is invisible in printed output.
+// Report every non-ASCII codepoint by U+XXXX so 18０ cannot be mistaken for 180.
+std::string nonascii_report(const std::string& s) {
+    std::string out;
+    for (std::size_t i = 0; i < s.size();) {
+        const unsigned char c = (unsigned char)s[i];
+        if (c < 0x80) { ++i; continue; }
+        // decode one UTF-8 sequence
+        unsigned cp = 0;
+        int len = 1;
+        if ((c & 0xE0) == 0xC0) { cp = c & 0x1F; len = 2; }
+        else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F; len = 3; }
+        else if ((c & 0xF8) == 0xF0) { cp = c & 0x07; len = 4; }
+        else { cp = c; len = 1; }
+        for (int k = 1; k < len && i + (std::size_t)k < s.size(); ++k)
+            cp = (cp << 6) | ((unsigned char)s[i + (std::size_t)k] & 0x3F);
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "U+%04X@%zu ", cp, i);
+        out += buf;
+        i += (std::size_t)len;
+    }
+    return out;
 }
 
 void quiet_log(ggml_log_level, const char*, void*) {}
@@ -124,9 +193,16 @@ int main(int argc, char** argv) {
     const int n_rollout = argc > 2 ? std::atoi(argv[2]) : 20;
     const int n_threads = argc > 3 ? std::atoi(argv[3]) : 8;
 
+    const std::string system_prompt =
+        std::getenv("AUDIT_SYSTEM_FILE") ? read_file_trimmed(std::getenv("AUDIT_SYSTEM_FILE"))
+                                         : std::string(kStrategySystemPrompt);
+
+    std::vector<std::string> utterances;
+    if (const char* uf = std::getenv("AUDIT_UTTERANCE_FILE")) utterances = read_lines(uf);
+    if (utterances.empty()) utterances.push_back("Iron condor on SPY, 30 days out, one contract.");
+
     // AUDIT_PAD: repeat filler in the user turn to push the prompt long, so RoPE
-    // is exercised at high positions rather than only at ~80.
-    std::string utterance = "Iron condor on SPY, 30 days out, one contract.";
+    // is exercised at high positions rather than only at ~80. First utterance only.
     if (const char* pad = std::getenv("AUDIT_PAD")) {
         const int reps = std::atoi(pad);
         std::string filler;
@@ -136,10 +212,13 @@ int main(int argc, char** argv) {
         for (int i = 0; i < shift; ++i) filler += "alpha ";
         for (int i = 0; i < reps; ++i)
             filler += "The trader also considered volatility, skew, gamma and theta at length. ";
-        utterance = filler + utterance;
+        utterances[0] = filler + utterances[0];
     }
-    const std::string prompt = build_prompt(utterance);
     const bool do_positions = std::getenv("AUDIT_POSITIONS") != nullptr;
+
+    std::printf("== SYSTEM PROMPT (%zu chars) ==\n%s\n\n", system_prompt.size(),
+                system_prompt.c_str());
+    std::printf("== UTTERANCES == %zu\n\n", utterances.size());
 
     // ---------------- llama.cpp reference ----------------
     llama_log_set(quiet_log, nullptr);
@@ -151,53 +230,21 @@ int main(int argc, char** argv) {
     const llama_vocab* vocab = llama_model_get_vocab(lmodel);
     const int n_vocab = llama_vocab_n_tokens(vocab);
 
+    // A mortgage answer runs to ~200 tokens, so the 1024 that sufficed for the
+    // strategy battery is no longer automatically enough. AUDIT_NCTX raises it.
+    const int n_ctx = std::getenv("AUDIT_NCTX") ? std::atoi(std::getenv("AUDIT_NCTX")) : 1024;
+
     llama_context_params cp = llama_context_default_params();
-    cp.n_ctx = 1024;
-    cp.n_batch = 1024;
-    cp.n_ubatch = 1024;
+    cp.n_ctx = (std::uint32_t)n_ctx;
+    cp.n_batch = (std::uint32_t)n_ctx;
+    cp.n_ubatch = (std::uint32_t)n_ctx;
     cp.n_seq_max = 1;
     cp.n_threads = n_threads;
     cp.n_threads_batch = n_threads;
     llama_context* lctx = llama_init_from_model(lmodel, cp);
     if (!lctx) { std::fprintf(stderr, "FATAL: llama ctx failed\n"); return 1; }
 
-    std::vector<llama_token> toks(prompt.size() + 16);
-    int nt = llama_tokenize(vocab, prompt.c_str(), (int32_t)prompt.size(), toks.data(),
-                            (int32_t)toks.size(), true, true);
-    if (nt < 0) { toks.resize(-nt); nt = llama_tokenize(vocab, prompt.c_str(), (int32_t)prompt.size(),
-                                                        toks.data(), (int32_t)toks.size(), true, true); }
-    toks.resize(nt);
-
-    std::printf("== TOKENS (llama.cpp, add_bos=%d) n=%d ==\n",
-                (int)llama_vocab_get_add_bos(vocab), nt);
-    for (int i = 0; i < nt; ++i) std::printf("%d ", toks[i]);
-    std::printf("\n\n");
-
-    llama_batch batch = llama_batch_init(1024, 0, 1);
-    auto reset = [&] { batch.n_tokens = 0; };
-    auto push = [&](llama_token t, int pos, bool want) {
-        int i = batch.n_tokens;
-        batch.token[i] = t; batch.pos[i] = pos; batch.n_seq_id[i] = 1;
-        batch.seq_id[i][0] = 0; batch.logits[i] = want ? 1 : 0;
-        batch.n_tokens++;
-    };
-
-    reset();
-    for (int i = 0; i < nt; ++i) push(toks[i], i, do_positions ? true : (i == nt - 1));
-    if (llama_decode(lctx, batch) != 0) { std::fprintf(stderr, "FATAL: llama prefill\n"); return 1; }
-    // Keep every position's reference logits when the per-position sweep is on.
-    std::vector<std::vector<float>> ref_all;
-    if (do_positions) {
-        ref_all.resize(nt);
-        for (int i = 0; i < nt; ++i) {
-            const float* q = llama_get_logits_ith(lctx, i);
-            ref_all[i].assign(q, q + n_vocab);
-        }
-    }
-    const float* lp = llama_get_logits_ith(lctx, batch.n_tokens - 1);
-    std::vector<float> ref_logits(lp, lp + n_vocab);
-
-    // ---------------- sensen ----------------
+    // ---------------- sensen (loaded once, reused across utterances) ----------
     auto parser = sensen::GGUFParser::open(model_path).loadMetadata().loadTensorIndex().build();
     const auto& cfg = parser->getConfig();
     std::printf("== SENSEN CONFIG ==\narch=%s layers=%zu hidden=%zu heads=%zu kv_heads=%zu "
@@ -212,7 +259,100 @@ int main(int argc, char** argv) {
     auto smodel = std::move(*smodel_e);
 
     sensen::InferenceThreadPool pool((std::size_t)n_threads);
-    sensen::AgentSession agent(0, cfg.num_layers, cfg.num_heads, 1024,
+
+    // ---- homoglyph watch set ------------------------------------------------
+    // The reported RPC corruption is U+FF10 (fullwidth zero) and U+2080
+    // (subscript zero) INSIDE numeric literals. Those print as ordinary digits,
+    // so find every token whose piece carries a fullwidth or subscript digit and
+    // track where they sit in each implementation's distribution. If sensen's
+    // decode were the fault, they would rank high on sensen and nowhere on
+    // llama.cpp; if the checkpoint is the fault, both rank them together.
+    std::vector<int> homoglyph_toks;
+    for (int t = 0; t < n_vocab; ++t) {
+        char b[256];
+        const int n = llama_token_to_piece(vocab, t, b, sizeof(b), 0, true);
+        if (n <= 0) continue;
+        const std::string s(b, (std::size_t)n);
+        for (std::size_t i = 0; i + 2 < s.size(); ++i) {
+            const unsigned char c0 = (unsigned char)s[i], c1 = (unsigned char)s[i + 1],
+                                c2 = (unsigned char)s[i + 2];
+            if ((c0 & 0xF0) != 0xE0) continue;
+            const unsigned cp = ((c0 & 0x0Fu) << 12) | ((c1 & 0x3Fu) << 6) | (c2 & 0x3Fu);
+            if ((cp >= 0xFF10 && cp <= 0xFF19) || (cp >= 0x2080 && cp <= 0x2089)) {
+                homoglyph_toks.push_back(t);
+                break;
+            }
+        }
+    }
+    std::printf("== HOMOGLYPH WATCH == %zu tokens carry a fullwidth (U+FF1x) or subscript "
+                "(U+208x) digit\n", homoglyph_toks.size());
+    for (std::size_t i = 0; i < homoglyph_toks.size() && i < 24; ++i)
+        std::printf("  %d(%s)", homoglyph_toks[i], piece(vocab, homoglyph_toks[i]).c_str());
+    std::printf("\n\n");
+    // Rank of the best homoglyph token in a logit vector, plus its gap to the top.
+    auto homoglyph_rank = [&](const std::vector<float>& v, int& best_tok, double& gap) {
+        best_tok = -1;
+        double best = -1e30, top = -1e30;
+        for (float x : v) top = std::max(top, (double)x);
+        for (int t : homoglyph_toks)
+            if ((double)v[(std::size_t)t] > best) { best = v[(std::size_t)t]; best_tok = t; }
+        int rank = 0;
+        for (float x : v) if ((double)x > best) ++rank;
+        gap = top - best;
+        return rank;
+    };
+
+    llama_batch batch = llama_batch_init(n_ctx, 0, 1);
+    auto reset = [&] { batch.n_tokens = 0; };
+    auto push = [&](llama_token t, int pos, bool want) {
+        int i = batch.n_tokens;
+        batch.token[i] = t; batch.pos[i] = pos; batch.n_seq_id[i] = 1;
+        batch.seq_id[i][0] = 0; batch.logits[i] = want ? 1 : 0;
+        batch.n_tokens++;
+    };
+
+    int diverged_utterances = 0;
+
+    for (std::size_t ui = 0; ui < utterances.size(); ++ui) {
+    const std::string& utterance = utterances[ui];
+    const std::string prompt = build_prompt(system_prompt, utterance);
+    std::printf("\n################ UTTERANCE %zu ################\n%s\n\n", ui,
+                utterance.c_str());
+
+    // Both sides start from an empty cache: sensen gets a brand-new AgentSession
+    // below, so llama.cpp must not carry the previous utterance's KV either.
+    llama_memory_clear(llama_get_memory(lctx), true);
+
+    std::vector<llama_token> toks(prompt.size() + 16);
+    int nt = llama_tokenize(vocab, prompt.c_str(), (int32_t)prompt.size(), toks.data(),
+                            (int32_t)toks.size(), true, true);
+    if (nt < 0) { toks.resize(-nt); nt = llama_tokenize(vocab, prompt.c_str(), (int32_t)prompt.size(),
+                                                        toks.data(), (int32_t)toks.size(), true, true); }
+    toks.resize(nt);
+
+    const bool sweep_this = do_positions && ui == 0;
+
+    std::printf("== TOKENS (llama.cpp, add_bos=%d) n=%d ==\n",
+                (int)llama_vocab_get_add_bos(vocab), nt);
+    for (int i = 0; i < nt; ++i) std::printf("%d ", toks[i]);
+    std::printf("\n\n");
+
+    reset();
+    for (int i = 0; i < nt; ++i) push(toks[i], i, sweep_this ? true : (i == nt - 1));
+    if (llama_decode(lctx, batch) != 0) { std::fprintf(stderr, "FATAL: llama prefill\n"); return 1; }
+    // Keep every position's reference logits when the per-position sweep is on.
+    std::vector<std::vector<float>> ref_all;
+    if (sweep_this) {
+        ref_all.resize(nt);
+        for (int i = 0; i < nt; ++i) {
+            const float* q = llama_get_logits_ith(lctx, i);
+            ref_all[i].assign(q, q + n_vocab);
+        }
+    }
+    const float* lp = llama_get_logits_ith(lctx, batch.n_tokens - 1);
+    std::vector<float> ref_logits(lp, lp + n_vocab);
+
+    sensen::AgentSession agent(0, cfg.num_layers, cfg.num_heads, (std::size_t)n_ctx,
                                cfg.head_dim_calculated(), sensen::KVCacheStrategy::FULL,
                                cfg.num_kv_heads);
 
@@ -261,7 +401,7 @@ int main(int argc, char** argv) {
     std::printf("top-5 set agreement        : %d/5\n\n", top5_set);
 
     // ---------------- per-position sweep (RoPE / attention across all positions) ----
-    if (do_positions) {
+    if (sweep_this) {
         std::printf("== PER-POSITION PREFILL SWEEP (sensen re-prefills each prefix) ==\n");
         std::printf("  pos | max|diff| | corr        | llama argmax | sensen argmax | match\n");
         int mismatches = 0;
@@ -308,6 +448,9 @@ int main(int argc, char** argv) {
     std::vector<int> ref_seq, sen_seq;
     std::vector<double> step_maxabs;
     std::vector<int> step_ref_argmax, step_sen_argmax;
+    // Per step, the four logits needed to quantify HOW close the call was:
+    // each side's own top logit, and each side's logit for the OTHER side's pick.
+    std::vector<double> ref_top_l, ref_l_of_sen, sen_top_l, sen_l_of_ref;
 
     // seed both from their own prefill logits
     int ref_tok = rt[0];
@@ -318,6 +461,26 @@ int main(int argc, char** argv) {
     step_ref_argmax.push_back(ref_tok);
     step_sen_argmax.push_back(sen_tok);
     step_maxabs.push_back(st.max_abs);
+    ref_top_l.push_back(ref_logits[rt[0]]);
+    ref_l_of_sen.push_back(ref_logits[stk[0]]);
+    sen_top_l.push_back(sen_logits[stk[0]]);
+    sen_l_of_ref.push_back(sen_logits[rt[0]]);
+
+    // Closest either side ever came to emitting a homoglyph, over this rollout.
+    int best_ref_hg_rank = 1 << 30, best_sen_hg_rank = 1 << 30;
+    int best_ref_hg_step = -1, best_sen_hg_step = -1, best_ref_hg_tok = -1, best_sen_hg_tok = -1;
+    double best_ref_hg_gap = 0.0, best_sen_hg_gap = 0.0;
+    auto note_hg = [&](const std::vector<float>& rl, const std::vector<float>& sl, int step) {
+        int rtok = -1, stok = -1;
+        double rgap = 0, sgap = 0;
+        const int rr = homoglyph_rank(rl, rtok, rgap);
+        const int sr = homoglyph_rank(sl, stok, sgap);
+        if (rr < best_ref_hg_rank) { best_ref_hg_rank = rr; best_ref_hg_step = step;
+                                     best_ref_hg_tok = rtok; best_ref_hg_gap = rgap; }
+        if (sr < best_sen_hg_rank) { best_sen_hg_rank = sr; best_sen_hg_step = step;
+                                     best_sen_hg_tok = stok; best_sen_hg_gap = sgap; }
+    };
+    note_hg(ref_logits, sen_logits, 0);
 
     int npast = nt;
     for (int s = 1; s < n_rollout; ++s) {
@@ -337,6 +500,11 @@ int main(int argc, char** argv) {
         auto sa = topk(sl, 1)[0];
         step_ref_argmax.push_back(ra);
         step_sen_argmax.push_back(sa);
+        ref_top_l.push_back(rl[ra]);
+        ref_l_of_sen.push_back(rl[sa]);
+        sen_top_l.push_back(sl[sa]);
+        sen_l_of_ref.push_back(sl[ra]);
+        note_hg(rl, sl, s);
         ref_seq.push_back(ra);
         sen_seq.push_back(sa);
         ref_tok = ra;
@@ -356,12 +524,47 @@ int main(int argc, char** argv) {
     }
     std::printf("\nROLLOUT: %s (%zu steps)\n", all_match ? "IDENTICAL" : "DIVERGED",
                 step_ref_argmax.size());
+    if (!all_match) ++diverged_utterances;
+
+    // FIRST divergence, stated precisely -- everything after it compares two
+    // different contexts and so cannot be attributed to a single step.
+    for (std::size_t i = 0; i < step_ref_argmax.size(); ++i) {
+        if (step_ref_argmax[i] == step_sen_argmax[i]) continue;
+        std::printf("FIRST DIVERGENCE at step %zu\n", i);
+        std::printf("  llama  chose %6d %-16s  own logit %9.4f | its logit for sensen's pick %9.4f"
+                    "  (margin %8.4f)\n",
+                    step_ref_argmax[i], piece(vocab, step_ref_argmax[i]).c_str(), ref_top_l[i],
+                    ref_l_of_sen[i], ref_top_l[i] - ref_l_of_sen[i]);
+        std::printf("  sensen chose %6d %-16s  own logit %9.4f | its logit for llama's  pick %9.4f"
+                    "  (margin %8.4f)\n",
+                    step_sen_argmax[i], piece(vocab, step_sen_argmax[i]).c_str(), sen_top_l[i],
+                    sen_l_of_ref[i], sen_top_l[i] - sen_l_of_ref[i]);
+        std::printf("  max|dlogit| over full vocab at this step: %.6f\n", step_maxabs[i]);
+        break;
+    }
 
     std::string ref_text, sen_text;
     for (int t : ref_seq) { char b[256]; int n = llama_token_to_piece(vocab, t, b, sizeof(b), 0, true); if (n>0) ref_text.append(b,n); }
     for (int t : sen_seq) { char b[256]; int n = llama_token_to_piece(vocab, t, b, sizeof(b), 0, true); if (n>0) sen_text.append(b,n); }
     std::printf("\nllama text : %s\n", ref_text.c_str());
     std::printf("sensen text: %s\n", sen_text.c_str());
+    // A fullwidth zero prints as a zero. Name every non-ASCII codepoint instead.
+    const std::string rna = nonascii_report(ref_text);
+    const std::string sna = nonascii_report(sen_text);
+    std::printf("llama  non-ASCII codepoints: %s\n", rna.empty() ? "(none)" : rna.c_str());
+    std::printf("sensen non-ASCII codepoints: %s\n", sna.empty() ? "(none)" : sna.c_str());
+    std::printf("closest homoglyph -- llama : rank %d at step %d (tok %d '%s', %.4f below top)\n",
+                best_ref_hg_rank, best_ref_hg_step, best_ref_hg_tok,
+                best_ref_hg_tok >= 0 ? piece(vocab, best_ref_hg_tok).c_str() : "?", best_ref_hg_gap);
+    std::printf("closest homoglyph -- sensen: rank %d at step %d (tok %d '%s', %.4f below top)\n",
+                best_sen_hg_rank, best_sen_hg_step, best_sen_hg_tok,
+                best_sen_hg_tok >= 0 ? piece(vocab, best_sen_hg_tok).c_str() : "?", best_sen_hg_gap);
+
+    }  // for each utterance
+
+    std::printf("\n================ SUMMARY ================\n");
+    std::printf("utterances: %zu   rollouts that diverged: %d\n", utterances.size(),
+                diverged_utterances);
 
     llama_batch_free(batch);
     llama_free(lctx);
