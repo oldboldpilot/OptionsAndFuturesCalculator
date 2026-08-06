@@ -811,7 +811,7 @@ add_subdirectory(external/SGEE sgee EXCLUDE_FROM_ALL)
 
 # Core engine binary
 add_executable(calculator_engine src/main.cpp src/issue_key.cpp src/modules/calculator_service.cpp src/modules/finance_service.cpp src/modules/quota.cpp src/modules/api_key.cpp src/modules/assistant_service.cpp src/modules/mortgage_assistant_service.cpp)
-target_sources(calculator_engine PUBLIC FILE_SET CXX_MODULES FILES src/modules/calculator_service.cppm src/modules/market_data.cppm src/modules/finance_service.cppm src/modules/quota.cppm src/modules/api_key.cppm src/modules/strategy_catalogue.cppm src/modules/assistant_verification.cppm src/modules/assistant_service.cppm src/modules/mortgage_verification.cppm src/modules/mortgage_assistant_service.cppm)
+target_sources(calculator_engine PUBLIC FILE_SET CXX_MODULES FILES src/modules/calculator_service.cppm src/modules/market_data.cppm src/modules/finance_service.cppm src/modules/quota.cppm src/modules/api_key.cppm src/modules/strategy_catalogue.cppm src/modules/assistant_verification.cppm src/modules/assistant_service.cppm src/modules/mortgage_verification.cppm src/modules/mortgage_grammar.cppm src/modules/mortgage_assistant_service.cppm)
 target_link_libraries(calculator_engine PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto sgee)
 
 
@@ -893,6 +893,31 @@ target_compile_definitions(test_mortgage_verification PRIVATE
     MORTGAGE_FINANCE_PROTO_PATH="${CMAKE_CURRENT_SOURCE_DIR}/proto/finance.proto")
 
 add_test(NAME MortgageVerificationTest COMMAND test_mortgage_verification)
+
+# Proto-derived CONSTRAINED DECODING for the mortgage assistant
+# (mortgage_grammar.cppm). Same rationale as the verification blocks above:
+# proto- and gRPC-free, and deliberately NOT linked against sensen_slim. It
+# needs two sensen modules -- sensen.gp_ara_interfaces (via
+# mortgage_verification) and sensen.grammar, whose IGrammar contract this
+# module implements -- and neither depends on anything beyond std, so both are
+# compiled here as this target's own FILE_SET sources.
+add_executable(test_mortgage_grammar tests/test_mortgage_grammar.cpp)
+target_sources(test_mortgage_grammar
+    PRIVATE
+    FILE_SET CXX_MODULES FILES
+        sensen/src/gp_ara_interfaces.cppm
+        sensen/src/grammar.cppm
+        src/modules/mortgage_verification.cppm
+        src/modules/mortgage_grammar.cppm
+)
+# Both structural gates read a real file at RUN time -- the label-space drift
+# check re-parses finance.proto, and the control set is the gold val.jsonl --
+# so the test FAILS rather than silently skipping if a path is wrong.
+target_compile_definitions(test_mortgage_grammar PRIVATE
+    MORTGAGE_FINANCE_PROTO_PATH="${CMAKE_CURRENT_SOURCE_DIR}/proto/finance.proto"
+    MORTGAGE_VAL_JSONL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../agent/dataset/data_mortgage/val.jsonl")
+
+add_test(NAME MortgageGrammarTest COMMAND test_mortgage_grammar)
 
 # End-to-end smoke client. Verifies a running engine returns live data on all
 # three RPCs; used as the deploy gate.
