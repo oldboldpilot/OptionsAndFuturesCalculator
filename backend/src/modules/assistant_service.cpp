@@ -636,6 +636,29 @@ class SensenBackend final : public QueuedBackend {
         // keeps the service correct against any sensen build, fixed or not.
         config.n_gpu_layers = 0;
 
+        // MUST be 1.0, and this line is as load-bearing as n_gpu_layers=0 above.
+        //
+        // sensen::Sampler::sample (llm_pipeline.cppm) applies repetition_penalty
+        // to the logits BEFORE the greedy argmax -- so it changes which token
+        // "greedy" picks, despite greedy decode having no business being
+        // penalised at all. GenerationConfig's default is 1.1 over a 64-token
+        // window (llm_interfaces.cppm), and the penalty divides a logit by 1.1
+        // ONCE PER OCCURRENCE in that window, i.e. exponentially in repeat count.
+        //
+        // Structured JSON is digit-dense and Qwen3 tokenises one digit per
+        // token, so '0' lands in the window 8-12 times in a normal params block
+        // and its logit collapses by 14-18 points. Measured A/B on 90 identical
+        // held-out rows: 0/90 exact at 1.1, 25/90 (27.8%) at 1.0. The whole
+        // failure was this field.
+        //
+        // It also produced the fullwidth-zero symptom: U+FF10 is a DIFFERENT
+        // token id, so it escapes the penalty entirely while ASCII '0' is being
+        // crushed, and greedy then prefers it -- 2/100 rows carried a homoglyph
+        // at 1.1, 0/100 at 1.0. Nothing was wrong with the decode path or the
+        // checkpoint; an independent llama.cpp rollout on the same GGUF agreed
+        // with sensen at 8/30 both ways.
+        config.repetition_penalty = 1.0F;
+
         return config;
     }
 
