@@ -335,11 +335,12 @@ What enforce means at the two client surfaces, neither of which is a backend
 concern and both of which are now user-visible:
 
 - optionsandfuturescalculator.com is a multi-leg calculator, so an anonymous
-  visitor is refused on every strategy except a lone call or put.
-  `StrategyMetrics.tsx` renders that refusal under the heading **"Unavailable"**,
-  while `ProPanel` on the same page holds `startCheckout`. The message is honest
-  and the upgrade path exists; they are simply not adjacent, at the one moment
-  the user has just demonstrated intent by building a spread.
+  visitor is refused on every strategy except a lone call or put. That refusal
+  renders as `UpgradePrompt` — heading **"Needs Pro"**, the engine's own
+  sentence, and the checkout buttons — rather than through the error branch
+  under "Unavailable" in loss red, which is what it did until 2026-08-06.
+  `useCalculatorStore` discriminates on the gRPC **status code** (7), never on
+  the message text, which was reworded twice in a single day.
 - mortgagefvcalculator.com gets `PERMISSION_DENIED` on every anonymous
   `ParseOperation`, so that integration needs a Pro credential before the
   assistant does anything at all. The `sensen.finance.Finance` RPCs it would
