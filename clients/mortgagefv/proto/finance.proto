@@ -1,23 +1,25 @@
 // ============================================================================
 // VENDORED COPY -- do not edit by hand.
 //
-// Source:  https://github.com/oldboldpilot/OptionsAndFuturesCalculator
-//          backend/proto/finance.proto
-// Commit:  6764749c6b3cc910bfe240dfc1584a51147d9d29  (2026-08-05)
+// Source:   https://github.com/oldboldpilot/OptionsAndFuturesCalculator
+//           backend/proto/finance.proto
+// Content:  6764749c6b3cc910bfe240dfc1584a51147d9d29  (2026-08-05) -- the last
+//           upstream commit that CHANGED this file.
+// Verified: d2ac44a3cd428dc161b65305bb48f0b4cfccd149  (2026-08-06) -- diffed
+//           against upstream at this commit; this header block is the ONLY
+//           difference, so the contract below is current, not merely old.
 //
 // This file is self-contained (no imports), so it travels as a single copy.
 // There is no published package for it (npm, BSR, etc.) -- re-vendoring on
-// update means: pull the file at a newer commit, update the commit hash
-// above, and re-run gen_proto.sh. See ../README.md.
+// update means: pull the file at a newer commit, update BOTH hashes above,
+// re-run the diff, and re-run gen_proto.sh. See ../README.md.
 //
-// NOT YET LIVE IN PRODUCTION as of the commit above: ComputeRefinance,
+// EVERY RPC DECLARED BELOW IS LIVE at api.optionsandfuturescalculator.com.
+// An earlier revision of this header said six of them were NOT YET LIVE and
+// answered UNIMPLEMENTED (grpc-status 12) -- ComputeRefinance,
 // ComputePayoffTiming, ComputeMortgageRecast, ComputeHomeFutureValue,
-// ComputeRentVsBuy, ComputeHomeNpv. They are declared in this contract (the
-// server that will eventually run them shares this same .proto) but the
-// engine currently deployed at api.optionsandfuturescalculator.com predates
-// them and answers UNIMPLEMENTED (grpc-status 12) for all six. Verify
-// against the live endpoint before shipping a UI that depends on them --
-// see ../README.md "RPCs not yet live".
+// ComputeRentVsBuy, ComputeHomeNpv. That is no longer true: all six were
+// deployed. See ../README.md and ../../../docs/MORTGAGEFV_INTEGRATION.md.
 // ============================================================================
 
 syntax = "proto3";
