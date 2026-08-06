@@ -90,6 +90,19 @@ def parse_params_text(text: str) -> dict | None:
         return None
 
 
+# Refusal reasons that mean "the ENVIRONMENT is not configured", never "the
+# model got it wrong". A run containing any of these is not a measurement of
+# the model and must not be reported as one -- see docs/guides/
+# ASSISTANT_EVALUATION.md, "Measurement traps that produce a confident wrong
+# answer".
+_INFRA_REASONS = ("DATA_UNAVAILABLE", "MODEL_UNAVAILABLE")
+
+
+def _is_infra(text: str | None) -> bool:
+    """True iff `text` is a refusal whose reason names an environment fault."""
+    return bool(text) and any(f"[{r}]" in text for r in _INFRA_REASONS)
+
+
 def call(stub: "assistant_pb2_grpc.StrategyAssistantStub", utterance: str, prior: str,
          timeout: float) -> tuple[dict | None, str, str | None]:
     """One ParseStrategy RPC. Returns (params_dict_or_None, oneof_name, text)."""
@@ -104,7 +117,12 @@ def call(stub: "assistant_pb2_grpc.StrategyAssistantStub", utterance: str, prior
     if which == "clarification":
         return None, which, resp.clarification.question
     if which == "refusal":
-        return None, which, resp.refusal.message
+        # The REASON, not just the prose. An infrastructure refusal
+        # (DATA_UNAVAILABLE when no market-data credentials are configured,
+        # MODEL_UNAVAILABLE when MODEL_PATH is unset) is not a model failure,
+        # and scoring it as one turned a 16/16 model into a reported 6/14.
+        reason = assistant_pb2.Refusal.Reason.Name(resp.refusal.reason)
+        return None, which, f"[{reason}] {resp.refusal.message}"
     return None, which or "EMPTY", None
 
 
@@ -121,6 +139,7 @@ def evaluate(rows: list[dict], stub, timeout: float, verbose: bool) -> dict:
     bad: list[tuple[str, dict, dict | None]] = []
     errors = 0
 
+    infra = 0
     for r in rows:
         convo = [t for t in r["conversations"] if t["role"] != "system"]
         target = convo[-1]["content"]
@@ -129,19 +148,22 @@ def evaluate(rows: list[dict], stub, timeout: float, verbose: bool) -> dict:
         try:
             if len(convo) == 2:
                 user_turn = convo[0]["content"]
-                got, which, _ = call(stub, user_turn, "", timeout)
+                got, which, text = call(stub, user_turn, "", timeout)
+                infra += _is_infra(text)
             elif len(convo) == 4:
                 user_turn = convo[0]["content"]
                 reply_turn = convo[2]["content"]
                 # First call: the model should ASK, not answer -- this is
                 # the defect-1/defect-5 disambiguation behaviour itself.
-                got1, which1, _ = call(stub, user_turn, "", timeout)
+                got1, which1, text1 = call(stub, user_turn, "", timeout)
+                infra += _is_infra(text1)
                 asked_total += 1
-                if which1 != "params":
+                if which1 != "params" and not _is_infra(text1):
                     asked_ok += 1
                 elif verbose:
                     print(f"  [should-have-asked] {user_turn!r} -> params instead of a question")
-                got, which, _ = call(stub, user_turn, reply_turn, timeout)
+                got, which, text = call(stub, user_turn, reply_turn, timeout)
+                infra += _is_infra(text)
             else:
                 continue
         except grpc.RpcError as e:
@@ -152,7 +174,11 @@ def evaluate(rows: list[dict], stub, timeout: float, verbose: bool) -> dict:
 
         if want is None:
             non_param_total += 1
-            if which != "params":
+            # `which != "params"` alone credits an infrastructure refusal as a
+            # correct decline. That is how a credential-less engine reported
+            # 2/2 non-params next to a broken 6/14: the healthy-looking numbers
+            # were the ones scored wrong.
+            if which != "params" and not _is_infra(text):
                 non_param_ok += 1
             elif verbose:
                 print(f"  [should-refuse/ask] {convo[0]['content']!r} -> params instead")
@@ -171,11 +197,11 @@ def evaluate(rows: list[dict], stub, timeout: float, verbose: bool) -> dict:
         "exact": exact, "total": total, "fields": fields,
         "non_param_ok": non_param_ok, "non_param_total": non_param_total,
         "asked_ok": asked_ok, "asked_total": asked_total,
-        "errors": errors, "bad": bad,
+        "errors": errors, "bad": bad, "infra": infra,
     }
 
 
-def report(res: dict, label: str) -> None:
+def report(res: dict, label: str) -> int:
     total = max(res["total"], 1)
     print(f"\n=== {label} ===")
     print(f"params exact-match : {res['exact']}/{res['total']} = {res['exact']/total:.1%}")
@@ -188,6 +214,21 @@ def report(res: dict, label: str) -> None:
     print(f"asked-when-ambiguous: {res['asked_ok']}/{res['asked_total']} = {res['asked_ok']/at:.1%}")
     if res["errors"]:
         print(f"RPC errors: {res['errors']}")
+
+    # HARD FAIL on an unmeasurable run.
+    #
+    # A DATA_UNAVAILABLE or MODEL_UNAVAILABLE refusal says the ENVIRONMENT is
+    # not configured -- no market-data credentials, no MODEL_PATH -- and says
+    # nothing whatever about the model. Scoring those as model misses reported
+    # a 16/16 assistant as 6/14 and nearly triggered an unnecessary retrain.
+    # Printing a number at all in that state is the bug; refusing to is the fix.
+    if res.get("infra", 0):
+        print(f"\n*** UNMEASURABLE: {res['infra']} infrastructure refusal(s) "
+              f"({', '.join(_INFRA_REASONS)}) ***")
+        print("    The engine is missing credentials or a model. These are NOT")
+        print("    model failures and the numbers above do not describe the model.")
+        print("    Configure the engine and re-run. See docs/guides/ASSISTANT_EVALUATION.md.")
+        return 1
     if res["bad"]:
         print("\nfirst mismatches:")
         for u, w, g in res["bad"][:5]:
@@ -195,6 +236,7 @@ def report(res: dict, label: str) -> None:
             print(f"    want {w}")
             print(f"    got  {g}")
 
+    return 0
 
 def main() -> None:
     ap = argparse.ArgumentParser()
@@ -220,7 +262,10 @@ def main() -> None:
     res = evaluate(rows, stub, args.timeout, args.verbose)
     dt = time.time() - t0
     print(f"[{len(rows)} rows, {dt:.1f}s, {dt/max(len(rows),1)*1000:.0f} ms/row]")
-    report(res, args.label)
+    rc = report(res, args.label)
+    # A run that could not measure the model must not exit 0 -- a green exit is
+    # how an unmeasurable result gets quoted later as if it were a score.
+    raise SystemExit(rc or 0)
 
 
 if __name__ == "__main__":
