@@ -2409,7 +2409,8 @@ class StrategyAssistantImpl final : public calculator::assistant::StrategyAssist
         // resolved above; reusing it here means authentication runs exactly
         // once per call. With PRO_GATE_MODE unset (Off) this is inert and
         // ParseStrategy stays free, matching today's behaviour.
-        if (auto s = ::options_calculator::auth::check_assistant_entitlement(_id); !s.ok()) {
+        if (auto s = ::options_calculator::auth::check_assistant_entitlement(
+                _id, ::options_calculator::auth::kStrategySurface); !s.ok()) {
             return s;
         }
 

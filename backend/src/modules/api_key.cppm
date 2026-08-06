@@ -295,6 +295,39 @@ enum class GateMode : std::uint8_t { Off, Warn, Enforce };
  * the gate is Off, OK-but-logged while Warn, PERMISSION_DENIED under Enforce
  * for a non-Pro identity.
  */
-[[nodiscard]] auto check_assistant_entitlement(const Identity& identity) -> grpc::Status;
+/**
+ * Names the calling surface, so a refusal describes the site the caller is
+ * actually on.
+ *
+ * The POLICY is deliberately shared between the two assistants -- see the
+ * rationale above; it follows from running a 0.6B model at all, not from which
+ * model it is. The COPY is not shareable, and for a while it was: the mortgage
+ * RPC refused with the strategy assistant's text, telling a
+ * mortgagefvcalculator.com user to "build your strategy manually with the
+ * symbol and strategy selectors" -- controls that do not exist on that site.
+ * The log line had the same defect from the other direction: every denial was
+ * recorded as `rpc=ParseStrategy` regardless of which service issued it, so the
+ * logs could not attribute a denial to a service.
+ */
+struct AssistantSurface {
+    std::string_view rpc;               // e.g. "ParseStrategy" -- for the log line
+    std::string_view feature;           // e.g. "natural-language strategy assistant"
+    std::string_view free_alternative;  // what the caller can still do without Pro
+};
+
+inline constexpr AssistantSurface kStrategySurface{
+    .rpc = "ParseStrategy",
+    .feature = "natural-language strategy assistant",
+    .free_alternative = "build your strategy manually with the symbol and strategy selectors"};
+
+inline constexpr AssistantSurface kMortgageSurface{
+    .rpc = "ParseOperation",
+    .feature = "natural-language mortgage assistant",
+    .free_alternative =
+        "call the sensen.finance.Finance operation you want directly -- every calculation "
+        "the assistant would have selected is free and unmetered by comparison"};
+
+[[nodiscard]] auto check_assistant_entitlement(const Identity& identity,
+                                               const AssistantSurface& surface) -> grpc::Status;
 
 }  // namespace options_calculator::auth

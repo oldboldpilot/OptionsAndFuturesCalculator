@@ -301,9 +301,26 @@ Two things to hold on to before trusting its output:
 
 Entitlement flows through Supabase `auth.users.app_metadata.tier` (never
 `user_metadata`, which is browser-writable) or a signed licence
-(`HMAC-SHA512[0:32]`, base64url). `PRO_GATE_MODE` is `warn` in production —
-observe-only, logging would-denies without denying — until a live checkout
-round trip is proven. `profiles.tier` is dead; nothing reads or writes it.
+(`HMAC-SHA512[0:32]`, base64url). `profiles.tier` is dead; nothing reads or
+writes it.
+
+**`PRO_GATE_MODE` is `enforce` in production, not `warn`.** This file said
+`warn` — observe-only, logging would-denies without denying, "until a live
+checkout round trip is proven" — and the live value was read as `enforce` on
+2026-08-06. Both assistants therefore answer a non-Pro caller with
+`PERMISSION_DENIED`, and an anonymous `ParseOperation` from
+mortgagefvcalculator.com is refused outright. **The condition that `warn` was
+waiting on has still not been met**: the live checkout round trip is unproven,
+so nothing has demonstrated that a user who pays actually receives the
+entitlement the gate now requires. Whether to hold `enforce` or fall back to
+`warn` until that round trip passes is a business decision, not a documentation
+one — this paragraph records which way the switch is actually set, not which
+way it should be.
+
+The gate is `check_assistant_entitlement` (`api_key.cpp`), shared by both
+assistants on purpose: its rationale is the cost asymmetry of running a 0.6B
+model at all, which is not a property of which model it is. Only the copy and
+the log label are per-surface (`kStrategySurface` / `kMortgageSurface`).
 
 `quota.cpp` collapses **every unkeyed caller into one shared `~anonymous`
 bucket**. A per-user-looking anonymous limit is therefore a site-wide limit; it

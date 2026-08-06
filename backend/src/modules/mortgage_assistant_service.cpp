@@ -2016,7 +2016,8 @@ class MortgageAssistantImpl final : public ::mortgage::assistant::MortgageAssist
         // `cost_llm_generate` call against the shared anonymous budget -- which
         // is a property of running a 0.6B model at all, not of which model it
         // is, and this RPC has exactly the same profile.
-        if (auto s = ::options_calculator::auth::check_assistant_entitlement(_id); !s.ok()) {
+        if (auto s = ::options_calculator::auth::check_assistant_entitlement(
+                _id, ::options_calculator::auth::kMortgageSurface); !s.ok()) {
             return s;
         }
 
