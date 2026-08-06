@@ -665,3 +665,17 @@ body {
   font-size: var(--text-xs);
 }
 .empty-state--error .empty-state-title { color: var(--color-loss); }
+/* A paywall is not a fault. Red here would read as "something went wrong",
+   which is exactly the misreading the "Unavailable" heading used to cause. */
+.empty-state--gate .empty-state-title { color: var(--color-accent); }
+/* The gate state carries four elements where the others carry two, and `.panel`
+   clips (`overflow: hidden`). With the inherited 1.75rem padding the price line
+   rendered 17px BELOW the panel's painted box -- present in the DOM, invisible
+   on screen, and it was the price. Tighter padding plus room to scroll means a
+   narrow viewport, where the message wraps to more lines, degrades to a
+   scrollbar rather than to silently swallowing the offer. */
+.empty-state--gate {
+  padding: 0.875rem 0.75rem;
+  min-height: 0;
+  overflow-y: auto;
+}

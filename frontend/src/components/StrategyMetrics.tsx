@@ -1,6 +1,7 @@
 'use client';
 
 import { useCalculatorStore } from '../store/useCalculatorStore';
+import { UpgradePrompt } from './UpgradePrompt';
 
 const money = (v: number) =>
   `${v < 0 ? '−' : ''}$${Math.abs(v).toLocaleString(undefined, {
@@ -29,7 +30,7 @@ const money = (v: number) =>
 const tone = (v: number) => (v > 0 ? 'profit' : v < 0 ? 'loss' : 'flat');
 
 export function StrategyMetrics() {
-  const { result, error } = useCalculatorStore();
+  const { result, error, gateDenied } = useCalculatorStore();
 
   const shell = (body: React.ReactNode) => (
     <div className="panel" style={{ flex: 'none' }}>
@@ -40,6 +41,15 @@ export function StrategyMetrics() {
       {body}
     </div>
   );
+
+  // Checked BEFORE `error`, and the two are mutually exclusive by construction:
+  // the store's catch sets exactly one of them per attempt. Order still matters
+  // for a reader -- an entitlement refusal is not a fault to be corrected, and
+  // rendering it through the error branch is what produced a heading of
+  // "Unavailable" over a message that was really an offer.
+  if (gateDenied) {
+    return shell(<UpgradePrompt reason={gateDenied} />);
+  }
 
   if (error) {
     return shell(

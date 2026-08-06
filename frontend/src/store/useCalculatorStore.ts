@@ -230,6 +230,23 @@ interface CalculatorState {
   isLoading: boolean;
   error: string | null;
 
+  /**
+   * The engine's own words when it refused this position for ENTITLEMENT
+   * reasons, rather than for anything wrong with the inputs.
+   *
+   * Separate from `error` because the two want opposite treatments: an error
+   * is something the user should fix, and this is something they can buy. It
+   * holds the server's message verbatim rather than a client-side rewording,
+   * for the same reason `StrategySelector` marks multi-leg strategies without
+   * disabling them -- the refusal is the engine's to make and to explain, and
+   * a paraphrase here would drift from what the gate actually did.
+   *
+   * Written ONLY by `calculateStrategy`, which clears it on entry before any
+   * of its early returns, so a denial cannot outlive the position that
+   * provoked it.
+   */
+  gateDenied: string | null;
+
   chainStrikes: ChainStrike[];
   futuresCurve: FuturesContract[];
   chainExpirations: ChainExpiration[];
@@ -313,6 +330,16 @@ function horizonDays(legs: Leg[]): number {
  */
 let rateRequest: Promise<void> | null = null;
 
+/**
+ * gRPC `PERMISSION_DENIED`.
+ *
+ * Spelled out rather than imported from grpc-web's `StatusCode`: that enum is
+ * a runtime value, and importing it here would pull the whole module into a
+ * store that otherwise only needs the generated client. The number is fixed by
+ * the gRPC specification, not by any library version.
+ */
+const RPC_PERMISSION_DENIED = 7;
+
 export const useCalculatorStore = create<CalculatorState>((set, get) => ({
   symbol: 'SPY',
   assetClass: 'EQUITY',
@@ -329,6 +356,7 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
   result: null,
   isLoading: false,
   error: null,
+  gateDenied: null,
 
   chainStrikes: [],
   chainExpirations: [],
@@ -616,6 +644,13 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
   },
 
   calculateStrategy: async () => {
+    // Cleared HERE, above every early return below, rather than alongside the
+    // `error: null` in each of them. A denial belongs to one position; leaving
+    // it set while the user empties their legs would show an upgrade prompt
+    // for a position that no longer exists, and the early returns are exactly
+    // the paths that would have skipped a clear placed further down.
+    set({ gateDenied: null });
+
     // The rate is deliberately not destructured here: it is read after the
     // fetch below, so a snapshot taken now would be the pre-fetch null.
     const { legs, spotPrice, symbol } = get();
@@ -790,7 +825,28 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
         },
       });
     } catch (err: unknown) {
-      set({ isLoading: false, result: null, error: (err as Error).message || 'Calculation failed' });
+      const message = (err as Error).message || 'Calculation failed';
+
+      // PERMISSION_DENIED (7) is the entitlement refusal, and on THIS client it
+      // can only be one. The engine returns code 7 from exactly three places
+      // (backend/src/modules/api_key.cpp): the multi-leg gate, the assistant
+      // gate -- which this store never calls -- and a licence that failed to
+      // verify. Every one of those means "you do not have Pro, or your Pro has
+      // lapsed", so every one of them wants the same response: the engine's
+      // sentence, and a way to fix it. Quota refusals are RESOURCE_EXHAUSTED
+      // (8) and stay ordinary errors, because paying does not fix a rate limit.
+      //
+      // Matched on the CODE, never on the message text. The message is copy: it
+      // was reworded twice in one day when the mortgage surface got its own
+      // wording, and any client keyed to a substring of it would have broken
+      // silently both times while still rendering something plausible.
+      const code = (err as { code?: number }).code;
+      if (code === RPC_PERMISSION_DENIED) {
+        set({ isLoading: false, result: null, error: null, gateDenied: message });
+        return;
+      }
+
+      set({ isLoading: false, result: null, error: message, gateDenied: null });
     }
   },
 
