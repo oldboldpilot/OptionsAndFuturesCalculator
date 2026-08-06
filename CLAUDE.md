@@ -304,23 +304,51 @@ Entitlement flows through Supabase `auth.users.app_metadata.tier` (never
 (`HMAC-SHA512[0:32]`, base64url). `profiles.tier` is dead; nothing reads or
 writes it.
 
-**`PRO_GATE_MODE` is `enforce` in production, not `warn`.** This file said
-`warn` — observe-only, logging would-denies without denying, "until a live
-checkout round trip is proven" — and the live value was read as `enforce` on
-2026-08-06. Both assistants therefore answer a non-Pro caller with
-`PERMISSION_DENIED`, and an anonymous `ParseOperation` from
-mortgagefvcalculator.com is refused outright. **The condition that `warn` was
-waiting on has still not been met**: the live checkout round trip is unproven,
-so nothing has demonstrated that a user who pays actually receives the
-entitlement the gate now requires. Whether to hold `enforce` or fall back to
-`warn` until that round trip passes is a business decision, not a documentation
-one — this paragraph records which way the switch is actually set, not which
-way it should be.
+**`PRO_GATE_MODE` is `enforce`, by decision, in Railway and in `config/.env`.**
+An earlier version of this file said `warn` — observe-only, logging would-denies
+without denying, "until a live checkout round trip is proven." That was stale in
+both halves: the live value was already `enforce` when it was read on
+2026-08-06, and the owner confirmed `enforce` as the intent the same day. It is
+not waiting on anything, and changing it is not a documentation edit.
 
-The gate is `check_assistant_entitlement` (`api_key.cpp`), shared by both
-assistants on purpose: its rationale is the cost asymmetry of running a 0.6B
-model at all, which is not a property of which model it is. Only the copy and
-the log label are per-surface (`kStrategySurface` / `kMortgageSurface`).
+Two gates, both live, **both verified against production in both directions**:
+
+| gate | free | Pro |
+| --- | --- | --- |
+| `check_strategy_entitlement` (`CalculateStrategy`) | 1 leg | 2+ legs |
+| `check_assistant_entitlement` (both assistants) | — | every call |
+
+Anonymous 2-leg → `PERMISSION_DENIED`. The same request with a signed licence →
+`maxProfit 1275, maxLoss -725, breakEven 587.25` on a 580/600 bull call spread,
+which is the closed-form answer for a 7.25 debit. **Verify the ADMIT direction,
+not only the refuse direction** — a gate that refuses everyone passes a
+refuse-only test, and this one stands in front of the product's entire reason to
+exist.
+
+`check_assistant_entitlement` is shared by both assistants on purpose: its
+rationale is the cost asymmetry of running a 0.6B model at all, which is not a
+property of which model it is. Only the copy and the log label are per-surface
+(`kStrategySurface` / `kMortgageSurface`) — see that struct's comment for why
+the message is stored whole rather than templated.
+
+What enforce means at the two client surfaces, neither of which is a backend
+concern and both of which are now user-visible:
+
+- optionsandfuturescalculator.com is a multi-leg calculator, so an anonymous
+  visitor is refused on every strategy except a lone call or put.
+  `StrategyMetrics.tsx` renders that refusal under the heading **"Unavailable"**,
+  while `ProPanel` on the same page holds `startCheckout`. The message is honest
+  and the upgrade path exists; they are simply not adjacent, at the one moment
+  the user has just demonstrated intent by building a spread.
+- mortgagefvcalculator.com gets `PERMISSION_DENIED` on every anonymous
+  `ParseOperation`, so that integration needs a Pro credential before the
+  assistant does anything at all. The `sensen.finance.Finance` RPCs it would
+  otherwise call are ungated — which is exactly what `kMortgageSurface`'s
+  refusal points the caller at.
+
+Task #44 — a live $0 Stripe round trip — remains unproven and needs owner
+authorization, because it puts a real card on an account shared with other apps.
+Enforce is live independently of it.
 
 `quota.cpp` collapses **every unkeyed caller into one shared `~anonymous`
 bucket**. A per-user-looking anonymous limit is therefore a site-wide limit; it
