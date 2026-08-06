@@ -77,11 +77,7 @@ backend/sensen/docs
 # kind of file that is easy to forget is still sitting there at deploy time.
 **/*.gguf
 
-# EXCEPTION, added deliberately: the two fine-tuned assistant models are
-# staged into backend/models/ and SHIP IN THE BUILD CONTEXT. They are the
-# owner's proprietary weights and are deliberately not hosted on any external
-# model registry, so the context is how they reach the image. The blanket
-# rule above still catches a .gguf dropped anywhere else in the tree, which
-# is the case it was written for.
-!backend/models/*.gguf
+# Models are NOT staged into the upload: they are fetched at BUILD time from a
+# private Railway bucket (SigV4, checksum-verified). Re-admitting a 639 MB file
+# here only reproduces the measured HTTP 413 -- 619 MB compressed already failed.
 

@@ -30,6 +30,21 @@ ARG MODEL_SHA256=""
 ARG MORTGAGE_MODEL_URL=""
 ARG MORTGAGE_MODEL_SHA256=""
 
+# S3-compatible credentials for the Railway bucket the models are fetched from.
+#
+# The weights are the owner's proprietary trade secrets and are deliberately not
+# on any external model registry. They live in a PRIVATE Railway bucket in the
+# same project and region as the service, so the bytes never leave Railway.
+# Reaching them needs a SigV4-signed GET, which is why this stage installs curl:
+# wget cannot sign an AWS-style request at all.
+#
+# These are consumed ONLY inside the `model` stage. The runtime stage takes just
+# `COPY --from=model /model/`, so neither the ARG values nor this stage's history
+# reach any published layer -- the same argument that already justified passing a
+# bearer token this way.
+ARG BUCKET_ACCESS_KEY_ID=""
+ARG BUCKET_SECRET_ACCESS_KEY=""
+
 # --------------------------------------------------------------------------
 # Model fetch: the fine-tuned Qwen3-0.6B GGUFs (Q8_0, ~639 MB each) that this
 # image's in-process assistants run at inference time --
@@ -127,13 +142,21 @@ FROM docker.io/library/ubuntu:24.04 AS model
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates wget \
+        ca-certificates wget curl \
     && rm -rf /var/lib/apt/lists/*
 
 ARG MODEL_URL
 ARG MODEL_SHA256
 ARG MORTGAGE_MODEL_URL
 ARG MORTGAGE_MODEL_SHA256
+# Redeclared INSIDE this stage for the same reason MODEL_TOKEN is below: a
+# global ARG is not visible to a stage that does not restate it, so without
+# these two lines the SigV4 branch silently sees empty credentials, falls
+# through to the unauthenticated wget, and the bucket answers 403. That is
+# exactly how the first version of this failed -- the build reported "could not
+# fetch MODEL_URL" while correct credentials were sitting in --build-arg.
+ARG BUCKET_ACCESS_KEY_ID
+ARG BUCKET_SECRET_ACCESS_KEY
 # Declared so the ${MODEL_TOKEN:-} fallback below can actually see a
 # --build-arg. Without this ARG the variable is simply unset inside the stage
 # and the fallback silently does nothing, which is how the first version of
@@ -229,7 +252,16 @@ RUN set -eu; \
             AUTH_HEADER="Authorization: Bearer ${MODEL_TOKEN}"; \
             echo "Using MODEL_TOKEN from the build environment."; \
         fi; \
-        if [ -n "${AUTH_HEADER}" ]; then \
+        if [ -n "${BUCKET_ACCESS_KEY_ID}" ] && [ -n "${BUCKET_SECRET_ACCESS_KEY}" ]; then \
+            echo "Fetching the strategy-assistant model from the private Railway bucket (SigV4)..."; \
+            curl -sS --fail --retry 3 --retry-delay 2 \
+                 --aws-sigv4 "aws:amz:auto:s3" \
+                 --user "${BUCKET_ACCESS_KEY_ID}:${BUCKET_SECRET_ACCESS_KEY}" \
+                 -o /model/strategy-assistant.gguf "${MODEL_URL}" || { \
+                echo "FATAL: SigV4 fetch of strategy-assistant model failed." >&2; \
+                exit 1; \
+            }; \
+        elif [ -n "${AUTH_HEADER}" ]; then \
             wget --tries=3 --timeout=60 --header="${AUTH_HEADER}" \
                  -qO /model/strategy-assistant.gguf "${MODEL_URL}"; \
         else \
@@ -299,7 +331,16 @@ RUN set -eu; \
             AUTH_HEADER="Authorization: Bearer ${MODEL_TOKEN}"; \
             echo "Using MODEL_TOKEN from the build environment."; \
         fi; \
-        if [ -n "${AUTH_HEADER}" ]; then \
+        if [ -n "${BUCKET_ACCESS_KEY_ID}" ] && [ -n "${BUCKET_SECRET_ACCESS_KEY}" ]; then \
+            echo "Fetching the mortgage-assistant model from the private Railway bucket (SigV4)..."; \
+            curl -sS --fail --retry 3 --retry-delay 2 \
+                 --aws-sigv4 "aws:amz:auto:s3" \
+                 --user "${BUCKET_ACCESS_KEY_ID}:${BUCKET_SECRET_ACCESS_KEY}" \
+                 -o /model/mortgage-assistant.gguf "${MORTGAGE_MODEL_URL}" || { \
+                echo "FATAL: SigV4 fetch of mortgage-assistant model failed." >&2; \
+                exit 1; \
+            }; \
+        elif [ -n "${AUTH_HEADER}" ]; then \
             wget --tries=3 --timeout=60 --header="${AUTH_HEADER}" \
                  -qO /model/mortgage-assistant.gguf "${MORTGAGE_MODEL_URL}"; \
         else \
