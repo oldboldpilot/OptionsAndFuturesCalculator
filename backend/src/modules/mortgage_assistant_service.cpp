@@ -3,6 +3,7 @@ module;
 #include <array>
 #include <cctype>
 #include <charconv>
+#include <chrono>
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
@@ -36,6 +37,7 @@ import logger;
 import quota;
 import api_key;
 import assistant_verification;
+import mortgage_verification;
 
 // ============================================================================
 // The mortgage / time-value-of-money assistant.
@@ -1334,6 +1336,126 @@ auto populate_clarification(::mortgage::assistant::ParseResponse& response, std:
 }
 
 // ---------------------------------------------------------------------------
+// GP-ARA mandatory verification stage
+// ---------------------------------------------------------------------------
+//
+// `mortgage_verification.cppm` is the sibling of `assistant_verification.cppm`,
+// and it is wired in here the same way and at the same point in the pipeline the
+// strategy assistant wires its own: after every per-field check has run, and
+// BEFORE anything reaches `response.mutable_params()`. Everything above that
+// point inspects the model's output against ITSELF -- is this a real operation,
+// are these its declared fields, does each value parse and sit inside a sane
+// magnitude. None of it can ask the one question that matters, because none of
+// it can see the utterance:
+//
+//   `current_monthly_payment: "5379.00"` when the user said `5378.63` is a real
+//   operation, in a real field of that operation, parsing as a real decimal,
+//   inside every bound this file enforces -- and it prices a DIFFERENT LOAN.
+//
+// The validator's own test proves that gap directly: the structural gates alone
+// return Proven on exactly that row. Only `verify_mortgage_output`, which takes
+// the user's own words as an explicit argument, can falsify it.
+
+namespace mv = ::mortgage_calculator::assistant::verify;
+
+/**
+ * Collapses the verifier's twelve reason codes onto this contract's four.
+ *
+ * The verifier is deliberately finer-grained than the wire enum (see its own
+ * `ReasonCode` doc comment), and collapsing is expected -- but the collapse must
+ * not lose the DISTINCTION the proto's Reason values draw. It does not:
+ *
+ *   UnknownOperation      -> UNSUPPORTED_OPERATION. The model named a method
+ *                            that is not one of the 26, which is precisely what
+ *                            that value is for.
+ *   everything else       -> INVALID_PARAMETERS. The proto's own doc comment for
+ *                            it reads "the guard that stands between a
+ *                            hallucinated figure and an exact wrong answer
+ *                            computed from it" -- which is `UngroundedValue`
+ *                            stated in the proto's words, and covers the field,
+ *                            shape, enum, magnitude and malformed-number codes
+ *                            it already enumerates.
+ *
+ * There is no OUT_OF_SCOPE branch: every code below reaches this function with a
+ * params block in hand, so the request WAS about one of these calculations; what
+ * failed is the answer, not the question. And no MODEL_UNAVAILABLE branch: the
+ * model answered, it just answered something that could not be verified.
+ *
+ * `None` only ever accompanies `Outcome::Proven`, which this function is never
+ * called for, and `NoParamsEmitted` is unreachable from the one call site
+ * (`params_emitted` is set true there). Both still land on INVALID_PARAMETERS
+ * rather than REASON_UNSPECIFIED: reaching either would be this file's own bug,
+ * and a fail-closed refusal is the right answer to a bug on the serving path.
+ */
+[[nodiscard]] auto map_verification_reason(mv::ReasonCode reason)
+    -> ::mortgage::assistant::Refusal_Reason {
+    switch (reason) {
+        case mv::ReasonCode::UnknownOperation:
+            return ::mortgage::assistant::Refusal::UNSUPPORTED_OPERATION;
+        case mv::ReasonCode::NoParamsEmitted:
+        case mv::ReasonCode::UnknownField:
+        case mv::ReasonCode::MissingField:
+        case mv::ReasonCode::DuplicateField:
+        case mv::ReasonCode::ShapeMismatch:
+        case mv::ReasonCode::InvalidEnumValue:
+        case mv::ReasonCode::MalformedNumber:
+        case mv::ReasonCode::UngroundedValue:
+        case mv::ReasonCode::OutOfRange:
+        case mv::ReasonCode::Unclassified:
+        case mv::ReasonCode::None:
+            return ::mortgage::assistant::Refusal::INVALID_PARAMETERS;
+    }
+    return ::mortgage::assistant::Refusal::INVALID_PARAMETERS;
+}
+
+/**
+ * Splits the `[a,b,c]` wire encoding of a repeated field back into its elements.
+ *
+ * The verifier's `EmittedField` carries one entry per element so that a scalar
+ * and a series share one shape, while this service's map value is the joined
+ * text. Splitting the ALREADY-ENCODED string rather than re-walking the JSON is
+ * deliberate: what gets verified is then byte-for-byte what would have gone onto
+ * the wire, so there is no second encoding path that could differ from the one
+ * the caller receives. Elements are `std::to_string`/`std::to_chars` output and
+ * so never contain a comma, which is what makes the split exact rather than a
+ * parse.
+ */
+[[nodiscard]] auto split_array_encoding(std::string_view encoded) -> std::vector<std::string> {
+    if (encoded.size() >= 2 && encoded.front() == '[' && encoded.back() == ']') {
+        encoded = encoded.substr(1, encoded.size() - 2);
+    }
+    std::vector<std::string> out;
+    if (encoded.empty()) return out;
+    std::size_t start = 0;
+    while (true) {
+        const auto comma = encoded.find(',', start);
+        if (comma == std::string_view::npos) {
+            out.emplace_back(encoded.substr(start));
+            break;
+        }
+        out.emplace_back(encoded.substr(start, comma - start));
+        start = comma + 1;
+    }
+    return out;
+}
+
+/** The text G3 grounds against: the user's own words, exactly as `build_prompt`
+ * handed them to the model, and in the same order. A figure the user supplied in
+ * answer to this service's clarifying question is as much their own word as one
+ * they supplied first time, so `prior_clarification` is concatenated rather than
+ * dropped -- dropping it would refuse "37 years" for the one reason the verifier
+ * must never refuse anything: that nobody showed it the utterance. */
+[[nodiscard]] auto grounding_text(std::string_view utterance, std::string_view prior_clarification)
+    -> std::string {
+    std::string text{utterance};
+    if (!prior_clarification.empty()) {
+        text += '\n';
+        text += prior_clarification;
+    }
+    return text;
+}
+
+// ---------------------------------------------------------------------------
 // Value validation and encoding
 // ---------------------------------------------------------------------------
 
@@ -1545,8 +1667,15 @@ auto populate_clarification(::mortgage::assistant::ParseResponse& response, std:
  * emitted object's key set is EXACTLY the request message's field set, on every
  * one of its rows, so a model answering as it was taught passes both trivially
  * and only a truncated or drifting answer fails.
+ *
+ * ...AND THEN (6), WHICH IS THE ONE NONE OF THE ABOVE CAN DO. Steps 1-5 read the
+ * model's output and nothing else, so the strongest thing they can conclude is
+ * "internally consistent". `user_text` is threaded down to here for the sixth
+ * step -- the mandatory GP-ARA gate at the bottom of this function -- because
+ * grounding a value needs the utterance the value was supposed to come from, and
+ * this is the first point in the pipeline where both exist at once.
  */
-auto validate_and_populate_params(std::string_view json_text,
+auto validate_and_populate_params(std::string_view json_text, std::string_view user_text,
                                   ::mortgage::assistant::ParseResponse& response) -> void {
     auto parsed = fastjson::parse(json_text);
     if (!parsed.has_value() || !parsed->is_object()) {
@@ -1591,8 +1720,16 @@ auto validate_and_populate_params(std::string_view json_text,
     }
 
     // (3) and (5) -- every declared field must be present and must validate.
+    //
+    // The verifier's view of the same object is assembled in this one pass
+    // alongside the wire message, from the ENCODED value rather than from the
+    // JSON a second time, so what the gate below judges is byte-for-byte what
+    // this response would carry.
     ::mortgage::assistant::FinanceParams params;
     params.set_operation(operation);
+    mv::MortgageParamsInput verifiable;
+    verifiable.params_emitted = true;
+    verifiable.operation = operation;
     for (const auto& field : op->fields) {
         const std::string key{field.name};
         if (!obj.contains(key)) {
@@ -1609,7 +1746,58 @@ auto validate_and_populate_params(std::string_view json_text,
                              "The assistant's " + *problem + ".");
             return;
         }
+        const bool repeated =
+            field.kind == Kind::RepeatedDouble || field.kind == Kind::RepeatedInt;
+        verifiable.fields.push_back(mv::EmittedField{
+            .name = key,
+            .values = repeated ? split_array_encoding(encoded)
+                               : std::vector<std::string>{encoded},
+            .repeated = repeated});
+
         (*params.mutable_params())[key] = std::move(encoded);
+    }
+
+    // ------------------------------------------------------------------
+    // (6) MANDATORY GP-ARA VERIFICATION. Nothing reaches
+    // `response.mutable_params()` except through this gate.
+    //
+    // It runs LAST, on purpose and in this order, because `ground_emitted_values`
+    // documents that it ASSUMES the structural gates already passed -- it needs a
+    // real operation and real field names to know what kind of quantity each
+    // value holds. Running it here means the checks above have already settled
+    // that, and `verify_mortgage_output` re-runs them itself as G1/G2/G5 anyway,
+    // so the two are belt-and-braces rather than an ordering hazard.
+    //
+    // The tri-state is preserved end to end and never collapsed to a boolean.
+    // Proven is the ONLY path to a FinanceParams. Unsafe and Indeterminate take
+    // the identical refusal branch, which is the fail-closed default the module's
+    // banner argues for at length: Indeterminate is by definition the catalogue
+    // of that rule table's blind spots, so serving on it would reduce an
+    // attacker's job to finding one. `VerificationVerdict` even
+    // default-constructs to Indeterminate for the same reason.
+    //
+    // A REFUSAL, NOT A gRPC ERROR. Per this proto's own banner, both are
+    // successful outcomes of ParseOperation: the RPC did its job -- it declined
+    // to hand back numbers the user never said. Encoding it as an error would
+    // make every correctly-refused hallucination indistinguishable from the model
+    // being down, in gRPC metrics, in Envoy's access log and in the browser
+    // client.
+    const auto verification_start = std::chrono::steady_clock::now();
+    const auto verdict = mv::verify_mortgage_output(verifiable, user_text);
+    const auto verification_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                     std::chrono::steady_clock::now() - verification_start)
+                                     .count();
+    logger::Logger::getInstance().debug(
+        "mortgage assistant: GP-ARA verification of {} took {}us, outcome={} reason={}", operation,
+        verification_us, mv::to_string(verdict.outcome), mv::to_string(verdict.reason));
+
+    if (verdict.outcome != mv::Outcome::Proven) {
+        populate_refusal(response, map_verification_reason(verdict.reason),
+                         verdict.message.empty()
+                             ? "The assistant's parameters could not be verified against your "
+                               "request."
+                             : verdict.message);
+        return;
     }
 
     *response.mutable_params() = std::move(params);
@@ -1663,7 +1851,8 @@ constexpr std::array<std::string_view, 16> kMortgageAdviceSignals{{
 // Output interpretation
 // ---------------------------------------------------------------------------
 
-auto interpret_model_output(const std::string& raw_text,
+auto interpret_model_output(const std::string& raw_text, std::string_view utterance,
+                            std::string_view prior_clarification,
                             ::mortgage::assistant::ParseResponse& response) -> void {
     // LOG THE RAW OUTPUT FIRST, BEFORE ANY VERIFICATION RUNS.
     //
@@ -1681,9 +1870,23 @@ auto interpret_model_output(const std::string& raw_text,
     const std::string visible = strip_think_block(raw_text);
 
     if (const auto block = extract_params_block(visible); block.has_value()) {
-        validate_and_populate_params(trim(*block), response);
+        // The utterance travels with the params block from here down. It is the
+        // ONLY object that can falsify a structurally perfect answer, so the
+        // params path is the one path that must never be walked without it.
+        validate_and_populate_params(trim(*block),
+                                     grounding_text(utterance, prior_clarification), response);
         return;
     }
+
+    // NO PARAMS BLOCK IS NOT ROUTED THROUGH THE VERIFIER, DELIBERATELY.
+    //
+    // `verify_mortgage_output`'s G4 answers Indeterminate for an absent params
+    // block, which at this boundary would mean a refusal -- and that is right for
+    // a caller about to DISPATCH something, which is what G4 is written for.
+    // Here there is nothing to dispatch: the model asked a question instead, and
+    // this proto's banner is explicit that a clarifying question is the model
+    // doing its job correctly. Feeding the absent case to the gate would convert
+    // all 824 clarification shapes in the training set into refusals.
 
     // No params block. Whatever prose remains is the model's clarifying
     // question -- which is a CORRECT outcome, not a failure, when it is short
@@ -1851,7 +2054,8 @@ class MortgageAssistantImpl final : public ::mortgage::assistant::MortgageAssist
             return Status::OK;
         }
 
-        interpret_model_output(outcome->text, *response);
+        interpret_model_output(outcome->text, request->utterance(), request->prior_clarification(),
+                               *response);
         return Status::OK;
     }
 };
