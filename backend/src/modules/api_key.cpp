@@ -5,7 +5,6 @@ module;
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
-#include <format>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -444,10 +443,7 @@ auto check_assistant_entitlement(const Identity& identity, const AssistantSurfac
 
     log.info("pro-gate deny: key={} rpc={} tier={}", who, surface.rpc,
              identity.tier.empty() ? "free" : identity.tier);
-    return grpc::Status(grpc::StatusCode::PERMISSION_DENIED,
-                        std::format("The {} is a Pro feature. The calculator itself remains "
-                                    "free -- {}, or upgrade for assisted parsing.",
-                                    surface.feature, surface.free_alternative));
+    return grpc::Status(grpc::StatusCode::PERMISSION_DENIED, std::string{surface.message});
 }
 
 class KeyRegistry::Impl {

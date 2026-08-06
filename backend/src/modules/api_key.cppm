@@ -310,22 +310,30 @@ enum class GateMode : std::uint8_t { Off, Warn, Enforce };
  * logs could not attribute a denial to a service.
  */
 struct AssistantSurface {
-    std::string_view rpc;               // e.g. "ParseStrategy" -- for the log line
-    std::string_view feature;           // e.g. "natural-language strategy assistant"
-    std::string_view free_alternative;  // what the caller can still do without Pro
+    std::string_view rpc;      // e.g. "ParseStrategy" -- for the log line
+    std::string_view message;  // the WHOLE refusal, not a fragment to splice
 };
 
+// The message is stored whole rather than assembled from a template and a
+// couple of clauses. The templated version lasted one deploy: the template's
+// own "--" collided with an em-dash inside the mortgage clause and pushed the
+// upgrade offer out behind a subordinate clause, producing a sentence no one
+// would have written on purpose. Two complete sentences cost a few duplicated
+// words and cannot come out ungrammatical.
 inline constexpr AssistantSurface kStrategySurface{
     .rpc = "ParseStrategy",
-    .feature = "natural-language strategy assistant",
-    .free_alternative = "build your strategy manually with the symbol and strategy selectors"};
+    .message = "The natural-language strategy assistant is a Pro feature. The calculator "
+               "itself remains free -- build your strategy manually with the symbol and "
+               "strategy selectors, or upgrade for assisted parsing."};
 
+// Names the Finance service, because that is genuinely what this caller wants
+// and it is free: the assistant only ever SELECTS a Finance operation and fills
+// in its parameters. Refusing it costs the caller the parsing, not the maths.
 inline constexpr AssistantSurface kMortgageSurface{
     .rpc = "ParseOperation",
-    .feature = "natural-language mortgage assistant",
-    .free_alternative =
-        "call the sensen.finance.Finance operation you want directly -- every calculation "
-        "the assistant would have selected is free and unmetered by comparison"};
+    .message = "The natural-language mortgage assistant is a Pro feature. The calculations "
+               "themselves remain free: call the sensen.finance.Finance operation you want "
+               "directly, or upgrade to have it chosen and filled in for you."};
 
 [[nodiscard]] auto check_assistant_entitlement(const Identity& identity,
                                                const AssistantSurface& surface) -> grpc::Status;
