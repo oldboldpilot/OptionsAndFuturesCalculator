@@ -489,7 +489,8 @@ def make_amortization_extraction(rng: random.Random) -> dict:
     if overpay:
         base += f", paying an extra {phrase_money(overpay)}/month"
     if mention_pmi:
-        base += f". Home is worth {phrase_money(home_value)}, so PMI applies"
+        base += (f". Home is worth {phrase_money(home_value)}, PMI runs "
+                 f"{phrase_pct(pmi)} a year")
     base += "."
     if op == "ComputeDetailedAmortization":
         base += (f" I'm in the {phrase_pct(tax_rate)} tax bracket -- show the "
@@ -498,7 +499,7 @@ def make_amortization_extraction(rng: random.Random) -> dict:
     compact = (f"Show me the full payment schedule on {phrase_money(loan)}, "
                f"{phrase_pct(annual_rate)}, {phrase_years(term)}"
                + (f", {phrase_money(overpay)} extra a month" if overpay else "")
-               + (f". Home is worth {phrase_money(home_value)}, so PMI applies"
+               + (f". Home is worth {phrase_money(home_value)}, PMI {phrase_pct(pmi)}/yr"
                   if mention_pmi else "")
                + (f", tax rate {phrase_pct(tax_rate)}" if op == "ComputeDetailedAmortization" else "")
                + ".")
@@ -610,7 +611,7 @@ def make_cashflow_extraction(rng: random.Random) -> dict:
         for _ in range(n):
             days.append(days[-1] + round(rng.triangular(300, 430, 365)))
         flow_desc = "; ".join(
-            f"{phrase_money(f)} after {int(round(d/30.44))} months" for f, d in zip(flows, days[1:]))
+            f"{phrase_money(f)} after {d} days" for f, d in zip(flows, days[1:]))
     else:
         flow_desc = "; ".join(f"year {i+1}: {phrase_money(f)}" for i, f in enumerate(flows))
 
@@ -711,7 +712,8 @@ def make_depreciation_extraction(rng: random.Random) -> dict:
     ])
     obj = {"method": method, "cost": round(cost, 2), "salvage": round(salvage, 2),
            "life": life, "period": float(period), "factor": factor,
-           "recovery_period": int(life), "year": period}
+           "recovery_period": int(round(life)) if float(life).is_integer() else life,
+           "year": period}
     return convo(("system", SYSTEM), ("user", user),
                  ("assistant", params_block(op, obj)))
 
@@ -771,7 +773,7 @@ def make_refinance_extraction(rng: random.Random) -> dict:
 
     remaining_years = round(remaining_months / 12, 1)
     base = (f"I owe {phrase_money(balance)} at {phrase_pct(current_rate)} with "
-            f"{remaining_years} years left, paying {phrase_money(payment)}/month. "
+            f"{remaining_months} months left, paying {phrase_money(payment)}/month. "
             f"Home is worth {phrase_money(property_value)}. If I refinance to "
             f"{phrase_pct(new_rate)} over {new_term_years} years with "
             f"{phrase_money(closing_costs)} in closing costs "
