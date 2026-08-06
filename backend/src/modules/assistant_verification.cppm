@@ -295,6 +295,41 @@ constexpr std::array<AmbiguousRootInfo, 2> kAmbiguousRootDetails{
     return lowercased_haystack.find(lowercase_needle) != std::string_view::npos;
 }
 
+/**
+ * `contains_ci` restricted to WHOLE-TOKEN matches: the hit must not be flanked
+ * by an alphanumeric on either side.
+ *
+ * This exists because a plain substring search over the futures roots is
+ * actively wrong. `kKnownFuturesRoots` contains "ES", and the word "futures"
+ * contains "es" -- so ANY utterance mentioning futures matched root ES, and
+ * `recover_bare_futures_directive` would then recover a directive about gold or
+ * bonds as an E-mini S&P position. It would pass verification too, because
+ * ES/FUTURES is a perfectly valid pair; the only thing wrong with it is that
+ * the trader never said it. "CL" inside "close" and "GC" inside a contract code
+ * are the same hazard.
+ *
+ * The bug was masked in practice because every futures utterance the deployed
+ * model was trained on contains the word "futures", so the ES hit was usually
+ * also the right answer by accident -- exactly the kind of coincidence that
+ * stops being true the moment a caller phrases a request differently.
+ */
+[[nodiscard]] auto contains_word_ci(std::string_view lowercased_haystack,
+                                    std::string_view lowercase_needle) noexcept -> bool {
+    if (lowercase_needle.empty()) return false;
+    std::size_t from = 0;
+    while (true) {
+        const auto at = lowercased_haystack.find(lowercase_needle, from);
+        if (at == std::string_view::npos) return false;
+        const bool left_ok =
+            at == 0 || (std::isalnum(static_cast<unsigned char>(lowercased_haystack[at - 1])) == 0);
+        const auto end = at + lowercase_needle.size();
+        const bool right_ok = end >= lowercased_haystack.size() ||
+                              (std::isalnum(static_cast<unsigned char>(lowercased_haystack[end])) == 0);
+        if (left_ok && right_ok) return true;
+        from = at + 1;
+    }
+}
+
 constexpr std::string_view kMonthCodeLetters = "FGHJKMNQUVXZ";
 
 /** True iff `context` contains a real futures contract code for `root` as
@@ -1351,11 +1386,11 @@ export [[nodiscard]] auto recover_bare_futures_directive(std::string_view uttera
     std::string_view root;
     for (const auto known : detail::kKnownFuturesRoots) {
         const std::string needle = detail::to_lower_copy(known);
-        if (detail::contains_ci(lowered, needle)) { root = known; break; }
+        if (detail::contains_word_ci(lowered, needle)) { root = known; break; }
     }
     if (root.empty()) {
         for (const auto& [word, mapped] : detail::kRootWords) {
-            if (detail::contains_ci(lowered, word)) { root = mapped; break; }
+            if (detail::contains_word_ci(lowered, word)) { root = mapped; break; }
         }
     }
     if (root.empty()) return std::nullopt;
