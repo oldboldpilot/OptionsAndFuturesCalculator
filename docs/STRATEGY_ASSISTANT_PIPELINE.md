@@ -170,7 +170,21 @@ precision for the part that actually learned something), Q8_0 at SERVE time
 
 ## 4. Distribution
 
-The GGUF lives in a **private HuggingFace repo** with its checksum pinned.
+> **SUPERSEDED, 2026-08-05 — the private HuggingFace repo named below was
+> DELETED**, at the owner's instruction, because the weights are proprietary
+> trade secrets and do not belong on a third-party registry, private or not. No
+> model URL is pinned and **no model is in the deployed container**; the
+> assistant answers `MODEL_UNAVAILABLE` and every other service is unaffected,
+> which is the supported empty-`MODEL_URL` build this section already describes.
+> A replacement hosting mechanism is being designed and is deliberately not
+> described here — do not infer one from what follows, and do not re-upload to a
+> registry to "restore" the fetch. `backend/Dockerfile`'s `backend/models/`
+> staging path is a LOCAL-BUILD stopgap, not a Railway answer. Everything below
+> about the MECHANICS of a build-time fetch — the checksum gate, the ARG-vs-secret
+> trap, why `railway up` cannot carry the file — remains true and is what any
+> replacement still has to satisfy.
+
+The GGUF lived in a **private HuggingFace repo** with its checksum pinned.
 It is fetched at **Docker build time**, never through `railway up` -- that
 CLI enforces an upload deadline that a 62 MB payload already failed, and the
 GGUF here is roughly ten times that. `MODEL_URL`, `MODEL_SHA256` and

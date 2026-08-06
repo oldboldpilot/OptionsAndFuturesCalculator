@@ -29,15 +29,18 @@ This document outlines the system architecture, build commands, and deployment i
 
 ## gRPC Surface
 
-The engine serves **two** services on one port (`:50051` native, and through
+The engine serves **four** services on one port (`:50051` native, and through
 Envoy's catch-all route as gRPC-Web). They are separate contracts, not separate
-deployments.
+deployments. The route is a catch-all prefix precisely so a new service on this
+port needs no proxy change — but each one must still be added to Envoy's
+`grpc_json_transcoder` services list, which resolves methods by name.
 
 | Service | Proto | Purpose |
 | --- | --- | --- |
 | `calculator.OptionsCalculator` | `backend/proto/calculator.proto` | This application's own API — strategies, legs, payoff curves, market data |
 | `sensen.finance.Finance` | `backend/proto/finance.proto` | The general-purpose sensen financial library, exposed for reuse by other applications |
 | `calculator.assistant.StrategyAssistant` | `backend/proto/assistant.proto` | Natural-language strategy parsing, served by a fine-tuned Qwen3-0.6B running in-process |
+| `mortgage.assistant.MortgageAssistant` | `backend/proto/mortgage_assistant.proto` | Natural-language MORTGAGE / time-value-of-money parsing, served by a SECOND, different fine-tuned Qwen3-0.6B in the same process |
 
 `sensen.finance.Finance` covers roughly fifty functions across sensen's
 `financial.cppm`, `options.cppm` and `portfolio.cppm`: time value of money,
@@ -70,9 +73,34 @@ domain.
 
 A fine-tuned Qwen3-0.6B (QLoRA, rank 16, 95.0% params exact-match) converts a
 plain-English request into calculator parameters. It runs **in-process**, Q8_0
-on CPU, fetched at image build time from a private HF repo with the checksum
-pinned — it cannot travel through `railway up`, which enforces an upload
-deadline that 62 MB already failed.
+on CPU, fetched at image build time with the checksum pinned — it cannot travel
+through `railway up`, which enforces an upload deadline that 62 MB already
+failed.
+
+**Where it is fetched FROM is currently unsettled, and no model is in the
+deployed container.** The private HuggingFace repository that `MODEL_URL` pointed
+at was **deleted on 2026-08-05** at the owner's instruction: the weights are
+proprietary trade secrets and do not belong on a third-party registry, private or
+not. This applies to both assistants' models. Consequences to hold on to:
+
+- Nothing in this repo hosts a model, and `**/*.gguf` is gitignored, so a
+  container built today has **no weights**. Each assistant answers
+  `MODEL_UNAVAILABLE` and every other service is unaffected — that is the
+  supported empty-`MODEL_URL` build, not a broken one.
+- A replacement hosting mechanism **is being designed** and is deliberately not
+  described here. Do not infer one from the old procedure, and do not re-upload
+  to any model registry to "restore" the fetch.
+- `backend/Dockerfile` gained a `backend/models/` build-context staging path so a
+  LOCAL `docker build` can use a locally held GGUF. It is a stopgap. It does not
+  help Railway, and the `!backend/models/*.gguf` exceptions in the root
+  `.dockerignore` / `.railwayignore` should be expected to come out.
+- The invariant that survives whatever replaces the transport: a model is
+  checksum-verified before anything uses it, staging is not verification, and the
+  checksum that counts is round-tripped from wherever the bytes are actually
+  served.
+
+`docs/MORTGAGE_MODEL_DISTRIBUTION.md` carries the same status banner and the
+checksums; its HF publishing steps are marked superseded.
 
 The full training-to-serving chain — dataset generation, the QLoRA-vs-full
 comparison that decided the recipe, merge/export/quantize, the Dockerfile's
@@ -158,6 +186,34 @@ Assert `pgrep -x calculator_engi | wc -l` is 1 before trusting a number (the
 nothing). And symbol verification needs live market data; without it every model
 scores identically because the refusal comes from the verification layer, not the
 model — score `[assistant] raw model output`, which is logged before it runs.
+
+## Mortgage assistant
+
+A **second, different** fine-tuned Qwen3-0.6B, serving
+`mortgage.assistant.MortgageAssistant` in the same process. It turns a
+plain-English mortgage / time-value-of-money request into **the name of a
+`sensen.finance.Finance` RPC plus that RPC's own parameters**. It computes
+nothing; the Finance service runs the operation it names.
+
+It reads `MORTGAGE_MODEL_PATH` and deliberately does **not** fall back to
+`MODEL_PATH` — that names the STRATEGY weights, and loading them here puts a
+model trained on option spreads behind a mortgage contract. One model, both, or
+neither is a supported image.
+
+Two things to hold on to before trusting its output:
+
+- **It measures 31.7% params exact-match (59/186)** on held-out data, against the
+  strategy model's 95.0%. Its dangerous failure is a CORRUPTED VALUE — it emitted
+  `5379.00` for a stated `5378.63`, which names a real operation, sits in a real
+  field, parses, satisfies every bound, and prices a different loan. Nothing in
+  the output is wrong on its own terms, so only the user's own utterance can
+  falsify it.
+- **`mortgage_verification.cppm` catches exactly that and is NOT yet wired into
+  the serving path.** Its five gates pass 72 checks / 0 failures, but today its
+  only consumer is `test_mortgage_verification` — nothing in
+  `mortgage_assistant_service.cpp` imports it. Until that call exists,
+  `ParseOperation`'s own structural checks are all that guard the RPC, and the
+  test proves those alone return Proven on `5379.00`.
 
 ## Pro tier and quota
 
