@@ -32,12 +32,14 @@ module;
 module mortgage_assistant_service;
 
 import sensen.llm_pipeline;
+import sensen.tokenizer;  // Tokenizer, for the grammar's id -> text vocabulary
 import fastjson;
 import logger;
 import quota;
 import api_key;
 import assistant_verification;
 import mortgage_verification;
+import mortgage_grammar;
 
 // ============================================================================
 // The mortgage / time-value-of-money assistant.
@@ -98,6 +100,10 @@ import mortgage_verification;
 // ============================================================================
 
 namespace options_calculator::mortgage_assistant {
+
+// The grammar module lives in the mortgage calculator's own namespace, not this
+// service's. Aliased once here for the same reason `mv` is aliased further down.
+namespace mg = ::mortgage_calculator::assistant::grammar;
 
 using grpc::ServerContext;
 using grpc::Status;
@@ -500,7 +506,32 @@ class SensenBackend final : public QueuedBackend {
         std::promise<InferenceOutcome> promise;
         std::uint32_t next_token = 0;
         std::vector<std::uint32_t> generated;
+
+        /**
+         * Everything this sequence has emitted, detokenised as it goes.
+         *
+         * Accumulated incrementally rather than re-decoding `generated` each
+         * step, which would be quadratic in the response length. Its only
+         * purpose is to spot the grammar's activation marker; the finished text
+         * still comes from `schedulerDecode` so nothing downstream depends on
+         * this being byte-identical to a whole-sequence decode.
+         */
+        std::string emitted;
+
+        /**
+         * The grammar constraining this sequence, or nullptr while it is
+         * decoding unconstrained.
+         *
+         * Null for the whole of the `<think>` block and null forever on a
+         * sequence that answers with a clarifying question -- 46 of 600 gold
+         * rows do. See `arm_grammar` for why the constraint is switched on
+         * partway through rather than at the first token.
+         */
+        mg::MortgageParamsGrammar* grammar = nullptr;
+        std::size_t grammar_slot = kNoSlot;
     };
+
+    static constexpr std::size_t kNoSlot = static_cast<std::size_t>(-1);
 
     SensenBackend(std::unique_ptr<sensen::LLMPipeline> pipeline, std::size_t max_concurrent,
                   std::size_t queue_depth)
@@ -606,6 +637,12 @@ class SensenBackend final : public QueuedBackend {
         if (const auto encoded = pipeline_->schedulerEncode("<|im_end|>"); encoded.size() == 1) {
             im_end_id = encoded.front();
         }
+
+        // Built here rather than lazily on the first token: this is the owner
+        // thread, it runs exactly once, and the outcome is logged at startup
+        // where an operator can see whether constrained decoding is actually on
+        // instead of having to infer it from the shape of a response.
+        ensure_grammar_pool();
 
         std::vector<Sequence> active;
         std::size_t next_agent_id = 0;
@@ -751,6 +788,30 @@ class SensenBackend final : public QueuedBackend {
             if (!stop) {
                 seq.agent->getContext().push_back(consumed);
                 seq.generated.push_back(consumed);
+
+                // Advance the constraint by the token actually taken, and only
+                // then look for the activation marker -- in that order, so the
+                // token that COMPLETES the marker arms the grammar rather than
+                // being fed to an automaton that has not been primed with it.
+                if (seq.grammar != nullptr && !seq.grammar->accept(consumed)) {
+                    // A mask/automaton disagreement. sensen's IGrammar contract
+                    // is explicit that a false return must not be ignored: the
+                    // constraint has desynced from the text, so every mask after
+                    // this one describes a state the sequence is not in.
+                    // Dropping the constraint keeps the answer coming and leaves
+                    // the verifier -- which is what actually decides safety -- in
+                    // charge, which is strictly better than masking against a lie.
+                    logger::Logger::getInstance().error(
+                        "mortgage assistant: grammar rejected token {} it had allowed -- "
+                        "constraint DROPPED for this sequence, verifier still gates the answer",
+                        consumed);
+                    release_grammar(seq);
+                }
+                if (!grammar_pool_.empty()) {
+                    seq.emitted += pipeline_->getTokenizer().decodeToken(consumed);
+                    arm_grammar(seq);
+                }
+
                 if (seq.generated.size() >= params.max_new_tokens) stop = true;
             }
             if (!stop && logits[i].empty()) {
@@ -761,9 +822,35 @@ class SensenBackend final : public QueuedBackend {
             }
 
             if (stop) {
+                release_grammar(seq);
                 finish(seq);
                 continue;
             }
+
+            // The IGrammar contract, applied exactly as sensen's own
+            // `sampleGuided` applies it: mask the disallowed logits to -inf,
+            // then sample normally. Done here rather than by asking sensen for a
+            // guided scheduler call because the batched path has no guided
+            // variant -- and because masking in front of the SAME
+            // `schedulerSample` keeps the unconstrained path byte-for-byte what
+            // it was, which is what makes an A/B on this meaningful.
+            if (seq.grammar != nullptr) {
+                const std::vector<bool>& allowed = seq.grammar->allowedMask();
+                if (allowed.size() == logits[i].size()) {
+                    for (std::size_t t = 0; t < allowed.size(); ++t) {
+                        if (!allowed[t]) logits[i][t] = -std::numeric_limits<float>::infinity();
+                    }
+                } else {
+                    // A vocabulary/logit width mismatch would silently mask the
+                    // wrong tokens. Refuse to guess which end is wrong.
+                    logger::Logger::getInstance().error(
+                        "mortgage assistant: grammar mask is {} wide but the logit vector is {} -- "
+                        "constraint DROPPED for this sequence",
+                        allowed.size(), logits[i].size());
+                    release_grammar(seq);
+                }
+            }
+
             seq.next_token = pipeline_->schedulerSample(logits[i], params, seq.agent->getContext());
             still_active.push_back(std::move(seq));
         }
@@ -789,7 +876,145 @@ class SensenBackend final : public QueuedBackend {
         pipeline_->schedulerEvict(*seq.agent);
     }
 
+    /**
+     * Builds the grammar pool once, on the owner thread, the first time a
+     * sequence needs it.
+     *
+     * Lazy rather than eager because it materialises the whole id -> text
+     * vocabulary: 151,936 `std::string`s for Qwen3, which every
+     * `MortgageParamsGrammar` holds a copy of. One instance per concurrent slot
+     * is allocated and then RE-USED across requests -- `reset()` + `prime()`
+     * returns an instance to its start state, so a per-request construction
+     * (and a per-request vocabulary copy) never happens.
+     *
+     * A failure here is not fatal. `grammar_pool_` stays empty, `arm_grammar`
+     * finds no slot, and every sequence decodes exactly as it did before this
+     * existed. Constrained decoding is an improvement to the output, not a
+     * precondition for producing any -- and the verifier behind it is what
+     * actually guarantees safety.
+     */
+    auto ensure_grammar_pool() -> void {
+        if (grammar_pool_ready_) return;
+        grammar_pool_ready_ = true;  // set first: a failure must not retry per token
+
+        logger::Logger::getInstance().info(
+            "mortgage assistant: MORTGAGE_GRAMMAR={} -- constrained decoding {}",
+            env_string("MORTGAGE_GRAMMAR").value_or("(unset, defaults on)"),
+            grammar_enabled_ ? "REQUESTED" : "OFF");
+        if (!grammar_enabled_) return;
+
+        auto schema = mg::Schema::build();
+        if (!schema.has_value()) {
+            logger::Logger::getInstance().error(
+                "mortgage assistant: could not build the params grammar schema ({}) -- decoding "
+                "UNCONSTRAINED. The verifier still gates every answer.",
+                schema.error());
+            return;
+        }
+        schema_ = std::move(*schema);
+
+        try {
+            const sensen::Tokenizer& tok = pipeline_->getTokenizer();
+            const std::size_t vsz = tok.getVocabSize();
+            std::vector<std::string> vocab_text(vsz);
+            for (std::size_t id = 0; id < vsz; ++id) {
+                vocab_text[id] = tok.decodeToken(static_cast<std::uint32_t>(id));
+            }
+            const std::optional<std::uint32_t> eos = tok.getSpecialTokens().eos;
+
+            grammar_pool_.reserve(max_concurrent_);
+            for (std::size_t i = 0; i < max_concurrent_; ++i) {
+                // The last one moves the table; the earlier ones must copy,
+                // because each instance masks against its own state.
+                grammar_pool_.push_back(std::make_unique<mg::MortgageParamsGrammar>(
+                    *schema_, (i + 1 == max_concurrent_) ? std::move(vocab_text) : vocab_text, eos));
+            }
+            grammar_free_.assign(max_concurrent_, true);
+            logger::Logger::getInstance().info(
+                "mortgage assistant: constrained decoding armed on '{}' -- {} grammar slots over a "
+                "{}-entry vocabulary",
+                schema_->activation_marker(), max_concurrent_, vsz);
+        } catch (const std::exception& e) {
+            grammar_pool_.clear();
+            logger::Logger::getInstance().error(
+                "mortgage assistant: could not build the grammar pool ({}) -- decoding "
+                "UNCONSTRAINED",
+                e.what());
+        }
+    }
+
+    /**
+     * Switches the constraint on for one sequence, at the moment its emitted
+     * text ends with the activation marker.
+     *
+     * Deliberately NOT at the first token. Qwen3 emits a `<think>` block on
+     * every response, and a legitimate answer may be a clarifying question
+     * rather than params at all -- a grammar forced from token zero would
+     * forbid both, and would turn the 46-in-600 clarification rows into
+     * malformed params. `prime()` replays the marker into a fresh automaton so
+     * arming late is not a desync.
+     */
+    auto arm_grammar(Sequence& seq) -> void {
+        if (seq.grammar != nullptr || grammar_pool_.empty()) return;
+        const std::string_view marker = schema_->activation_marker();
+        if (marker.empty()) return;
+
+        // CONTAINS, not ends-with, and then replay everything from the marker
+        // onward. A token boundary does not respect the marker: the token that
+        // completes `<params>` also carries the `{"` after it, so the emitted
+        // text never ENDS with the marker at any single step -- it goes from
+        // "...<param" straight to "...<params>{\"". An ends_with test therefore
+        // never fires, which is exactly how this failed the first time: the
+        // pool built, the log said armed, and not one sequence was constrained.
+        const auto at = seq.emitted.find(marker);
+        if (at == std::string::npos) return;
+        const std::string_view replay = std::string_view{seq.emitted}.substr(at);
+
+        for (std::size_t s = 0; s < grammar_pool_.size(); ++s) {
+            if (!grammar_free_[s]) continue;
+            auto* g = grammar_pool_[s].get();
+            g->reset();
+            if (!g->prime(replay)) {
+                // The automaton rejected its own activation marker. That is a
+                // contradiction rather than a bad response, so say so once and
+                // leave this sequence unconstrained instead of masking against
+                // a state that does not correspond to what was emitted.
+                logger::Logger::getInstance().error(
+                    "mortgage assistant: grammar refused to prime on the emitted prefix '{}' -- "
+                    "this sequence decodes UNCONSTRAINED",
+                    replay);
+                return;
+            }
+            grammar_free_[s] = false;
+            seq.grammar = g;
+            seq.grammar_slot = s;
+            return;
+        }
+        // Every slot busy. Possible only if the pool were smaller than
+        // max_concurrent_; it is not, so this is unreachable rather than a
+        // capacity policy. Unconstrained is the honest fallback either way.
+    }
+
+    /** Returns a sequence's grammar slot to the pool. Safe to call on a
+     * sequence that never armed one. */
+    auto release_grammar(Sequence& seq) -> void {
+        if (seq.grammar_slot != kNoSlot && seq.grammar_slot < grammar_free_.size()) {
+            grammar_free_[seq.grammar_slot] = true;
+        }
+        seq.grammar = nullptr;
+        seq.grammar_slot = kNoSlot;
+    }
+
     std::unique_ptr<sensen::LLMPipeline> pipeline_;
+
+    // Constrained decoding. All of this is touched ONLY by the owner thread
+    // (`run` and the functions it calls), which is the same reason the rest of
+    // the decode state needs no lock.
+    bool grammar_enabled_ = env_string("MORTGAGE_GRAMMAR").value_or("on") != "off";
+    bool grammar_pool_ready_ = false;
+    std::optional<mg::Schema> schema_;
+    std::vector<std::unique_ptr<mg::MortgageParamsGrammar>> grammar_pool_;
+    std::vector<bool> grammar_free_;
 
     // Declared LAST: member destruction order is the reverse of declaration
     // order, so `worker_`'s destructor (request_stop + join) runs BEFORE
