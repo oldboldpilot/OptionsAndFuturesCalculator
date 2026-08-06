@@ -245,7 +245,16 @@ A CORS preflight from an unrelated origin returns `204` with that origin echoed 
 
 ## 8. Verifying an integration
 
-1. `GET https://api.optionsandfuturescalculator.com/health` → `200`.
+1. `GET https://api.optionsandfuturescalculator.com/healthz` → `200` **with
+   `content-type: text/plain` and the body `ok`**.
+
+   Assert the body, not the status. `/healthz` is the only path Envoy matches
+   exactly (`backend/envoy.yaml`); every other path falls through to the
+   catch-all gRPC route, and a gRPC-Web failure is *itself* an HTTP `200` with
+   the error in `grpc-status`. `GET /health` — one letter off — answers `200`,
+   `content-type: application/grpc`, `grpc-status: 2`, `grpc-message: Bad method
+   header`, empty body. A liveness probe that checks only the status code passes
+   against that forever.
 2. Call `ComputePayment` with a known loan; assert the value matches the
    closed-form annuity payment, not merely that a response arrived.
 3. Send a deliberately malformed decimal; assert you get `grpc-status: 3` and that

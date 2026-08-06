@@ -43,23 +43,44 @@ belongs with the service that owns it
 
 | | value |
 | --- | --- |
-| file | `mortgagefv-assistant-q8_0.gguf` |
+| file | `mortgagefv-assistant-v2-q8_0.gguf` |
 | size | 639,447,136 bytes |
-| sha256 | `31ed8f45b3fca52cf46d99ccecc65e9a7210b736cbc39ae043270be40c5630a5` |
+| sha256 | `269efd32a5533ff94fc31975f0cbee2c46ba47863a924a0745886fdbc3b413fe` |
 | format | Q8_0 GGUF, Qwen3-0.6B |
 | served from | `MORTGAGE_MODEL_PATH` (`/app/model/mortgage-assistant.gguf` in the image) |
 
+**v2 is the model of record; v1 is not.** v1
+(`31ed8f45b3fca52cf46d99ccecc65e9a7210b736cbc39ae043270be40c5630a5`) was trained
+on the dataset that still contained the four ungrounded-value families, and this
+table recorded it as "what ships" for a day after v2 replaced it — during which
+the bucket object, `MORTGAGE_MODEL_SHA256` and the running container were all
+consistently pinned to the *wrong* model. Corrected 2026-08-06.
+
+**Do not use size to tell them apart.** Both files are exactly 639,447,136
+bytes: same architecture, same quantisation, same tensor shapes — only the
+weights differ. Size is not an identity check here, and the byte count above is
+a transfer-completeness check only. The sha256 is the only thing that
+distinguishes v1 from v2.
+
 That sha256 is the value `MORTGAGE_MODEL_SHA256` must carry **for this exact
 file**, and it was computed against a local copy at
-`backend/models/mortgagefv-assistant-q8_0.gguf`. It is not the number to trust
-after an upload — see step 2 below, which exists because the local checksum and
-the served checksum are two different claims.
+`backend/models/mortgagefv-assistant-v2-q8_0.gguf`. It is not the number to
+trust after an upload — see step 2 below, which exists because the local
+checksum and the served checksum are two different claims.
 
-The GGUF itself is **not in this repository and not in the deployed image**;
-`**/*.gguf` is gitignored and `backend/models/` is committed empty (see its
-`.gitkeep`). The checksum is recorded here so that whatever transport replaces
-the deleted HF repo has a value to be checked against, rather than being
-re-derived from whatever file happens to turn up later.
+**The bucket key is still named for v1.** `MORTGAGE_MODEL_URL` ends in
+`mortgagefv-assistant-q8_0.gguf` — no `-v2` — because v2 was uploaded *over*
+the existing key rather than beside it. The key name is therefore not evidence
+of which model is behind it; only `MORTGAGE_MODEL_SHA256` is, and the build
+fails closed if the two disagree.
+
+The GGUF is **not in this repository** — `**/*.gguf` is gitignored and
+`backend/models/` is committed empty (see its `.gitkeep`) — but it **is** in the
+deployed image, fetched at build time from the private Railway bucket and
+checksum-verified before the layer is kept. The checksum is recorded here so
+that the transport that replaced the deleted HF repo has a value to be checked
+against, rather than being re-derived from whatever file happens to turn up
+later.
 
 ## Why a build-time fetch
 
