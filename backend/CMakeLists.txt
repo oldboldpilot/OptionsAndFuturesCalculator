@@ -846,9 +846,26 @@ target_sources(test_runner
         src/modules/market_data.cppm
         src/modules/pricing_engine.cppm
 )
-target_link_libraries(test_runner PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto)
+target_link_libraries(test_runner PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto sgee)
 
 add_test(NAME CoreEngineTest COMMAND test_runner)
+
+# Retry-with-backoff + circuit-breaker orchestration around market_data.cppm's
+# network fetches (fetch_with_resilience, built on SGEE's own
+# sgee.runtime.resilience::BackoffPolicy / CircuitBreaker). Exercises the
+# retry/backoff/circuit-breaker ORCHESTRATION against a fake FetchAttempt --
+# no real socket -- so it needs the same module + link surface market_data.cppm
+# itself needs (fastjson/logger/httplib/OpenSSL) plus sgee, but not proto_lib
+# or sensen_slim, neither of which market_data.cppm depends on.
+add_executable(test_market_data_resilience tests/test_market_data_resilience.cpp)
+target_sources(test_market_data_resilience
+    PRIVATE
+    FILE_SET CXX_MODULES FILES
+        src/modules/market_data.cppm
+)
+target_link_libraries(test_market_data_resilience PRIVATE fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto sgee)
+
+add_test(NAME MarketDataResilienceTest COMMAND test_market_data_resilience)
 
 # GP-ARA mandatory verification stage for the strategy assistant
 # (assistant_verification.cppm). Deliberately proto- and gRPC-free (see that

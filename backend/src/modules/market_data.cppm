@@ -13,10 +13,12 @@ module;
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <random>
 #include <shared_mutex>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -29,6 +31,7 @@ export module market_data;
 
 import fastjson;
 import logger;
+import sgee.runtime.resilience;
 
 /*
  * Market data.
@@ -70,6 +73,7 @@ export enum class MarketDataError {
     MissingData,
     NotConfigured,
     NotFound,
+    CircuitOpen,
 };
 
 [[nodiscard]] auto market_data_category() noexcept -> const std::error_category& {
@@ -83,6 +87,7 @@ export enum class MarketDataError {
                 case MarketDataError::MissingData:   return "Provider response is missing a required field";
                 case MarketDataError::NotConfigured: return "ALPACA_API_KEY / ALPACA_API_SECRET are not set";
                 case MarketDataError::NotFound:      return "No listed contracts for the requested symbol";
+                case MarketDataError::CircuitOpen:   return "Provider has failed repeatedly; refusing without a network attempt until the cooldown elapses";
                 default:                             return "Unknown market data error";
             }
         }
@@ -150,6 +155,186 @@ struct Credentials {
     return *it->second;
 }
 
+// --------------------------------------------------------------------------
+// Resilience: retry with backoff + a per-host circuit breaker.
+//
+// Every call in this module that leaves the process is a single unauthenticated
+// GET against a third-party host (Alpaca or home.treasury.gov) over the public
+// internet — a dropped connection, a DNS hiccup, or a momentary 503 is routine,
+// not exceptional, and previously turned into an immediate, permanent failure
+// of whatever RPC triggered it. That is the textbook case for a retry: the
+// call is read-only (idempotent — retrying it has no side effect to worry
+// about) and the failure mode is transient by nature.
+//
+// The retry math and the circuit-breaker state machine are SGEE's own
+// (sgee.runtime.resilience::BackoffPolicy / CircuitBreaker) rather than a
+// hand-rolled sleep loop: BackoffPolicy computes the deterministic
+// exponential-with-jitter delay schedule and CircuitBreaker tracks
+// Closed/Open/HalfOpen transitions from injected failure/success events, so
+// this module owns only the orchestration (when to call attempt(), when to
+// sleep, when to give up) and none of the policy arithmetic. This is a
+// narrower use of SGEE than calculator_service.cpp's: that service models a
+// whole multi-step pricing computation as a graph and lets the interpreter
+// walk it; there is no external I/O and nothing here to retry. This module
+// has exactly one thing worth retrying — the network call — and no multi-step
+// workflow to model, so it takes the two resilience primitives directly
+// rather than standing up a Builder/ActionRegistry/Interpreter graph for a
+// single action. (Separately: the interpreter's own per-node RetryPolicy does
+// not honor delay_ms/backoff_multiplier at all — a failed action is retried
+// on the very next batch tick, with no injected delay — so it would not have
+// produced real backoff even if a graph were built here.)
+//
+// The circuit breaker exists so that an actual Alpaca/Treasury outage does not
+// turn into a retry storm: once a host has failed kCircuitFailureThreshold
+// times in a row, every subsequent call is refused immediately (CircuitOpen)
+// without attempting the network at all, for kCircuitCooldownMs, after which
+// one trial call is allowed through to test recovery. Breaker state is process-
+// wide per host (not per thread, not per request) because the thing it is
+// protecting — the host's actual availability — is a property of the host, not
+// of any one caller.
+// --------------------------------------------------------------------------
+
+/** How many times a fetch is attempted in total, including the first try. */
+constexpr std::uint32_t kMaxFetchAttempts = 3;
+constexpr std::uint64_t kBackoffBaseMs = 200;
+constexpr std::uint64_t kBackoffMaxMs = 2000;
+constexpr double kBackoffFactor = 2.0;
+constexpr std::uint32_t kCircuitFailureThreshold = 5;
+constexpr std::uint64_t kCircuitCooldownMs = 30'000;
+constexpr std::uint32_t kCircuitHalfOpenTrials = 1;
+
+/**
+ * One process-wide monotonic millisecond clock, shared by every call site.
+ *
+ * CircuitBreaker::allow/on_success/on_failure compare timestamps ACROSS calls
+ * (e.g. "has open_cooldown_ms elapsed since the call that tripped the
+ * breaker"), so the clock has to share one fixed origin for the life of the
+ * process — a clock rebased to "now" on every fetch would make the cooldown
+ * math meaningless the moment two calls are involved.
+ */
+[[nodiscard]] auto steady_now_ms() -> std::uint64_t {
+    static const auto epoch = std::chrono::steady_clock::now();
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - epoch).count());
+}
+
+/** A circuit breaker plus the mutex serializing access to it. Not copyable or
+ *  movable (std::mutex isn't), so the registry below stores these by pointer. */
+struct HostBreaker {
+    std::mutex mutex;
+    sgee::resilience::CircuitBreaker breaker;
+
+    HostBreaker()
+        : breaker{sgee::resilience::CircuitBreakerConfig{
+              .failure_threshold = kCircuitFailureThreshold,
+              .open_cooldown_ms = kCircuitCooldownMs,
+              .half_open_max_trials = kCircuitHalfOpenTrials}} {}
+};
+
+/** The circuit breaker for one host, created on first use and held for the
+ *  life of the process — this is what makes breaker state process-wide. */
+[[nodiscard]] auto host_breaker(const std::string& host_key) -> HostBreaker& {
+    static std::mutex registry_mutex;
+    static std::unordered_map<std::string, std::unique_ptr<HostBreaker>> registry;
+
+    const std::lock_guard lock{registry_mutex};
+    auto it = registry.find(host_key);
+    if (it == registry.end()) {
+        it = registry.emplace(host_key, std::make_unique<HostBreaker>()).first;
+    }
+    return *it->second;
+}
+
+/** The outcome of one fetch attempt: an error code plus whether trying again
+ *  is worth it. A transport failure (no response at all) is always worth
+ *  retrying; among HTTP statuses, only the ones that describe a transient
+ *  condition (429 rate-limited, 5xx server-side) are — a 4xx client error
+ *  (401 bad credentials, 404 not found) will fail exactly the same way on
+ *  the next attempt, so retrying it would only burn the retry budget and
+ *  delay an error that is not going to resolve itself. */
+export struct FetchAttemptError {
+    MarketDataError code{MarketDataError::NetworkError};
+    bool retryable{false};
+};
+
+/** One fetch attempt: whatever network I/O `fetch_with_resilience` retries.
+ *  Exposed as a callable seam (rather than `fetch_with_resilience` taking a
+ *  host/path/headers triple and doing the httplib call itself) so the retry
+ *  and circuit-breaker orchestration is unit-testable against a fake attempt
+ *  function, without a real socket. */
+export using FetchAttempt = std::function<std::expected<std::string, FetchAttemptError>()>;
+
+/**
+ * Runs `attempt` up to kMaxFetchAttempts times against `host_key`'s circuit
+ * breaker, sleeping between retryable failures on SGEE's exponential-with-
+ * full-jitter backoff schedule.
+ *
+ * `host_key` identifies the breaker to consult and update, NOT necessarily a
+ * literal hostname — callers that want independent breakers for what is
+ * physically the same host (or a shared breaker across physically different
+ * hosts) are free to key it however makes sense for them. This module keys
+ * it by the httplib host string, one breaker per (data host, trading host,
+ * Treasury host) triple.
+ */
+export [[nodiscard]] auto fetch_with_resilience(const std::string& host_key,
+                                                const FetchAttempt& attempt)
+    -> std::expected<std::string, MarketDataError> {
+    auto& log = logger::Logger::getInstance();
+    auto& guard = host_breaker(host_key);
+
+    static const sgee::resilience::BackoffPolicy backoff{sgee::resilience::BackoffConfig{
+        .base_ms = kBackoffBaseMs,
+        .factor = kBackoffFactor,
+        .max_ms = kBackoffMaxMs,
+        .jitter = sgee::resilience::JitterType::Full}};
+
+    // Full jitter needs an RNG source; thread_local so concurrent gRPC
+    // handler threads (this service has no worker pool — see
+    // calculator_service.cpp's constructor comment) never share one engine.
+    thread_local std::mt19937_64 rng{std::random_device{}()};
+    auto jitter_rng = [&]() -> double {
+        return std::uniform_real_distribution<double>{0.0, 1.0}(rng);
+    };
+
+    MarketDataError last_error = MarketDataError::NetworkError;
+    for (std::uint32_t attempt_no = 0; attempt_no < kMaxFetchAttempts; ++attempt_no) {
+        bool allowed = false;
+        {
+            const std::lock_guard lock{guard.mutex};
+            allowed = guard.breaker.allow(steady_now_ms());
+        }
+        if (!allowed) {
+            log.warn("Circuit open for {}; refusing without a network attempt", host_key);
+            return std::unexpected(MarketDataError::CircuitOpen);
+        }
+
+        auto result = attempt();
+        if (result) {
+            const std::lock_guard lock{guard.mutex};
+            guard.breaker.on_success(steady_now_ms());
+            return std::move(*result);
+        }
+
+        last_error = result.error().code;
+        {
+            const std::lock_guard lock{guard.mutex};
+            guard.breaker.on_failure(steady_now_ms());
+        }
+
+        const bool have_attempts_left = attempt_no + 1 < kMaxFetchAttempts;
+        if (!result.error().retryable || !have_attempts_left) {
+            break;
+        }
+
+        const auto delay_ms = backoff.delay_for_attempt(attempt_no, jitter_rng);
+        log.warn("Fetch attempt {} for {} failed ({}); retrying in {} ms", attempt_no + 1,
+                host_key, static_cast<int>(last_error), delay_ms);
+        std::this_thread::sleep_for(std::chrono::milliseconds{delay_ms});
+    }
+    return std::unexpected(last_error);
+}
+
 /**
  * One GET, no vendor assumptions.
  *
@@ -158,22 +343,34 @@ struct Credentials {
  * refuses without ALPACA_* credentials and then insists on parsing JSON.
  * Reuses client_for() so it inherits the same per-(thread, host) keep-alive
  * client and the same error mapping.
+ *
+ * Retries transient failures through fetch_with_resilience() (see the
+ * "Resilience" section above): a dropped connection or a 429/5xx is retried
+ * with backoff; a genuine HTTP client error (401, 404, ...) is not, since
+ * asking again would reproduce exactly the same response.
  */
 [[nodiscard]] auto get_text(const std::string& host, const std::string& path,
                             const httplib::Headers& headers)
     -> std::expected<std::string, std::error_code> {
     auto& log = logger::Logger::getInstance();
 
-    auto res = client_for(host).Get(path, headers);
-    if (!res) {
-        log.error("Network error: {}{} ({})", host, path, httplib::to_string(res.error()));
-        return std::unexpected(make_error_code(MarketDataError::NetworkError));
-    }
-    if (res->status != 200) {
-        log.error("HTTP {} from {}{}: {}", res->status, host, path, res->body.substr(0, 240));
-        return std::unexpected(make_error_code(MarketDataError::HttpError));
-    }
-    return std::move(res->body);
+    auto result = fetch_with_resilience(host, [&]() -> std::expected<std::string, FetchAttemptError> {
+        auto res = client_for(host).Get(path, headers);
+        if (!res) {
+            log.error("Network error: {}{} ({})", host, path, httplib::to_string(res.error()));
+            return std::unexpected(FetchAttemptError{MarketDataError::NetworkError, /*retryable=*/true});
+        }
+        if (res->status != 200) {
+            log.error("HTTP {} from {}{}: {}", res->status, host, path, res->body.substr(0, 240));
+            const bool transient = res->status == 429 || res->status == 500 || res->status == 502 ||
+                                   res->status == 503 || res->status == 504;
+            return std::unexpected(FetchAttemptError{MarketDataError::HttpError, transient});
+        }
+        return std::move(res->body);
+    });
+
+    if (!result) return std::unexpected(make_error_code(result.error()));
+    return std::move(*result);
 }
 
 [[nodiscard]] auto get_json(const std::string& host, const std::string& path)
