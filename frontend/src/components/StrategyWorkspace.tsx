@@ -9,6 +9,7 @@ import StrategyMetrics from './StrategyMetrics';
 import OptionChain from './OptionChain';
 import PnLMatrix from './PnLMatrix';
 import OptionTicket from './OptionTicket';
+import ExerciseStylePanel from './ExerciseStylePanel';
 import PnLSurface from './PnLSurface';
 import AdSlot from './AdSlot';
 import TermStructure from './TermStructure';
@@ -89,10 +90,17 @@ export function StrategyWorkspace({ heading }: { heading?: string }) {
           <StrategySelector />
         </div>
 
-        {/* Compose the position: ticket first, then what it has built */}
+        {/* Compose the position: ticket first, then what it has built. This
+            column is the only one with natural-height panels and its own
+            scroll -- columns 3/4 wrap panels in fixed flex fractions and
+            `.panel` clips (globals.css:334-345), which already clipped
+            content off-screen once (UpgradePrompt.tsx:66-73). The exercise
+            panel's Bermudan date list has variable height, so it belongs
+            here. */}
         <div className="stagger" style={{ ...column, overflowY: 'auto' }}>
           <OptionTicket />
           <PositionLegs />
+          <ExerciseStylePanel />
         </div>
 
         {/* Read the result */}
