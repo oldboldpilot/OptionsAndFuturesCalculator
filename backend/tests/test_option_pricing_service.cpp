@@ -97,6 +97,18 @@
 // still come back non-finite with Status::OK. That residual gap is
 // exercised at the end of section 5 as a documented, known, NOT-fixed
 // finding rather than papered over.
+//
+// SCOPE NOTE, added by the later finance-audit pass that swept the REST of
+// sensen.finance.Finance for the same four bug classes: the paragraph above
+// describes PriceOptionTree's OWN residual gap, not a property of the file
+// as a whole. At the time this file was written, PriceBlackScholes and
+// PriceOptionMonteCarlo had NO finiteness or positivity guard AT ALL (not
+// even PriceOptionTree's original "<= 0" check) -- a bare client-sent NaN in
+// spot/strike/rate/volatility reached Status::OK directly, no overflow or
+// absurd magnitude required. Both were closed in that later pass
+// (require_finite + positivity, mirroring PriceOptionTree's own fix) and are
+// covered by tests/test_finance_service_validation.cpp. Read this file's own
+// guarantee as scoped to PriceOptionTree specifically.
 #include <chrono>
 #include <cmath>
 #include <cstdio>

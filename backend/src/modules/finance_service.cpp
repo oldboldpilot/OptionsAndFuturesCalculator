@@ -397,6 +397,99 @@ template <typename T>
 }
 
 /**
+ * check_compound_growth_safe's sibling for the TIME-VALUE-OF-MONEY RPCs
+ * (ComputePayment/ComputePresentValue/ComputeFutureValue/ComputeInterestPayment/
+ * ComputePrincipalPayment), whose `rate` field is already documented as a
+ * PER-PERIOD rate (finance.proto: "per-period rate, decimal (0.004166...
+ * monthly)") -- unlike the six home-finance RPCs above, there is no
+ * payments_per_year to divide an annual rate by first.
+ *
+ * Reachable exactly the same way ComputeMortgageRecast's own annual_rate gap
+ * was: `pmt`/`pv`/`fv` (financial.cppm) all raise `1+rate` to `periods` via
+ * BigDecimal::pow -- exponentiation by squaring, so the call itself is cheap
+ * (~31 multiplies) regardless of how large `periods` is, but a `rate` whose
+ * *magnitude* is absurd (nothing stops periods, rate, or both from being
+ * whatever the caller likes; ComputePayment's REQUIRE_DECIMAL has no upper
+ * bound at all) still wraps BigDecimal's exact __int128 range. Reproduced
+ * directly: ComputeAmortization{annual_rate=1000000, term_months=1200}
+ * (calculate_mortgage_amortization -> the SAME pmt() with monthly_rate=
+ * annual_rate/12) returned total_interest_paid =
+ * "29999999999999.999999999880000000" -- thirty trillion dollars of
+ * interest on a request that never named a loan_amount over $300,000,
+ * silently wrapped rather than refused.
+ */
+[[nodiscard]] auto check_compound_growth_safe_periods(double rate_per_period, int periods,
+                                                      std::string_view context) -> Status {
+    if (auto s = check_rate_floor(rate_per_period, context); !s.ok()) return s;
+    if (periods <= 0) return Status::OK;
+
+    const double log_growth = static_cast<double>(periods) * std::log1p(rate_per_period);
+    if (!std::isfinite(log_growth) || log_growth > 40.0 || log_growth < -40.0) {
+        return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                      std::string(context) +
+                          ": rate and periods combine to a compounding factor too extreme for "
+                          "this calculator to price (would overflow the exact decimal engine)");
+    }
+    return Status::OK;
+}
+
+/**
+ * Refuses a period COUNT above any real payment schedule -- the TVM-family
+ * analogue of check_term's 1200-month cap, generalized because "periods"
+ * here is not always months (a per-period rate can describe daily, weekly,
+ * or any other cadence). 100,000 periods is already an absurd figure (over
+ * 270 years of DAILY payments) and exists purely to bound the O(periods)
+ * work `ipmt`/`ppmt` (financial.cppm) do internally -- their per-period
+ * balance-walk loop runs `per` times, and neither `periods` (nper) nor
+ * `period` (per) carried any upper bound before this guard. Reproduced
+ * directly: ComputeInterestPayment{period=periods=3,000,000, ...} is
+ * accepted today and measurably burns CPU proportional to `period` for an
+ * unauthenticated, flat-rate-charged caller -- cheap per request at this
+ * particular size, but genuinely unbounded, and the quota system charges
+ * quota::cost_default() regardless of how large the caller asks for it to
+ * be, exactly the same pattern ComputeRefinance's own payments_per_year
+ * guard (above) was written to close.
+ */
+[[nodiscard]] auto check_period_count_ceiling(int periods, std::string_view field) -> Status {
+    if (periods > 100'000) {
+        return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                      std::string(field) +
+                          " exceeds 100,000; no real payment schedule (even daily, for "
+                          "centuries) needs more periods than that");
+    }
+    return Status::OK;
+}
+
+/**
+ * Refuses a non-finite element anywhere in a repeated-double cash-flow
+ * field. `ComputeNpv`/`ComputeXnpv`/`ComputeIrr`/`ComputeXirr`/
+ * `ComputePaybackPeriod` all sum or Newton-iterate directly over these
+ * values in double arithmetic (financial.cppm's npv_double/xnpv/irr/xirr/
+ * payback_period) with no finiteness check of their own; a single NaN
+ * anywhere in the list propagates through the arithmetic straight into the
+ * response. Newton solvers (irr/xirr) usually self-protect by simply never
+ * converging on a NaN chase and returning FAILED_PRECONDITION after their
+ * fixed 100-iteration budget -- but the plain-sum RPCs (npv_double/xnpv) do
+ * not iterate at all, so a NaN reaches Status::OK. Checked uniformly here
+ * regardless of which failure mode a given callee would hit, so the error
+ * names the actual bad element rather than a generic solver-convergence
+ * message.
+ */
+template <typename Repeated>
+[[nodiscard]] auto require_all_finite(const Repeated& values, std::string_view field) -> Status {
+    int idx = 0;
+    for (const double v : values) {
+        if (!std::isfinite(v)) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          std::string(field) + "[" + std::to_string(idx) +
+                              "] must be a finite number, got " + std::to_string(v));
+        }
+        ++idx;
+    }
+    return Status::OK;
+}
+
+/**
  * Prices ComputeRefinance from the UNVALIDATED request, because CHARGE runs
  * before the validation below (a refused call must not spend an
  * unauthenticated caller's allowance on the work it never does).
@@ -492,9 +585,20 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         }
         CHARGE("ComputePayment", quota::cost_default());
         if (auto s = check_periods(request->periods()); !s.ok()) return s;
+        if (auto s = check_period_count_ceiling(request->periods(), "periods"); !s.ok()) return s;
         REQUIRE_DECIMAL(rate, request->rate(), "rate");
         REQUIRE_DECIMAL(pv, request->present_value(), "present_value");
         READ_DECIMAL(fv, request->future_value(), "future_value");
+        // rate is a PER-PERIOD rate here (finance.proto's own field comment),
+        // so pmt()'s BigDecimal pow(periods) is checked directly against it --
+        // see check_compound_growth_safe_periods's own comment for the
+        // reproduction (ComputeAmortization{annual_rate=1000000,
+        // term_months=1200}, the identical missing-guard shape on a sibling
+        // RPC that already had it retrofitted).
+        if (auto s = check_compound_growth_safe_periods(rate.to_double(), request->periods(), "rate");
+            !s.ok()) {
+            return s;
+        }
         const auto r = sensen::pmt(rate, request->periods(), pv, fv, timing_of(request->timing()));
         response->set_value(r.to_string());
         return Status::OK;
@@ -507,9 +611,14 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         }
         CHARGE("ComputePresentValue", quota::cost_default());
         if (auto s = check_periods(request->periods()); !s.ok()) return s;
+        if (auto s = check_period_count_ceiling(request->periods(), "periods"); !s.ok()) return s;
         REQUIRE_DECIMAL(rate, request->rate(), "rate");
         REQUIRE_DECIMAL(pmt_v, request->payment(), "payment");
         READ_DECIMAL(fv, request->future_value(), "future_value");
+        if (auto s = check_compound_growth_safe_periods(rate.to_double(), request->periods(), "rate");
+            !s.ok()) {
+            return s;
+        }
         const auto r = sensen::pv(rate, request->periods(), pmt_v, fv, timing_of(request->timing()));
         response->set_value(r.to_string());
         return Status::OK;
@@ -522,9 +631,14 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         }
         CHARGE("ComputeFutureValue", quota::cost_default());
         if (auto s = check_periods(request->periods()); !s.ok()) return s;
+        if (auto s = check_period_count_ceiling(request->periods(), "periods"); !s.ok()) return s;
         REQUIRE_DECIMAL(rate, request->rate(), "rate");
         REQUIRE_DECIMAL(pmt_v, request->payment(), "payment");
         READ_DECIMAL(pv_v, request->present_value(), "present_value");
+        if (auto s = check_compound_growth_safe_periods(rate.to_double(), request->periods(), "rate");
+            !s.ok()) {
+            return s;
+        }
         const auto r = sensen::fv(rate, request->periods(), pmt_v, pv_v, timing_of(request->timing()));
         response->set_value(r.to_string());
         return Status::OK;
@@ -659,11 +773,31 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         }
         CHARGE("ComputeAmortization", quota::cost_amortization(request->term_months()));
         if (auto s = check_term(request->term_months()); !s.ok()) return s;
-        REQUIRE_DECIMAL(loan, request->loan_amount(), "loan_amount");
-        REQUIRE_DECIMAL(rate, request->annual_rate(), "annual_rate");
+        // loan_amount/annual_rate used PLAIN REQUIRE_DECIMAL here -- neither
+        // the magnitude bound (check_decimal_string_magnitude, via
+        // REQUIRE_DECIMAL_SAFE) nor the compound-growth bound
+        // (check_compound_growth_safe) the six home-finance RPCs and
+        // ComputeMortgageRecast already carry for the IDENTICAL
+        // monthly_rate=annual_rate/12, pow(term_months) shape
+        // calculate_mortgage_amortization's own pmt() call performs. This is
+        // the SAME missing-guard pattern ComputeMortgageRecast's own comment
+        // documents ("annual_rate=1000000 returned a new_monthly_payment
+        // with no relation to the input"), just never retrofitted onto this
+        // RPC. Reproduced directly on THIS RPC: {loan_amount=300000,
+        // annual_rate=1000000, term_months=1200} returns Status::OK with
+        // total_interest_paid="29999999999999.999999999880000000" -- $30
+        // trillion of interest on a loan under $300,000, BigDecimal's exact
+        // __int128 range silently wrapped rather than refused.
+        REQUIRE_DECIMAL_SAFE(loan, request->loan_amount(), "loan_amount");
+        REQUIRE_DECIMAL_SAFE(rate, request->annual_rate(), "annual_rate");
         READ_DECIMAL(extra, request->monthly_overpayment(), "monthly_overpayment");
         READ_DECIMAL(pmi, request->pmi_annual_rate(), "pmi_annual_rate");
         READ_DECIMAL(home, request->original_home_value(), "original_home_value");
+        if (auto s = check_compound_growth_safe(rate.to_double(), 12, request->term_months(),
+                                                "annual_rate");
+            !s.ok()) {
+            return s;
+        }
 
         auto [schedule, summary] = sensen::calculate_mortgage_amortization(
             loan, rate, request->term_months(), extra, pmi, home);
@@ -697,12 +831,19 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         }
         CHARGE("ComputeDetailedAmortization", quota::cost_amortization(request->term_months()));
         if (auto s = check_term(request->term_months()); !s.ok()) return s;
-        REQUIRE_DECIMAL(loan, request->loan_amount(), "loan_amount");
-        REQUIRE_DECIMAL(rate, request->annual_rate(), "annual_rate");
+        // Same missing-guard shape as ComputeAmortization just above --
+        // see that RPC's comment for the reproduction.
+        REQUIRE_DECIMAL_SAFE(loan, request->loan_amount(), "loan_amount");
+        REQUIRE_DECIMAL_SAFE(rate, request->annual_rate(), "annual_rate");
         READ_DECIMAL(extra, request->monthly_overpayment(), "monthly_overpayment");
         READ_DECIMAL(pmi, request->pmi_annual_rate(), "pmi_annual_rate");
         READ_DECIMAL(home, request->original_home_value(), "original_home_value");
         READ_DECIMAL(tax, request->annual_tax_rate(), "annual_tax_rate");
+        if (auto s = check_compound_growth_safe(rate.to_double(), 12, request->term_months(),
+                                                "annual_rate");
+            !s.ok()) {
+            return s;
+        }
 
         auto [schedule, summary] = sensen::calculate_detailed_mortgage_amortization(
             loan, rate, request->term_months(), extra, pmi, home, tax);
@@ -763,6 +904,33 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
 
         for (int i = 0; i < n; ++i) {
             if (auto s = check_term(request->term_months(i)); !s.ok()) return s;
+        }
+        // loan_amounts/annual_rates/extra_payments/pmi_rates/home_values are
+        // raw wire doubles (unlike the single-loan ComputeAmortization above,
+        // this batch RPC's proto message never grew a decimal-string field),
+        // and calculate_mortgage_batch_cpu (financial.cppm) constructs a
+        // BigDecimal DIRECTLY from each one: `BigDecimal(loan_amounts[i])`.
+        // That constructor is `value_ = static_cast<__int128_t>(std::round(
+        // val * 1e18))` (bigdecimal.cppm) -- casting a NaN double to
+        // __int128_t is UNDEFINED BEHAVIOUR per [conv.fpint], not merely a
+        // NaN that propagates predictably. Reproduced directly: a batch
+        // entry of loan_amounts[0]=NaN is accepted today (Status::OK, one
+        // summary returned) rather than refused; what garbage value the UB
+        // actually produces is compiler/build-dependent by construction, so
+        // it cannot be relied on to "look wrong" the way ComputeCumulative's
+        // NaN reproduction (see require_finite there) happened to.
+        for (int i = 0; i < n; ++i) {
+            if (auto s = require_finite(request->loan_amounts(i), "loan_amounts"); !s.ok()) {
+                return s;
+            }
+            if (auto s = require_finite(request->annual_rates(i), "annual_rates"); !s.ok()) {
+                return s;
+            }
+            if (auto s = require_finite(request->extra_payments(i), "extra_payments"); !s.ok()) {
+                return s;
+            }
+            if (auto s = require_finite(request->pmi_rates(i), "pmi_rates"); !s.ok()) return s;
+            if (auto s = require_finite(request->home_values(i), "home_values"); !s.ok()) return s;
         }
 
         const std::vector<double> loans(request->loan_amounts().begin(), request->loan_amounts().end());
@@ -1045,6 +1213,13 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
         CHARGE("ComputeNpv", quota::cost_cash_flow(request->values_size()));
+        // npv_double (financial.cppm) is a PLAIN SUM -- unlike irr/xirr below,
+        // it does not iterate, so it has no Newton-Raphson "never converges on
+        // a NaN chase" self-protection. rate/values are raw wire doubles with
+        // no check of any kind before this fix. Reproduced directly: rate=NaN
+        // returns Status::OK with value=nan.
+        if (auto s = require_finite(request->rate(), "rate"); !s.ok()) return s;
+        if (auto s = require_all_finite(request->values(), "values"); !s.ok()) return s;
         const std::vector<double> values(request->values().begin(), request->values().end());
         response->set_value(sensen::npv_double(request->rate(), values));
         return Status::OK;
@@ -1056,6 +1231,16 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
         CHARGE("ComputeIrr", quota::cost_cash_flow(request->values_size()));
+        // irr (financial.cppm) Newton-Raphson-solves in double; a NaN
+        // anywhere in `values` or in `guess` makes every iteration produce
+        // NaN, which never satisfies either convergence check (a NaN
+        // comparison is always false), so it burns the full 100-iteration
+        // budget and returns FAILED_PRECONDITION rather than Status::OK with
+        // a NaN result -- self-protecting, unlike ComputeNpv above. Checked
+        // explicitly anyway for a clear, specific error instead of a
+        // misleading "failed to converge" after 100 wasted iterations.
+        if (auto s = require_all_finite(request->values(), "values"); !s.ok()) return s;
+        if (auto s = require_finite(request->guess(), "guess"); !s.ok()) return s;
         const std::vector<double> values(request->values().begin(), request->values().end());
         const auto r = (request->guess() == 0.0) ? sensen::irr(values)
                                                  : sensen::irr(values, request->guess());
@@ -1071,6 +1256,13 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         }
         CHARGE("ComputeXnpv", quota::cost_cash_flow(request->values_size()));
         if (auto s = check_dated(request); !s.ok()) return s;
+        // xnpv (financial.cppm) is a plain sum, same as npv_double above --
+        // no Newton-Raphson self-protection. Reproduced directly: rate=NaN
+        // (values/dates otherwise well-formed) returns Status::OK with
+        // value=nan.
+        if (auto s = require_finite(request->rate(), "rate"); !s.ok()) return s;
+        if (auto s = require_all_finite(request->values(), "values"); !s.ok()) return s;
+        if (auto s = require_all_finite(request->dates(), "dates"); !s.ok()) return s;
         const std::vector<double> values(request->values().begin(), request->values().end());
         const std::vector<double> dates(request->dates().begin(), request->dates().end());
         const auto r = sensen::xnpv(request->rate(), values, dates);
@@ -1086,6 +1278,12 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         }
         CHARGE("ComputeXirr", quota::cost_cash_flow(request->values_size()));
         if (auto s = check_dated(request); !s.ok()) return s;
+        // xirr Newton-Raphson-solves like irr above (self-protecting against
+        // NaN via non-convergence), checked explicitly for the same clearer-
+        // error reason.
+        if (auto s = require_all_finite(request->values(), "values"); !s.ok()) return s;
+        if (auto s = require_all_finite(request->dates(), "dates"); !s.ok()) return s;
+        if (auto s = require_finite(request->guess(), "guess"); !s.ok()) return s;
         const std::vector<double> values(request->values().begin(), request->values().end());
         const std::vector<double> dates(request->dates().begin(), request->dates().end());
         const auto r = (request->guess() == 0.0) ? sensen::xirr(values, dates)
@@ -1101,6 +1299,16 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
         CHARGE("ComputePaybackPeriod", quota::cost_cash_flow(request->values_size()));
+        // payback_period/discounted_payback_period (financial.cppm) compare a
+        // running cumulative sum against ">= 0.0" -- a NaN comparison is
+        // always false, so a NaN cumulative sum today happens to fall through
+        // to the loop's own "never recovered" error rather than an OK
+        // response (self-protecting by luck of the comparison, not by
+        // design). Checked explicitly anyway rather than relying on that.
+        if (auto s = require_all_finite(request->values(), "values"); !s.ok()) return s;
+        if (request->discounted()) {
+            if (auto s = require_finite(request->rate(), "rate"); !s.ok()) return s;
+        }
         const std::vector<double> values(request->values().begin(), request->values().end());
         const auto r = request->discounted()
                            ? sensen::discounted_payback_period(request->rate(), values)
@@ -1116,6 +1324,41 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
         CHARGE("ComputeCumulative", quota::cost_amortization(request->periods()));
+        // `rate`/`present_value` are raw wire doubles (CumulativeRequest has
+        // no decimal-string field at all), and `BigDecimal{double}` is
+        // `static_cast<__int128_t>(std::round(val * 1e18))` -- casting a NaN
+        // double to __int128_t is UNDEFINED BEHAVIOUR, not a NaN that merely
+        // propagates. Reproduced directly: rate=NaN (present_value=300000,
+        // periods=360, start_period=end_period=1) returned Status::OK with
+        // value=-1424480681.094903 -- a large, plausible-looking, completely
+        // fabricated number with no relationship to any real computation.
+        if (auto s = require_finite(request->rate(), "rate"); !s.ok()) return s;
+        if (auto s = require_finite(request->present_value(), "present_value"); !s.ok()) {
+            return s;
+        }
+        // periods (nper) and the [start_period, end_period] range were
+        // completely unbounded: cumipmt/cumprinc (financial.cppm) run
+        // `for (per = start_period; per <= end_period; ++per)` unconditionally
+        // -- the loop itself costs O(end_period - start_period) regardless of
+        // how small `periods` is, since ipmt/ppmt's own per>nper early exit
+        // only makes each ITERATION cheap, not the iteration COUNT. Reproduced
+        // directly: start_period=-2,000,000, end_period=2,000,000 (periods=1)
+        // is accepted today and walks 4,000,001 iterations for a flat
+        // quota::cost_amortization(1) charge.
+        if (auto s = check_period_count_ceiling(request->periods(), "periods"); !s.ok()) return s;
+        if (request->start_period() < -100'000 || request->start_period() > 100'000) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "start_period must fall within [-100000, 100000]");
+        }
+        if (request->end_period() < -100'000 || request->end_period() > 100'000) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "end_period must fall within [-100000, 100000]");
+        }
+        // Both endpoints are now individually bounded to +/-100,000, so their
+        // difference (computed in int64 to avoid the int32 overflow a naive
+        // subtraction of two such endpoints could otherwise hit) is already
+        // capped at 200,000 -- no further range check is needed on top of the
+        // two bounds above.
         const BigDecimal rate{request->rate()};
         const BigDecimal pv_v{request->present_value()};
         const auto r =
@@ -1136,6 +1379,19 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
         CHARGE("ComputeDepreciation", quota::cost_default());
+        // cost/salvage/life/period/factor are raw wire doubles. life's own
+        // "<= 0.0" checks below (present before this fix) do not catch NaN
+        // (NaN <= 0.0 is false), and cost/salvage/period/factor had no check
+        // of any kind -- sln/syd/ddb/macrs (financial.cppm) are pure double
+        // arithmetic with no guard of their own. Reproduced directly:
+        // {method=STRAIGHT_LINE, cost=10000, salvage=1000, life=NaN} returns
+        // Status::OK with value=nan (life<=0.0 is false for NaN, so the
+        // existing check let it straight through).
+        if (auto s = require_finite(request->cost(), "cost"); !s.ok()) return s;
+        if (auto s = require_finite(request->salvage(), "salvage"); !s.ok()) return s;
+        if (auto s = require_finite(request->life(), "life"); !s.ok()) return s;
+        if (auto s = require_finite(request->period(), "period"); !s.ok()) return s;
+        if (auto s = require_finite(request->factor(), "factor"); !s.ok()) return s;
         double v = 0.0;
         switch (request->method()) {
             case sensen::finance::DepreciationRequest::STRAIGHT_LINE:
@@ -1650,7 +1906,32 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         // list validated as a whole rather than accepted-then-silently-
         // ignored member by member. (This also catches a NaN date: NaN
         // compares false against "> 0.0", so it fails the same test.)
+        // is_bermudan_exercise_time (options.cppm) only ever compares a
+        // backward-induction time t=j*dt, j in [0, steps-1] -- i.e.
+        // t in [0, years_to_expiry - dt] -- against each date, with a
+        // +/-dt/2 match window. The largest matchable time is therefore
+        // (steps-1)*dt + dt/2 == years_to_expiry - dt/2, strictly less than
+        // years_to_expiry itself. A date in the half-open band
+        // [years_to_expiry - dt/2, years_to_expiry) therefore satisfies the
+        // (0, years_to_expiry] guard directly above -- it is neither
+        // rejected by that guard nor equal to years_to_expiry -- yet STILL
+        // can never match any j*dt: the identical silent-mislabelling defect
+        // the guard above exists to close, just in a narrower band right at
+        // the far edge of the option's life. years_to_expiry itself is
+        // deliberately exempt: a date exactly AT expiry does not need to
+        // match a backward-induction step at all -- the tree's own final-
+        // step payoff already implements exercise-at-expiry independently of
+        // is_bermudan_exercise_time (proven by the existing "Bermudan with a
+        // single date at expiry == European, bit-for-bit" test), so it is
+        // never silently ignored the way an interior dead-band date is.
+        // Reproduced directly: steps=200, years_to_expiry=1.0 (dt=0.005,
+        // dead band = [0.9975, 1.0)) -- a Bermudan date of 0.999 priced
+        // BIT-IDENTICAL to plain European (6.200231 == 6.200231) despite
+        // passing every other guard, while a date of 0.5 (well inside the
+        // matchable range) genuinely changed the price (6.662411).
         if (exercise == sensen::finance::BERMUDAN) {
+            const double dt = request->years_to_expiry() / static_cast<double>(request->steps());
+            const double dead_band_start = request->years_to_expiry() - dt * 0.5;
             for (const double d : request->bermudan_dates()) {
                 if (!(d > 0.0) || d > request->years_to_expiry()) {
                     return Status(
@@ -1660,6 +1941,18 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
                             std::to_string(request->years_to_expiry()) +
                             " -- a date outside that range never matches a real "
                             "backward-induction step and would silently price as European");
+                }
+                if (d != request->years_to_expiry() && d >= dead_band_start) {
+                    return Status(
+                        grpc::StatusCode::INVALID_ARGUMENT,
+                        "bermudan_dates entry " + std::to_string(d) +
+                            " cannot be represented at steps=" + std::to_string(request->steps()) +
+                            " -- it falls within half a step of years_to_expiry (" +
+                            std::to_string(request->years_to_expiry()) +
+                            ") without being exactly years_to_expiry, so it can never match a "
+                            "real backward-induction time and would silently price as European; "
+                            "use years_to_expiry exactly for a date at expiry, or raise steps so "
+                            "this date has its own step");
                 }
             }
         }
@@ -1723,6 +2016,33 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
         CHARGE("PriceBlackScholes", quota::cost_default());
+        // Unlike PriceOptionTree (fixed in the commit this file's finance
+        // audit continues from), this RPC had NO input validation at all --
+        // not even a positivity check. price_black_scholes (options.cppm)
+        // divides by (volatility * sqrt(years_to_expiry)) to form d1/d2 with
+        // no guard of its own; spot/strike feed std::log(spot/strike). A
+        // zero or NaN volatility (division by exactly 0), a non-positive
+        // spot/strike (log of <=0 is NaN), or a bare NaN in any field all
+        // reach Status::OK carrying NaN/Infinity in value and every Greek.
+        // Reproduced directly: {spot=100,strike=100,rate=0.05,volatility=0,
+        // years_to_expiry=1} returns value=4.877058 (a plausible number) but
+        // gamma=NaN (0.0/0.0) in the SAME response; {spot=NaN, ...} returns
+        // value=NaN outright. years_to_expiry<=0 is deliberately NOT
+        // rejected here: price_black_scholes has its own explicit T<=0
+        // branch returning the intrinsic value with every Greek at exactly
+        // 0 -- a real, intentional answer for an expired/expiring option,
+        // not a defect this guard should refuse.
+        if (auto s = require_finite(request->spot(), "spot"); !s.ok()) return s;
+        if (auto s = require_finite(request->strike(), "strike"); !s.ok()) return s;
+        if (auto s = require_finite(request->rate(), "rate"); !s.ok()) return s;
+        if (auto s = require_finite(request->volatility(), "volatility"); !s.ok()) return s;
+        if (auto s = require_finite(request->years_to_expiry(), "years_to_expiry"); !s.ok()) {
+            return s;
+        }
+        if (request->spot() <= 0.0 || request->strike() <= 0.0 || request->volatility() <= 0.0) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "spot, strike and volatility must all be positive");
+        }
         const auto r = sensen::price_black_scholes(
             request->spot(), request->strike(), request->rate(), request->volatility(),
             request->years_to_expiry(), option_type_of(request->option_type()));
@@ -1750,6 +2070,28 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         if (request->paths() <= 0 || request->steps() <= 0) {
             return Status(grpc::StatusCode::INVALID_ARGUMENT, "paths and steps must be positive");
         }
+        // Same gap as PriceBlackScholes above: spot/strike/rate/volatility/
+        // years_to_expiry were never checked at all. price_option_monte_carlo
+        // (options.cppm) computes dt=T/steps, drift=(r-0.5*sigma^2)*dt,
+        // vol=sigma*sqrt(dt) with no guard -- a negative years_to_expiry
+        // makes dt negative and vol=sqrt(negative)=NaN, propagating NaN
+        // through every simulated path and back out as Status::OK. Unlike
+        // PriceBlackScholes, T==0 is not a meaningful "priced at expiry"
+        // case for a path simulation (dt=0 degenerates every path to S0,
+        // silently mispricing rather than erroring), so years_to_expiry is
+        // held to the same strict ">0" bar as spot/strike/volatility here.
+        if (auto s = require_finite(request->spot(), "spot"); !s.ok()) return s;
+        if (auto s = require_finite(request->strike(), "strike"); !s.ok()) return s;
+        if (auto s = require_finite(request->rate(), "rate"); !s.ok()) return s;
+        if (auto s = require_finite(request->volatility(), "volatility"); !s.ok()) return s;
+        if (auto s = require_finite(request->years_to_expiry(), "years_to_expiry"); !s.ok()) {
+            return s;
+        }
+        if (request->spot() <= 0.0 || request->strike() <= 0.0 || request->volatility() <= 0.0 ||
+            request->years_to_expiry() <= 0.0) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "spot, strike, volatility and years_to_expiry must all be positive");
+        }
         const int threads = (request->num_threads() > 0) ? request->num_threads() : -1;
         response->set_value(sensen::price_option_monte_carlo(
             request->spot(), request->strike(), request->rate(), request->volatility(),
@@ -1769,6 +2111,17 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
             request->volatility() <= 0.0) {
             return Status(grpc::StatusCode::INVALID_ARGUMENT,
                           "steps, years_to_expiry and volatility must be positive");
+        }
+        // The "<= 0.0" checks above do not catch NaN (NaN <= 0.0 is false),
+        // same class as PriceBlackScholes/PriceOptionMonteCarlo above and
+        // PriceOptionTree before this file's finance-audit pass. rate has no
+        // positivity check of its own (a negative rate is real) but must
+        // still be finite -- calculate_probability_tree feeds it directly
+        // into a per-step exp(rate*dt) growth factor.
+        if (auto s = require_finite(request->rate(), "rate"); !s.ok()) return s;
+        if (auto s = require_finite(request->volatility(), "volatility"); !s.ok()) return s;
+        if (auto s = require_finite(request->years_to_expiry(), "years_to_expiry"); !s.ok()) {
+            return s;
         }
         const double lambda =
             (request->lambda() > 0.0) ? request->lambda() : 1.224744871391589;
@@ -1975,6 +2328,20 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         // and ComputePrincipalPayment, and both charge at their own entry
         // point. Charging again would bill one call twice.
         if (auto s = check_periods(request->periods()); !s.ok()) return s;
+        // ipmt/ppmt (financial.cppm) walk a month-by-month balance in a
+        // `for (t=1; t<=per; ++t)` loop whenever `per` (request->period(),
+        // itself never bounded -- the proto's own contract is merely
+        // "outside [1, periods] returns 0", which does not stop `period`
+        // from equalling a huge `periods`) falls in [1, periods]. Neither
+        // field had an upper bound before this guard, so a caller could ask
+        // for an arbitrarily long walk for a flat quota::cost_default()
+        // charge. Reproduced directly: period=periods=3,000,000 is accepted
+        // today and burns CPU proportional to `period`, unauthenticated.
+        // Capping `periods` alone is sufficient (per<=periods always, or the
+        // engine's own contract already zeroes it), matching the DoS class
+        // this file already guards elsewhere (check_payments_per_year,
+        // check_term).
+        if (auto s = check_period_count_ceiling(request->periods(), "periods"); !s.ok()) return s;
         REQUIRE_DECIMAL(rate, request->rate(), "rate");
         REQUIRE_DECIMAL(pv_v, request->present_value(), "present_value");
         READ_DECIMAL(fv_v, request->future_value(), "future_value");
