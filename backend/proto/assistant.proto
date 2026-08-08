@@ -2,6 +2,13 @@ syntax = "proto3";
 
 package calculator.assistant;
 
+// ExerciseType and AsianType are imported, not redefined, so a StrategyParams
+// value can be handed to sensen.finance.Finance/PriceOptionTree without a
+// conversion step -- see StrategyParams' own exercise_type/asian_type fields
+// below for why a second vocabulary here would be a drift hazard, not a
+// convenience.
+import "finance.proto";
+
 // ============================================================================
 // The LLM-backed strategy assistant, over gRPC.
 //
@@ -113,6 +120,39 @@ message StrategyParams {
   // When present it must be strictly greater than `expiration_days`; a far leg
   // at or before the near leg is not a calendar spread.
   int32 far_expiration_days = 6;
+
+  // Exercise style and Asian averaging. NOT emitted by the fine-tuned model --
+  // its training set (agent/dataset/, 11,400 rows) contains zero instances of
+  // either concept, closed vocabulary or not. Both are set instead by a
+  // deterministic, whole-word keyword extractor over the trader's own
+  // utterance (`assistant_verification.cppm`'s exercise/Asian extraction,
+  // called from `validate_and_populate_params` in assistant_service.cpp)
+  // layered in FRONT of the model's output, the same architecture as
+  // `normalize_strategy_alias` and `recover_bare_futures_directive` above:
+  // deterministic code answering a question a 0.6B fine-tune was never taught
+  // to answer, rather than retraining it to.
+  //
+  // Reusing sensen.finance.ExerciseType/AsianType (imported above) verbatim --
+  // same enumerator names, same wire values -- rather than inventing parallel
+  // enums here is deliberate: it is what lets a StrategyParams flow into
+  // sensen.finance.Finance/PriceOptionTree unchanged, and it means the
+  // default (0) already means what this field needs it to mean before a
+  // single line of extraction code runs.
+  //
+  // Default (0) is EUROPEAN / NOT_ASIAN, matching finance.proto's own
+  // zero-values, so every existing caller and every existing gold row is
+  // byte-unchanged: absence of the words "American", "European", "Bermudan"
+  // (or "Bermudian") anywhere in the utterance means European, never a guess
+  // -- see the extractor's own doc comment for why silence is not evidence of
+  // American-style exercise just because it is the more common instrument in
+  // practice.
+  sensen.finance.ExerciseType exercise_type = 7;
+
+  // Default (0) is NOT_ASIAN, matching finance.proto's own zero-value. Set
+  // only when the trader's own words say "Asian" -- see the extractor's own
+  // doc comment for how AVERAGE_PRICE vs AVERAGE_STRIKE is disambiguated and
+  // which one is the default when "Asian" appears with no qualifier at all.
+  sensen.finance.AsianType asian_type = 8;
 }
 
 // The one short question the model needs answered before it can commit to a

@@ -2204,6 +2204,18 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
             break;
     }
 
+    // Exercise style (European/American/Bermudan) and Asian averaging.
+    // Deterministic extraction over the trader's OWN utterance, not model
+    // output -- the fine-tuned model was never trained on either concept
+    // (agent/dataset/, 11,400 rows, zero instances of either) and cannot be
+    // asked to emit them. `extract_exercise_and_asian` mirrors
+    // sensen.finance.ExerciseType/AsianType name-for-name and value-for-value
+    // as its own plain enum (that module links no protobuf headers -- see its
+    // own doc comment), so the two `static_cast`s below are a same-numbered-
+    // value reinterpretation, never a translation that could drift.
+    const auto exercise_asian =
+        ::options_calculator::assistant::verify::extract_exercise_and_asian(utterance);
+
     auto* params = response.mutable_params();
     params->set_symbol(symbol);
     params->set_asset_class(asset_class);
@@ -2211,6 +2223,8 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
     params->set_expiration_days(static_cast<std::int32_t>(expiration_days));
     params->set_quantity(static_cast<std::int32_t>(quantity));
     params->set_far_expiration_days(static_cast<std::int32_t>(far_expiration_days));
+    params->set_exercise_type(static_cast<sensen::finance::ExerciseType>(exercise_asian.exercise_type));
+    params->set_asian_type(static_cast<sensen::finance::AsianType>(exercise_asian.asian_type));
 }
 
 /**

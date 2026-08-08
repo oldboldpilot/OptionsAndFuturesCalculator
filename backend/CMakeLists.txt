@@ -325,6 +325,14 @@ add_custom_command(
 # vocabulary (utterances, clarifications, refusals) rather than either
 # calculator's strategies/legs or the financial library's numeric functions.
 # Same binary, same port, third contract.
+#
+# StrategyParams DOES import finance.proto for exactly two fields
+# (exercise_type, asian_type) -- reusing sensen.finance.ExerciseType/AsianType
+# verbatim rather than inventing a parallel vocabulary, so a param can reach
+# sensen.finance.Finance/PriceOptionTree unchanged. FINANCE_PROTO_FILE is
+# therefore listed in DEPENDS below too: protoc resolves the import from
+# -I${CMAKE_CURRENT_SOURCE_DIR}/proto regardless, but without this the build
+# would not know to regenerate assistant's headers when finance.proto changes.
 set(ASSISTANT_PROTO_FILE "${CMAKE_CURRENT_SOURCE_DIR}/proto/assistant.proto")
 
 add_custom_command(
@@ -335,7 +343,7 @@ add_custom_command(
          --plugin=protoc-gen-grpc=$<TARGET_FILE:grpc_cpp_plugin>
          -I${CMAKE_CURRENT_SOURCE_DIR}/proto
          ${ASSISTANT_PROTO_FILE}
-    DEPENDS ${ASSISTANT_PROTO_FILE}
+    DEPENDS ${ASSISTANT_PROTO_FILE} ${FINANCE_PROTO_FILE}
 )
 
 # The MORTGAGE assistant's contract: free-text mortgage / time-value-of-money /

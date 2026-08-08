@@ -816,6 +816,151 @@ auto main() -> int {
         }
     }
 
+    std::printf("\n=== GP-ARA assistant verification: exercise style / Asian averaging extraction "
+                "(deterministic, no retrain) ===\n");
+    {
+        using options_calculator::assistant::verify::AsianType;
+        using options_calculator::assistant::verify::ExerciseType;
+        using options_calculator::assistant::verify::extract_exercise_and_asian;
+
+        auto expect_exercise = [](std::string_view utterance, ExerciseType expected, const std::string& label) {
+            const auto got = extract_exercise_and_asian(utterance).exercise_type;
+            const auto name = [](ExerciseType e) {
+                switch (e) {
+                    case ExerciseType::EUROPEAN: return "EUROPEAN";
+                    case ExerciseType::AMERICAN: return "AMERICAN";
+                    case ExerciseType::BERMUDAN: return "BERMUDAN";
+                }
+                return "?";
+            };
+            check(got == expected, label + " -> expected " + std::string{name(expected)} + ", got " +
+                                        std::string{name(got)});
+        };
+        auto expect_asian = [](std::string_view utterance, AsianType expected, const std::string& label) {
+            const auto got = extract_exercise_and_asian(utterance).asian_type;
+            const auto name = [](AsianType a) {
+                switch (a) {
+                    case AsianType::NOT_ASIAN: return "NOT_ASIAN";
+                    case AsianType::AVERAGE_PRICE: return "AVERAGE_PRICE";
+                    case AsianType::AVERAGE_STRIKE: return "AVERAGE_STRIKE";
+                }
+                return "?";
+            };
+            check(got == expected, label + " -> expected " + std::string{name(expected)} + ", got " +
+                                        std::string{name(got)});
+        };
+
+        // ---- Absence means the default, never a guess. ----
+        expect_exercise("Bull call spread on SPY, 30 days, 1 contract.", ExerciseType::EUROPEAN,
+                         "no exercise-style word anywhere -> EUROPEAN (the default)");
+        expect_asian("Bull call spread on SPY, 30 days, 1 contract.", AsianType::NOT_ASIAN,
+                      "no \"Asian\" anywhere -> NOT_ASIAN (the default)");
+
+        // ---- Every keyword, in a phrasing a trader would actually type. ----
+        expect_exercise("American-style put on NVDA, 30 days, 1 contract.", ExerciseType::AMERICAN,
+                         "\"American-style\" -> AMERICAN");
+        expect_exercise("I want European-style exercise on SPY, 45 days.", ExerciseType::EUROPEAN,
+                         "\"European-style\" -> EUROPEAN (also proves the explicit case, not just absence)");
+        expect_exercise("Bermudan exercise call on GC, 60 days, 2 contracts.", ExerciseType::BERMUDAN,
+                         "\"Bermudan exercise\" -> BERMUDAN");
+
+        // ---- The spelling variant: "Bermudian", not just "Bermudan". ----
+        expect_exercise("Bermudian-style call on ES, 60 days, 1 contract.", ExerciseType::BERMUDAN,
+                         "\"Bermudian-style\" (the common spelling variant) -> BERMUDAN");
+
+        // ---- Negative controls: the exact bug class contains_word_ci was
+        // written for. Whole-word matching on its own does NOT save these --
+        // "American" really is its own word inside "American Airlines" -- so
+        // this is proving the style/exercise proximity gate specifically. ----
+        expect_exercise("Bull call spread on American Airlines (AAL), 30 days, 1 contract.",
+                         ExerciseType::EUROPEAN,
+                         "\"American Airlines\" (ticker AAL) does not set AMERICAN");
+        expect_exercise("Covered call on American Express (AXP), 30 days, 1 contract.", ExerciseType::EUROPEAN,
+                         "\"American Express\" (ticker AXP) does not set AMERICAN either");
+        expect_exercise("Iron condor on American Tower (AMT), 45 days, 1 contract.", ExerciseType::EUROPEAN,
+                         "\"American Tower\" (ticker AMT) does not set AMERICAN");
+        // "options" alone, without "style"/"exercise", is not enough either --
+        // a trader merely asking about options on an "American ..." company
+        // must not be misread as naming an exercise style.
+        expect_exercise("What options are available on American Airlines, 30 days out?",
+                         ExerciseType::EUROPEAN,
+                         "\"options\" near \"American Airlines\" (no \"style\"/\"exercise\") still does not "
+                         "set AMERICAN");
+
+        // ---- The natural phrasing: no "style"/"exercise" word at all.
+        // "American put on SPY" is the single most common way a trader
+        // actually states this -- a {style, exercise}-only context list
+        // silently mis-defaults it to EUROPEAN, which is a wrong instrument,
+        // not a safe fallback. Proves kExerciseStyleContextWords now
+        // includes put/call/puts/calls and that the capitalisation guard
+        // does not block a genuine lower-case continuation. ----
+        expect_exercise("American put on SPY, 30 days", ExerciseType::AMERICAN,
+                         "\"American put\" (no \"style\"/\"exercise\") -> AMERICAN");
+        expect_exercise("give me a European call on QQQ", ExerciseType::EUROPEAN,
+                         "\"European call\" (no \"style\"/\"exercise\") -> EUROPEAN");
+        expect_exercise("an american put", ExerciseType::AMERICAN,
+                         "\"an american put\", already lower-case input -> AMERICAN (the capitalisation "
+                         "guard only ever BLOCKS a match; an already-lower-case utterance has no capitalised "
+                         "token to trip it)");
+        // The style/exercise phrasing from above must still work now that
+        // put/call/puts/calls have been added alongside it -- the new words
+        // are additive, not a replacement.
+        expect_exercise("American-style put on SPY, 30 days, 1 contract.", ExerciseType::AMERICAN,
+                         "\"American-style put\" still -> AMERICAN now that put/call context words exist too");
+
+        // ---- The proper-noun guard, specifically: put/call/puts/calls are
+        // exactly the words that reopen the "American Airlines" collision
+        // (kExerciseStyleContextWords's own doc comment), so these three are
+        // the cases that actually exercise next_token_is_capitalized rather
+        // than merely the absence of a context word. Each one has a put/
+        // call-family word within the match window -- "puts" inline,
+        // "calls" inline, and "options" NOT in the context list at all for
+        // the third -- so only the capitalised continuation ("Airlines",
+        // "Express") is what keeps the first two from matching; the third is
+        // additionally covered by the context-word check alone. ----
+        expect_exercise("buy American Airlines puts", ExerciseType::EUROPEAN,
+                         "\"buy American Airlines puts\" -- \"puts\" is right there, but \"Airlines\" "
+                         "(capitalised) guards it off");
+        expect_exercise("American Express calls", ExerciseType::EUROPEAN,
+                         "\"American Express calls\" -- \"calls\" is right there, but \"Express\" "
+                         "(capitalised) guards it off");
+        expect_exercise("American Tower options", ExerciseType::EUROPEAN,
+                         "\"American Tower options\" -- \"Tower\" (capitalised) guards it off (and "
+                         "\"options\" is not a context word regardless)");
+
+        // ---- Asian: bare "Asian" (no qualifier) resolves to the documented
+        // default, AVERAGE_PRICE. ----
+        expect_asian("Asian option on CL, 45 days, 1 contract.", AsianType::AVERAGE_PRICE,
+                      "bare \"Asian option\", no qualifier -> AVERAGE_PRICE (the documented default)");
+
+        // ---- Asian: both qualifiers, disambiguated. ----
+        expect_asian("Asian average price call on GC, 30 days, 1 contract.", AsianType::AVERAGE_PRICE,
+                      "\"average price\" qualifier -> AVERAGE_PRICE");
+        expect_asian("Asian avg price option on SPY, 30 days.", AsianType::AVERAGE_PRICE,
+                      "\"avg price\" abbreviation -> AVERAGE_PRICE");
+        expect_asian("Asian average strike put on NVDA, 30 days, 1 contract.", AsianType::AVERAGE_STRIKE,
+                      "\"average strike\" qualifier -> AVERAGE_STRIKE");
+        expect_asian("Asian avg strike option on ES, 45 days.", AsianType::AVERAGE_STRIKE,
+                      "\"avg strike\" abbreviation -> AVERAGE_STRIKE");
+
+        // ---- "Asian" without option-adjacent context is not a guess either
+        // -- markets/session language must not set it. ----
+        expect_asian("Asian markets rallied overnight; bull call spread on NVDA, 30 days, 1 contract.",
+                      AsianType::NOT_ASIAN,
+                      "\"Asian markets\" (no option/average/price/strike nearby) does not set Asian averaging");
+
+        // ---- Exercise style and Asian averaging are independent fields;
+        // both can be stated in the same utterance. ----
+        {
+            const auto got =
+                extract_exercise_and_asian("American-style Asian average strike call on CL, 45 days, 1 contract.");
+            check(got.exercise_type == ExerciseType::AMERICAN,
+                  "combined utterance: exercise_type is still AMERICAN");
+            check(got.asian_type == AsianType::AVERAGE_STRIKE,
+                  "combined utterance: asian_type is still AVERAGE_STRIKE");
+        }
+    }
+
     std::printf("\n=== Results: %d checks, %d failed ===\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

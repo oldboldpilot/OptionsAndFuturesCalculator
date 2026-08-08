@@ -1414,4 +1414,320 @@ export [[nodiscard]] auto recover_bare_futures_directive(std::string_view uttera
            ",\"quantity\":" + std::to_string(*qty) + "}";
 }
 
+// ---------------------------------------------------------------------------
+// Exercise style and Asian averaging extraction.
+//
+// WHY THIS EXISTS: exercise style (European/American/Bermudan) and Asian
+// averaging are a CLOSED, small vocabulary a trader states in plain words --
+// "American-style", "European exercise", "Asian average price" -- but the
+// fine-tuned model was never trained to emit either concept: its dataset
+// (agent/dataset/, 11,400 rows) contains zero instances of it. Retraining is
+// out of scope for the task this shipped against. A deterministic extractor
+// over the trader's own words, run the same architectural role as
+// `recover_bare_futures_directive` and the ambiguous-root disambiguation
+// above -- deterministic code answering a question this size of model was
+// never taught to answer, layered in FRONT of (not replacing) the model's
+// own output -- is strictly more reliable for a fixed, closed vocabulary
+// than hoping a 0.6B fine-tune generalizes to a concept it has never seen a
+// single training example of.
+// ---------------------------------------------------------------------------
+
+/** Mirrors `sensen.finance.ExerciseType` (finance.proto) name-for-name and
+ * value-for-value. Deliberately a plain C++ enum, not the generated proto
+ * type -- this module links no protobuf headers at all (see this file's
+ * CMakeLists.txt target comment: "Deliberately proto- and gRPC-free"), the
+ * same reason `AssistantParamsInput` above is a plain struct rather than the
+ * generated `calculator::assistant::StrategyParams`.
+ * `assistant_service.cpp`, which DOES have both the generated
+ * `calculator::assistant::StrategyParams` and `sensen::finance::ExerciseType`
+ * available, is responsible for the one-line `static_cast` between this enum
+ * and the wire one -- safe only because the values are pinned identical here,
+ * not merely similar. If finance.proto's enum is ever renumbered, this one
+ * must move with it. */
+export enum class ExerciseType : int { EUROPEAN = 0, AMERICAN = 1, BERMUDAN = 2 };
+
+/** Mirrors `sensen.finance.AsianType` (finance.proto) the same way, for the
+ * same reason. */
+export enum class AsianType : int { NOT_ASIAN = 0, AVERAGE_PRICE = 1, AVERAGE_STRIKE = 2 };
+
+/** The extractor's whole output. Defaults match `ExerciseType`/`AsianType`'s
+ * own zero-values -- and finance.proto's -- so a default-constructed
+ * `ExerciseAsianExtraction` already means "nothing stated," matching what
+ * `extract_exercise_and_asian` returns when `utterance` names neither
+ * concept. */
+export struct ExerciseAsianExtraction {
+    ExerciseType exercise_type = ExerciseType::EUROPEAN;
+    AsianType asian_type = AsianType::NOT_ASIAN;
+};
+
+namespace detail {
+
+/** How many characters of `lowered` on each side of a keyword hit are
+ * searched for a qualifying context word (see `contains_word_ci_in_context`
+ * below). Wide enough to catch "American exercise style option" (keyword,
+ * two words, then "style") and "the exercise style here is American" (three
+ * words before the keyword); narrow enough that an unrelated "style" or
+ * "exercise" mention elsewhere in a long utterance does not leak in. */
+constexpr std::size_t kExerciseContextWindow = 30;
+
+/**
+ * Whole-word occurrence of `keyword` in `lowered`, counted ONLY when a word
+ * from `context_words` also appears within `kExerciseContextWindow`
+ * characters of it.
+ *
+ * WHY THIS EXISTS, AND WHY PLAIN `contains_word_ci` IS NOT ENOUGH HERE:
+ * "American" really is a standalone WORD inside "American Airlines",
+ * "American Express", "American Tower" -- so whole-word matching alone
+ * (which is what fixes "ES" matching inside "futures", see
+ * `contains_word_ci`'s own doc comment) does NOT fix this collision the way
+ * it fixes that one; "es" is never its own word inside "futures", but
+ * "American" genuinely is its own word inside "American Airlines". What
+ * actually distinguishes a trader saying "American-style" or "American
+ * exercise" from a trader naming an S&P 500 company that happens to start
+ * with the same adjective is the word next to it: nobody writes "American
+ * Airlines-style" or "American Airlines exercise". Requiring "style" or
+ * "exercise" nearby is therefore the general fix for this collision, not a
+ * special case carved out for the one ticker (AAL) this file's own tests
+ * happen to name.
+ *
+ * USED FOR ASIAN ONLY. American/European/Bermudan(ian) go through
+ * `contains_exercise_style_keyword` below instead, which layers a second,
+ * capitalisation-based guard on top of this same context-word idea -- see
+ * that function's own doc comment for why plain context words alone stopped
+ * being enough for those three the moment "put"/"call" joined
+ * `kExerciseStyleContextWords`. Asian has no such counterpart collision (no
+ * real ticker or company is named literally "Asian"; see
+ * `kAsianContextWords`'s own doc comment), so it keeps the simpler check.
+ */
+[[nodiscard]] auto contains_word_ci_in_context(std::string_view lowered, std::string_view keyword,
+                                               std::span<const std::string_view> context_words) noexcept
+    -> bool {
+    std::size_t from = 0;
+    while (true) {
+        const auto at = lowered.find(keyword, from);
+        if (at == std::string_view::npos) return false;
+        const auto end = at + keyword.size();
+        const bool left_ok = at == 0 || (std::isalnum(static_cast<unsigned char>(lowered[at - 1])) == 0);
+        const bool right_ok =
+            end >= lowered.size() || (std::isalnum(static_cast<unsigned char>(lowered[end])) == 0);
+        if (left_ok && right_ok) {
+            const std::size_t window_start = at > kExerciseContextWindow ? at - kExerciseContextWindow : 0;
+            const std::size_t window_end = std::min(lowered.size(), end + kExerciseContextWindow);
+            const std::string_view window = lowered.substr(window_start, window_end - window_start);
+            for (const auto ctx : context_words) {
+                if (contains_word_ci(window, ctx)) return true;
+            }
+        }
+        from = at + 1;
+    }
+}
+
+/** The words that turn a bare "American"/"European"/"Bermudan"/"Bermudian"
+ * mention into a stated exercise style. Deliberately NOT "option"/"options":
+ * a trader asking about "American Airlines options" would otherwise
+ * false-positive (both words present within the window, neither one
+ * actually about exercise style) -- see `contains_word_ci_in_context`'s own
+ * doc comment.
+ *
+ * "put"/"call"/"puts"/"calls" ARE included, on purpose, even though they
+ * reopen a version of the exact collision "option"/"options" was excluded
+ * to avoid: "American put on SPY, 30 days" -- not "American-style" or
+ * "American exercise" -- is the single most natural way a trader actually
+ * states this, and a plain {style, exercise} list silently mis-defaults it
+ * to EUROPEAN, pricing the wrong instrument. That is not a safe default: a
+ * false negative here is the same failure class this whole verification
+ * layer exists to catch, just arriving from the direction of under-, not
+ * over-, extraction. What makes "put"/"call" safe to add is
+ * `next_token_is_capitalized` below, run at every call site that uses this
+ * list -- it is what tells "American put" (matches) apart from "American
+ * Airlines puts" / "American Express calls" / "American Tower options"
+ * (all still refused), since "call"/"put" alone, without that guard, would
+ * happily match all four. */
+constexpr std::array<std::string_view, 6> kExerciseStyleContextWords{"style", "exercise", "put",
+                                                                      "call",  "puts",     "calls"};
+
+/**
+ * True iff the token immediately following `original[after..]` -- skipping
+ * any run of non-alphanumeric separators (spaces, hyphens, punctuation) --
+ * begins with an uppercase ASCII letter. `false` both when the next token
+ * starts lower-case AND when there is no next token at all (end of string):
+ * this guard only ever BLOCKS a match, it never manufactures a reason to.
+ *
+ * MUST run against `original`, the trader's own un-lowercased utterance --
+ * never against a lowercased copy, which destroys the one signal this
+ * function depends on. Because `to_lower_copy` is a strict, length-preserving
+ * one-character-to-one-character mapping (see its own definition: ASCII
+ * 'A'-'Z' folds to 'a'-'z', every other byte is copied unchanged), any byte
+ * offset computed against a lowercased string names the exact same byte in
+ * `original` -- so a caller holding both may reuse one match position
+ * directly against the other with no re-scan or remapping. That equivalence
+ * would silently break if any future normalisation step here ever changed
+ * string LENGTH (e.g. Unicode case-folding, or collapsing runs of
+ * whitespace) -- worth a reader's attention if this function ever grows one.
+ *
+ * WHY THIS GUARD EXISTS: adding "put"/"call"/"puts"/"calls" to
+ * `kExerciseStyleContextWords` above is necessary to catch the single most
+ * natural phrasing a trader uses ("American put on SPY, 30 days"), but it
+ * reopens the exact collision that list's own doc comment describes for
+ * "option"/"options": "Bull call spread on American Airlines" now has
+ * "call" inside the context window around "American" too, and "buy American
+ * Airlines puts" has "puts" inside it directly. Vocabulary alone can no
+ * longer tell "American put" (a stated exercise style) apart from "American
+ * Airlines puts" (a companyname followed by an unrelated options word) --
+ * both satisfy the context-word check identically. What still tells them
+ * apart is CAPITALISATION: "American put" continues in ordinary lower-case
+ * English, while "American Airlines"/"American Express"/"American Tower"
+ * continue with another capitalised proper-noun token. A trader typing
+ * normally does not capitalise "put" or "call" (they are not the start of a
+ * sentence or a proper noun), so a capitalised continuation is strong
+ * evidence the keyword just matched is itself the first word of a company
+ * name, not an adjective describing an option.
+ *
+ * Deliberately NOT folded away as "obviously redundant" with the
+ * context-word check: it is not redundant, it is the second, independent
+ * condition that makes adding "put"/"call" to that list sound rather than a
+ * regression. */
+[[nodiscard]] auto next_token_is_capitalized(std::string_view original, std::size_t after) noexcept -> bool {
+    std::size_t i = after;
+    while (i < original.size() && std::isalnum(static_cast<unsigned char>(original[i])) == 0) {
+        ++i;
+    }
+    if (i >= original.size()) return false;  // nothing follows -- nothing to guard against.
+    return original[i] >= 'A' && original[i] <= 'Z';
+}
+
+/**
+ * `contains_word_ci_in_context`'s exercise-style-specific sibling: identical
+ * whole-word-plus-nearby-context-word matching, PLUS the proper-noun guard
+ * (`next_token_is_capitalized` above) applied at the exact position of each
+ * candidate match. Kept as its own function, rather than a flag bolted onto
+ * `contains_word_ci_in_context`, because the guard needs `original` (the
+ * un-lowercased utterance) threaded through to the one place it is checked --
+ * a parameter Asian's own matching (which needs no such guard; see
+ * `kAsianContextWords`'s doc comment) has no use for.
+ *
+ * Only american/european/bermudan/bermudian are ever matched through this
+ * function -- see `extract_exercise_and_asian`'s call sites.
+ */
+[[nodiscard]] auto contains_exercise_style_keyword(std::string_view original, std::string_view lowered,
+                                                    std::string_view keyword) noexcept -> bool {
+    std::size_t from = 0;
+    while (true) {
+        const auto at = lowered.find(keyword, from);
+        if (at == std::string_view::npos) return false;
+        const auto end = at + keyword.size();
+        const bool left_ok = at == 0 || (std::isalnum(static_cast<unsigned char>(lowered[at - 1])) == 0);
+        const bool right_ok =
+            end >= lowered.size() || (std::isalnum(static_cast<unsigned char>(lowered[end])) == 0);
+        if (left_ok && right_ok) {
+            const std::size_t window_start = at > kExerciseContextWindow ? at - kExerciseContextWindow : 0;
+            const std::size_t window_end = std::min(lowered.size(), end + kExerciseContextWindow);
+            const std::string_view window = lowered.substr(window_start, window_end - window_start);
+            bool has_context = false;
+            for (const auto ctx : kExerciseStyleContextWords) {
+                if (contains_word_ci(window, ctx)) {
+                    has_context = true;
+                    break;
+                }
+            }
+            if (has_context && !next_token_is_capitalized(original, end)) return true;
+        }
+        from = at + 1;
+    }
+}
+
+/** Words that turn a bare "Asian" mention into a stated Asian-averaging
+ * option, as opposed to "Asian markets", "Asian session", "pan-Asian fund"
+ * and similar incidental uses that have nothing to do with option structure.
+ * Deliberately broader than `kExerciseStyleContextWords` above -- "option"
+ * and "options" are safe to include here, unlike in the exercise-style list,
+ * because there is no real ticker or company whose name is literally
+ * "Asian" the way there is for "American"; the collision that list guards
+ * against does not have an Asian-specific counterpart. */
+constexpr std::array<std::string_view, 6> kAsianContextWords{"option", "options", "average",
+                                                              "avg",    "price",   "strike"};
+
+/** True iff any phrase in `phrases` appears anywhere in `lowered`, as a plain
+ * (non-word-boundary) substring search. Used only for the two-word
+ * "average price"/"average strike" qualifiers below, which are specific
+ * enough as whole phrases that a substring hit is not a plausible accident. */
+[[nodiscard]] auto contains_any_ci(std::string_view lowered, std::span<const std::string_view> phrases) noexcept
+    -> bool {
+    for (const auto phrase : phrases) {
+        if (contains_ci(lowered, phrase)) return true;
+    }
+    return false;
+}
+
+constexpr std::array<std::string_view, 4> kAveragePricePhrases{"average price", "average-price", "avg price",
+                                                                "avg-price"};
+constexpr std::array<std::string_view, 4> kAverageStrikePhrases{"average strike", "average-strike", "avg strike",
+                                                                 "avg-strike"};
+
+}  // namespace detail
+
+/**
+ * Deterministically extracts exercise style and Asian averaging from the
+ * trader's own words. Whole-word and case-insensitive throughout; the
+ * exercise-style keywords are additionally gated on nearby "style"/
+ * "exercise"/"put"/"call"/"puts"/"calls" vocabulary AND on a
+ * capitalisation guard, so a company name never sets one while the ordinary
+ * "American put on SPY" phrasing still does -- see
+ * `contains_exercise_style_keyword`'s and `next_token_is_capitalized`'s own
+ * doc comments for the two collisions this jointly resolves.
+ *
+ * ABSENCE MEANS THE DEFAULT, NEVER A GUESS: no matching word anywhere in
+ * `utterance` leaves `exercise_type` at `ExerciseType::EUROPEAN` and
+ * `asian_type` at `AsianType::NOT_ASIAN` -- the same zero-values
+ * `sensen.finance.ExerciseType`/`AsianType` themselves default to, so a
+ * request that never mentions either concept produces exactly the params it
+ * would have produced before this extractor existed, byte-for-byte.
+ *
+ * CONFLICT ORDER, if more than one exercise-style word somehow appears in
+ * one utterance (a malformed or adversarial input, not a real trade
+ * description): American, then Bermudan/Bermudian, then European, in that
+ * fixed order -- checked, not left to whichever branch happens to run last.
+ *
+ * THE ASIAN DEFAULT, AND WHY: "Asian" with no "average price"/"average
+ * strike" qualifier resolves to `AVERAGE_PRICE`, not `AVERAGE_STRIKE`. This
+ * is a deliberate, documented choice, not an arbitrary tie-break: a
+ * fixed-strike, averaged-settlement-price Asian option ("average price") is
+ * the structure every standard reference (Hull's own options text; the
+ * exchanges that list them) means by an unqualified "Asian option" -- it is
+ * the variant actually traded and quoted in practice. Average-strike Asian
+ * options are the rarer variant and, in this product's own experience of how
+ * traders phrase requests, are always named explicitly when meant. Defaulting
+ * the common case and requiring the rare one to be stated is the same shape
+ * of decision this file already makes elsewhere (e.g. `far_expiration_days
+ * == 0` meaning "not stated," never "assume the near leg twice" --
+ * `AssistantParamsInput`'s own doc comment). Both qualifiers present at once
+ * (contradictory, not a real trade description) resolves the same way as
+ * neither being present, for the same reason: guessing which one the trader
+ * meant would be worse than falling back to the documented default.
+ */
+export [[nodiscard]] auto extract_exercise_and_asian(std::string_view utterance) -> ExerciseAsianExtraction {
+    const std::string lowered = detail::to_lower_copy(utterance);
+    ExerciseAsianExtraction out;
+
+    if (detail::contains_exercise_style_keyword(utterance, lowered, "american")) {
+        out.exercise_type = ExerciseType::AMERICAN;
+    } else if (detail::contains_exercise_style_keyword(utterance, lowered, "bermudan") ||
+               detail::contains_exercise_style_keyword(utterance, lowered, "bermudian")) {
+        out.exercise_type = ExerciseType::BERMUDAN;
+    } else if (detail::contains_exercise_style_keyword(utterance, lowered, "european")) {
+        out.exercise_type = ExerciseType::EUROPEAN;
+    }
+    // else: absence -> stays EUROPEAN, the struct's own default.
+
+    if (detail::contains_word_ci_in_context(lowered, "asian", detail::kAsianContextWords)) {
+        const bool average_strike = detail::contains_any_ci(lowered, detail::kAverageStrikePhrases);
+        const bool average_price = detail::contains_any_ci(lowered, detail::kAveragePricePhrases);
+        out.asian_type =
+            (average_strike && !average_price) ? AsianType::AVERAGE_STRIKE : AsianType::AVERAGE_PRICE;
+    }
+    // else: absence -> stays NOT_ASIAN, the struct's own default.
+
+    return out;
+}
+
 }  // namespace options_calculator::assistant::verify
