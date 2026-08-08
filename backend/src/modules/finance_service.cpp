@@ -490,6 +490,84 @@ template <typename Repeated>
 }
 
 /**
+ * Refuses a raw wire-double field whose magnitude would overflow
+ * BigDecimal's exact __int128 range once `BigDecimal{double}` --
+ * `static_cast<__int128_t>(std::round(val * 1e18))` -- constructs from it.
+ *
+ * check_decimal_string_magnitude's sibling for the handful of RPCs that
+ * carry money as a raw wire DOUBLE rather than a decimal STRING
+ * (ComputeAmortizationBatch's loan_amounts/annual_rates/extra_payments/
+ * pmi_rates/home_values, ComputeCumulative's rate/present_value) -- there is
+ * no parse step for that helper's digit-count scan to run against, so the
+ * bound is applied directly to the value. `require_finite` alone is NOT
+ * enough here: above roughly 1.7e20 the scaled value (`val * 1e18`) no
+ * longer fits in __int128 at all, so casting it is UNDEFINED BEHAVIOUR per
+ * [conv.fpint], not merely an overflowed-but-defined wraparound -- and a
+ * perfectly finite double as "small" as 1e30 already crosses that line, so
+ * `require_finite`'s own "is this a real number" check passes it straight
+ * through. Same 1e15 bound as check_decimal_string_magnitude (15 integer
+ * digits, already an absurd figure for anything this calculator prices) for
+ * the identical reason -- headroom below BigDecimal's own ~20-digit ceiling
+ * for the arithmetic that follows.
+ */
+[[nodiscard]] auto check_double_magnitude(double v, std::string_view field) -> Status {
+    if (std::abs(v) >= 1e15) {
+        return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                      std::string(field) +
+                          " is too large in magnitude for this calculator (the exact decimal "
+                          "engine has a finite range)");
+    }
+    return Status::OK;
+}
+
+/**
+ * Refuses a repeated-double field's element count above 100,000 -- the same
+ * "period ceiling" shape check_period_count_ceiling already applies to an
+ * int32 period count, applied here to a caller-controlled array length.
+ * SimulateMarginAccount's daily_prices (a mark-to-market path,
+ * O(len(daily_prices)) in simulate_futures_margin_account) and
+ * ComputePortfolioStats' portfolio_returns/market_returns (O(n log n) for
+ * the historical VaR sort) both had no ceiling of any kind beyond
+ * quota::cost_margin_simulation/cost_portfolio_stats's proportional pricing
+ * -- which bounds what a REPEATED call costs, not what a SINGLE absurdly
+ * long request costs to execute. 100,000 entries is already an absurd
+ * figure for anything this calculator prices (270+ years of daily data).
+ */
+[[nodiscard]] auto check_series_length_ceiling(int len, std::string_view field) -> Status {
+    if (len > 100'000) {
+        return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                      std::string(field) +
+                          " exceeds 100,000 entries; no real series this calculator prices "
+                          "needs more than that");
+    }
+    return Status::OK;
+}
+
+/**
+ * Refuses a portfolio asset count above 1,000. OptimizePortfolio and
+ * ComputeRiskContributions both solve against a size*size covariance matrix
+ * (LU decomposition / a marginal-risk matrix-vector product) -- O(size^3)
+ * and O(size^2) work respectively -- and read_covariance's own length checks
+ * bound the request's SHAPE (size matches the accompanying vector, the flat
+ * array holds exactly size*size entries) but not its MAGNITUDE. A
+ * caller-chosen size in the low thousands is already enough to make a
+ * single request's LU decomposition run for an unreasonable time regardless
+ * of how the quota system prices it -- the same DoS shape
+ * check_period_count_ceiling closes for period counts, applied here to a
+ * covariance-solve dimension. 1,000 assets is already an enormous portfolio
+ * (the S&P 500 is 500 names).
+ */
+[[nodiscard]] auto check_portfolio_size_ceiling(int size, std::string_view field) -> Status {
+    if (size > 1'000) {
+        return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                      std::string(field) +
+                          " exceeds 1,000 assets; the covariance solve is O(size^3) and no "
+                          "real portfolio needs more than that");
+    }
+    return Status::OK;
+}
+
+/**
  * Prices ComputeRefinance from the UNVALIDATED request, because CHARGE runs
  * before the validation below (a refused call must not spend an
  * unauthenticated caller's allowance on the work it never does).
@@ -659,13 +737,64 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
             return Status(grpc::StatusCode::INVALID_ARGUMENT,
                           "compound_frequency must be positive (12 monthly, 4 quarterly, 1 annual)");
         }
+        // compound_frequency had no CEILING either -- calculate_future_value_detailed
+        // (financial.cppm) multiplies it against years to form total_periods
+        // (an int), the same payments_per_year shape check_payments_per_year
+        // already bounds elsewhere in this file. No real compounding
+        // schedule is finer than daily.
+        if (request->compound_frequency() > 366) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "compound_frequency exceeds 366 (daily); no real compounding schedule "
+                          "is finer than that");
+        }
         if (request->years() < 0) {
             return Status(grpc::StatusCode::INVALID_ARGUMENT, "years cannot be negative");
         }
-        REQUIRE_DECIMAL(rate, request->annual_rate(), "annual_rate");
-        REQUIRE_DECIMAL(contrib, request->annual_contribution(), "annual_contribution");
-        REQUIRE_DECIMAL(principal, request->current_principal(), "current_principal");
-        READ_DECIMAL(inflation, request->annual_inflation_rate(), "annual_inflation_rate");
+        // years also had no ceiling: `years * compound_frequency`
+        // (calculate_future_value_detailed's total_periods, an int) can
+        // overflow int32 outright when both are large -- undefined
+        // behaviour regardless of whether the request is refused for its
+        // magnitude two lines later -- and years alone feeds
+        // annual_inflation_rate's own BigDecimal::pow(years). 100 years is
+        // already longer than any real projection horizon.
+        if (request->years() > 100) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "years must be at most 100; no real projection horizon runs longer "
+                          "than a lifetime");
+        }
+        // annual_rate/annual_contribution/current_principal used PLAIN
+        // REQUIRE_DECIMAL here -- neither the magnitude bound
+        // (check_decimal_string_magnitude, via REQUIRE_DECIMAL_SAFE) nor the
+        // compound-growth bound (check_compound_growth_safe) the six
+        // home-finance RPCs and ComputeAmortization already carry for the
+        // IDENTICAL rate/compound_frequency, pow(total_periods) shape
+        // calculate_future_value_detailed's own fv() call performs. This is
+        // the same missing-guard pattern ComputeAmortization's own comment
+        // documents, never retrofitted onto this RPC either. Reproduced
+        // directly: {annual_rate=1000000, years=100, compound_frequency=12,
+        // annual_contribution=5000, current_principal=10000} returned
+        // Status::OK with total_interest_earned silently wrapped to a
+        // fabricated figure rather than refused.
+        REQUIRE_DECIMAL_SAFE(rate, request->annual_rate(), "annual_rate");
+        REQUIRE_DECIMAL_SAFE(contrib, request->annual_contribution(), "annual_contribution");
+        REQUIRE_DECIMAL_SAFE(principal, request->current_principal(), "current_principal");
+        READ_DECIMAL_SAFE(inflation, request->annual_inflation_rate(), "annual_inflation_rate");
+        if (auto s = check_compound_growth_safe(rate.to_double(), request->compound_frequency(),
+                                                request->years() * request->compound_frequency(),
+                                                "annual_rate");
+            !s.ok()) {
+            return s;
+        }
+        // annual_inflation_rate also raises (1+rate) to `years` via
+        // BigDecimal::pow (the inflation-adjustment leg), with no
+        // compound-growth bound of its own -- check_compound_growth_safe_periods
+        // is the exact shape this plain annual compounding needs (rate per
+        // period == the annual rate itself, periods == years).
+        if (auto s = check_compound_growth_safe_periods(inflation.to_double(), request->years(),
+                                                        "annual_inflation_rate");
+            !s.ok()) {
+            return s;
+        }
 
         const auto s = sensen::calculate_future_value_detailed(
             rate, request->years(), contrib, principal, inflation, request->compound_frequency());
@@ -919,18 +1048,46 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         // actually produces is compiler/build-dependent by construction, so
         // it cannot be relied on to "look wrong" the way ComputeCumulative's
         // NaN reproduction (see require_finite there) happened to.
+        //
+        // require_finite alone is NOT enough, either: a FINITE loan_amount
+        // as "small" as 1e30 already overflows __int128 once
+        // BigDecimal(double) scales it by 1e18 (~1e48, far past __int128's
+        // ~1.7e38 range) -- casting a value that cannot be represented in
+        // the destination type is undefined behaviour per [conv.fpint], not
+        // a defined wraparound. check_double_magnitude closes exactly this
+        // gap (the raw-double sibling of check_decimal_string_magnitude,
+        // which the STRING-money RPCs elsewhere in this file already carry).
         for (int i = 0; i < n; ++i) {
             if (auto s = require_finite(request->loan_amounts(i), "loan_amounts"); !s.ok()) {
+                return s;
+            }
+            if (auto s = check_double_magnitude(request->loan_amounts(i), "loan_amounts");
+                !s.ok()) {
                 return s;
             }
             if (auto s = require_finite(request->annual_rates(i), "annual_rates"); !s.ok()) {
                 return s;
             }
+            if (auto s = check_double_magnitude(request->annual_rates(i), "annual_rates");
+                !s.ok()) {
+                return s;
+            }
             if (auto s = require_finite(request->extra_payments(i), "extra_payments"); !s.ok()) {
                 return s;
             }
+            if (auto s = check_double_magnitude(request->extra_payments(i), "extra_payments");
+                !s.ok()) {
+                return s;
+            }
             if (auto s = require_finite(request->pmi_rates(i), "pmi_rates"); !s.ok()) return s;
+            if (auto s = check_double_magnitude(request->pmi_rates(i), "pmi_rates"); !s.ok()) {
+                return s;
+            }
             if (auto s = require_finite(request->home_values(i), "home_values"); !s.ok()) return s;
+            if (auto s = check_double_magnitude(request->home_values(i), "home_values");
+                !s.ok()) {
+                return s;
+            }
         }
 
         const std::vector<double> loans(request->loan_amounts().begin(), request->loan_amounts().end());
@@ -1336,6 +1493,17 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         if (auto s = require_finite(request->present_value(), "present_value"); !s.ok()) {
             return s;
         }
+        // require_finite alone does not close this: a FINITE rate/
+        // present_value as "small" as 1e30 already overflows __int128 once
+        // BigDecimal(double) scales it by 1e18 (~1e48, far past __int128's
+        // ~1.7e38 range) -- the same undefined-behaviour cast this RPC's own
+        // comment above already names for NaN, just reachable through a
+        // large-but-finite value require_finite cannot see is a problem.
+        if (auto s = check_double_magnitude(request->rate(), "rate"); !s.ok()) return s;
+        if (auto s = check_double_magnitude(request->present_value(), "present_value");
+            !s.ok()) {
+            return s;
+        }
         // periods (nper) and the [start_period, end_period] range were
         // completely unbounded: cumipmt/cumprinc (financial.cppm) run
         // `for (per = start_period; per <= end_period; ++per)` unconditionally
@@ -1441,6 +1609,37 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
         CHARGE("AnalyzeBond", quota::cost_default());
+        // par/coupon_rate/years_to_maturity/redemption/yield_guess and
+        // whichever of yield/price the caller supplied are all raw wire
+        // doubles. coupon_rate had NO check of any kind before this fix;
+        // par/years_to_maturity's own "<= 0.0" guards (below) do not catch
+        // NaN, the same class-4 defeat PriceOptionTree's own original bug
+        // had ("NaN <= 0" is false). years_to_maturity is the more serious
+        // of the two: price_bond/yield_bond/duration_bond/convexity_bond
+        // (financial.cppm) all cast it into an int loop bound via
+        // `static_cast<int>(std::round(years_to_maturity * frequency))`,
+        // and casting a NaN double to int is UNDEFINED BEHAVIOUR per
+        // [conv.fpint], not merely a NaN that propagates predictably.
+        // Reproduced directly: {par=1000, coupon_rate=0.05, frequency=2,
+        // years_to_maturity=NaN, yield=0.045} returned Status::OK with
+        // every field of the response NaN.
+        if (auto s = require_finite(request->par(), "par"); !s.ok()) return s;
+        if (auto s = require_finite(request->coupon_rate(), "coupon_rate"); !s.ok()) return s;
+        if (auto s = require_finite(request->years_to_maturity(), "years_to_maturity"); !s.ok()) {
+            return s;
+        }
+        if (auto s = require_finite(request->redemption(), "redemption"); !s.ok()) return s;
+        if (auto s = require_finite(request->yield_guess(), "yield_guess"); !s.ok()) return s;
+        switch (request->known_case()) {
+            case sensen::finance::BondRequest::kYield:
+                if (auto s = require_finite(request->yield(), "yield"); !s.ok()) return s;
+                break;
+            case sensen::finance::BondRequest::kPrice:
+                if (auto s = require_finite(request->price(), "price"); !s.ok()) return s;
+                break;
+            default:
+                break;  // caught by the "supply either yield or price" check below.
+        }
         if (request->frequency() <= 0) {
             return Status(grpc::StatusCode::INVALID_ARGUMENT,
                           "frequency must be positive (2 = semi-annual)");
@@ -1499,6 +1698,27 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
         CHARGE("AnalyzeTreasuryBill", quota::cost_default());
+        // face_value's own "<= 0.0" guard (below) does not catch NaN, and
+        // discount_rate/price (whichever the caller supplied) had no check
+        // of any kind -- price_tbill (financial.cppm) is pure double
+        // arithmetic that does not throw on NaN, and the "price <= 0.0"
+        // self-check further down does not catch a NaN price either.
+        // Reproduced directly: {face_value=10000, discount_rate=NaN,
+        // days_to_maturity=90} returned Status::OK with price=nan and every
+        // yield field nan.
+        if (auto s = require_finite(request->face_value(), "face_value"); !s.ok()) return s;
+        switch (request->known_case()) {
+            case sensen::finance::TreasuryBillRequest::kDiscountRate:
+                if (auto s = require_finite(request->discount_rate(), "discount_rate"); !s.ok()) {
+                    return s;
+                }
+                break;
+            case sensen::finance::TreasuryBillRequest::kPrice:
+                if (auto s = require_finite(request->price(), "price"); !s.ok()) return s;
+                break;
+            default:
+                break;  // caught by the "supply either discount_rate or price" check below.
+        }
         if (request->days_to_maturity() <= 0) {
             return Status(grpc::StatusCode::INVALID_ARGUMENT, "days_to_maturity must be positive");
         }
@@ -1541,6 +1761,34 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
         CHARGE("PriceFutures", quota::cost_default());
+        // PriceFutures had NO validation of any kind -- not even a bare
+        // "<= 0" check. price_futures (financial.cppm) either exponentiates
+        // (continuous compounding) or raises (1+cost_of_carry) to
+        // years_to_maturity via std::pow (discrete compounding); a NaN in
+        // any field, or a (1+cost_of_carry) at or below zero raised to a
+        // non-integer years_to_maturity under discrete compounding (a
+        // std::pow domain error -> NaN), reaches Status::OK carrying a
+        // NaN/Infinity value. Reproduced directly: spot=NaN returns
+        // Status::OK with value=nan; {cost_of_carry=-2,
+        // years_to_maturity=0.5, continuous=false} returns Status::OK with
+        // value=nan.
+        if (auto s = require_finite(request->spot(), "spot"); !s.ok()) return s;
+        if (auto s = require_finite(request->rate(), "rate"); !s.ok()) return s;
+        if (auto s = require_finite(request->cost_of_carry(), "cost_of_carry"); !s.ok()) return s;
+        if (auto s = require_finite(request->years_to_maturity(), "years_to_maturity"); !s.ok()) {
+            return s;
+        }
+        // Discrete (non-continuous) compounding raises (1+cost_of_carry) to
+        // years_to_maturity via std::pow; a base at or below zero raised to
+        // a fractional exponent is a domain error (NaN), not a real futures
+        // price. check_rate_floor is the exact same "1+x > 0" bound this
+        // field needs, already used elsewhere in this file for per-period
+        // rates entering the identical shape of expression.
+        if (!request->continuous()) {
+            if (auto s = check_rate_floor(request->cost_of_carry(), "cost_of_carry"); !s.ok()) {
+                return s;
+            }
+        }
         sensen::FuturesPricingParams p{};
         p.spot = request->spot();
         p.rate = request->rate();
@@ -1557,6 +1805,18 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
         CHARGE("ValueFutures", quota::cost_default());
+        // ValueFutures had NO validation of any kind either. value_futures
+        // (financial.cppm) is exp(-rate*years)*(spot-delivery), which does
+        // not itself hit a domain error for any real input -- but a NaN in
+        // any field still reaches Status::OK carrying a NaN value.
+        if (auto s = require_finite(request->current_spot(), "current_spot"); !s.ok()) return s;
+        if (auto s = require_finite(request->delivery_price(), "delivery_price"); !s.ok()) {
+            return s;
+        }
+        if (auto s = require_finite(request->rate(), "rate"); !s.ok()) return s;
+        if (auto s = require_finite(request->years_to_maturity(), "years_to_maturity"); !s.ok()) {
+            return s;
+        }
         response->set_value(sensen::value_futures(request->current_spot(), request->delivery_price(),
                                                   request->rate(), request->years_to_maturity(),
                                                   request->is_long()));
@@ -1573,6 +1833,37 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
                quota::cost_margin_simulation(request->daily_prices_size()));
         if (request->contract_size() <= 0) {
             return Status(grpc::StatusCode::INVALID_ARGUMENT, "contract_size must be positive");
+        }
+        // initial_deposit/initial_margin_requirement/
+        // maintenance_margin_requirement/entry_price had no validation of
+        // any kind, and daily_prices (the mark-to-market path) was
+        // completely unbounded -- simulate_futures_margin_account
+        // (financial.cppm) walks it in a plain for loop, O(len(daily_prices))
+        // regardless of how quota::cost_margin_simulation prices a single
+        // request. Reproduced directly: entry_price=NaN returns Status::OK
+        // with balance=nan; a single NaN inside daily_prices propagates a
+        // NaN balance the same way, the per-element case a scalar guard
+        // cannot catch.
+        if (auto s = require_finite(request->initial_deposit(), "initial_deposit"); !s.ok()) {
+            return s;
+        }
+        if (auto s = require_finite(request->initial_margin_requirement(),
+                                    "initial_margin_requirement");
+            !s.ok()) {
+            return s;
+        }
+        if (auto s = require_finite(request->maintenance_margin_requirement(),
+                                    "maintenance_margin_requirement");
+            !s.ok()) {
+            return s;
+        }
+        if (auto s = require_finite(request->entry_price(), "entry_price"); !s.ok()) return s;
+        if (auto s = check_series_length_ceiling(request->daily_prices_size(), "daily_prices");
+            !s.ok()) {
+            return s;
+        }
+        if (auto s = require_all_finite(request->daily_prices(), "daily_prices"); !s.ok()) {
+            return s;
         }
         const std::vector<double> path(request->daily_prices().begin(),
                                        request->daily_prices().end());
@@ -1594,14 +1885,46 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
         CHARGE("ComputeHedge", quota::cost_default());
-        if (request->futures_volatility() == 0.0) {
+        // The only existing guard was an EXACT-equality check against zero;
+        // NaN == 0.0 is false, so a NaN futures_volatility sailed straight
+        // through to calculate_hedge_ratio's own "<= 0.0" guard, which NaN
+        // defeats the same way. A negative futures_volatility is not a real
+        // one either -- the exact-equality check let it through to that
+        // same fallback-to-zero rather than being refused as nonsensical.
+        // asset_volatility/correlation had no check of any kind. Reproduced
+        // directly: futures_volatility=NaN returns Status::OK with
+        // hedge_ratio=nan.
+        if (auto s = require_finite(request->asset_volatility(), "asset_volatility"); !s.ok()) {
+            return s;
+        }
+        if (auto s = require_finite(request->futures_volatility(), "futures_volatility");
+            !s.ok()) {
+            return s;
+        }
+        if (auto s = require_finite(request->correlation(), "correlation"); !s.ok()) return s;
+        if (request->futures_volatility() <= 0.0) {
             return Status(grpc::StatusCode::INVALID_ARGUMENT,
-                          "futures_volatility cannot be zero; the hedge ratio divides by it");
+                          "futures_volatility must be positive; the hedge ratio divides by it");
         }
         const double ratio = sensen::calculate_hedge_ratio(
             request->asset_volatility(), request->futures_volatility(), request->correlation());
         response->set_hedge_ratio(ratio);
 
+        // spot_value/contract_multiplier/futures_price feed the optional
+        // contract-count leg. have_position is decided by "!= 0.0" -- and
+        // NaN != 0.0 is TRUE, so a NaN position input was previously treated
+        // as "a genuine position was supplied" and produced a NaN contracts
+        // count in an otherwise-OK response. Checked finite here regardless
+        // of whether have_position ends up true, since have_position itself
+        // is what a NaN would corrupt.
+        if (auto s = require_finite(request->spot_value(), "spot_value"); !s.ok()) return s;
+        if (auto s = require_finite(request->contract_multiplier(), "contract_multiplier");
+            !s.ok()) {
+            return s;
+        }
+        if (auto s = require_finite(request->futures_price(), "futures_price"); !s.ok()) {
+            return s;
+        }
         // A contract count needs a position size and a contract spec. Without
         // them the count is left absent and SAID to be absent, rather than
         // returned as a zero that reads like "no contracts needed".
@@ -1624,6 +1947,16 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
         CHARGE("ComputeCommoditySpread", quota::cost_default());
+        // No validation of any kind existed here -- calculate_crack_spread_321/
+        // calculate_spark_spread/calculate_crush_spread (financial.cppm) are
+        // all pure double arithmetic with no domain requirement of their
+        // own, but a NaN in any field still reaches Status::OK carrying a
+        // NaN spread value, same class as rate on PriceOptionTree/
+        // ComputeProbabilityTree elsewhere in this file (no positivity
+        // requirement, but must still be finite).
+        if (auto s = require_finite(request->a(), "a"); !s.ok()) return s;
+        if (auto s = require_finite(request->b(), "b"); !s.ok()) return s;
+        if (auto s = require_finite(request->c(), "c"); !s.ok()) return s;
         double v = 0.0;
         switch (request->spread()) {
             case sensen::finance::CommoditySpreadRequest::CRACK_321:
@@ -2092,6 +2425,23 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
             return Status(grpc::StatusCode::INVALID_ARGUMENT,
                           "spot, strike, volatility and years_to_expiry must all be positive");
         }
+        // paths and steps together are the O(paths*steps) work
+        // price_option_monte_carlo actually does (a TBB parallel_reduce over
+        // paths, each walking steps RNG draws); quota::cost_monte_carlo(paths,
+        // steps) prices that work proportionally but never refuses a SINGLE
+        // request whose own product is large enough to run for an
+        // unreasonable time regardless of how it is billed -- the same DoS
+        // shape check_period_count_ceiling/check_portfolio_size_ceiling close
+        // elsewhere in this file for other caller-chosen work sizes. 100
+        // million path-steps is already far beyond any real Monte Carlo
+        // option pricer's needs (10,000 paths x 252 daily steps = 2.52M is
+        // already a generous real-world figure).
+        if (static_cast<long long>(request->paths()) * static_cast<long long>(request->steps()) >
+            100'000'000LL) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "paths * steps exceeds 100,000,000; no real Monte Carlo option "
+                          "pricer needs more path-steps than that");
+        }
         const int threads = (request->num_threads() > 0) ? request->num_threads() : -1;
         response->set_value(sensen::price_option_monte_carlo(
             request->spot(), request->strike(), request->rate(), request->volatility(),
@@ -2155,6 +2505,29 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
                               std::to_string(request->portfolio_returns_size()) +
                               "; a benchmark must cover the same periods");
         }
+        // portfolio_returns/market_returns were unbounded beyond the length
+        // check above -- calculate_portfolio_stats (portfolio.cppm) is
+        // O(n log n) for the historical VaR/CVaR sort, work that
+        // quota::cost_portfolio_stats(n) prices proportionally but never
+        // refuses outright for a single absurdly long series. A NaN
+        // anywhere in either series also propagates through every one of
+        // the eighteen statistics in the response -- the per-element case a
+        // whole-vector emptiness/length check cannot catch.
+        if (auto s = check_series_length_ceiling(request->portfolio_returns_size(),
+                                                 "portfolio_returns");
+            !s.ok()) {
+            return s;
+        }
+        if (auto s = require_all_finite(request->portfolio_returns(), "portfolio_returns");
+            !s.ok()) {
+            return s;
+        }
+        if (auto s = require_all_finite(request->market_returns(), "market_returns"); !s.ok()) {
+            return s;
+        }
+        if (auto s = require_finite(request->risk_free_rate(), "risk_free_rate"); !s.ok()) {
+            return s;
+        }
 
         const std::vector<double> pr(request->portfolio_returns().begin(),
                                      request->portfolio_returns().end());
@@ -2191,10 +2564,30 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
         CHARGE("OptimizePortfolio", quota::cost_portfolio_optimize(request->size()));
+        // size was bounded only in SHAPE by read_covariance below (it must
+        // agree with expected_returns' length, and covariance must hold
+        // exactly size*size entries) -- never in MAGNITUDE.
+        // optimize_portfolio (portfolio.cppm) LU-decomposes a size*size
+        // matrix, O(size^3) work quota::cost_portfolio_optimize(size) prices
+        // proportionally but never refuses outright for a single request.
+        if (auto s = check_portfolio_size_ceiling(request->size(), "size"); !s.ok()) return s;
         sensen::MatrixT<double> cov;
         if (auto s = read_covariance(request->size(), request->expected_returns_size(),
                                      request->covariance(), cov);
             !s.ok()) {
+            return s;
+        }
+        // A NaN anywhere in expected_returns/covariance propagates through
+        // the LU solve into every weight and stat in the response --
+        // optimize_portfolio's own guards (a near-zero weight-sum check,
+        // etc.) all compare against NaN, which is always false, so they
+        // never catch it either.
+        if (auto s = require_all_finite(request->expected_returns(), "expected_returns");
+            !s.ok()) {
+            return s;
+        }
+        if (auto s = require_all_finite(request->covariance(), "covariance"); !s.ok()) return s;
+        if (auto s = require_finite(request->risk_free_rate(), "risk_free_rate"); !s.ok()) {
             return s;
         }
         const std::vector<double> mu(request->expected_returns().begin(),
@@ -2218,12 +2611,19 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         }
         // Same O(n^3) covariance solve as OptimizePortfolio, so the same price.
         CHARGE("ComputeRiskContributions", quota::cost_portfolio_optimize(request->size()));
+        // Same unbounded-magnitude gap as OptimizePortfolio above, on the
+        // identical size*size covariance shape.
+        if (auto s = check_portfolio_size_ceiling(request->size(), "size"); !s.ok()) return s;
         sensen::MatrixT<double> cov;
         if (auto s = read_covariance(request->size(), request->weights_size(), request->covariance(),
                                      cov);
             !s.ok()) {
             return s;
         }
+        // A NaN anywhere in weights/covariance propagates through the
+        // marginal-risk matrix-vector product into every contribution.
+        if (auto s = require_all_finite(request->weights(), "weights"); !s.ok()) return s;
+        if (auto s = require_all_finite(request->covariance(), "covariance"); !s.ok()) return s;
         const std::vector<double> w(request->weights().begin(), request->weights().end());
         const auto r = sensen::calculate_risk_contributions(w, cov);
         if (!r) return fail(r);
