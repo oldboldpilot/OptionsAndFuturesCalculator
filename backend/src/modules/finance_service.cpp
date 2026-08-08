@@ -174,6 +174,31 @@ namespace {
     }
 }
 
+/**
+ * Refuses a non-finite (NaN or +/-Infinity) option-pricing field.
+ *
+ * PriceOptionTree/PriceBlackScholes/PriceOptionMonteCarlo's numeric fields
+ * are plain wire doubles, not the BigDecimal STRINGS the money RPCs above
+ * validate via READ_DECIMAL/REQUIRE_DECIMAL -- there is no decimal-string
+ * parse step here for those macros to guard, so nothing else in this file
+ * catches a NaN or +/-Infinity in one of them. That matters because a "<= 0"
+ * positivity check (PriceOptionTree's own guard, right below) does not
+ * catch either: NaN compares false against every relation including "<= 0"
+ * and "> 0", and +Infinity compares true against "> 0" same as any other
+ * huge positive number. Both sail straight through and reach
+ * price_option_double(), which is pure double arithmetic and does not
+ * throw for either -- without this, the RPC would return Status::OK
+ * carrying a NaN/Infinity value, delta, gamma or theta instead of refusing
+ * the request that produced it.
+ */
+[[nodiscard]] auto require_finite(double v, std::string_view field) -> Status {
+    if (!std::isfinite(v)) {
+        return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                      std::string(field) + " must be a finite number, got " + std::to_string(v));
+    }
+    return Status::OK;
+}
+
 /** A std::expected failure becomes the gRPC error carrying its own message. */
 template <typename T>
 [[nodiscard]] auto fail(const std::expected<T, std::string>& e) -> Status {
@@ -1580,10 +1605,63 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
             return Status(grpc::StatusCode::INVALID_ARGUMENT,
                           "steps, years_to_expiry, spot, strike and volatility must all be positive");
         }
+        // A 1-step trinomial tree has no second backward-induction layer, but
+        // the Greeks calculation below unconditionally reads one: theta reads
+        // "step 2, node 0" (options.cppm's V[4+2+0]) regardless of how many
+        // steps the caller asked for. At steps=1 the tree array itself only
+        // holds (1+1)^2=4 elements, so that read runs past the end of it --
+        // measured returning a plausible-looking but meaningless theta
+        // (47.19, against -1.67 at steps=200) rather than an error, because a
+        // small heap over-read does not reliably fault. Refused here instead
+        // of left to silently return that.
+        if (request->steps() < 2) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "steps must be at least 2 (a 1-step tree has no second "
+                          "backward-induction layer for the theta estimate to read)");
+        }
+        // Every numeric field below is a plain wire double, so a NaN or
+        // +/-Infinity survives the positivity check above -- see
+        // require_finite's own comment for why. rate carries no positivity
+        // requirement of its own (negative rates are real) but must still be
+        // finite.
+        if (auto s = require_finite(request->spot(), "spot"); !s.ok()) return s;
+        if (auto s = require_finite(request->strike(), "strike"); !s.ok()) return s;
+        if (auto s = require_finite(request->rate(), "rate"); !s.ok()) return s;
+        if (auto s = require_finite(request->volatility(), "volatility"); !s.ok()) return s;
+        if (auto s = require_finite(request->years_to_expiry(), "years_to_expiry"); !s.ok()) {
+            return s;
+        }
+
         const auto exercise = request->exercise_type();
         if (exercise == sensen::finance::BERMUDAN && request->bermudan_dates_size() == 0) {
             return Status(grpc::StatusCode::INVALID_ARGUMENT,
                           "a Bermudan option needs bermudan_dates; without them it is European");
+        }
+        // A Bermudan exercise date outside (0, years_to_expiry] can never be
+        // within half a step of any real backward-induction time
+        // (is_bermudan_exercise_time only ever compares against
+        // t = j*dt for j in [0, steps-1], i.e. times in [0, years_to_expiry)),
+        // so it silently contributes nothing: the option prices exactly as
+        // European while still being labelled Bermudan on the wire, with no
+        // error to tell the caller their date list did not do what they
+        // asked. A date list that is entirely out of range is the extreme
+        // case of this and is otherwise invisible, since it is non-empty and
+        // so passes the guard directly above. Refused here instead, one date
+        // list validated as a whole rather than accepted-then-silently-
+        // ignored member by member. (This also catches a NaN date: NaN
+        // compares false against "> 0.0", so it fails the same test.)
+        if (exercise == sensen::finance::BERMUDAN) {
+            for (const double d : request->bermudan_dates()) {
+                if (!(d > 0.0) || d > request->years_to_expiry()) {
+                    return Status(
+                        grpc::StatusCode::INVALID_ARGUMENT,
+                        "bermudan_dates must all fall in (0, years_to_expiry]; got " +
+                            std::to_string(d) + " against years_to_expiry=" +
+                            std::to_string(request->years_to_expiry()) +
+                            " -- a date outside that range never matches a real "
+                            "backward-induction step and would silently price as European");
+                }
+            }
         }
 
         sensen::ExerciseType ex = sensen::ExerciseType::European;
@@ -1597,12 +1675,38 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         // sqrt(1.5), the spacing that makes the middle branch probability 1/3.
         const double lambda =
             (request->lambda() > 0.0) ? request->lambda() : 1.224744871391589;
+        const auto asian = asian_type_of(request->asian_type());
+        // options.cppm's Asian branch discretizes each node's running-average
+        // range into a grid of averaging_states values, and divides by
+        // (averaging_states - 1) to size the grid step (its terminal-state
+        // init at line ~175 and, far more dangerously, its interpolate()
+        // helper at line ~214). At averaging_states=1 that divisor is exactly
+        // 0. Reproduced directly: PriceOptionTree{spot=100, strike=100,
+        // rate=0.05, volatility=0.2, years_to_expiry=1, steps=60,
+        // asian_type=AVERAGE_PRICE, averaging_states=1} killed the engine
+        // process outright (no error in the log -- an abrupt SIGSEGV-class
+        // termination, not a thrown exception this file could catch). The
+        // mechanism: the resulting NaN average is converted to an int as an
+        // interpolation grid index (int(NaN) is undefined behaviour), and
+        // that near-arbitrary index is then used to subscript a
+        // std::vector<double> via operator[] with no bounds check. Every
+        // other anonymous caller of this public, no-API-key-required RPC
+        // could reach the same crash, taking down the calculator and both
+        // assistant services sharing this process with it. Refused here,
+        // before the pricer is ever called. (averaging_states<=0 does not
+        // reach this: it is defaulted to 50 above, same as before this fix.)
+        if (asian != sensen::AsianType::None && avg_states < 2) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "averaging_states must be at least 2 for an Asian option (it "
+                          "discretizes a continuous running-average range into a grid of "
+                          "that many states; at 1 the grid has no width)");
+        }
 
         try {
             const auto r = sensen::price_option_double(
                 request->spot(), request->strike(), request->rate(), request->volatility(),
                 request->years_to_expiry(), request->steps(), option_type_of(request->option_type()),
-                ex, dates, asian_type_of(request->asian_type()), avg_states, lambda);
+                ex, dates, asian, avg_states, lambda);
             response->set_value(r.value);
             response->set_delta(r.delta);
             response->set_gamma(r.gamma);

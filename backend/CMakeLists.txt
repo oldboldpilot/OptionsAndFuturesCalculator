@@ -936,6 +936,33 @@ target_compile_definitions(test_mortgage_grammar PRIVATE
 
 add_test(NAME MortgageGrammarTest COMMAND test_mortgage_grammar)
 
+# Option EXERCISE STYLE (European/American/Bermudan) and ASIAN option coverage
+# for the sensen.finance.Finance PriceOptionTree RPC, at the gRPC service
+# layer -- i.e. through options_calculator::finance::RegisterFinanceService on
+# a real in-process grpc::Server, not by calling sensen's pricer directly. The
+# pricer itself (backend/sensen/src/options.cppm) is read-only for this test;
+# what is under test is finance_service.cpp's request validation, defaulting,
+# and marshalling around it. Needs the same module set finance_service.cpp
+# itself imports (quota, api_key) as its own FILE_SET sources, exactly the
+# way calculator_engine already builds them, and proto_lib/sensen_slim to
+# link real sensen pricing code and the generated finance.pb.h stubs.
+add_executable(test_option_pricing_service
+    tests/test_option_pricing_service.cpp
+    src/modules/finance_service.cpp
+    src/modules/quota.cpp
+    src/modules/api_key.cpp
+)
+target_sources(test_option_pricing_service
+    PRIVATE
+    FILE_SET CXX_MODULES FILES
+        src/modules/finance_service.cppm
+        src/modules/quota.cppm
+        src/modules/api_key.cppm
+)
+target_link_libraries(test_option_pricing_service PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto)
+
+add_test(NAME OptionPricingServiceTest COMMAND test_option_pricing_service)
+
 # End-to-end smoke client. Verifies a running engine returns live data on all
 # three RPCs; used as the deploy gate.
 add_executable(smoke_client src/smoke_client.cpp)
