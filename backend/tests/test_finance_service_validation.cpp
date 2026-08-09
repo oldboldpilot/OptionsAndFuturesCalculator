@@ -696,6 +696,52 @@ auto main() -> int {
               "price_black_scholes has its own explicit T<=0 intrinsic-value branch, a real "
               "answer (110-100=10) not a defect (got " + std::to_string(resp.value()) + ")");
     }
+    {
+        // Magnitude overflow (a LATER finding, not the original "no
+        // validation at all" gap above): a rate far enough negative
+        // overflows PriceBlackScholes' own exp(-rate*years_to_expiry)
+        // discount factor to +Infinity, and that Infinity times a
+        // normal_cdf() that has itself saturated to exactly 0.0 is a
+        // genuine 0*Infinity -> NaN. Reproduced directly against the
+        // pre-fix binary: {spot=100,strike=100,rate=-1e10,volatility=0.2,
+        // years_to_expiry=1} returned Status::OK with value=-nan.
+        sensen::finance::BlackScholesRequest req;
+        req.set_spot(100.0);
+        req.set_strike(100.0);
+        req.set_rate(-1.0e10);
+        req.set_volatility(0.2);
+        req.set_years_to_expiry(1.0);
+        req.set_option_type(sensen::finance::CALL);
+        sensen::finance::BlackScholesResponse resp;
+        auto ctx = make_context();
+        auto status = stub.PriceBlackScholes(ctx.get(), req, &resp);
+        check(is_invalid_argument(status),
+              "PriceBlackScholes{rate=-1e10} (absurd-but-finite magnitude) is REJECTED -- used "
+              "to return Status::OK with value=-nan");
+    }
+    {
+        // Positive control at the same shape as the magnitude test above,
+        // and a genuinely high-but-legitimate volatility (500%, a
+        // crypto-like underlying) alongside it -- both must still succeed
+        // and price finitely.
+        sensen::finance::BlackScholesRequest req;
+        req.set_spot(100.0);
+        req.set_strike(100.0);
+        req.set_rate(0.05);
+        req.set_volatility(5.0);
+        req.set_years_to_expiry(1.0);
+        req.set_option_type(sensen::finance::CALL);
+        sensen::finance::BlackScholesResponse resp;
+        auto ctx = make_context();
+        auto status = stub.PriceBlackScholes(ctx.get(), req, &resp);
+        check(status.ok() && std::isfinite(resp.value()) && std::isfinite(resp.gamma()) &&
+                  std::isfinite(resp.vega()) && std::isfinite(resp.vanna()) &&
+                  std::isfinite(resp.volga()) && std::isfinite(resp.charm()) &&
+                  std::isfinite(resp.color()) && std::isfinite(resp.speed()),
+              "...but volatility=5.0 (500%, a legitimate high-vol crypto-like case) is ACCEPTED "
+              "with EVERY Greek finite -- the bound is not over-tight (value=" +
+                  std::to_string(resp.value()) + ")");
+    }
 
     // =======================================================================
     section("9. PriceOptionMonteCarlo: same missing-guard shape as PriceBlackScholes");
@@ -734,6 +780,67 @@ auto main() -> int {
               "...but a normal Monte Carlo run still succeeds (value=" +
                   std::to_string(resp.value()) + ")");
     }
+    {
+        // Magnitude overflow: price_option_monte_carlo's per-step update is
+        // S *= exp(drift + vol*Z), and an absurd years_to_expiry (with
+        // steps left modest) makes dt large enough to overflow that exp().
+        // Reproduced directly against the pre-fix binary:
+        // {volatility=0.2, years_to_expiry=1e6} returned Status::OK with
+        // value=nan.
+        sensen::finance::MonteCarloRequest req;
+        req.set_spot(100.0);
+        req.set_strike(100.0);
+        req.set_rate(0.05);
+        req.set_volatility(0.2);
+        req.set_years_to_expiry(1.0e6);
+        req.set_paths(100);
+        req.set_steps(50);
+        req.set_option_type(sensen::finance::CALL);
+        sensen::finance::DoubleResponse resp;
+        auto ctx = make_context();
+        auto status = stub.PriceOptionMonteCarlo(ctx.get(), req, &resp);
+        check(is_invalid_argument(status),
+              "PriceOptionMonteCarlo{years_to_expiry=1e6} (absurd-but-finite magnitude) is "
+              "REJECTED -- used to return Status::OK with value=nan");
+    }
+    {
+        // Magnitude overflow via rate instead: reproduced directly:
+        // {rate=1e5} returned Status::OK with value=nan.
+        sensen::finance::MonteCarloRequest req;
+        req.set_spot(100.0);
+        req.set_strike(100.0);
+        req.set_rate(1.0e5);
+        req.set_volatility(0.2);
+        req.set_years_to_expiry(1.0);
+        req.set_paths(100);
+        req.set_steps(50);
+        req.set_option_type(sensen::finance::CALL);
+        sensen::finance::DoubleResponse resp;
+        auto ctx = make_context();
+        auto status = stub.PriceOptionMonteCarlo(ctx.get(), req, &resp);
+        check(is_invalid_argument(status),
+              "PriceOptionMonteCarlo{rate=1e5} (absurd-but-finite magnitude) is REJECTED -- "
+              "used to return Status::OK with value=nan");
+    }
+    {
+        // Positive control: a legitimate high volatility (500%) still
+        // succeeds and prices finitely.
+        sensen::finance::MonteCarloRequest req;
+        req.set_spot(100.0);
+        req.set_strike(100.0);
+        req.set_rate(0.05);
+        req.set_volatility(5.0);
+        req.set_years_to_expiry(1.0);
+        req.set_paths(2000);
+        req.set_steps(20);
+        req.set_option_type(sensen::finance::CALL);
+        sensen::finance::DoubleResponse resp;
+        auto ctx = make_context();
+        auto status = stub.PriceOptionMonteCarlo(ctx.get(), req, &resp);
+        check(status.ok() && std::isfinite(resp.value()),
+              "...but volatility=5.0 (500%, legitimate high-vol case) is ACCEPTED and finite "
+              "(value=" + std::to_string(resp.value()) + ")");
+    }
 
     // =======================================================================
     section("10. ComputeProbabilityTree: rate had no check, existing checks miss NaN");
@@ -759,6 +866,78 @@ auto main() -> int {
         auto ctx = make_context();
         auto status = stub.ComputeProbabilityTree(ctx.get(), req, &resp);
         check(status.ok(), "...but a normal request still succeeds");
+    }
+    {
+        // Magnitude overflow: calculate_probability_tree shares
+        // PriceOptionTree's identical u=exp(lambda*sigma*sqrt(dt)) driver.
+        // Reproduced directly: {volatility=1e10} returned Status::OK with
+        // a non-finite entry in stock_prices.
+        sensen::finance::ProbabilityTreeRequest req;
+        req.set_rate(0.05);
+        req.set_volatility(1.0e10);
+        req.set_years_to_expiry(1.0);
+        req.set_steps(20);
+        sensen::finance::ProbabilityTreeResponse resp;
+        auto ctx = make_context();
+        auto status = stub.ComputeProbabilityTree(ctx.get(), req, &resp);
+        check(is_invalid_argument(status),
+              "ComputeProbabilityTree{volatility=1e10} (absurd-but-finite magnitude) is "
+              "REJECTED -- used to return Status::OK with a non-finite stock_prices entry");
+    }
+    {
+        // Magnitude overflow via years_to_expiry instead: reproduced
+        // directly: {years_to_expiry=1e10} returned Status::OK with a
+        // non-finite entry.
+        sensen::finance::ProbabilityTreeRequest req;
+        req.set_rate(0.05);
+        req.set_volatility(0.2);
+        req.set_years_to_expiry(1.0e10);
+        req.set_steps(20);
+        sensen::finance::ProbabilityTreeResponse resp;
+        auto ctx = make_context();
+        auto status = stub.ComputeProbabilityTree(ctx.get(), req, &resp);
+        check(is_invalid_argument(status),
+              "ComputeProbabilityTree{years_to_expiry=1e10} (absurd-but-finite magnitude) is "
+              "REJECTED -- used to return Status::OK with a non-finite stock_prices entry");
+    }
+    {
+        // lambda == +Infinity: had NO finiteness check of any kind before
+        // this fix, same finding as PriceOptionTree's own lambda gap.
+        sensen::finance::ProbabilityTreeRequest req;
+        req.set_rate(0.05);
+        req.set_volatility(0.2);
+        req.set_years_to_expiry(1.0);
+        req.set_steps(20);
+        req.set_lambda(std::numeric_limits<double>::infinity());
+        sensen::finance::ProbabilityTreeResponse resp;
+        auto ctx = make_context();
+        auto status = stub.ComputeProbabilityTree(ctx.get(), req, &resp);
+        check(is_invalid_argument(status),
+              "ComputeProbabilityTree{lambda=+Infinity} is REJECTED (previously had no "
+              "finiteness check at all)");
+    }
+    {
+        // Positive control: a legitimate high volatility (500%) still
+        // succeeds with every stock_prices/state_probabilities entry
+        // finite.
+        sensen::finance::ProbabilityTreeRequest req;
+        req.set_rate(0.05);
+        req.set_volatility(5.0);
+        req.set_years_to_expiry(1.0);
+        req.set_steps(20);
+        sensen::finance::ProbabilityTreeResponse resp;
+        auto ctx = make_context();
+        auto status = stub.ComputeProbabilityTree(ctx.get(), req, &resp);
+        bool all_finite = true;
+        for (int i = 0; i < resp.stock_prices_size(); ++i) {
+            if (!std::isfinite(resp.stock_prices(i))) all_finite = false;
+        }
+        for (int i = 0; i < resp.state_probabilities_size(); ++i) {
+            if (!std::isfinite(resp.state_probabilities(i))) all_finite = false;
+        }
+        check(status.ok() && all_finite,
+              "...but volatility=5.0 (500%, legitimate high-vol case) is ACCEPTED with every "
+              "stock_prices/state_probabilities entry finite");
     }
 
     // =======================================================================

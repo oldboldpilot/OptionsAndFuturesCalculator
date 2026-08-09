@@ -520,6 +520,152 @@ template <typename Repeated>
     return Status::OK;
 }
 
+// ---------------------------------------------------------------------------
+// Magnitude guards for the FOUR option-pricing RPCs (PriceOptionTree,
+// PriceBlackScholes, PriceOptionMonteCarlo, ComputeProbabilityTree).
+//
+// `require_finite` (above) closes the NaN/+-Infinity-INPUT hole: it stops a
+// bad wire value from sailing through a "<= 0" positivity check the way NaN
+// and +Infinity both do. It does NOT stop a FINITE-but-absurd value from
+// overflowing an INTERMEDIATE quantity DURING computation. Reproduced
+// directly against this file's pre-fix binary: PriceOptionTree{spot=100,
+// strike=100, rate=0.05, volatility=1.0e10, years_to_expiry=1, steps=100}
+// returned Status::OK with value=-nan -- every individual field passed
+// require_finite and the ">0" positivity checks, and the response was still
+// garbage.
+//
+// The mechanism (sensen::price_option_double /
+// sensen::calculate_probability_tree, options.cppm): both build a trinomial
+// tree whose most extreme node is
+//     S0 * u^steps,  u = exp(lambda * sigma * sqrt(years_to_expiry / steps))
+// which reduces to
+//     S0 * exp(lambda * sigma * sqrt(steps * years_to_expiry))
+// -- an EXPONENT that grows with volatility, years_to_expiry, lambda AND
+// steps, all four jointly, not any one of them alone. `std::exp` overflows
+// to +Infinity once its argument exceeds ln(DBL_MAX) =~ 709.78; the bounds
+// below keep that exponent under 650 (comment on
+// check_tree_exponent_safe has the arithmetic), leaving ~60 nats
+// (~8%) of headroom below the hard ceiling for whatever the backward
+// induction or Black-Scholes' own Greek formulas do on top of it -- the
+// same "individually-generous, jointly-checked" shape check_compound_growth_
+// safe already uses for the BigDecimal TVM/mortgage RPCs, just for a
+// different closed-form limit (IEEE double's ~1.8e308 range via exp(), not
+// BigDecimal's ~1.7e20 __int128 range).
+//
+// Every bound is chosen to be an order of magnitude or more above the
+// largest figure a real options desk would ever submit, per field:
+//   - volatility: 1000% (10.0) annualised. A 300-500% annualised volatility
+//     is unusual but real for a crypto-like underlying -- the task this
+//     guard was written for names that case explicitly -- so the bound sits
+//     at 2x that, not merely just-above-the-legitimate-value.
+//   - rate: +/-500% (5.0) continuously compounded. No real risk-free,
+//     dividend, or cost-of-carry rate approaches this even in a hyper-
+//     inflationary economy; it is kept symmetric because a very negative
+//     rate is exactly as capable of overflowing exp(-rate*T) as a very
+//     positive one is capable of overflowing exp(+rate*T) (BS's discount
+//     factor is exp(-rate*T); MC's per-step drift is (rate-0.5*sigma^2)*dt).
+//   - years_to_expiry: 100 years. The SAME bound this file already uses
+//     elsewhere (ComputeFutureValueDetailed's `years <= 100`: "no real
+//     projection horizon runs longer than a lifetime"); real options rarely
+//     exceed 30-year LEAPS.
+//   - lambda (tree spacing; PriceOptionTree/ComputeProbabilityTree only):
+//     10.0. Every real caller either omits it (0 selects the engine's own
+//     default, sqrt(1.5) =~ 1.2247) or passes something close to that
+//     default -- there is no legitimate reason to deviate far from it, and
+//     it enters the SAME exponent as sigma multiplicatively, so an
+//     unchecked lambda is exactly as dangerous as an unchecked volatility.
+//
+// spot/strike are NOT given a new bound here: they are ordinary money-like
+// quantities, exactly what check_double_magnitude (above) already exists
+// to bound, so this guard reuses it rather than inventing a third
+// magnitude helper for the same shape of field.
+[[nodiscard]] auto check_option_field_magnitude(double v, std::string_view field, double bound,
+                                                std::string_view legitimate_ceiling) -> Status {
+    if (std::abs(v) > bound) {
+        return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                      std::string(field) +
+                          " is too large in magnitude for this option pricer (no real position "
+                          "needs " + std::string(field) + " beyond " +
+                          std::string(legitimate_ceiling) + ")");
+    }
+    return Status::OK;
+}
+
+constexpr double kMaxOptionVolatility = 10.0;       // 1000% annualised
+constexpr double kMaxOptionRate = 5.0;              // +/-500% continuously compounded
+constexpr double kMaxOptionYearsToExpiry = 100.0;   // 100 years
+constexpr double kMaxOptionLambda = 10.0;           // tree spacing; default is sqrt(1.5)=~1.2247
+
+/**
+ * The joint check that actually closes the overflow gap for the two TREE
+ * RPCs (PriceOptionTree, ComputeProbabilityTree): even with every one of the
+ * per-field bounds above enforced, `steps` itself carries NO ceiling in
+ * either RPC (PriceOptionTree only floors it at >=2; ComputeProbabilityTree
+ * only requires >0) -- and steps enters the SAME exponent through
+ * sqrt(steps * years_to_expiry). A caller at exactly the per-field bounds
+ * (volatility=10, years_to_expiry=100) with a large enough steps can still
+ * overflow: sqrt(steps*100) grows without limit as steps grows, so the
+ * per-field bounds ALONE cannot make this safe -- the exponent must be
+ * checked directly, mirroring check_compound_growth_safe's own "each bound
+ * is individually reasonable but their PRODUCT is what matters" reasoning.
+ *
+ * lambda's own effective value mirrors the RPC's own default-selection
+ * logic exactly (lambda <= 0 selects the engine's sqrt(1.5) default) so
+ * this check evaluates the SAME exponent the pricer itself will compute.
+ *
+ * 650 nats leaves ~60 nats (~8%) of headroom below IEEE double's exp()
+ * overflow threshold (ln(DBL_MAX) =~ 709.78) for the backward induction's
+ * own combination of neighbouring tree nodes on top of the single extreme
+ * node this function bounds.
+ */
+[[nodiscard]] auto check_tree_exponent_safe(double sigma, double lambda_field,
+                                            double years_to_expiry, int steps,
+                                            std::string_view context) -> Status {
+    const double lambda_eff = (lambda_field > 0.0) ? lambda_field : 1.224744871391589;
+    const double exponent =
+        lambda_eff * sigma * std::sqrt(static_cast<double>(steps) * years_to_expiry);
+    if (!std::isfinite(exponent) || exponent > 650.0) {
+        return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                      std::string(context) +
+                          ": lambda, volatility, years_to_expiry and steps combine to a tree-node "
+                          "exponent too extreme for this calculator to price (would overflow the "
+                          "underlying exp() to +Infinity)");
+    }
+    return Status::OK;
+}
+
+/**
+ * Refuses a response whose numeric fields came back non-finite despite every
+ * guard above -- defence in depth, not the primary guard. The per-field and
+ * joint checks above close the SPECIFIC, reproduced overflow path (the tree
+ * node exponent); this closes whatever this audit did NOT enumerate, on the
+ * theory that a service whose contract is "a priced option or a clear
+ * refusal" should never depend on having found every overflow path by
+ * inspection. Concretely, it is what would also catch, for example, the
+ * Kamrad-Ritchken transition probabilities (p_u/p_d in price_option_double)
+ * going outside [0,1] for a rate large relative to volatility -- a genuine,
+ * pre-existing numerical-stability limitation of that scheme, present even
+ * at inputs well inside every bound above, that is out of this fix's scope
+ * to correct but not out of scope to REFUSE rather than silently return.
+ * Cheap relative to the O(steps^2) tree computation already done, so there
+ * is no real cost argument against always running it.
+ */
+[[nodiscard]] auto require_response_finite(
+    std::initializer_list<std::pair<double, std::string_view>> fields,
+    std::string_view rpc_name) -> Status {
+    for (const auto& [v, name] : fields) {
+        if (!std::isfinite(v)) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          std::string(rpc_name) + " produced a non-finite " + std::string(name) +
+                              " (" + std::to_string(v) +
+                              ") from an input combination this calculator cannot represent "
+                              "accurately -- refusing rather than returning a confidently wrong "
+                              "answer");
+        }
+    }
+    return Status::OK;
+}
+
 /**
  * Refuses a repeated-double field's element count above 100,000 -- the same
  * "period ceiling" shape check_period_count_ceiling already applies to an
@@ -2220,6 +2366,55 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         if (auto s = require_finite(request->years_to_expiry(), "years_to_expiry"); !s.ok()) {
             return s;
         }
+        // lambda had NO finiteness check of any kind before this fix -- a
+        // caller-sent +Infinity survives "(lambda() > 0.0)" (Infinity > 0.0
+        // is true) and becomes lambda_eff itself, so u=exp(lambda*sigma*
+        // sqrt(dt)) overflows to +Infinity directly regardless of how sane
+        // every other field is. (A NaN lambda is harmless on its own --
+        // "NaN > 0.0" is false, so it falls through to the sqrt(1.5)
+        // default -- but is refused anyway for the same reason every other
+        // field is: a NaN on the wire is a caller mistake, not silently
+        // ignorable input.)
+        if (auto s = require_finite(request->lambda(), "lambda"); !s.ok()) return s;
+
+        // -- Magnitude guards: closes the gap named in this file's own
+        // "KNOWN GAP, not fixed by this change" test (tests/
+        // test_option_pricing_service.cpp) -- volatility=1.0e10 (and the
+        // other fields at absurd-but-finite magnitude) used to sail past
+        // every check above and overflow an internal tree quantity to
+        // +/-Infinity DURING computation. See check_option_field_magnitude's
+        // own comment for why each bound is what it is. --
+        if (auto s = check_option_field_magnitude(request->volatility(), "volatility",
+                                                   kMaxOptionVolatility, "1000% annualised");
+            !s.ok()) {
+            return s;
+        }
+        if (auto s = check_option_field_magnitude(request->rate(), "rate", kMaxOptionRate,
+                                                   "+/-500% continuously compounded");
+            !s.ok()) {
+            return s;
+        }
+        if (auto s = check_option_field_magnitude(request->years_to_expiry(), "years_to_expiry",
+                                                   kMaxOptionYearsToExpiry, "100 years");
+            !s.ok()) {
+            return s;
+        }
+        if (auto s = check_option_field_magnitude(request->lambda(), "lambda", kMaxOptionLambda,
+                                                   "10 (the engine's own default is ~1.2247)");
+            !s.ok()) {
+            return s;
+        }
+        if (auto s = check_double_magnitude(request->spot(), "spot"); !s.ok()) return s;
+        if (auto s = check_double_magnitude(request->strike(), "strike"); !s.ok()) return s;
+        // The joint check: even with every field above individually bounded,
+        // `steps` itself carries no ceiling here, and it enters the SAME
+        // exponent -- see check_tree_exponent_safe's own comment.
+        if (auto s = check_tree_exponent_safe(request->volatility(), request->lambda(),
+                                              request->years_to_expiry(), request->steps(),
+                                              "PriceOptionTree");
+            !s.ok()) {
+            return s;
+        }
 
         const auto exercise = request->exercise_type();
         if (exercise == sensen::finance::BERMUDAN && request->bermudan_dates_size() == 0) {
@@ -2333,6 +2528,13 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
                 request->spot(), request->strike(), request->rate(), request->volatility(),
                 request->years_to_expiry(), request->steps(), option_type_of(request->option_type()),
                 ex, dates, asian, avg_states, lambda);
+            // Defence in depth -- see require_response_finite's own comment.
+            if (auto s = require_response_finite(
+                    {{r.value, "value"}, {r.delta, "delta"}, {r.gamma, "gamma"}, {r.theta, "theta"}},
+                    "PriceOptionTree");
+                !s.ok()) {
+                return s;
+            }
             response->set_value(r.value);
             response->set_delta(r.delta);
             response->set_gamma(r.gamma);
@@ -2376,9 +2578,58 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
             return Status(grpc::StatusCode::INVALID_ARGUMENT,
                           "spot, strike and volatility must all be positive");
         }
+        // -- Magnitude guards: PriceBlackScholes's own overflow path is
+        // narrower than PriceOptionTree's (normal_cdf/normal_pdf, options.
+        // cppm, saturate gracefully for a huge but finite d1/d2 via erf --
+        // volatility alone up to 1e10 was measured NOT to produce a
+        // non-finite value here), but rate is not: the discount factor
+        // exp(-rate*years_to_expiry) overflows to +Infinity for a large
+        // enough NEGATIVE rate, and that Infinity times a normal_cdf(d2)
+        // that has itself saturated to exactly 0.0 is a genuine 0*Infinity
+        // -> NaN. Reproduced directly: {spot=100,strike=100,rate=-1e10,
+        // volatility=0.2,years_to_expiry=1} returned Status::OK with
+        // value=-nan. The SAME per-field bounds as PriceOptionTree are
+        // applied here anyway (not just rate) for a consistent API surface
+        // across the four option-pricing RPCs -- see
+        // check_option_field_magnitude's own comment for why each bound is
+        // what it is. --
+        if (auto s = check_option_field_magnitude(request->volatility(), "volatility",
+                                                   kMaxOptionVolatility, "1000% annualised");
+            !s.ok()) {
+            return s;
+        }
+        if (auto s = check_option_field_magnitude(request->rate(), "rate", kMaxOptionRate,
+                                                   "+/-500% continuously compounded");
+            !s.ok()) {
+            return s;
+        }
+        if (auto s = check_option_field_magnitude(request->years_to_expiry(), "years_to_expiry",
+                                                   kMaxOptionYearsToExpiry, "100 years");
+            !s.ok()) {
+            return s;
+        }
+        if (auto s = check_double_magnitude(request->spot(), "spot"); !s.ok()) return s;
+        if (auto s = check_double_magnitude(request->strike(), "strike"); !s.ok()) return s;
+
         const auto r = sensen::price_black_scholes(
             request->spot(), request->strike(), request->rate(), request->volatility(),
             request->years_to_expiry(), option_type_of(request->option_type()));
+        // Defence in depth -- see require_response_finite's own comment.
+        if (auto s = require_response_finite({{r.value, "value"},
+                                              {r.delta, "delta"},
+                                              {r.gamma, "gamma"},
+                                              {r.theta, "theta"},
+                                              {r.vega, "vega"},
+                                              {r.rho, "rho"},
+                                              {r.vanna, "vanna"},
+                                              {r.volga, "volga"},
+                                              {r.charm, "charm"},
+                                              {r.color, "color"},
+                                              {r.speed, "speed"}},
+                                              "PriceBlackScholes");
+            !s.ok()) {
+            return s;
+        }
         response->set_value(r.value);
         response->set_delta(r.delta);
         response->set_gamma(r.gamma);
@@ -2425,6 +2676,33 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
             return Status(grpc::StatusCode::INVALID_ARGUMENT,
                           "spot, strike, volatility and years_to_expiry must all be positive");
         }
+        // -- Magnitude guards: price_option_monte_carlo's per-step update is
+        // S *= exp(drift + vol*Z), drift=(rate-0.5*volatility^2)*dt,
+        // vol=volatility*sqrt(dt) -- an absurd volatility or rate (or a huge
+        // years_to_expiry combined with a small steps, which makes dt large)
+        // overflows that exp() the same way PriceOptionTree's tree-node
+        // exponent does. Reproduced directly: {volatility=0.2,
+        // years_to_expiry=1e6} and {rate=1e5, years_to_expiry=1} both
+        // returned Status::OK with value=nan. Same bounds as the sibling
+        // option-pricing RPCs -- see check_option_field_magnitude's own
+        // comment. --
+        if (auto s = check_option_field_magnitude(request->volatility(), "volatility",
+                                                   kMaxOptionVolatility, "1000% annualised");
+            !s.ok()) {
+            return s;
+        }
+        if (auto s = check_option_field_magnitude(request->rate(), "rate", kMaxOptionRate,
+                                                   "+/-500% continuously compounded");
+            !s.ok()) {
+            return s;
+        }
+        if (auto s = check_option_field_magnitude(request->years_to_expiry(), "years_to_expiry",
+                                                   kMaxOptionYearsToExpiry, "100 years");
+            !s.ok()) {
+            return s;
+        }
+        if (auto s = check_double_magnitude(request->spot(), "spot"); !s.ok()) return s;
+        if (auto s = check_double_magnitude(request->strike(), "strike"); !s.ok()) return s;
         // paths and steps together are the O(paths*steps) work
         // price_option_monte_carlo actually does (a TBB parallel_reduce over
         // paths, each walking steps RNG draws); quota::cost_monte_carlo(paths,
@@ -2443,10 +2721,16 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
                           "pricer needs more path-steps than that");
         }
         const int threads = (request->num_threads() > 0) ? request->num_threads() : -1;
-        response->set_value(sensen::price_option_monte_carlo(
+        const double value = sensen::price_option_monte_carlo(
             request->spot(), request->strike(), request->rate(), request->volatility(),
             request->years_to_expiry(), request->paths(), request->steps(),
-            option_type_of(request->option_type()), asian_type_of(request->asian_type()), threads));
+            option_type_of(request->option_type()), asian_type_of(request->asian_type()), threads);
+        // Defence in depth -- see require_response_finite's own comment.
+        if (auto s = require_response_finite({{value, "value"}}, "PriceOptionMonteCarlo");
+            !s.ok()) {
+            return s;
+        }
+        response->set_value(value);
         return Status::OK;
     }
 
@@ -2473,11 +2757,68 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         if (auto s = require_finite(request->years_to_expiry(), "years_to_expiry"); !s.ok()) {
             return s;
         }
+        // lambda had no finiteness check of any kind before this fix --
+        // same gap, same reasoning, as PriceOptionTree's own lambda check
+        // above (a caller-sent +Infinity survives "(lambda() > 0.0)" and
+        // becomes the effective lambda directly).
+        if (auto s = require_finite(request->lambda(), "lambda"); !s.ok()) return s;
+
+        // -- Magnitude guards: calculate_probability_tree (options.cppm)
+        // shares PriceOptionTree's identical u=exp(lambda*sigma*sqrt(dt))
+        // driver, so it overflows the same way for the same reason --
+        // reproduced directly: {volatility=1e10} and {years_to_expiry=1e10}
+        // both returned Status::OK with non-finite entries in stock_prices.
+        // Same bounds as PriceOptionTree -- see
+        // check_option_field_magnitude's own comment. --
+        if (auto s = check_option_field_magnitude(request->volatility(), "volatility",
+                                                   kMaxOptionVolatility, "1000% annualised");
+            !s.ok()) {
+            return s;
+        }
+        if (auto s = check_option_field_magnitude(request->rate(), "rate", kMaxOptionRate,
+                                                   "+/-500% continuously compounded");
+            !s.ok()) {
+            return s;
+        }
+        if (auto s = check_option_field_magnitude(request->years_to_expiry(), "years_to_expiry",
+                                                   kMaxOptionYearsToExpiry, "100 years");
+            !s.ok()) {
+            return s;
+        }
+        if (auto s = check_option_field_magnitude(request->lambda(), "lambda", kMaxOptionLambda,
+                                                   "10 (the engine's own default is ~1.2247)");
+            !s.ok()) {
+            return s;
+        }
+        // The joint check, identical reasoning to PriceOptionTree's own:
+        // steps carries no ceiling here either.
+        if (auto s = check_tree_exponent_safe(request->volatility(), request->lambda(),
+                                              request->years_to_expiry(), request->steps(),
+                                              "ComputeProbabilityTree");
+            !s.ok()) {
+            return s;
+        }
+
         const double lambda =
             (request->lambda() > 0.0) ? request->lambda() : 1.224744871391589;
         const auto t = sensen::calculate_probability_tree(
             request->rate(), request->volatility(), request->years_to_expiry(), request->steps(),
             lambda);
+        // Defence in depth -- see require_response_finite's own comment.
+        // (calculate_probability_tree returns two repeated fields rather
+        // than a handful of named scalars, so this reuses require_all_finite
+        // -- the same helper the REQUEST-side repeated cash-flow fields use
+        // elsewhere in this file -- rather than require_response_finite's
+        // named-field list, which does not fit a variable-length array.)
+        if (auto s = require_all_finite(t.stock_prices, "ComputeProbabilityTree stock_prices");
+            !s.ok()) {
+            return s;
+        }
+        if (auto s = require_all_finite(t.state_probabilities,
+                                        "ComputeProbabilityTree state_probabilities");
+            !s.ok()) {
+            return s;
+        }
         for (const double p : t.stock_prices) response->add_stock_prices(p);
         for (const double p : t.state_probabilities) response->add_state_probabilities(p);
         response->set_steps(t.steps);

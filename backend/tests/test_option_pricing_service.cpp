@@ -80,35 +80,40 @@
 //      identically to a plain European call. Now refused: every
 //      bermudan_dates entry must fall in (0, years_to_expiry].
 //
-// A FOURTH real gap was found and is DELIBERATELY NOT FIXED here, and is
-// itself asserted below rather than silently worked around: spot, strike,
-// rate, volatility, and years_to_expiry are plain wire doubles, and the
-// only guard on them before this file's fixes was "<= 0" -- which a NaN or
-// +/-Infinity sails straight through (NaN compares false against every
-// relation; +Infinity compares true against "> 0"). Nothing downstream
-// catches either -- price_option_double is pure double arithmetic and does
-// not throw for it -- so the RPC returned Status::OK carrying a
-// NaN/Infinity value/delta/gamma/theta. finance_service.cpp now requires
-// those five fields to be FINITE (require_finite(), fixed here). It does
-// NOT bound their MAGNITUDE the way the BigDecimal money RPCs'
-// check_decimal_string_magnitude does: an absurd-but-finite volatility
-// (e.g. 1e10) still passes every guard and still overflows an internal
-// tree quantity to +/-Infinity DURING computation, so the response can
-// still come back non-finite with Status::OK. That residual gap is
-// exercised at the end of section 5 as a documented, known, NOT-fixed
-// finding rather than papered over.
+// A FOURTH real gap was found here: spot, strike, rate, volatility, and
+// years_to_expiry are plain wire doubles, and the only guard on them before
+// this file's earliest fixes was "<= 0" -- which a NaN or +/-Infinity sails
+// straight through (NaN compares false against every relation; +Infinity
+// compares true against "> 0"). Nothing downstream catches either --
+// price_option_double is pure double arithmetic and does not throw for it --
+// so the RPC returned Status::OK carrying a NaN/Infinity value/delta/gamma/
+// theta. finance_service.cpp requires those five fields to be FINITE
+// (require_finite()) -- closing the NaN/Infinity-INPUT half of this gap.
+//
+// It did NOT, for a time, bound their MAGNITUDE the way the BigDecimal money
+// RPCs' check_decimal_string_magnitude does: an absurd-but-finite volatility
+// (e.g. 1e10) still passed every guard and still overflowed an internal tree
+// quantity to +/-Infinity DURING computation, so the response could still
+// come back non-finite with Status::OK. THIS IS NOW ALSO FIXED --
+// check_option_field_magnitude and check_tree_exponent_safe
+// (finance_service.cpp) close the overflows-during-computation half too,
+// with a post-computation require_response_finite check as defence in depth
+// on top. Exercised at the end of section 5, and across all four
+// option-pricing RPCs in tests/test_finance_service_validation.cpp.
 //
 // SCOPE NOTE, added by the later finance-audit pass that swept the REST of
 // sensen.finance.Finance for the same four bug classes: the paragraph above
-// describes PriceOptionTree's OWN residual gap, not a property of the file
-// as a whole. At the time this file was written, PriceBlackScholes and
+// describes PriceOptionTree's OWN gap, not a property of the file as a
+// whole. At the time this file was written, PriceBlackScholes and
 // PriceOptionMonteCarlo had NO finiteness or positivity guard AT ALL (not
 // even PriceOptionTree's original "<= 0" check) -- a bare client-sent NaN in
 // spot/strike/rate/volatility reached Status::OK directly, no overflow or
 // absurd magnitude required. Both were closed in that later pass
-// (require_finite + positivity, mirroring PriceOptionTree's own fix) and are
-// covered by tests/test_finance_service_validation.cpp. Read this file's own
-// guarantee as scoped to PriceOptionTree specifically.
+// (require_finite + positivity, mirroring PriceOptionTree's own fix), and
+// the magnitude-overflow fix above was applied uniformly across all four
+// option-pricing RPCs (PriceOptionTree, PriceBlackScholes,
+// PriceOptionMonteCarlo, ComputeProbabilityTree) in the same change --
+// covered by tests/test_finance_service_validation.cpp.
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -912,28 +917,177 @@ auto main() -> int {
         // -- Absurd-but-finite magnitude: large enough that intermediate
         // tree quantities (u = exp(lambda*sigma*sqrt(dt))) overflow to
         // +Infinity even though the INPUT itself is finite and satisfies
-        // every guard above. This is a real, documented gap: finance.proto
-        // routes these fields as plain doubles, and finance_service.cpp
-        // has no equivalent of the BigDecimal RPCs'
-        // check_decimal_string_magnitude bound for them -- the fix in this
-        // change closes the NaN/Infinity-INPUT hole, not the
-        // overflows-during-computation one. Documented here as a REAL,
-        // KNOWN, NOT-FIXED gap rather than silently assumed away: the
-        // request is accepted (Status::OK) and the response itself ends
-        // up non-finite. */
+        // every guard above. finance.proto routes these fields as plain
+        // doubles; require_finite alone (this file's earlier fix) closes the
+        // NaN/Infinity-INPUT hole but not this one -- an absurd-but-finite
+        // value can still overflow an intermediate quantity DURING
+        // computation. This USED TO BE a real, documented, NOT-fixed gap
+        // (see git history for the "KNOWN GAP" version of this test this
+        // block replaces): volatility=1.0e10 was accepted with Status::OK
+        // and produced a non-finite response value. It is now CLOSED by
+        // check_option_field_magnitude/check_tree_exponent_safe
+        // (finance_service.cpp) -- this is the regression test for that fix,
+        // asserting the FIXED behaviour (refusal), not the bug. --
         {
             TreeParams p = good;
             p.volatility = 1.0e10;  // 1e12 % annualized vol
             auto [status, resp] = call_tree(stub, p);
-            check(status.ok(),
-                  "KNOWN GAP, not fixed by this change: an absurd-but-finite volatility (1e10) "
-                  "is still ACCEPTED (Status::OK) even though it overflows internal tree "
-                  "quantities to Infinity -- see the comment above this check");
-            check(!std::isfinite(resp.value()),
-                  "...and the response value it produces is itself non-finite (" +
-                      std::to_string(resp.value()) +
-                      "), i.e. this RPC can still return a confidently-garbage OK response for "
-                      "an input every individual field check above accepts");
+            check(!status.ok() && status.error_code() == grpc::StatusCode::INVALID_ARGUMENT,
+                  "FIXED: an absurd-but-finite volatility (1e10) -- which used to be ACCEPTED "
+                  "with a non-finite response value -- is now REFUSED with INVALID_ARGUMENT "
+                  "(got " + (status.ok() ? "OK" : std::to_string(static_cast<int>(status.error_code()))) +
+                  (status.ok() ? "" : (": " + status.error_message())) + ")");
+        }
+        {
+            // The rejection message names the offending field specifically,
+            // consistent with this file's own style throughout.
+            TreeParams p = good;
+            p.volatility = 1.0e10;
+            auto [status, resp] = call_tree(stub, p);
+            check(status.error_message().find("volatility") != std::string::npos,
+                  "...and the rejection message names \"volatility\" specifically: \"" +
+                      status.error_message() + "\"");
+        }
+
+        // -- Every OTHER plain-double option-pricing field, individually
+        // pushed to an absurd-but-finite magnitude, is ALSO now refused --
+        // not just the one field the original gap happened to be reported
+        // against. Each of these was independently reproduced against the
+        // pre-fix binary returning Status::OK with a non-finite response
+        // value before this fix (see the comment above
+        // check_option_field_magnitude/check_tree_exponent_safe in
+        // finance_service.cpp for the exact reproduction of each). --
+        {
+            TreeParams p = good;
+            p.rate = -1.0e10;
+            auto [status, resp] = call_tree(stub, p);
+            check(!status.ok() && status.error_code() == grpc::StatusCode::INVALID_ARGUMENT,
+                  "an absurd-but-finite rate (-1e10) is REFUSED");
+        }
+        {
+            TreeParams p = good;
+            p.years_to_expiry = 1.0e10;
+            auto [status, resp] = call_tree(stub, p);
+            check(!status.ok() && status.error_code() == grpc::StatusCode::INVALID_ARGUMENT,
+                  "an absurd-but-finite years_to_expiry (1e10) is REFUSED");
+        }
+        {
+            TreeParams p = good;
+            p.lambda = 1.0e6;
+            auto [status, resp] = call_tree(stub, p);
+            check(!status.ok() && status.error_code() == grpc::StatusCode::INVALID_ARGUMENT,
+                  "an absurd-but-finite lambda (1e6, tree spacing -- the engine's own default "
+                  "is ~1.2247) is REFUSED");
+        }
+        {
+            // lambda == +Infinity is a SEPARATE finding from the magnitude
+            // gap above: lambda had NO finiteness check of any kind before
+            // this fix (only spot/strike/rate/volatility/years_to_expiry
+            // did) -- "(lambda() > 0.0)" is true for +Infinity, so it became
+            // the tree's effective spacing directly, overflowing u=exp(...)
+            // immediately regardless of every other field.
+            TreeParams p = good;
+            p.lambda = std::numeric_limits<double>::infinity();
+            auto [status, resp] = call_tree(stub, p);
+            check(!status.ok() && status.error_code() == grpc::StatusCode::INVALID_ARGUMENT,
+                  "lambda == +Infinity is REFUSED (previously had no finiteness check at all)");
+        }
+        {
+            TreeParams p = good;
+            p.spot = 1.0e16;  // above check_double_magnitude's reused 1e15 bound
+            auto [status, resp] = call_tree(stub, p);
+            check(!status.ok() && status.error_code() == grpc::StatusCode::INVALID_ARGUMENT,
+                  "an absurd-magnitude spot (1e16) is REFUSED (reuses check_double_magnitude, "
+                  "the same helper the BigDecimal money RPCs already use)");
+        }
+        {
+            TreeParams p = good;
+            p.strike = 1.0e16;
+            auto [status, resp] = call_tree(stub, p);
+            check(!status.ok() && status.error_code() == grpc::StatusCode::INVALID_ARGUMENT,
+                  "an absurd-magnitude strike (1e16) is REFUSED, same reuse");
+        }
+
+        // -- The JOINT check does real work beyond the per-field bounds:
+        // volatility=10.0 and years_to_expiry=100.0 are each, INDIVIDUALLY,
+        // exactly at their own per-field ceiling (kMaxOptionVolatility,
+        // kMaxOptionYearsToExpiry) and would pass a per-field-only guard --
+        // but steps has NO ceiling in this RPC, and lambda*sigma*
+        // sqrt(steps*years_to_expiry) grows without bound as steps grows,
+        // so a large enough steps still overflows exp() even with both
+        // other fields sitting AT their individually-generous bounds. This
+        // is the SAME "individually reasonable, jointly checked" shape
+        // check_compound_growth_safe already uses elsewhere in this file. --
+        {
+            TreeParams p = good;
+            p.volatility = 10.0;         // exactly at the per-field bound
+            p.years_to_expiry = 100.0;   // exactly at the per-field bound
+            p.steps = 5000;              // steps itself has no ceiling
+            auto [status, resp] = call_tree(stub, p);
+            check(!status.ok() && status.error_code() == grpc::StatusCode::INVALID_ARGUMENT,
+                  "volatility=10 and years_to_expiry=100 (each individually AT its own bound) "
+                  "combined with steps=5000 is REFUSED by the JOINT exponent check, even though "
+                  "no single field is over its own per-field bound (got " +
+                      (status.ok() ? "OK" : std::to_string(static_cast<int>(status.error_code()))) +
+                      (status.ok() ? "" : (": " + status.error_message())) + ")");
+        }
+
+        // -- POSITIVE CONTROLS: this is the half that actually matters -- a
+        // guard that refuses everything passes a refuse-only test. --
+
+        // 1. The exact well-formed control from this section's own "good"
+        //    params (spot=100, strike=100, rate=0.05, volatility=0.2,
+        //    years_to_expiry=1, steps=100) must still price to the SAME
+        //    value it did BEFORE this fix, digit for digit -- captured from
+        //    the pre-fix binary via %.17g (full double round-trip
+        //    precision), not recomputed after the fact. --
+        {
+            auto [status, resp] = call_tree(stub, good);
+            check(status.ok(), "the plain well-formed control still succeeds after the fix");
+            check(resp.value() == 10.444232440723583 && resp.delta() == 0.63635964309841297 &&
+                      resp.gamma() == 0.018830978290712938 && resp.theta() == -6.4367555466783521,
+                  "...and prices to the EXACT SAME value/delta/gamma/theta as the pre-fix binary, "
+                  "digit for digit -- a guard that changed the answer for ordinary inputs would "
+                  "be a worse defect than the one it fixes (got value=" +
+                      std::to_string(resp.value()) + " delta=" + std::to_string(resp.delta()) +
+                      " gamma=" + std::to_string(resp.gamma()) +
+                      " theta=" + std::to_string(resp.theta()) + ")");
+        }
+
+        // 2. High-but-legitimate volatility on a crypto-like underlying --
+        //    300-500% annualized is unusual but real (the task this bound
+        //    was chosen for names this case explicitly) -- must be ACCEPTED
+        //    and price to the SAME value the pre-fix binary computed.
+        {
+            TreeParams p = good;
+            p.volatility = 4.0;  // 400%
+            auto [status, resp] = call_tree(stub, p);
+            check(status.ok() && std::isfinite(resp.value()),
+                  "volatility=4.0 (400%, a legitimate high-vol crypto-like case) is ACCEPTED "
+                  "and finite");
+            check(resp.value() == 80.90630736189955,
+                  "...and prices to the exact same value as the pre-fix binary: got " +
+                      std::to_string(resp.value()));
+        }
+        {
+            TreeParams p = good;
+            p.volatility = 5.0;  // 500% -- the upper end of the legitimate range
+            auto [status, resp] = call_tree(stub, p);
+            check(status.ok() && std::isfinite(resp.value()),
+                  "volatility=5.0 (500%, the upper end of the stated legitimate crypto-like "
+                  "range) is ACCEPTED and finite -- the bound is not over-tight");
+            check(resp.value() == 66.089886991174993,
+                  "...and prices to the exact same value as the pre-fix binary: got " +
+                      std::to_string(resp.value()));
+
+            // The BLACK-SCHOLES sibling at the same volatility, same
+            // positive-control shape.
+            auto [status_bs, resp_bs] = call_black_scholes(stub, p);
+            check(status_bs.ok() && std::isfinite(resp_bs.value()),
+                  "PriceBlackScholes at the same volatility=5.0 is ALSO accepted and finite");
+            check(resp_bs.value() == 98.788779236833335,
+                  "...and prices to the exact same value as the pre-fix binary: got " +
+                      std::to_string(resp_bs.value()));
         }
     }
 
