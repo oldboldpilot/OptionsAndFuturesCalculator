@@ -191,17 +191,44 @@ export struct SweepReport {
  */
 export struct QueueConfig {
     /** Bound on pending rows PER SURFACE, enforced by enqueue's own
-     *  `INSERT ... SELECT ... WHERE (SELECT count(*) ...) < bound`. This
+     *  `INSERT ... SELECT ... WHERE (SELECT count(*) ...) < bound` -- the
+     *  check and the write are already ONE SQL statement, not two
+     *  application-level round trips, so the only remaining race is
+     *  Postgres's own per-statement MVCC snapshot under two genuinely
+     *  concurrent transactions, not an app-level check-then-act bug. This
      *  is a soft bound under concurrent submitters -- two racing
      *  submit_remote() calls can each observe a count just under the
      *  bound and both insert, so the true pending count can briefly
-     *  exceed it by up to (concurrent submitters - 1). Serializing it
-     *  exactly would need a per-surface advisory lock around every
-     *  enqueue, turning every submission into a point of contention with
-     *  every other submission to the same surface for a guarantee this
-     *  queue does not need: "zero rows back means full" holds exactly as
+     *  exceed it by up to (concurrent submitters - 1).
+     *
+     *  KEPT AS A SOFT BOUND, DELIBERATELY, after quantifying the overshoot
+     *  rather than assuming it away: "concurrent submitters" here means
+     *  concurrent submit_remote() calls racing this exact statement for
+     *  the SAME surface, which is hard-capped by each process's own
+     *  `pg::PoolConfig::size` (4, unmodified by either
+     *  assistant_service.cpp's or mortgage_assistant_service.cpp's
+     *  `configure_inference_queue()`) -- submit_remote() must first
+     *  acquire a pooled connection, so no more than `pool_size` callers
+     *  can even be mid-INSERT at once per process. Worst case, with the
+     *  current single-container Railway deployment (one replica, one pool
+     *  per surface), that is AT MOST 3 extra rows beyond a 200-row bound
+     *  -- 1.5% burst, self-limiting (nothing about it compounds: the next
+     *  submit_remote() sees the true, now-updated count and is refused
+     *  normally), and still bounded in time by `submit_deadline`/the
+     *  sweeper regardless. A future multi-replica deployment scales this
+     *  to `(pool_size * replica_count) - 1`, still a small, known number,
+     *  not unbounded growth.
+     *
+     *  A per-surface advisory lock would make this exact instead --
+     *  serializing EVERY enqueue to that surface, not just concurrent
+     *  ones, adding latency and a new shared point of contention between
+     *  both assistants' submitters -- to buy a guarantee this queue does
+     *  not need: "zero rows back means full" already holds exactly as
      *  specified either way, and the bound exists to protect the worker
-     *  pool from unbounded backlog, not to be exact to the row. */
+     *  pool from UNBOUNDED backlog, not to be exact to the row. Revisit
+     *  only if `pool_size` or replica count grows enough to make that
+     *  handful-out-of-200 figure worth re-deriving -- see this comment for
+     *  the arithmetic, not just the conclusion. */
     std::size_t pending_bound_per_surface = 200;
     std::chrono::seconds lease_duration{30};
     std::chrono::milliseconds poll_interval{250};

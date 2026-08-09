@@ -548,6 +548,111 @@ auto main() -> int {
               "no row is left pending or leased -- every job reached a terminal state");
     }
 
+    // -----------------------------------------------------------------
+    section("Concurrent submitters racing the pending_bound_per_surface check -- overshoot is "
+            "bounded by the connection pool, never unbounded");
+    {
+        // Quantifies QueueConfig::pending_bound_per_surface's own doc: the
+        // check-then-insert race is a single SQL statement, so the only
+        // window is Postgres's per-statement MVCC snapshot under GENUINELY
+        // concurrent transactions -- and that concurrency is itself capped
+        // by how many submit_remote() calls can be mid-flight against the
+        // SAME pool at once, i.e. by pg::PoolConfig::size. This section
+        // fires more concurrent submitters than the pool has connections,
+        // against a deliberately small bound, and proves the overshoot is a
+        // small, PREDICTED number -- not "however many threads happened to
+        // race it".
+        reset_db(admin);
+        constexpr std::size_t kPoolSize = 6;
+        constexpr std::size_t kBound = 5;
+        constexpr int kAttempts = 40;  // far more concurrent callers than kPoolSize connections
+
+        auto pool = make_pool("iq_test_overshoot", kPoolSize);
+        Queue::Config qcfg;
+        qcfg.pending_bound_per_surface = kBound;
+        Queue queue{pool, qcfg};
+
+        std::atomic<int> accepted{0};
+        std::atomic<int> queue_full{0};
+        // 40 concurrent callers against a 6-connection pool, over a REAL
+        // network hop (this section is written to run against a live,
+        // possibly remote, Postgres -- see this file's own banner), can
+        // legitimately fail acquire() itself (PoolExhausted, bounded by
+        // pg::PoolConfig::acquire_timeout) or the query's own
+        // statement_timeout/connect path (Timeout/ConnectFailed) -- none of
+        // which is a pending_bound_per_surface defect: a caller that never
+        // got as far as racing the bound check at all cannot have violated
+        // it. Only genuinely UNEXPECTED error classes (InvalidSurface,
+        // CircuitOpen, DatabaseError) would indicate something is actually
+        // wrong here.
+        std::atomic<int> pool_pressure_error{0};
+        std::atomic<int> other_error{0};
+
+        std::vector<std::thread> submitters;
+        submitters.reserve(kAttempts);
+        for (int i = 0; i < kAttempts; ++i) {
+            submitters.emplace_back([&] {
+                auto submitted = queue.submit_remote(Surface::Strategy,
+                                                       R"({"race":true})", kFarFuture());
+                if (submitted.has_value()) {
+                    accepted.fetch_add(1);
+                } else if (submitted.error() == SubmitError::QueueFull) {
+                    queue_full.fetch_add(1);
+                } else if (submitted.error() == SubmitError::PoolExhausted ||
+                           submitted.error() == SubmitError::Timeout ||
+                           submitted.error() == SubmitError::ConnectFailed) {
+                    pool_pressure_error.fetch_add(1);
+                } else {
+                    other_error.fetch_add(1);
+                }
+            });
+        }
+        for (auto& t : submitters) t.join();
+
+        check(other_error.load() == 0,
+              "every one of the " + std::to_string(kAttempts) + " concurrent submit_remote() "
+              "calls returned success, QueueFull, or a real-network pool-pressure error "
+              "(PoolExhausted/Timeout/ConnectFailed) -- no UNEXPECTED error class (got " +
+                  std::to_string(other_error.load()) + " unexpected errors, " +
+                  std::to_string(pool_pressure_error.load()) + " pool-pressure errors)");
+        check(queue_full.load() > 0,
+              "the bound was genuinely enforced -- at least one of the " +
+                  std::to_string(kAttempts) + " concurrent callers was refused with QueueFull "
+                  "(got " + std::to_string(queue_full.load()) + ")");
+        check(accepted.load() < kAttempts,
+              "NOT unbounded -- most of the " + std::to_string(kAttempts) +
+                  " concurrent attempts were refused, not accepted (accepted=" +
+                  std::to_string(accepted.load()) + ")");
+
+        // THE quantified claim itself: accepted rows can exceed kBound by AT
+        // MOST (pool_size - 1), because no more than kPoolSize submit_remote()
+        // calls can be mid-INSERT against this Queue's Pool at once -- never
+        // "as many as happened to race it".
+        const auto max_expected_overshoot = kPoolSize - 1;
+        check(static_cast<std::size_t>(accepted.load()) <= kBound + max_expected_overshoot,
+              "accepted=" + std::to_string(accepted.load()) + " is within kBound(" +
+                  std::to_string(kBound) + ") + (pool_size - 1)(" +
+                  std::to_string(max_expected_overshoot) + ") = " +
+                  std::to_string(kBound + max_expected_overshoot) +
+                  " -- the overshoot this section deliberately provoked is bounded exactly as "
+                  "QueueConfig::pending_bound_per_surface's doc quantifies, not unbounded");
+
+        auto row_count = admin.exec(
+            "SELECT count(*) FROM inference_jobs WHERE surface = 'strategy' AND state = "
+            "'pending'");
+        check(row_count.has_value() && row_count->rows() == 1,
+              "row count query for the pending-row sanity check succeeded");
+        if (row_count.has_value() && row_count->rows() == 1) {
+            const auto actual_rows = std::stoi(std::string{row_count->text(0, 0)});
+            check(actual_rows == accepted.load(),
+                  "the actual pending row count in Postgres (" + std::to_string(actual_rows) +
+                      ") matches the accepted count submit_remote() itself reported (" +
+                      std::to_string(accepted.load()) +
+                      ") -- no accepted submission silently failed to persist, and no row was "
+                      "created without submit_remote() reporting it accepted");
+        }
+    }
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }
