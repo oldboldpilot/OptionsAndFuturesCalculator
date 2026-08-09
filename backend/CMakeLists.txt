@@ -652,6 +652,15 @@ target_sources(sensen_slim
             "${SENSEN_SRC}/qwen35moe.cppm"
             "${SENSEN_SRC}/qwen35moe_serving_model.cppm"
             "${SENSEN_SRC}/rms_norm.cppm"
+            # Pulled in by autograd_cuda.cppm as of sensen 8ffda361, which
+            # added `import sensen.rope_context_ext;` for RopeExtConfig::mscale()
+            # (the YaRN attention-temperature correction on ringAttentionFusedYarn's
+            # SIMT fallback). sensen_slim is a CURATED subset of sensen's modules,
+            # not the whole tree, so a new import upstream is a build break here
+            # until the module is listed -- which is exactly how this surfaced:
+            # "fatal error: module 'sensen.rope_context_ext' not found".
+            # It imports only `std`, so it adds no further closure.
+            "${SENSEN_SRC}/rope_context_ext.cppm"
             "${SENSEN_SRC}/rotary_embedding.cppm"
             "${SENSEN_SRC}/safetensors_weight_loader.cppm"
             "${SENSEN_SRC}/secondary_stream_prepass.cppm"
