@@ -818,9 +818,13 @@ add_subdirectory(external/SGEE sgee EXCLUDE_FROM_ALL)
 # add_subdirectory(nanobind EXCLUDE_FROM_ALL)
 
 # Core engine binary
-add_executable(calculator_engine src/main.cpp src/issue_key.cpp src/modules/calculator_service.cpp src/modules/finance_service.cpp src/modules/quota.cpp src/modules/api_key.cpp src/modules/assistant_service.cpp src/modules/mortgage_assistant_service.cpp)
-target_sources(calculator_engine PUBLIC FILE_SET CXX_MODULES FILES src/modules/calculator_service.cppm src/modules/market_data.cppm src/modules/finance_service.cppm src/modules/quota.cppm src/modules/api_key.cppm src/modules/strategy_catalogue.cppm src/modules/assistant_verification.cppm src/modules/assistant_service.cppm src/modules/mortgage_verification.cppm src/modules/mortgage_grammar.cppm src/modules/mortgage_assistant_service.cppm)
+add_executable(calculator_engine src/main.cpp src/issue_key.cpp src/modules/calculator_service.cpp src/modules/finance_service.cpp src/modules/quota.cpp src/modules/api_key.cpp src/modules/assistant_service.cpp src/modules/mortgage_assistant_service.cpp src/modules/inference_queue.cpp src/modules/inference_admission.cpp)
+target_sources(calculator_engine PUBLIC FILE_SET CXX_MODULES FILES src/modules/calculator_service.cppm src/modules/market_data.cppm src/modules/finance_service.cppm src/modules/quota.cppm src/modules/api_key.cppm src/modules/strategy_catalogue.cppm src/modules/assistant_verification.cppm src/modules/assistant_service.cppm src/modules/mortgage_verification.cppm src/modules/mortgage_grammar.cppm src/modules/mortgage_assistant_service.cppm src/modules/pg.cppm src/modules/inference_queue.cppm src/modules/inference_admission.cppm)
 target_link_libraries(calculator_engine PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto sgee)
+# PostgreSQL::PostgreSQL is linked into calculator_engine further down, right
+# after find_package(PostgreSQL REQUIRED) runs (see that comment block) --
+# CMake allows target_link_libraries() to be called more than once for the
+# same target, so this does not need find_package() hoisted above this point.
 
 
 # Python Bindings via nanobind
@@ -1025,18 +1029,36 @@ target_link_libraries(test_calculator_service PRIVATE proto_lib sensen_slim fast
 add_test(NAME CalculatorServiceTest COMMAND test_calculator_service)
 
 # ---------------------------------------------------------------------------
-# Shared inference queue substrate (pg.cppm + inference_queue.cppm) -- the
-# Postgres-backed queue that will let more than one engine replica share the
-# two fine-tuned Qwen3-0.6B assistants as a pool of workers. This wave builds
-# and tests the substrate ONLY: neither module is added to calculator_engine's
-# FILE_SET or link line above, and neither is imported by finance_service.cpp/
-# finance_service.cppm or calculator_service.cpp/calculator_service.cppm --
-# grep confirms it, and this comment is the CMake side of keeping it that
-# way. Linking PostgreSQL::PostgreSQL only into the test target below, never
-# into calculator_engine, is what makes "the Finance RPCs are structurally
-# incapable of touching libpq" true of the BUILD, not just of the source
-# text. Wiring an actual caller and an actual worker onto this substrate is a
-# later, separate wave.
+# Shared inference queue substrate (pg.cppm + inference_queue.cppm), and the
+# admission layer built on top of it (inference_admission.cppm) -- the
+# Postgres-backed queue that lets more than one engine replica share the two
+# fine-tuned Qwen3-0.6B assistants as a pool of workers, wired into
+# assistant_service.cpp/mortgage_assistant_service.cpp behind the
+# INFERENCE_QUEUE env var (default `local`, unchanged behaviour;
+# `postgres` opts in). THIS IS NO LONGER "a later, separate wave" -- this
+# comment used to say wiring a caller/worker was future work; that wave is
+# this commit, and calculator_engine (below, via its own
+# `target_link_libraries(calculator_engine PRIVATE PostgreSQL::PostgreSQL)`
+# right after find_package() runs) DOES now link PostgreSQL::PostgreSQL,
+# because assistant_service.cpp and mortgage_assistant_service.cpp both
+# `import inference_admission;` (which itself imports `inference_queue`,
+# which imports `pg`).
+#
+# WHAT STILL HOLDS, UNCHANGED: finance_service.cpp/finance_service.cppm and
+# calculator_service.cpp/calculator_service.cppm still do not, and must not,
+# `import pg;`/`import inference_queue;`/`import inference_admission;`,
+# directly or transitively -- grep confirms it (see this task's own report
+# for the exact command), and neither file is listed in ANY of
+# test_finance_service_validation's, test_option_pricing_service's or
+# test_calculator_service's sources/FILE_SETs below, none of which gained
+# PostgreSQL::PostgreSQL either. That is what makes "the Finance/Calculator
+# RPCs are structurally incapable of touching libpq" true of those two
+# services' own translation units specifically -- calculator_engine as a
+# WHOLE binary links libpq now (for the assistant services), which is
+# expected and does not weaken that claim: C++20 modules only expose what a
+# translation unit explicitly imports, so finance_service.cpp/
+# calculator_service.cpp have zero reachable symbols from pg/inference_queue/
+# inference_admission regardless of what else shares their final link line.
 #
 # libpq is a C API (see pg.cppm's own banner for why that means no libc++/
 # libstdc++ ABI concern), so find_package(PostgreSQL) here needs no special
@@ -1044,7 +1066,17 @@ add_test(NAME CalculatorServiceTest COMMAND test_calculator_service)
 # SGEE_USE_POSTGRES path (external/SGEE/CMakeLists.txt ~692-699), this one is
 # unconditional: libpq-dev/libpq5 are already in the builder/runtime images
 # (Dockerfile:401,683) specifically in anticipation of this substrate.
+#
+# ORDERING: find_package(PostgreSQL) runs here, AFTER calculator_engine's own
+# add_executable/target_sources/first target_link_libraries call far above.
+# That is fine -- CMake resolves target_link_libraries() at generate time, not
+# strictly in script order, and permits calling it more than once for the same
+# target -- so calculator_engine's OWN `target_link_libraries(calculator_engine
+# PRIVATE PostgreSQL::PostgreSQL)` is issued immediately below rather than
+# hoisting this find_package() call earlier in the file.
 find_package(PostgreSQL REQUIRED)
+
+target_link_libraries(calculator_engine PRIVATE PostgreSQL::PostgreSQL)
 
 # sgee (not sensen_slim) for the same reason test_market_data_resilience links
 # it above: the only sensen-family module this needs is
@@ -1067,6 +1099,51 @@ target_link_libraries(test_inference_queue_pg PRIVATE PostgreSQL::PostgreSQL log
 # killed connection), which makes it a poor fit for an unconditional `ctest`
 # run on a machine that may have neither Postgres nor time to spare. Run it
 # directly: DATABASE_URL=postgresql://... ./test_inference_queue_pg
+
+# inference_admission.cppm's `local`-mode admission queue -- QueuedBackend's
+# submit()/take_jobs()/drain_and_fail() -- against a trivial concrete
+# subclass standing in for SensenBackend/LlamaCppBackend's decode loop. Needs
+# NO Postgres: this is exactly the "lease_source_ stays null, behaviour is
+# unchanged" proof the task's own testing brief asks for, so it IS registered
+# via add_test() and runs on every `ctest` invocation.
+add_executable(test_inference_admission
+    tests/test_inference_admission.cpp
+)
+target_sources(test_inference_admission
+    PRIVATE
+    FILE_SET CXX_MODULES FILES
+        src/modules/pg.cppm
+        src/modules/inference_queue.cppm
+        src/modules/inference_admission.cppm
+)
+target_sources(test_inference_admission PRIVATE src/modules/inference_queue.cpp src/modules/inference_admission.cpp)
+target_link_libraries(test_inference_admission PRIVATE PostgreSQL::PostgreSQL fastjson logger sgee)
+
+add_test(NAME InferenceAdmissionTest COMMAND test_inference_admission)
+
+# The Postgres-backed half of the admission layer: PostgresLeaseSource and
+# PostgresAdmission, exercised through two separate process-local Queue/Pool
+# instances sharing one real Postgres (one submits only, one leases only --
+# see this file for the cross-worker scenario), plus the mandatory
+# fallback-to-local path and fenced-completion discard, both proven THROUGH
+# this admission layer rather than only at the raw Queue API level (which
+# test_inference_queue_pg above already covers). Same reasoning as
+# test_inference_queue_pg for why this is NOT registered via add_test():
+# needs a real, reachable Postgres (DATABASE_URL). Run it directly:
+# DATABASE_URL="host=... port=... dbname=... user=postgres" ./test_inference_admission_pg
+add_executable(test_inference_admission_pg
+    tests/test_inference_admission_pg.cpp
+    src/modules/inference_queue.cpp
+    src/modules/inference_admission.cpp
+)
+target_sources(test_inference_admission_pg
+    PRIVATE
+    FILE_SET CXX_MODULES FILES
+        src/modules/pg.cppm
+        src/modules/inference_queue.cppm
+        src/modules/inference_admission.cppm
+)
+target_link_libraries(test_inference_admission_pg PRIVATE PostgreSQL::PostgreSQL fastjson logger sgee)
 
 # End-to-end smoke client. Verifies a running engine returns live data on all
 # three RPCs; used as the deploy gate.

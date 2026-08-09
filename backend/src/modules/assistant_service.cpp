@@ -23,6 +23,8 @@ module;
 #include <utility>
 #include <vector>
 
+#include <unistd.h>
+
 #include <grpcpp/grpcpp.h>
 #include "assistant.pb.h"
 #include "assistant.grpc.pb.h"
@@ -47,11 +49,21 @@ import api_key;
 import strategy_catalogue;
 import market_data;
 import assistant_verification;
+import inference_admission;
+import inference_queue;
+import pg;
 
 namespace options_calculator::assistant {
 
 using grpc::ServerContext;
 using grpc::Status;
+
+// InferenceOutcome, PendingJob, InferenceBackend, QueuedBackend, and the
+// Postgres-backed PostgresLeaseSource/PostgresAdmission extension of that
+// same admission layer all live in inference_admission.cppm now -- shared
+// with mortgage_assistant_service.cpp rather than duplicated. See that
+// module's own banner for the full contract.
+using namespace options_calculator::inference_admission;
 
 namespace {
 
@@ -259,196 +271,14 @@ constexpr std::int64_t kMaxQuantity = 100'000;
 // ---------------------------------------------------------------------------
 // Inference backends
 // ---------------------------------------------------------------------------
+//
+// InferenceOutcome, PendingJob, InferenceBackend and QueuedBackend used to be
+// defined here. They now live in inference_admission.cppm (imported above)
+// -- see this file's own `using namespace options_calculator::inference_admission;`
+// and that module's banner for the full contract. SensenBackend and
+// LlamaCppBackend below derive from the imported QueuedBackend exactly as they
+// derived from the local one before this extraction.
 
-/** What a backend hands back for one generation request. */
-struct InferenceOutcome {
-    bool ok = false;
-    std::string text;   // the model's raw decoded output, valid iff ok
-    std::string error;  // human-readable failure detail, valid iff !ok
-};
-
-/**
- * One accepted request, in flight from the gRPC handler thread that accepted
- * it to the backend owner thread that will serve it.
- *
- * The promise is fulfilled exactly once, on every path out of the owner
- * thread including shutdown -- a promise destroyed unfulfilled would make the
- * handler thread's `future.get()` throw `std::future_error` instead of
- * returning, which is a strictly worse failure than an honest error string.
- */
-struct PendingJob {
-    std::string prompt;
-    std::promise<InferenceOutcome> promise;
-};
-
-/**
- * The narrow contract the RPC layer depends on, and the ONLY thing it knows
- * about inference.
- *
- * There are two implementations -- sensen's in-process `LLMPipeline` and
- * upstream llama.cpp -- and the RPC handler cannot tell them apart. That is
- * the point: the sensen path is the production default because it is this
- * project's own stack and needs no third-party runtime, but it is a large,
- * fast-moving library whose CPU inference path this service has already been
- * bitten by once (see the `n_gpu_layers` comment in the decode loop below).
- * Having a second, independently-implemented engine behind the same interface
- * turns "the model backend is misbehaving" from an outage into a one
- * environment-variable change, and -- more valuable during diagnosis -- gives
- * a second opinion on what the same GGUF, given the same prompt, ought to
- * produce.
- */
-class InferenceBackend {
-  public:
-    InferenceBackend() = default;
-    virtual ~InferenceBackend() = default;
-    InferenceBackend(const InferenceBackend&) = delete;
-    auto operator=(const InferenceBackend&) -> InferenceBackend& = delete;
-    InferenceBackend(InferenceBackend&&) = delete;
-    auto operator=(InferenceBackend&&) -> InferenceBackend& = delete;
-
-    /**
-     * Submits one prompt and blocks the CALLING thread (an accepted gRPC
-     * handler thread) until the backend has produced a result.
-     *
-     * Returns `std::nullopt` iff the admission queue was already full when
-     * this call arrived -- the caller must map that, and only that, to
-     * RESOURCE_EXHAUSTED. Any other outcome, including a failed generation,
-     * comes back as an `InferenceOutcome` with `ok == false`.
-     */
-    [[nodiscard]] virtual auto submit(std::string prompt) -> std::optional<InferenceOutcome> = 0;
-
-    /** Identifier for logs and for the startup banner. Never user-facing. */
-    [[nodiscard]] virtual auto name() const noexcept -> std::string_view = 0;
-};
-
-/**
- * The admission queue and back-pressure policy both backends share.
- *
- * WHY A BOUNDED QUEUE AT ALL:
- *
- * Every accepted request holds a gRPC handler thread blocked on `submit()`
- * for the duration of one extraction. An unbounded queue would let load pile
- * up invisibly -- the caller-facing symptom would be requests taking longer
- * and longer to answer, with no signal distinguishing "briefly busy" from
- * "about to wait minutes", and no way for a client to make an informed retry
- * decision. A bounded queue makes the choice explicit instead: once it is
- * full, a request fails FAST with RESOURCE_EXHAUSTED rather than joining an
- * invisible line. A fast, honest refusal beats an unbounded latency cliff --
- * the caller can retry with backoff immediately, instead of discovering
- * minutes later that its request was one of dozens silently queued behind it.
- *
- * The queue lives on the calling gRPC threads' side: `submit()` never blocks
- * to make room. If the queue is already full when a new request arrives it is
- * turned away immediately, full stop -- the gRPC thread is never parked
- * waiting for space to open up.
- *
- * WHAT CHANGED FROM THE ORIGINAL ONE-AT-A-TIME DESIGN:
- *
- * This class used to serve exactly one request at a time behind a queue of
- * depth four, so a fifth concurrent user was refused outright and the fourth
- * waited roughly four extractions. That is no longer the shape. Both backends
- * now run CONTINUOUS BATCHING: a single owner thread holds a set of in-flight
- * sequences and advances all of them by one token per iteration in one fused
- * forward pass, admitting newly-queued requests into free slots as earlier
- * ones finish. The queue below is therefore the WAITING room in front of that
- * set, not the whole capacity.
- */
-class QueuedBackend : public InferenceBackend {
-  public:
-    [[nodiscard]] auto submit(std::string prompt) -> std::optional<InferenceOutcome> final {
-        // The promise/future pair is only constructed once there is confirmed
-        // room -- the full-queue rejection path stays as cheap as an
-        // immediate refusal should be, rather than paying for setup work
-        // whose result is about to be discarded.
-        std::future<InferenceOutcome> future;
-        {
-            const std::lock_guard lock{mutex_};
-            if (shutting_down_) {
-                return InferenceOutcome{
-                    .ok = false, .text = {}, .error = "assistant backend is shutting down"};
-            }
-            if (queue_.size() >= max_queue_depth_) {
-                return std::nullopt;
-            }
-            PendingJob job;
-            job.prompt = std::move(prompt);
-            future = job.promise.get_future();
-            queue_.push_back(std::move(job));
-        }
-        cv_.notify_one();
-        return future.get();
-    }
-
-  protected:
-    /**
-     * Blocks the owner thread until at least one job is queued or a stop is
-     * requested, then moves up to `want` jobs out of the queue.
-     *
-     * `want` is how many free in-flight slots the caller has right now, so a
-     * backend never dequeues work it has no slot to run -- a dequeued job is
-     * one whose promise this thread has taken responsibility for, and holding
-     * un-runnable ones would only make the shutdown drain longer.
-     *
-     * `block` is false when the caller already has sequences in flight: it
-     * must not park on the condition variable while there is decoding to do,
-     * it just wants whatever happens to be waiting.
-     */
-    [[nodiscard]] auto take_jobs(std::stop_token stoken, std::size_t want, bool block)
-        -> std::vector<PendingJob> {
-        std::vector<PendingJob> taken;
-        if (want == 0) return taken;
-
-        std::unique_lock lock{mutex_};
-        if (block) {
-            // The stop_token-aware overload registers a stop callback that
-            // notifies this condition variable the moment a stop is
-            // requested, so this wakes promptly on shutdown rather than only
-            // on the next enqueue.
-            const bool has_job = cv_.wait(lock, stoken, [this] { return !queue_.empty(); });
-            if (!has_job) return taken;
-        }
-        while (!queue_.empty() && taken.size() < want) {
-            taken.push_back(std::move(queue_.front()));
-            queue_.pop_front();
-        }
-        return taken;
-    }
-
-    /**
-     * Fails every job still queued so no caller blocked in `submit()`'s
-     * `future.get()` hangs forever waiting on a promise this backend will
-     * never fulfil. Called from the owner thread as it exits, and again --
-     * harmlessly, the queue is empty by then -- is not needed, so it is
-     * called exactly once.
-     *
-     * `shutting_down_` is set under the same lock so a request that races the
-     * shutdown gets an honest error rather than being enqueued onto a queue
-     * nobody will ever drain again.
-     */
-    auto drain_and_fail(std::string_view reason) -> void {
-        std::deque<PendingJob> leftovers;
-        {
-            const std::lock_guard lock{mutex_};
-            shutting_down_ = true;
-            leftovers.swap(queue_);
-        }
-        for (auto& job : leftovers) {
-            job.promise.set_value(
-                InferenceOutcome{.ok = false, .text = {}, .error = std::string{reason}});
-        }
-    }
-
-    /** How many requests may be decoding simultaneously in one fused batch. */
-    std::size_t max_concurrent_ = 1;
-    /** How many may WAIT for a slot before further arrivals are refused. */
-    std::size_t max_queue_depth_ = 1;
-
-  private:
-    std::mutex mutex_;
-    std::condition_variable_any cv_;
-    std::deque<PendingJob> queue_;
-    bool shutting_down_ = false;
-};
 
 // ---------------------------------------------------------------------------
 // Backend 1: sensen's in-process LLMPipeline (the production default)
@@ -1356,6 +1186,14 @@ class AssistantWorker {
             // between this and a permanent hang.
             return InferenceOutcome{.ok = false, .text = {}, .error = "model not loaded"};
         }
+        // `admission_` is non-null only in INFERENCE_QUEUE=postgres mode, and
+        // it already falls back to `*backend_` (today's exact in-process
+        // path) on any Postgres-path failure -- see PostgresAdmission::submit.
+        // In `local` mode (the default) `admission_` stays null and this call
+        // goes to `backend_` directly, exactly as before this feature existed.
+        if (admission_ != nullptr) {
+            return admission_->submit(std::move(prompt));
+        }
         return backend_->submit(std::move(prompt));
     }
 
@@ -1456,9 +1294,93 @@ class AssistantWorker {
             "Strategy assistant ready: backend={} model={} inference_threads={} "
             "max_concurrent={} queue_depth={} context_tokens={}",
             backend_->name(), *path, threads, max_concurrent, queue_depth, kv_max_seq_len);
+
+        configure_inference_queue();
     }
 
-    std::unique_ptr<InferenceBackend> backend_;
+    /**
+     * `INFERENCE_QUEUE` selects `local` (default, or anything unrecognized --
+     * degrades quietly rather than crashing) or `postgres`. This runs AFTER
+     * `backend_` is confirmed non-null above, since postgres mode still needs
+     * a real local backend both as the lease source's decode target and as
+     * PostgresAdmission's fallback.
+     *
+     * Any failure here degrades to `local` behaviour rather than leaving the
+     * process half-configured: a missing DATABASE_URL is logged and this
+     * function simply returns with `admission_`/lease source left null, which
+     * is indistinguishable from INFERENCE_QUEUE=local at every call site.
+     * pg::Pool itself never throws or hard-fails at construction either (see
+     * its own header comment) -- a dead initial connection heals on first
+     * use, or surfaces as a bounded submit_remote()/await_result() failure
+     * that PostgresAdmission already treats as "fall back to local".
+     */
+    auto configure_inference_queue() -> void {
+        const std::string mode = env_string("INFERENCE_QUEUE").value_or("local");
+        if (mode != "postgres") {
+            if (mode != "local") {
+                logger::Logger::getInstance().warn(
+                    "INFERENCE_QUEUE=\"{}\" is not \"local\" or \"postgres\" -- the strategy "
+                    "assistant stays on local-only inference.",
+                    mode);
+            }
+            return;
+        }
+
+        const auto database_url = env_string("DATABASE_URL");
+        if (!database_url.has_value()) {
+            logger::Logger::getInstance().warn(
+                "INFERENCE_QUEUE=postgres was requested but DATABASE_URL is unset -- the "
+                "strategy assistant degrades to local-only inference (its own decode loop, no "
+                "shared queue).");
+            return;
+        }
+
+        // connect_timeout=2000ms/statement_timeout=2000ms are pg::PoolConfig's
+        // own defaults already -- restated here, not overridden, so this is
+        // self-documenting against the brief's mandated bounds rather than a
+        // silent reliance on a default that could drift later.
+        pg::PoolConfig pool_config;
+        pool_config.conninfo = *database_url;
+        pool_config.connect_timeout = std::chrono::milliseconds(2000);
+        pool_config.statement_timeout = std::chrono::milliseconds(2000);
+        pool_ = std::make_shared<pg::Pool>(std::move(pool_config));
+        queue_ = std::make_shared<inference_queue::Queue>(pool_);
+        // LISTEN/NOTIFY is a wakeup hint only (see inference_queue.cppm's own
+        // banner) -- a failure to start it is logged and otherwise ignored;
+        // await_result()'s poll loop remains correct, just not sped up.
+        if (auto pump = queue_->start_notify_pump(); !pump.has_value()) {
+            logger::Logger::getInstance().warn(
+                "inference_admission: strategy assistant's LISTEN pump failed to start ({}) -- "
+                "await_result() will still work correctly via its poll backstop, just not as "
+                "promptly.",
+                inference_queue::to_string(pump.error()));
+        }
+
+        const std::string worker_id = "strategy-" + std::to_string(::getpid());
+        auto lease_source = std::make_shared<inference_admission::PostgresLeaseSource>(
+            queue_, inference_queue::Surface::Strategy, worker_id);
+        backend_->set_lease_source(lease_source);
+        lease_source_ = std::move(lease_source);
+
+        // Round-trip budget for one remote submission: bounded well above
+        // this assistant's own decode time (kMaxNewTokens at ~34 tok/s is
+        // roughly a second) so a healthy remote worker has real headroom, but
+        // still bounded -- a caller waiting past this falls back to the local
+        // backend rather than ever hanging.
+        admission_ = std::make_unique<inference_admission::PostgresAdmission>(
+            queue_, inference_queue::Surface::Strategy, *backend_, std::chrono::milliseconds(20000));
+
+        logger::Logger::getInstance().info(
+            "Strategy assistant: INFERENCE_QUEUE=postgres -- submitting through the shared "
+            "queue (worker_id={}), with the local backend as fallback and lease source",
+            worker_id);
+    }
+
+    std::unique_ptr<QueuedBackend> backend_;
+    std::shared_ptr<pg::Pool> pool_;
+    std::shared_ptr<inference_queue::Queue> queue_;
+    std::shared_ptr<inference_admission::PostgresLeaseSource> lease_source_;
+    std::unique_ptr<InferenceBackend> admission_;
 };
 
 // ---------------------------------------------------------------------------

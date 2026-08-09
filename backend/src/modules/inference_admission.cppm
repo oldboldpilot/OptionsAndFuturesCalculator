@@ -1,0 +1,494 @@
+module;
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <cstdint>
+#include <deque>
+#include <future>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <stop_token>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <vector>
+
+export module inference_admission;
+
+import inference_queue;
+
+/**
+ * @author Olumuyiwa Oluwasanmi
+ *
+ * The admission-queue/backpressure layer shared by the strategy assistant
+ * (assistant_service.cpp) and the mortgage assistant (mortgage_assistant_
+ * service.cpp), extracted out of both files' near-identical anonymous
+ * namespaces into one module. `InferenceOutcome`, `PendingJob`,
+ * `InferenceBackend` and `QueuedBackend` below are the SAME classes that used
+ * to live twice -- once per file -- with the SAME names and the SAME
+ * behaviour; only their address changed. `SensenBackend`/`LlamaCppBackend`
+ * stay in their own service files: they are surface-specific (different model
+ * path env vars, different system prompts, different grammars) and were never
+ * duplicated in the first place.
+ *
+ * Also home to the Postgres-backed extension of this layer
+ * (`PostgresLeaseSource` / `PostgresAdmission`), selected by
+ * `INFERENCE_QUEUE=postgres` in each service's Worker class. This extension
+ * is ADDITIVE and OFF by default:
+ *
+ *   - `QueuedBackend::set_lease_source()` defaults to installing nothing
+ *     (`lease_source_` stays null for the whole process lifetime unless a
+ *     Worker explicitly calls it), and `take_jobs()`'s local (`local`-mode)
+ *     branch is untouched code -- same statements, same lock, same unbounded
+ *     `cv_.wait(lock, stoken, pred)` -- when `lease_source_` is null. See
+ *     `take_jobs()`'s own doc for exactly what changes when it is not.
+ *   - `PostgresAdmission` wraps a Worker's real local `InferenceBackend` (the
+ *     `SensenBackend`/`LlamaCppBackend` already doing decode) and falls back
+ *     to calling it directly -- today's exact in-process path -- on ANY
+ *     failure of the Postgres path, at either the submit step or the await
+ *     step. A Postgres outage therefore degrades this service to `local`
+ *     behaviour, bounded by `pg::PoolConfig`'s `connect_timeout`/
+ *     `statement_timeout`, rather than hanging or erroring the RPC.
+ *
+ * WHY THIS MODULE IMPORTS `inference_queue` DIRECTLY (and is therefore only
+ * safe to import from assistant_service.cpp / mortgage_assistant_service.cpp,
+ * never from finance_service.cpp or calculator_service.cpp): the Postgres
+ * extension's types are expressed directly in terms of
+ * `inference_queue::Queue`/`Surface`/`Job` rather than behind a further
+ * abstraction, because there is exactly one production consumer of that
+ * queue (this admission layer) and a third layer of indirection would buy
+ * nothing. The Finance/Calculator isolation this repo's CLAUDE.md and this
+ * task's own brief require is enforced by NOT importing this module (or
+ * `pg`/`inference_queue`) from those two services at all -- see this
+ * project's CMakeLists.txt comment above `find_package(PostgreSQL REQUIRED)`
+ * for the build-level half of that same claim.
+ */
+namespace options_calculator::inference_admission {
+
+/** What a backend hands back for one generation request. */
+export struct InferenceOutcome {
+    bool ok = false;
+    std::string text;   // the model's raw decoded output, valid iff ok
+    std::string error;  // human-readable failure detail, valid iff !ok
+};
+
+/**
+ * One accepted request, in flight from the gRPC handler thread that accepted
+ * it to the backend owner thread that will serve it (in `local` mode), or
+ * from `PostgresLeaseSource::fill()` to that same owner thread's decode loop
+ * (in `postgres` mode, for a job leased from the shared queue rather than
+ * submitted locally).
+ *
+ * The promise is fulfilled exactly once, on every path out of the owner
+ * thread including shutdown -- a promise destroyed unfulfilled would make
+ * the waiting side's `future.get()` throw `std::future_error` instead of
+ * returning, which is a strictly worse failure than an honest error string.
+ */
+export struct PendingJob {
+    std::string prompt;
+    std::promise<InferenceOutcome> promise;
+};
+
+/**
+ * The narrow contract the RPC layer depends on, and the ONLY thing it knows
+ * about inference. Both `QueuedBackend` (local decode) and `PostgresAdmission`
+ * (the Postgres-backed submission wrapper) implement it, so a Worker class can
+ * hold either behind one `InferenceBackend*`/`InferenceBackend&` without the
+ * RPC handler ever knowing which.
+ */
+export class InferenceBackend {
+  public:
+    InferenceBackend() = default;
+    virtual ~InferenceBackend() = default;
+    InferenceBackend(const InferenceBackend&) = delete;
+    auto operator=(const InferenceBackend&) -> InferenceBackend& = delete;
+    InferenceBackend(InferenceBackend&&) = delete;
+    auto operator=(InferenceBackend&&) -> InferenceBackend& = delete;
+
+    /**
+     * Submits one prompt and blocks the CALLING thread until the backend has
+     * produced a result.
+     *
+     * Returns `std::nullopt` iff the admission queue was already full when
+     * this call arrived -- the caller must map that, and only that, to
+     * RESOURCE_EXHAUSTED. Any other outcome, including a failed generation,
+     * comes back as an `InferenceOutcome` with `ok == false`.
+     */
+    [[nodiscard]] virtual auto submit(std::string prompt) -> std::optional<InferenceOutcome> = 0;
+
+    /** Identifier for logs and for the startup banner. Never user-facing. */
+    [[nodiscard]] virtual auto name() const noexcept -> std::string_view = 0;
+};
+
+export class PostgresLeaseSource;  // defined below; QueuedBackend only needs a pointer to it.
+
+/**
+ * The admission queue and back-pressure policy both local backends share.
+ *
+ * WHY A BOUNDED QUEUE AT ALL:
+ *
+ * Every accepted request holds a gRPC handler thread blocked on `submit()`
+ * for the duration of one extraction. An unbounded queue would let load pile
+ * up invisibly -- the caller-facing symptom would be requests taking longer
+ * and longer to answer, with no signal distinguishing "briefly busy" from
+ * "about to wait minutes", and no way for a client to make an informed retry
+ * decision. A bounded queue makes the choice explicit instead: once it is
+ * full, a request fails FAST with RESOURCE_EXHAUSTED rather than joining an
+ * invisible line.
+ *
+ * The queue lives on the calling gRPC threads' side: `submit()` never blocks
+ * to make room. If the queue is already full when a new request arrives it is
+ * turned away immediately, full stop.
+ *
+ * CONTINUOUS BATCHING: a single owner thread holds a set of in-flight
+ * sequences and advances all of them by one token per iteration in one fused
+ * forward pass, admitting newly-queued requests into free slots as earlier
+ * ones finish. The queue below is therefore the WAITING room in front of that
+ * set, not the whole capacity.
+ *
+ * THE OPTIONAL POSTGRES LEASE SOURCE:
+ *
+ * `set_lease_source()` installs an optional `PostgresLeaseSource` that
+ * `take_jobs()` consults AFTER draining the local queue, to fill any
+ * remaining free decode slots by leasing jobs from the shared Postgres queue
+ * -- "lease late, never early": a local submission always wins a free slot
+ * over a leased one, since local jobs are drained first and leasing only
+ * tops up whatever slots are still empty. See `take_jobs()`'s own doc for
+ * the wait-loop change this requires, and for the guarantee that `local`
+ * mode (`lease_source_ == nullptr`) is unaffected.
+ */
+export class QueuedBackend : public InferenceBackend {
+  public:
+    // submit()/drain_and_fail() are defined INLINE, in-class, here. take_jobs()
+    // is declared here but DEFINED further down THIS SAME FILE (still the
+    // module INTERFACE unit, inference_admission.cppm -- never
+    // inference_admission.cpp), after PostgresLeaseSource's own definition,
+    // for two independent reasons:
+    //
+    //   1. Its body calls `lease_source->fill(...)`, which needs
+    //      PostgresLeaseSource to be a COMPLETE type -- impossible from
+    //      inside QueuedBackend's own class body, which is compiled in
+    //      QueuedBackend's complete-class context and therefore BEFORE
+    //      PostgresLeaseSource (forward-declared just above, defined later)
+    //      is complete.
+    //   2. Its body also calls
+    //      `std::condition_variable_any::wait(lock, stop_token, pred)`, and
+    //      that call failed to LINK ("undefined reference to
+    //      std::__1::__atomic_unique_lock<...>::__set_locked_bit") when
+    //      defined out-of-line in inference_admission.cpp (a module
+    //      IMPLEMENTATION unit) -- but links fine defined out-of-line here,
+    //      in the INTERFACE unit itself, which is the same reason
+    //      PostgresLeaseSource/PostgresAdmission -- defined out-of-line in
+    //      the .cpp without issue, since neither touches
+    //      condition_variable_any -- were left there rather than moved here
+    //      too.
+    [[nodiscard]] auto submit(std::string prompt) -> std::optional<InferenceOutcome> final {
+        // The promise/future pair is only constructed once there is
+        // confirmed room -- the full-queue rejection path stays as cheap as
+        // an immediate refusal should be, rather than paying for setup work
+        // whose result is about to be discarded.
+        std::future<InferenceOutcome> future;
+        {
+            const std::lock_guard lock{mutex_};
+            if (shutting_down_) {
+                return InferenceOutcome{.ok = false, .text = {}, .error = shutting_down_message_};
+            }
+            if (queue_.size() >= max_queue_depth_) {
+                return std::nullopt;
+            }
+            PendingJob job;
+            job.prompt = std::move(prompt);
+            future = job.promise.get_future();
+            queue_.push_back(std::move(job));
+        }
+        cv_.notify_one();
+        return future.get();
+    }
+
+    /**
+     * Installs (or, with `nullptr`, removes) the Postgres lease source this
+     * backend's owner thread will additionally draw from. Thread-safe: may be
+     * called once at Worker construction (the only case this codebase
+     * exercises) or, in principle, at any time -- `take_jobs()` snapshots the
+     * pointer under `mutex_` on every call rather than caching it.
+     */
+    auto set_lease_source(std::shared_ptr<PostgresLeaseSource> source) -> void {
+        const std::lock_guard lock{mutex_};
+        lease_source_ = std::move(source);
+    }
+
+  protected:
+    /**
+     * A per-surface human-readable name for the "shutting down" message
+     * `submit()` returns to a caller that arrives after shutdown has begun.
+     * Defaults to the strategy assistant's original wording so
+     * assistant_service.cpp's `SensenBackend`/`LlamaCppBackend` need no
+     * change; mortgage_assistant_service.cpp's `SensenBackend` passes its own
+     * original wording explicitly. This is the one piece of `QueuedBackend`'s
+     * externally-visible behaviour that genuinely differed between the two
+     * pre-extraction copies, so it is parameterized rather than unified.
+     */
+    explicit QueuedBackend(
+        std::string_view shutting_down_message = "assistant backend is shutting down")
+        : shutting_down_message_(shutting_down_message) {}
+
+    /**
+     * Blocks the owner thread until at least one job is queued or a stop is
+     * requested, then moves up to `want` jobs out of the local queue --
+     * and, if a lease source is installed and local jobs did not fill every
+     * requested slot, tops up the remainder by leasing from Postgres.
+     *
+     * `want` is how many free in-flight slots the caller has right now, so a
+     * backend never dequeues work it has no slot to run.
+     *
+     * `block` is false when the caller already has sequences in flight: it
+     * must not park on the condition variable while there is decoding to do,
+     * it just wants whatever happens to be waiting.
+     *
+     * WAIT BEHAVIOUR, PRECISELY:
+     *
+     *   `lease_source_ == nullptr` (local mode, the default): byte-identical
+     *   to the pre-extraction code -- `cv_.wait(lock, stoken, pred)`, an
+     *   UNBOUNDED wait for either a local job or a stop request. Nothing
+     *   about this branch changed.
+     *
+     *   `lease_source_ != nullptr` (postgres mode): a BOUNDED
+     *   `cv_.wait_for(lock, kLeasePollTick, pred)` instead (the plain,
+     *   non-stop_token-aware overload -- deliberately, not
+     *   `wait_for(lock, stoken, tick, pred)`: that stop_token-aware
+     *   timed-wait template failed to LINK against this build's libc++ when
+     *   tried, with an undefined reference to
+     *   `std::__1::__atomic_unique_lock<...>::__set_locked_bit`, unlike the
+     *   plain overload used here and the no-timeout `wait(lock, stoken,
+     *   pred)` used in the `local` branch below, both of which link fine),
+     *   so this thread periodically comes back to try leasing from Postgres
+     *   even when the local queue stays empty and nothing new is submitted
+     *   locally. A stop request is still noticed promptly by the caller's
+     *   own `while (!stoken.stop_requested())` loop, at worst one
+     *   `kLeasePollTick` later. This is the only behavioural change postgres
+     *   mode makes to the wait itself, and it is reachable only through that
+     *   mode.
+     */
+    [[nodiscard]] auto take_jobs(std::stop_token stoken, std::size_t want, bool block)
+        -> std::vector<PendingJob>;
+
+    /**
+     * Fails every job still queued so no caller blocked in `submit()`'s
+     * `future.get()` hangs forever waiting on a promise this backend will
+     * never fulfil. Called from the owner thread as it exits.
+     */
+    auto drain_and_fail(std::string_view reason) -> void {
+        std::deque<PendingJob> leftovers;
+        {
+            const std::lock_guard lock{mutex_};
+            shutting_down_ = true;
+            leftovers.swap(queue_);
+        }
+        for (auto& job : leftovers) {
+            job.promise.set_value(
+                InferenceOutcome{.ok = false, .text = {}, .error = std::string{reason}});
+        }
+    }
+
+    /** How many requests may be decoding simultaneously in one fused batch. */
+    std::size_t max_concurrent_ = 1;
+    /** How many may WAIT for a slot before further arrivals are refused. */
+    std::size_t max_queue_depth_ = 1;
+
+  private:
+    [[nodiscard]] auto lease_source_snapshot() -> std::shared_ptr<PostgresLeaseSource> {
+        const std::lock_guard lock{mutex_};
+        return lease_source_;
+    }
+
+    /**
+     * Exists ONLY to force THIS translation unit -- inference_admission.cppm.o,
+     * compiled fresh for, and linked into, every target that uses this
+     * module -- to emit a genuine, usable definition of `take_jobs`'s
+     * compiled body, rather than leaving that to whichever calling TU
+     * (assistant_service.cpp, mortgage_assistant_service.cpp, a test driver,
+     * ...) happens to need it first.
+     *
+     * WHY THIS IS NECESSARY: `take_jobs`'s `local`-mode branch calls
+     * `std::condition_variable_any::wait(lock, stop_token, pred)`, whose
+     * compiled body references a libc++-internal symbol
+     * (`std::__1::__atomic_unique_lock<unsigned int, 2>::__set_locked_bit`,
+     * reached via `__stop_state::__add_callback`). Empirically, on this
+     * build's toolchain, whether a given calling TU emits a genuine (weak,
+     * defined -- nm(1) code `V`/`W`) copy of that symbol alongside its own
+     * inline instantiation of `take_jobs`, or only an undefined reference to
+     * it (nm(1) code `U`, relying on some OTHER linked object to supply it),
+     * is NOT reliable: assistant_service.cpp.o and
+     * mortgage_assistant_service.cpp.o happened to emit a real definition;
+     * this task's own tests/test_inference_admission.cpp.o and
+     * tests/test_inference_admission_pg.cpp.o did not, and failed to link
+     * with "undefined reference to
+     * std::__1::__atomic_unique_lock<...>::__set_locked_bit" as a result --
+     * even though calculator_engine (whose much larger link graph
+     * incidentally included an object that DID emit it) linked fine.
+     * Defined `[[gnu::used]]` so the optimizer cannot decide it is
+     * unreferenced and elide it -- see its out-of-line definition, right
+     * after `take_jobs` itself, which is the actual address-of that forces
+     * emission. Since inference_admission.cppm.o is part of EVERY target's
+     * link by construction, every target gets a reliable source for the
+     * symbol regardless of what any calling TU does on its own.
+     */
+    [[maybe_unused, gnu::used]] static auto force_take_jobs_symbol_emission() noexcept
+        -> std::vector<PendingJob> (QueuedBackend::*)(std::stop_token, std::size_t, bool);
+
+    /** How often `take_jobs()`'s postgres-mode wait re-checks for local work
+     *  before falling through to try leasing again. Local mode never uses
+     *  this constant at all. */
+    static constexpr std::chrono::milliseconds kLeasePollTick{200};
+
+    std::mutex mutex_;
+    std::condition_variable_any cv_;
+    std::deque<PendingJob> queue_;
+    bool shutting_down_ = false;
+    std::string shutting_down_message_;
+    std::shared_ptr<PostgresLeaseSource> lease_source_;
+};
+
+// ---------------------------------------------------------------------------
+// The Postgres-backed shared queue extension (INFERENCE_QUEUE=postgres)
+// ---------------------------------------------------------------------------
+
+/**
+ * Leases jobs from the shared `inference_queue::Queue` on behalf of one
+ * `QueuedBackend`'s owner thread, and writes each one's result back once the
+ * SAME decode loop that serves local jobs has produced it.
+ *
+ * THE WRITE-BACK PROBLEM THIS CLASS SOLVES: `fill()` is called FROM the owner
+ * thread (inside `take_jobs()`), which must never block on network I/O for a
+ * result that has not been decoded yet -- that thread's job is to keep
+ * feeding the fused decode step, not to sit blocked on one job's
+ * `future.get()`. So `fill()` only leases and hands back fresh
+ * `PendingJob`s (synthetic local jobs, indistinguishable to the decode loop
+ * from a real local submission); a short-lived helper thread, spawned here,
+ * is what later blocks on that job's `future.get()` and reports the result
+ * to Postgres via `complete()`/`fail()`.
+ *
+ * THREAD LIFETIME: every helper thread this class spawns is joined either
+ * when a later `fill()` call notices it finished (`reap_finished_locked()`)
+ * or, unconditionally, in `~PostgresLeaseSource()`. This class -- and
+ * therefore the `Queue`/`Pool` it holds a `shared_ptr` to -- is guaranteed to
+ * outlive every helper thread it spawns: the destructor blocks until each one
+ * has been joined before any member is torn down.
+ */
+export class PostgresLeaseSource {
+  public:
+    PostgresLeaseSource(std::shared_ptr<options_calculator::inference_queue::Queue> queue,
+                         options_calculator::inference_queue::Surface surface,
+                         std::string worker_id);
+    ~PostgresLeaseSource();
+
+    PostgresLeaseSource(const PostgresLeaseSource&) = delete;
+    auto operator=(const PostgresLeaseSource&) -> PostgresLeaseSource& = delete;
+    PostgresLeaseSource(PostgresLeaseSource&&) = delete;
+    auto operator=(PostgresLeaseSource&&) -> PostgresLeaseSource& = delete;
+
+    /**
+     * Leases up to `want` jobs for this source's surface (fewer, or none, if
+     * the shared queue does not have that many eligible right now -- an
+     * empty/partial result is the ordinary case, not a failure). Each leased
+     * job's write-back is delegated to a freshly-spawned helper thread; this
+     * call itself never blocks on a decode result.
+     */
+    [[nodiscard]] auto fill(std::size_t want) -> std::vector<PendingJob>;
+
+  private:
+    auto spawn_writeback(std::int64_t job_id, std::int64_t fencing_token,
+                          std::future<InferenceOutcome> future) -> void;
+    /** Caller must hold `helpers_mu_`. */
+    auto reap_finished_locked() -> void;
+
+    std::shared_ptr<options_calculator::inference_queue::Queue> queue_;
+    options_calculator::inference_queue::Surface surface_;
+    std::string worker_id_;
+
+    std::mutex helpers_mu_;
+    std::vector<std::jthread> helpers_;
+    std::vector<std::shared_ptr<std::atomic<bool>>> helper_done_;
+};
+
+/**
+ * Out-of-line, but still inside inference_admission.cppm (the module
+ * INTERFACE unit) -- see QueuedBackend's own comment on `take_jobs`'s
+ * declaration for why it cannot be defined earlier (needs PostgresLeaseSource
+ * complete) or in inference_admission.cpp (fails to link).
+ */
+inline auto QueuedBackend::take_jobs(std::stop_token stoken, std::size_t want, bool block)
+    -> std::vector<PendingJob> {
+    std::vector<PendingJob> taken;
+    if (want == 0) return taken;
+
+    const auto lease_source = lease_source_snapshot();
+
+    std::unique_lock lock{mutex_};
+    if (block) {
+        if (lease_source == nullptr) {
+            // BYTE-IDENTICAL to the pre-extraction code: an unbounded wait,
+            // exactly as `local` mode has always had. Nothing in this branch
+            // is new.
+            const bool has_job = cv_.wait(lock, stoken, [this] { return !queue_.empty(); });
+            if (!has_job) return taken;
+        } else {
+            // Postgres mode only. See this function's own declaration-site
+            // doc for why this is the plain (non-stop_token) wait_for
+            // overload.
+            static_cast<void>(
+                cv_.wait_for(lock, kLeasePollTick, [this] { return !queue_.empty(); }));
+        }
+    }
+    while (!queue_.empty() && taken.size() < want) {
+        taken.push_back(std::move(queue_.front()));
+        queue_.pop_front();
+    }
+    lock.unlock();
+
+    if (lease_source != nullptr && taken.size() < want) {
+        // "Lease late, never early": local submissions were already drained
+        // above and always win a free slot; this only tops up whatever slots
+        // are STILL empty after that.
+        auto leased = lease_source->fill(want - taken.size());
+        for (auto& job : leased) taken.push_back(std::move(job));
+    }
+    return taken;
+}
+
+/** See the in-class declaration's doc for why this exists. Taking
+ *  `take_jobs`'s address here is what forces this translation unit to emit
+ *  a real, usable definition of its compiled body. */
+inline auto QueuedBackend::force_take_jobs_symbol_emission() noexcept
+    -> std::vector<PendingJob> (QueuedBackend::*)(std::stop_token, std::size_t, bool) {
+    return &QueuedBackend::take_jobs;
+}
+
+/**
+ * Wraps a Worker's real local `InferenceBackend` and prefers routing each
+ * request through the shared Postgres queue instead of straight to it --
+ * falling back to calling the wrapped backend DIRECTLY, i.e. today's exact
+ * in-process path, on any failure of the Postgres path (queue full, pool
+ * exhausted, circuit open, connect/query failure, or a wait that times out
+ * before the job reaches a terminal state). This is the mandatory
+ * degrade-never-hang property: a Postgres outage must not turn into an
+ * unbounded RPC hang or an error the caller cannot get a real answer behind.
+ */
+export class PostgresAdmission final : public InferenceBackend {
+  public:
+    PostgresAdmission(std::shared_ptr<options_calculator::inference_queue::Queue> queue,
+                       options_calculator::inference_queue::Surface surface,
+                       InferenceBackend& local, std::chrono::milliseconds remote_deadline);
+
+    [[nodiscard]] auto submit(std::string prompt) -> std::optional<InferenceOutcome> override;
+    [[nodiscard]] auto name() const noexcept -> std::string_view override { return "postgres"; }
+
+  private:
+    std::shared_ptr<options_calculator::inference_queue::Queue> queue_;
+    options_calculator::inference_queue::Surface surface_;
+    InferenceBackend& local_;
+    std::chrono::milliseconds remote_deadline_;
+};
+
+}  // namespace options_calculator::inference_admission

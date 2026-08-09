@@ -25,6 +25,8 @@ module;
 #include <utility>
 #include <vector>
 
+#include <unistd.h>
+
 #include <grpcpp/grpcpp.h>
 #include "mortgage_assistant.pb.h"
 #include "mortgage_assistant.grpc.pb.h"
@@ -40,6 +42,9 @@ import api_key;
 import assistant_verification;
 import mortgage_verification;
 import mortgage_grammar;
+import inference_admission;
+import inference_queue;
+import pg;
 
 // ============================================================================
 // The mortgage / time-value-of-money assistant.
@@ -107,6 +112,14 @@ namespace mg = ::mortgage_calculator::assistant::grammar;
 
 using grpc::ServerContext;
 using grpc::Status;
+
+// InferenceOutcome, PendingJob, InferenceBackend, QueuedBackend, and the
+// Postgres-backed PostgresLeaseSource/PostgresAdmission extension now live in
+// inference_admission.cppm, shared with assistant_service.cpp rather than
+// duplicated -- see that module's own banner, and see this file's header
+// comment above ("ON THE DUPLICATED INFERENCE MACHINERY BELOW") for the
+// history of why they were duplicated in the first place.
+using namespace options_calculator::inference_admission;
 
 namespace {
 
@@ -279,146 +292,14 @@ constexpr double kMaxAbsMagnitude = 1e15;
 // ---------------------------------------------------------------------------
 // Inference backend
 // ---------------------------------------------------------------------------
+//
+// InferenceOutcome, PendingJob and QueuedBackend used to be defined here.
+// They now live in inference_admission.cppm (imported above, shared with
+// assistant_service.cpp) -- see this file's `using namespace
+// options_calculator::inference_admission;` and that module's own banner.
+// SensenBackend below derives from the imported QueuedBackend exactly as it
+// derived from the local one before this extraction.
 
-/** What the backend hands back for one generation request. */
-struct InferenceOutcome {
-    bool ok = false;
-    std::string text;   // the model's raw decoded output, valid iff ok
-    std::string error;  // human-readable failure detail, valid iff !ok
-};
-
-/**
- * One accepted request, in flight from the gRPC handler thread that accepted it
- * to the owner thread that will serve it.
- *
- * The promise is fulfilled exactly once, on every path out of the owner thread
- * including shutdown -- a promise destroyed unfulfilled would make the handler
- * thread's `future.get()` throw `std::future_error` instead of returning, which
- * is a strictly worse failure than an honest error string.
- */
-struct PendingJob {
-    std::string prompt;
-    std::promise<InferenceOutcome> promise;
-};
-
-/**
- * The admission queue and back-pressure policy.
- *
- * Every accepted request holds a gRPC handler thread blocked on `submit()` for
- * the duration of one extraction. An unbounded queue would let load pile up
- * invisibly -- the caller-facing symptom would be requests taking longer and
- * longer, with no signal distinguishing "briefly busy" from "about to wait
- * minutes". A bounded queue makes the choice explicit: once full, a request
- * fails FAST with RESOURCE_EXHAUSTED rather than joining an invisible line.
- *
- * The queue is the WAITING ROOM in front of the in-flight set, not the whole
- * capacity: the owner thread runs continuous batching, holding several
- * sequences and advancing all of them by one token per fused forward pass,
- * admitting newly-queued requests into slots as earlier ones finish.
- */
-class QueuedBackend {
-  public:
-    QueuedBackend() = default;
-    virtual ~QueuedBackend() = default;
-    QueuedBackend(const QueuedBackend&) = delete;
-    auto operator=(const QueuedBackend&) -> QueuedBackend& = delete;
-    QueuedBackend(QueuedBackend&&) = delete;
-    auto operator=(QueuedBackend&&) -> QueuedBackend& = delete;
-
-    /**
-     * Submits one prompt and blocks the CALLING thread until the backend has
-     * produced a result.
-     *
-     * Returns `std::nullopt` iff the admission queue was already full when this
-     * call arrived -- the caller must map that, and only that, to
-     * RESOURCE_EXHAUSTED. Any other outcome, including a failed generation,
-     * comes back as an `InferenceOutcome` with `ok == false`.
-     */
-    [[nodiscard]] auto submit(std::string prompt) -> std::optional<InferenceOutcome> {
-        // The promise/future pair is only constructed once there is confirmed
-        // room -- the full-queue rejection path stays as cheap as an immediate
-        // refusal should be.
-        std::future<InferenceOutcome> future;
-        {
-            const std::lock_guard lock{mutex_};
-            if (shutting_down_) {
-                return InferenceOutcome{
-                    .ok = false, .text = {}, .error = "mortgage assistant backend is shutting down"};
-            }
-            if (queue_.size() >= max_queue_depth_) {
-                return std::nullopt;
-            }
-            PendingJob job;
-            job.prompt = std::move(prompt);
-            future = job.promise.get_future();
-            queue_.push_back(std::move(job));
-        }
-        cv_.notify_one();
-        return future.get();
-    }
-
-  protected:
-    /**
-     * Blocks the owner thread until at least one job is queued or a stop is
-     * requested, then moves up to `want` jobs out of the queue.
-     *
-     * `want` is how many free in-flight slots the caller has right now, so the
-     * backend never dequeues work it has no slot to run. `block` is false when
-     * the caller already has sequences in flight: it must not park on the
-     * condition variable while there is decoding to do.
-     */
-    [[nodiscard]] auto take_jobs(std::stop_token stoken, std::size_t want, bool block)
-        -> std::vector<PendingJob> {
-        std::vector<PendingJob> taken;
-        if (want == 0) return taken;
-
-        std::unique_lock lock{mutex_};
-        if (block) {
-            // The stop_token-aware overload registers a stop callback that
-            // notifies this condition variable the moment a stop is requested,
-            // so this wakes promptly on shutdown rather than only on the next
-            // enqueue.
-            const bool has_job = cv_.wait(lock, stoken, [this] { return !queue_.empty(); });
-            if (!has_job) return taken;
-        }
-        while (!queue_.empty() && taken.size() < want) {
-            taken.push_back(std::move(queue_.front()));
-            queue_.pop_front();
-        }
-        return taken;
-    }
-
-    /**
-     * Fails every job still queued so no caller blocked in `submit()`'s
-     * `future.get()` hangs forever waiting on a promise this backend will never
-     * fulfil. `shutting_down_` is set under the same lock so a request that
-     * races the shutdown gets an honest error rather than being enqueued onto a
-     * queue nobody will ever drain again.
-     */
-    auto drain_and_fail(std::string_view reason) -> void {
-        std::deque<PendingJob> leftovers;
-        {
-            const std::lock_guard lock{mutex_};
-            shutting_down_ = true;
-            leftovers.swap(queue_);
-        }
-        for (auto& job : leftovers) {
-            job.promise.set_value(
-                InferenceOutcome{.ok = false, .text = {}, .error = std::string{reason}});
-        }
-    }
-
-    /** How many requests may be decoding simultaneously in one fused batch. */
-    std::size_t max_concurrent_ = 1;
-    /** How many may WAIT for a slot before further arrivals are refused. */
-    std::size_t max_queue_depth_ = 1;
-
-  private:
-    std::mutex mutex_;
-    std::condition_variable_any cv_;
-    std::deque<PendingJob> queue_;
-    bool shutting_down_ = false;
-};
 
 /**
  * Drives this service's OWN `sensen::LLMPipeline` through its iteration-level
@@ -491,7 +372,7 @@ class SensenBackend final : public QueuedBackend {
         return backend;
     }
 
-    [[nodiscard]] static auto name() noexcept -> std::string_view { return "sensen"; }
+    [[nodiscard]] auto name() const noexcept -> std::string_view override { return "sensen"; }
 
     ~SensenBackend() override = default;
 
@@ -535,7 +416,14 @@ class SensenBackend final : public QueuedBackend {
 
     SensenBackend(std::unique_ptr<sensen::LLMPipeline> pipeline, std::size_t max_concurrent,
                   std::size_t queue_depth)
-        : pipeline_{std::move(pipeline)} {
+        // The pre-extraction QueuedBackend::submit() in THIS file hardcoded
+        // "mortgage assistant backend is shutting down" -- distinct from
+        // assistant_service.cpp's "assistant backend is shutting down".
+        // Passed explicitly here so the shared QueuedBackend's default (which
+        // matches the strategy assistant's original wording) does not change
+        // this service's own text.
+        : QueuedBackend("mortgage assistant backend is shutting down"),
+          pipeline_{std::move(pipeline)} {
         max_concurrent_ = max_concurrent;
         max_queue_depth_ = queue_depth;
     }
@@ -1060,6 +948,14 @@ class MortgageAssistantWorker {
             // between this and a permanent hang.
             return InferenceOutcome{.ok = false, .text = {}, .error = "model not loaded"};
         }
+        // `admission_` is non-null only in INFERENCE_QUEUE=postgres mode, and
+        // already falls back to `*backend_` (today's exact in-process path)
+        // on any Postgres-path failure. In `local` mode (the default)
+        // `admission_` stays null and this goes to `backend_` directly,
+        // exactly as before this feature existed.
+        if (admission_ != nullptr) {
+            return admission_->submit(std::move(prompt));
+        }
         return backend_->submit(std::move(prompt));
     }
 
@@ -1122,10 +1018,78 @@ class MortgageAssistantWorker {
         logger::Logger::getInstance().info(
             "Mortgage assistant ready: backend={} model={} inference_threads={} max_concurrent={} "
             "queue_depth={} context_tokens={}",
-            SensenBackend::name(), *path, threads, max_concurrent, queue_depth, kv_max_seq_len);
+            backend_->name(), *path, threads, max_concurrent, queue_depth, kv_max_seq_len);
+
+        configure_inference_queue();
+    }
+
+    /**
+     * `INFERENCE_QUEUE` selects `local` (default, or anything unrecognized --
+     * degrades quietly) or `postgres`. Mirrors AssistantWorker's own
+     * configure_inference_queue() in assistant_service.cpp exactly, using
+     * `Surface::Mortgage` and the `MORTGAGE_` prefix's worker_id -- see that
+     * function's doc for the full rationale (degrade-never-crash, pg::Pool's
+     * own non-failing construction, why this runs after backend_ is
+     * confirmed non-null).
+     */
+    auto configure_inference_queue() -> void {
+        const std::string mode = env_string("INFERENCE_QUEUE").value_or("local");
+        if (mode != "postgres") {
+            if (mode != "local") {
+                logger::Logger::getInstance().warn(
+                    "INFERENCE_QUEUE=\"{}\" is not \"local\" or \"postgres\" -- the mortgage "
+                    "assistant stays on local-only inference.",
+                    mode);
+            }
+            return;
+        }
+
+        const auto database_url = env_string("DATABASE_URL");
+        if (!database_url.has_value()) {
+            logger::Logger::getInstance().warn(
+                "INFERENCE_QUEUE=postgres was requested but DATABASE_URL is unset -- the "
+                "mortgage assistant degrades to local-only inference (its own decode loop, no "
+                "shared queue).");
+            return;
+        }
+
+        // connect_timeout=2000ms/statement_timeout=2000ms are pg::PoolConfig's
+        // own defaults already -- restated here, not overridden.
+        pg::PoolConfig pool_config;
+        pool_config.conninfo = *database_url;
+        pool_config.connect_timeout = std::chrono::milliseconds(2000);
+        pool_config.statement_timeout = std::chrono::milliseconds(2000);
+        pool_ = std::make_shared<pg::Pool>(std::move(pool_config));
+        queue_ = std::make_shared<inference_queue::Queue>(pool_);
+        if (auto pump = queue_->start_notify_pump(); !pump.has_value()) {
+            logger::Logger::getInstance().warn(
+                "inference_admission: mortgage assistant's LISTEN pump failed to start ({}) -- "
+                "await_result() will still work correctly via its poll backstop, just not as "
+                "promptly.",
+                inference_queue::to_string(pump.error()));
+        }
+
+        const std::string worker_id = "mortgage-" + std::to_string(::getpid());
+        auto lease_source = std::make_shared<inference_admission::PostgresLeaseSource>(
+            queue_, inference_queue::Surface::Mortgage, worker_id);
+        backend_->set_lease_source(lease_source);
+        lease_source_ = std::move(lease_source);
+
+        admission_ = std::make_unique<inference_admission::PostgresAdmission>(
+            queue_, inference_queue::Surface::Mortgage, *backend_,
+            std::chrono::milliseconds(20000));
+
+        logger::Logger::getInstance().info(
+            "Mortgage assistant: INFERENCE_QUEUE=postgres -- submitting through the shared "
+            "queue (worker_id={}), with the local backend as fallback and lease source",
+            worker_id);
     }
 
     std::unique_ptr<QueuedBackend> backend_;
+    std::shared_ptr<pg::Pool> pool_;
+    std::shared_ptr<inference_queue::Queue> queue_;
+    std::shared_ptr<inference_admission::PostgresLeaseSource> lease_source_;
+    std::unique_ptr<InferenceBackend> admission_;
 };
 
 // ---------------------------------------------------------------------------

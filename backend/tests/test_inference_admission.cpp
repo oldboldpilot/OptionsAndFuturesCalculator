@@ -1,0 +1,225 @@
+// @author Olumuyiwa Oluwasanmi
+//
+// Tests inference_admission.cppm's LOCAL admission queue -- QueuedBackend's
+// submit()/take_jobs()/drain_and_fail() -- against a trivial concrete
+// subclass standing in for SensenBackend/LlamaCppBackend's real decode loop.
+// Needs NO Postgres: this suite IS the "lease_source_ stays null, `local`
+// mode's behaviour is unaffected by the postgres extension" proof, so it is
+// registered via add_test() and runs on every `ctest` invocation.
+//
+// Plain hand-rolled check()/section() harness, matching every other test in
+// this tree -- not gtest (config/cpp_details.txt rule 39 forbids external
+// test frameworks project-wide).
+#include <chrono>
+#include <condition_variable>
+#include <cstdio>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <stop_token>
+#include <string>
+#include <thread>
+#include <vector>
+
+import inference_admission;
+
+using namespace std::chrono_literals;
+using options_calculator::inference_admission::InferenceOutcome;
+using options_calculator::inference_admission::QueuedBackend;
+
+namespace {
+
+int g_checks = 0;
+int g_failures = 0;
+
+auto check(bool condition, const std::string& what) -> void {
+    ++g_checks;
+    if (condition) {
+        std::printf("  PASS: %s\n", what.c_str());
+    } else {
+        ++g_failures;
+        std::printf("  FAIL: %s\n", what.c_str());
+    }
+}
+
+auto section(const char* title) -> void { std::printf("\n=== %s ===\n", title); }
+
+/**
+ * A trivial concrete QueuedBackend: one owner thread that calls take_jobs()
+ * exactly the way SensenBackend::run() does (block on empty, drain up to
+ * max_concurrent_), and for each job taken, blocks on a test-controlled gate
+ * before echoing the prompt back as the result. The gate is what lets a test
+ * deterministically hold one job "in flight" (already dequeued from the
+ * local waiting room) while it fills the waiting room itself to
+ * max_queue_depth_ and checks the refusal boundary precisely.
+ */
+class GatedEchoBackend final : public QueuedBackend {
+  public:
+    GatedEchoBackend(std::size_t max_concurrent, std::size_t queue_depth,
+                      std::string_view shutting_down_message = "assistant backend is shutting down")
+        : QueuedBackend(shutting_down_message), shutting_down_message_(shutting_down_message) {
+        max_concurrent_ = max_concurrent;
+        max_queue_depth_ = queue_depth;
+        worker_ = std::jthread([this](std::stop_token st) { run(st); });
+    }
+
+    ~GatedEchoBackend() override {
+        worker_.request_stop();
+        open_gate();  // unstick anything blocked on the gate so join() below completes
+        worker_.join();
+        // The SAME message this instance was constructed with -- drain_and_fail()'s
+        // reason is a free parameter, not automatically tied to the base's own
+        // shutting_down_message_ (used only by submit()'s post-shutdown path), so
+        // this test deliberately passes the identical string to prove both call
+        // sites agree, exactly as SensenBackend's real shutdown path does (see
+        // assistant_service.cpp / mortgage_assistant_service.cpp's own
+        // drain_and_fail(...) call sites).
+        drain_and_fail(shutting_down_message_);
+    }
+
+    [[nodiscard]] auto name() const noexcept -> std::string_view override { return "gated-echo"; }
+
+    auto open_gate() -> void {
+        const std::lock_guard lock{gate_mu_};
+        gate_open_ = true;
+        gate_cv_.notify_all();
+    }
+    auto close_gate() -> void {
+        const std::lock_guard lock{gate_mu_};
+        gate_open_ = false;
+    }
+
+  private:
+    auto run(std::stop_token st) -> void {
+        while (!st.stop_requested()) {
+            auto jobs = take_jobs(st, max_concurrent_, /*block=*/true);
+            for (auto& job : jobs) {
+                wait_for_gate(st);
+                if (st.stop_requested()) {
+                    job.promise.set_value(
+                        InferenceOutcome{.ok = false, .text = {}, .error = "test worker stopping"});
+                    continue;
+                }
+                job.promise.set_value(InferenceOutcome{.ok = true, .text = job.prompt, .error = {}});
+            }
+        }
+    }
+
+    auto wait_for_gate(std::stop_token st) -> void {
+        std::unique_lock lock{gate_mu_};
+        static_cast<void>(gate_cv_.wait(lock, st, [this] { return gate_open_; }));
+    }
+
+    std::mutex gate_mu_;
+    std::condition_variable_any gate_cv_;
+    bool gate_open_ = true;
+    std::string shutting_down_message_;
+    std::jthread worker_;
+};
+
+}  // namespace
+
+auto main() -> int {
+    // -----------------------------------------------------------------
+    section("Ordering and the exact RESOURCE_EXHAUSTED-triggering nullopt condition");
+    {
+        // max_concurrent_=1 so exactly one job is "in flight" (already
+        // dequeued, held on the gate) at a time; max_queue_depth_=2 so the
+        // waiting room holds exactly two more before refusing.
+        GatedEchoBackend backend{/*max_concurrent=*/1, /*queue_depth=*/2};
+        backend.close_gate();
+
+        std::optional<InferenceOutcome> result_a, result_b, result_c;
+        std::thread thread_a([&] { result_a = backend.submit("A"); });
+        // Give the worker thread time to dequeue "A" (queue_ becomes empty,
+        // the job moves to "in flight, blocked on the gate").
+        std::this_thread::sleep_for(150ms);
+
+        std::thread thread_b([&] { result_b = backend.submit("B"); });
+        std::this_thread::sleep_for(50ms);
+        std::thread thread_c([&] { result_c = backend.submit("C"); });
+        std::this_thread::sleep_for(50ms);
+
+        // The waiting room now holds exactly {B, C} -- size 2 == max_queue_depth_.
+        auto result_d = backend.submit("D");
+        check(!result_d.has_value(),
+              "submit() at the queue's exact capacity boundary returns nullopt (the ONLY "
+              "condition the RPC layer maps to RESOURCE_EXHAUSTED)");
+
+        backend.open_gate();
+        thread_a.join();
+        thread_b.join();
+        thread_c.join();
+
+        check(result_a.has_value() && result_a->ok && result_a->text == "A",
+              "the in-flight job (A) completed successfully once the gate opened");
+        check(result_b.has_value() && result_b->ok && result_b->text == "B",
+              "the first queued job (B) was served after A, in submission order");
+        check(result_c.has_value() && result_c->ok && result_c->text == "C",
+              "the second queued job (C) was served after B, in submission order");
+    }
+
+    // -----------------------------------------------------------------
+    section("A queue with free capacity never refuses");
+    {
+        GatedEchoBackend backend{/*max_concurrent=*/2, /*queue_depth=*/4};
+        auto result = backend.submit("hello");
+        check(result.has_value() && result->ok && result->text == "hello",
+              "submit() with free capacity returns a real InferenceOutcome, never nullopt");
+    }
+
+    // -----------------------------------------------------------------
+    section("Per-surface shutting-down wording is preserved through the shared base");
+    {
+        auto run_one = [](std::string_view message) {
+            auto backend = std::make_unique<GatedEchoBackend>(/*max_concurrent=*/1,
+                                                                /*queue_depth=*/1, message);
+            backend->close_gate();
+
+            // One job in flight (dequeued, blocked on the gate)...
+            std::optional<InferenceOutcome> held;
+            std::thread hold([&] { held = backend->submit("held"); });
+            std::this_thread::sleep_for(150ms);
+
+            // ...and one still sitting in the local waiting room.
+            std::optional<InferenceOutcome> queued;
+            std::thread enqueue([&] { queued = backend->submit("queued"); });
+            std::this_thread::sleep_for(100ms);
+
+            // Destroying the backend NOW (via reset(), synchronously) runs
+            // request_stop() + open_gate() + worker_.join() + drain_and_fail()
+            // -- exactly the shutdown path a real process exit takes -- and
+            // returns only once every promise below is fulfilled, so it is
+            // now safe to join the two helper threads.
+            backend.reset();
+            hold.join();
+            enqueue.join();
+
+            return std::pair{held, queued};
+        };
+
+        const auto [held_default, queued_default] = run_one("assistant backend is shutting down");
+        check(held_default.has_value() && !held_default->ok &&
+                  held_default->error == "test worker stopping",
+              "the in-flight job is failed with the worker-stopping message on shutdown");
+        check(queued_default.has_value() && !queued_default->ok &&
+                  queued_default->error == "assistant backend is shutting down",
+              "the still-queued job is failed by drain_and_fail() with the DEFAULT "
+              "shutting-down message (matches assistant_service.cpp's original wording)");
+
+        const auto [held_custom, queued_custom] =
+            run_one("mortgage assistant backend is shutting down");
+        check(held_custom.has_value() && !held_custom->ok &&
+                  held_custom->error == "test worker stopping",
+              "(custom-message instance) the in-flight job still fails with the same "
+              "worker-stopping message -- that text is not parameterized");
+        check(queued_custom.has_value() && !queued_custom->ok &&
+                  queued_custom->error == "mortgage assistant backend is shutting down",
+              "the still-queued job is failed with the CUSTOM shutting-down message (matches "
+              "mortgage_assistant_service.cpp's original wording) -- proving the two surfaces' "
+              "wording did not homogenize when the class was unified");
+    }
+
+    std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
+    return g_failures == 0 ? 0 : 1;
+}
