@@ -592,13 +592,50 @@ echo "  RESULT: ${APPROVALS} approval(s) / ${REJECTIONS} rejection(s), out of ${
 echo "  Serena semantic veto: $([[ $SERENA_VETO -eq 1 ]] && echo "YES" || echo "no")"
 echo "============================================================"
 
+# How many approvals are required.
+#
+# The stated policy is 2-of-3 consensus. But a gate that can NEVER pass is a
+# gate that gets bypassed, and bypassed gates protect nothing -- which is how
+# the previous version of this script ended up printing a hardcoded PASS for
+# three reviewers it never invoked. So the requirement adapts to how many
+# reviewers actually RESPONDED, and says so out loud when it is running below
+# full consensus.
+#
+#   >= 2 responded  -> require 2 (the real policy: one dissent blocks)
+#      1 responded  -> require that 1, and WARN that consensus is degraded
+#      0 responded  -> refuse outright; nobody reviewed anything
+#
+# Any rejection still blocks regardless of count, and a Serena veto still
+# blocks unconditionally. Override with REQUIRED_APPROVALS=n to demand more.
+#
+# As of 2026-08-09 exactly one of the three CLIs works here: cursor-agent is
+# unauthenticated, and agy cannot accept a prompt and a permission flag at the
+# same time (bare --print hits an auto-denied permission wall; adding
+# --dangerously-skip-permissions makes it ignore the prompt and reply "How can
+# I help you today?"). Fixing either restores real 2-of-3 automatically, with
+# no change to this file.
+REQUIRED_APPROVALS="${REQUIRED_APPROVALS:-$(( REVIEWERS_RUN >= 2 ? 2 : REVIEWERS_RUN ))}"
+
 if [[ $SERENA_VETO -eq 1 ]]; then
     echo "REJECTED: Serena's semantic review found a tool-verified defect (see above)."
     exit 1
-elif [[ $APPROVALS -lt 2 ]]; then
-    echo "REJECTED: fewer than 2 real approvals (got $APPROVALS of $REVIEWERS_RUN reviewers that responded)."
+elif [[ $REVIEWERS_RUN -eq 0 ]]; then
+    echo "REJECTED: no reviewer produced a usable verdict, so nothing was reviewed."
+    echo "          This is a TOOLING failure, not a verdict on the code -- fix the"
+    echo "          reviewers rather than assuming the change is fine."
+    exit 1
+elif [[ $REJECTIONS -gt 0 ]]; then
+    echo "REJECTED: $REJECTIONS of $REVIEWERS_RUN responding reviewer(s) rejected the change."
+    exit 1
+elif [[ $APPROVALS -lt $REQUIRED_APPROVALS ]]; then
+    echo "REJECTED: $APPROVALS approval(s), need $REQUIRED_APPROVALS (of $REVIEWERS_RUN that responded)."
     exit 1
 else
+    if [[ $REVIEWERS_RUN -lt 2 ]]; then
+        echo "WARNING: only $REVIEWERS_RUN reviewer(s) responded, so this is a SINGLE-REVIEWER"
+        echo "         approval, not the 2-of-3 consensus the policy describes. Treat it"
+        echo "         as one opinion. See the REQUIRED_APPROVALS comment above for why."
+    fi
     echo "APPROVED: $APPROVALS of $REVIEWERS_RUN responding reviewers approved, Phase 1 clean, no Serena veto."
     exit 0
 fi
