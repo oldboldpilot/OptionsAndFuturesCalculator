@@ -994,6 +994,36 @@ target_link_libraries(test_finance_service_validation PRIVATE proto_lib sensen_s
 
 add_test(NAME FinanceServiceValidationTest COMMAND test_finance_service_validation)
 
+# CalculateStrategy coverage -- EVERY strategy calculation on
+# optionsandfuturescalculator.com goes through this RPC and SGEE's graph
+# interpreter, and until this target it had zero automated coverage (see
+# tests/test_calculator_service.cpp's own header for the stale file this
+# replaces and why it was worse than absent). Same shape as
+# test_option_pricing_service and test_finance_service_validation above: a
+# real in-process grpc::Server through a real OptionsCalculator::Stub, plus
+# RegisterCalculatorServiceForTest (calculator_service.cppm/.cpp) for the
+# discriminating section that proves interpreter.Run()'s postconditions
+# actually catch a partial action registry, not just assert they exist.
+# Needs market_data.cppm in addition to quota/api_key (unlike the finance
+# tests) because calculator_service.cpp imports it directly for live quotes.
+add_executable(test_calculator_service
+    tests/test_calculator_service.cpp
+    src/modules/calculator_service.cpp
+    src/modules/quota.cpp
+    src/modules/api_key.cpp
+)
+target_sources(test_calculator_service
+    PRIVATE
+    FILE_SET CXX_MODULES FILES
+        src/modules/calculator_service.cppm
+        src/modules/market_data.cppm
+        src/modules/quota.cppm
+        src/modules/api_key.cppm
+)
+target_link_libraries(test_calculator_service PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto sgee)
+
+add_test(NAME CalculatorServiceTest COMMAND test_calculator_service)
+
 # ---------------------------------------------------------------------------
 # Shared inference queue substrate (pg.cppm + inference_queue.cppm) -- the
 # Postgres-backed queue that will let more than one engine replica share the

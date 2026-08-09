@@ -1,6 +1,7 @@
 module;
 #include <algorithm>
 #include <array>
+#include <span>
 #include <string_view>
 #include <utility>
 #include <chrono>
@@ -558,6 +559,17 @@ using ActionRegistry = sgee::runtime::ActionRegistry<Ctx>;
 
 using sgee::ExecutionResult;
 
+/**
+ * The five action names the OptionsWorkflow graph defines, in graph order.
+ * Shared between the production constructor (which always binds all five)
+ * and the test-only constructor overload below (which binds a caller-chosen
+ * subset) so the two paths cannot drift apart into two different ideas of
+ * "the full set".
+ */
+inline constexpr std::array<std::string_view, 5> kAllActionNames{
+    "Initialize", "ComputeExpiryCurve", "ComputeMatrix", "ComputeGreeks",
+    "ComputeProbabilities"};
+
 [[nodiscard]] auto action_initialize(Ctx& ctx) -> ExecutionResult<> {
     ctx->spot = ctx->request.current_price();
     ctx->r = ctx->request.risk_free_rate();
@@ -904,9 +916,25 @@ class CalculatorServiceImpl final : public calculator::OptionsCalculator::Servic
 private:
     std::shared_ptr<ActionRegistry> actions_;
     std::shared_ptr<const sgee::GraphBlueprint> graph_;
+    // The graph's terminal node id, resolved once at construction rather than
+    // looked up by name on every RPC -- see the postcondition in
+    // CalculateStrategy below, which is on the hot path and must stay cheap.
+    std::uint16_t done_node_id_{0};
 
 public:
-    CalculatorServiceImpl() : actions_{std::make_shared<ActionRegistry>()} {
+    /**
+     * `bound_action_names` defaults to every action the graph defines, which
+     * is the only thing production ever constructs (see
+     * RegisterCalculatorService at the bottom of this file). The parameter
+     * exists so RegisterCalculatorServiceForTest can build a graph with a
+     * DELIBERATELY incomplete registry -- reproducing the exact silent-halt
+     * failure mode described in the block comment above (a null registry, an
+     * action that fails without setting ctx->status, or an unregistered
+     * action id) so the postconditions below can be proven to catch it.
+     */
+    explicit CalculatorServiceImpl(
+        std::span<const std::string_view> bound_action_names = kAllActionNames)
+        : actions_{std::make_shared<ActionRegistry>()} {
         auto& log = logger::Logger::getInstance();
 
         auto graph_result = sgee::Builder<Ctx>("OptionsWorkflow")
@@ -934,6 +962,7 @@ public:
             return;
         }
         graph_ = graph_result.value();
+        done_node_id_ = graph_->GetNodeId("Done");
 
         /*
          * Bind each action by the ID the builder assigned, not by name.
@@ -953,7 +982,21 @@ public:
             {"ComputeProbabilities", action_probabilities},
         }};
 
+        const auto is_bound = [&](std::string_view name) {
+            return std::ranges::find(bound_action_names, name) != bound_action_names.end();
+        };
+
         for (const auto& [name, fn] : bindings) {
+            if (!is_bound(name)) {
+                // Test-only path: bound_action_names deliberately omitted
+                // this one. Production never reaches this branch -- the
+                // default argument is the full set, so is_bound is true for
+                // every name calculator_engine ever constructs with.
+                log.warn("Action '{}' intentionally left unbound (test configuration); "
+                         "any entity reaching its node will halt without a status",
+                         name);
+                continue;
+            }
             const auto id = graph_->GetActionId(name);
             if (!id) {
                 log.error("Action '{}' is not present in the graph; refusing to start", name);
@@ -1081,6 +1124,61 @@ public:
         interpreter.Run(engine);
 
         if (!ctx->status.ok()) return ctx->status;
+
+        // --- Postconditions -------------------------------------------------
+        //
+        // interpreter.Run() returns void. Success and a silent partial halt
+        // are otherwise indistinguishable from here: a null action registry
+        // (interpreter.cppm:151), an action that fails without setting
+        // ctx->status (interpreter.cppm:193-197), and an unregistered action
+        // id (action_registry.cppm's Execute() returns ActionFailed, which
+        // reaches the exact same silent-halt branch) all leave this RPC about
+        // to return Status::OK over whatever ctx->response happened to
+        // contain when the entity stopped advancing -- a P&L curve with no
+        // Greeks, or all zeros. ctx->status alone cannot catch any of the
+        // three: none of them sets it.
+        //
+        // Both checks below are single reads off state the run above already
+        // produced -- no extra pass over legs or the price grid -- so neither
+        // adds measurable cost to this RPC's hot path.
+
+        // 1. TERMINAL-STATE: did the one entity in this run actually reach
+        //    the graph's Done node? If it stalled anywhere else, one of the
+        //    three failure modes above occurred.
+        const auto& state_ids = engine.GetStateIds();
+        if (state_ids.empty() || state_ids[0] != done_node_id_) {
+            const std::string stalled_at =
+                state_ids.empty() ? std::string{"<no entity>"}
+                                  : std::string{graph_->GetNodeName(state_ids[0])};
+            log.error("CalculateStrategy: graph halted at '{}' instead of reaching Done -- an "
+                      "action failed without setting status, an action id was not registered, "
+                      "or the action registry was never wired up",
+                      stalled_at);
+            return Status(grpc::StatusCode::INTERNAL,
+                          "Strategy computation halted before completion (stalled at '" +
+                              stalled_at +
+                              "'); this is a server-side defect, not a problem with the "
+                              "request");
+        }
+
+        // 2. DID-COMPUTE: reaching Done proves every state was walked, not
+        //    that any action actually wrote a payload -- a bound action that
+        //    is itself a no-op would satisfy check 1 while returning zeros.
+        //    Assert the one property the historical bug at this file's
+        //    "Action registration by ID" comment above (and the dead-lambda
+        //    regression it documents) violated: the P&L curve has exactly as
+        //    many points as were requested, not zero and not some other
+        //    count.
+        if (static_cast<std::uint32_t>(ctx->response.pnl_matrix_size()) != ctx->price_steps) {
+            log.error("CalculateStrategy: graph reached Done but pnl_matrix has {} points, not "
+                      "the requested {} -- the graph walked its states without computing the "
+                      "payoff curve",
+                      ctx->response.pnl_matrix_size(), ctx->price_steps);
+            return Status(grpc::StatusCode::INTERNAL,
+                          "Strategy computation reached completion without producing a payoff "
+                          "curve of the requested size; this is a server-side defect, not a "
+                          "problem with the request");
+        }
 
         res = ctx->response;
         return Status::OK;
@@ -1454,6 +1552,24 @@ auto RegisterCalculatorService(grpc::ServerBuilder& builder) -> void {
     // gRPC's own contract; ownership stays here.
     static CalculatorServiceImpl service;
     builder.RegisterService(&service);
+}
+
+auto RegisterCalculatorServiceForTest(grpc::ServerBuilder& builder,
+                                      std::span<const std::string_view> bound_action_names)
+    -> void {
+    // Deliberately leaked, unlike the function-local static above. A static
+    // here would fix the bound action set at the FIRST call for the rest of
+    // the process, which is wrong for this hook: a discriminating test needs
+    // to register services with DIFFERENT subsets of actions in the same
+    // test binary (one with the full set as a control, one missing an
+    // action). Each caller is a short-lived test process that builds one
+    // in-process grpc::Server per case and exits soon after, so the leak is
+    // bounded by the test's own lifetime -- the same trade the rest of this
+    // file's test siblings (ServiceFixture in test_option_pricing_service.cpp
+    // and test_finance_service_validation.cpp) make implicitly by never
+    // tearing down what BuildAndStart() allocates.
+    auto* service = new CalculatorServiceImpl(bound_action_names);
+    builder.RegisterService(service);
 }
 
 }  // namespace options_calculator::service
