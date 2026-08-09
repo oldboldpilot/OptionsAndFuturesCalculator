@@ -177,12 +177,17 @@ export class QueuedBackend : public InferenceBackend {
     //      that call failed to LINK ("undefined reference to
     //      std::__1::__atomic_unique_lock<...>::__set_locked_bit") when
     //      defined out-of-line in inference_admission.cpp (a module
-    //      IMPLEMENTATION unit) -- but links fine defined out-of-line here,
-    //      in the INTERFACE unit itself, which is the same reason
-    //      PostgresLeaseSource/PostgresAdmission -- defined out-of-line in
-    //      the .cpp without issue, since neither touches
-    //      condition_variable_any -- were left there rather than moved here
-    //      too.
+    //      IMPLEMENTATION unit) -- but links (unreliably; see
+    //      `force_take_jobs_symbol_emission`'s own doc below for why it is
+    //      not simply "fine") defined out-of-line here, in the INTERFACE
+    //      unit itself, which is the same reason PostgresLeaseSource/
+    //      PostgresAdmission -- defined out-of-line in the .cpp without
+    //      issue, since neither touches condition_variable_any -- were left
+    //      there rather than moved here too. This is a genuine, diagnosed
+    //      upstream Clang bug, not a mystery local to this file -- see
+    //      `force_take_jobs_symbol_emission` for the diagnosis, the upstream
+    //      report, and what would let this comment (and that function) be
+    //      deleted.
     [[nodiscard]] auto submit(std::string prompt) -> std::optional<InferenceOutcome> final {
         // The promise/future pair is only constructed once there is
         // confirmed room -- the full-queue rejection path stays as cheap as
@@ -258,11 +263,14 @@ export class QueuedBackend : public InferenceBackend {
      *   non-stop_token-aware overload -- deliberately, not
      *   `wait_for(lock, stoken, tick, pred)`: that stop_token-aware
      *   timed-wait template failed to LINK against this build's libc++ when
-     *   tried, with an undefined reference to
-     *   `std::__1::__atomic_unique_lock<...>::__set_locked_bit`, unlike the
-     *   plain overload used here and the no-timeout `wait(lock, stoken,
-     *   pred)` used in the `local` branch below, both of which link fine),
-     *   so this thread periodically comes back to try leasing from Postgres
+     *   tried, with the same undefined reference to
+     *   `std::__1::__atomic_unique_lock<...>::__set_locked_bit` diagnosed at
+     *   `force_take_jobs_symbol_emission` below -- this file works around it
+     *   by simply not using that overload here, rather than by forcing a
+     *   second symbol; the plain overload used here and the no-timeout
+     *   `wait(lock, stoken, pred)` used in the `local` branch below are both
+     *   covered by that one forced definition instead), so this thread
+     *   periodically comes back to try leasing from Postgres
      *   even when the local queue stays empty and nothing new is submitted
      *   locally. A stop request is still noticed promptly by the caller's
      *   own `while (!stoken.stop_requested())` loop, at worst one
@@ -310,29 +318,88 @@ export class QueuedBackend : public InferenceBackend {
      * (assistant_service.cpp, mortgage_assistant_service.cpp, a test driver,
      * ...) happens to need it first.
      *
-     * WHY THIS IS NECESSARY: `take_jobs`'s `local`-mode branch calls
-     * `std::condition_variable_any::wait(lock, stop_token, pred)`, whose
-     * compiled body references a libc++-internal symbol
+     * DIAGNOSIS (root cause, not a shrug): `take_jobs`'s `local`-mode branch
+     * calls `std::condition_variable_any::wait(lock, stop_token, pred)`,
+     * whose compiled body references a libc++-internal symbol
      * (`std::__1::__atomic_unique_lock<unsigned int, 2>::__set_locked_bit`,
-     * reached via `__stop_state::__add_callback`). Empirically, on this
-     * build's toolchain, whether a given calling TU emits a genuine (weak,
-     * defined -- nm(1) code `V`/`W`) copy of that symbol alongside its own
-     * inline instantiation of `take_jobs`, or only an undefined reference to
-     * it (nm(1) code `U`, relying on some OTHER linked object to supply it),
-     * is NOT reliable: assistant_service.cpp.o and
-     * mortgage_assistant_service.cpp.o happened to emit a real definition;
-     * this task's own tests/test_inference_admission.cpp.o and
+     * reached via `__stop_state::__add_callback`/`__remove_callback` --
+     * `<condition_variable>`'s stop_token-aware `wait` overload is built on
+     * `<stop_token>`'s `__stop_state`, and THAT is where this symbol lives).
+     * This is a genuine, upstream CLANG bug (not libc++, not a toolchain
+     * misconfiguration here), independently reproduced with a minimal
+     * 3-file example on this project's exact toolchain and canonical flags
+     * (clang 22.1.0, `scripts/build_common.sh`'s CANONICAL_FLAGS): a module
+     * whose interface unit defines a member function OUT-OF-LINE (`inline`,
+     * still inside the interface unit -- exactly `take_jobs`'s own shape,
+     * required here because its body needs `PostgresLeaseSource` complete,
+     * see this class's `take_jobs` declaration above) that calls
+     * `condition_variable_any::wait(lock, stop_token, pred)`, called from a
+     * second TU that both `import`s that module AND independently
+     * `#include`s `<stop_token>` (as every real caller here does, directly
+     * or transitively) fails to link with this EXACT symbol and the EXACT
+     * "hidden symbol ... isn't defined" wording. Defining the same function
+     * IN-CLASS instead (implicit inline, at the point of the class
+     * definition) links fine -- but that shape is unavailable to
+     * `take_jobs` for the independent, structural reason given above it.
+     *
+     * This matches, and is very likely one instance of, a confirmed CLANG
+     * (not libc++) bug: llvm/llvm-project#172241, "C++20 modules and
+     * std::jthread: link failed with clang & libc++ v21.1.x". A Clang
+     * maintainer (ChuanqiXu9) reproduced it, called it a Clang bug rather
+     * than a libc++ one, and root-caused it to
+     * `clang/lib/Serialization/ASTReaderDecl.cpp`'s declaration-merging
+     * logic: when a TU both `import`s a module whose global module fragment
+     * `#include`s a header AND separately `#include`s that SAME header
+     * itself (exactly this file's shape: inference_admission.cppm's own
+     * global module fragment includes `<condition_variable>`/
+     * `<stop_token>`, and every calling TU reaches those same headers too),
+     * an "optimization" in that merge marks the definition read from the
+     * imported module's serialized AST as a mere DECLARATION rather than a
+     * definition -- so neither the importing TU nor the module's own
+     * compiled object reliably ends up owning a real, emitted copy, and the
+     * linker sees only an undefined reference. A fix for this landed
+     * upstream and was then REVERTED (commit
+     * `42065cfd74dfd95916cc50cf4d324083585a9210`); the issue was reopened
+     * and remained unresolved upstream as of 2026-08-09, the date this was
+     * last checked.
+     *
+     * Empirically, on this build's toolchain, whether a given calling TU
+     * happens to dodge the bug -- by independently instantiating the same
+     * libc++ internals for some unrelated reason of its own, which sidesteps
+     * the merge-as-declaration defect entirely rather than depending on it
+     * being fixed -- is NOT reliable: assistant_service.cpp.o and
+     * mortgage_assistant_service.cpp.o happened to emit a real definition
+     * (both construct `std::jthread` workers directly, which independently
+     * instantiates this same `__stop_state` machinery); this task's own
+     * tests/test_inference_admission.cpp.o and
      * tests/test_inference_admission_pg.cpp.o did not, and failed to link
      * with "undefined reference to
      * std::__1::__atomic_unique_lock<...>::__set_locked_bit" as a result --
      * even though calculator_engine (whose much larger link graph
      * incidentally included an object that DID emit it) linked fine.
-     * Defined `[[gnu::used]]` so the optimizer cannot decide it is
-     * unreferenced and elide it -- see its out-of-line definition, right
-     * after `take_jobs` itself, which is the actual address-of that forces
-     * emission. Since inference_admission.cppm.o is part of EVERY target's
-     * link by construction, every target gets a reliable source for the
-     * symbol regardless of what any calling TU does on its own.
+     *
+     * THE FIX: since the bug is confirmed genuine and, as of this writing,
+     * unresolved upstream, this function is the correct mitigation, not a
+     * placeholder for a real one -- it removes the dependency on any calling
+     * TU's own luck entirely. Defined `[[gnu::used]]` so the optimizer
+     * cannot decide it is unreferenced and elide it -- see its out-of-line
+     * definition, right after `take_jobs` itself, which is the actual
+     * address-of that forces emission. Since inference_admission.cppm.o is
+     * part of EVERY target's link by construction, every target gets a
+     * reliable source for the symbol regardless of what any calling TU does
+     * on its own. Because `take_jobs` is ONE function containing both the
+     * `local`-mode `wait(...)` call and the postgres-mode `wait_for(...)`
+     * call, forcing emission of its whole body forces both call sites'
+     * internal instantiations together -- no second forcing function is
+     * needed for the `wait_for` overload used below.
+     *
+     * WHAT WOULD LET THIS BE REMOVED: once the upstream fix lands AND stays
+     * landed (is not reverted again) in a Clang release this project's
+     * canonical toolchain (`clang++-22`, `config/cpp_details.txt` rule 50)
+     * adopts, delete this function and its out-of-line address-of below, and
+     * confirm test_inference_admission/test_inference_admission_pg/
+     * calculator_engine/every other target that imports this module still
+     * link without it.
      */
     [[maybe_unused, gnu::used]] static auto force_take_jobs_symbol_emission() noexcept
         -> std::vector<PendingJob> (QueuedBackend::*)(std::stop_token, std::size_t, bool);
