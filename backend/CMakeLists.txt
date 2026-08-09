@@ -994,6 +994,50 @@ target_link_libraries(test_finance_service_validation PRIVATE proto_lib sensen_s
 
 add_test(NAME FinanceServiceValidationTest COMMAND test_finance_service_validation)
 
+# ---------------------------------------------------------------------------
+# Shared inference queue substrate (pg.cppm + inference_queue.cppm) -- the
+# Postgres-backed queue that will let more than one engine replica share the
+# two fine-tuned Qwen3-0.6B assistants as a pool of workers. This wave builds
+# and tests the substrate ONLY: neither module is added to calculator_engine's
+# FILE_SET or link line above, and neither is imported by finance_service.cpp/
+# finance_service.cppm or calculator_service.cpp/calculator_service.cppm --
+# grep confirms it, and this comment is the CMake side of keeping it that
+# way. Linking PostgreSQL::PostgreSQL only into the test target below, never
+# into calculator_engine, is what makes "the Finance RPCs are structurally
+# incapable of touching libpq" true of the BUILD, not just of the source
+# text. Wiring an actual caller and an actual worker onto this substrate is a
+# later, separate wave.
+#
+# libpq is a C API (see pg.cppm's own banner for why that means no libc++/
+# libstdc++ ABI concern), so find_package(PostgreSQL) here needs no special
+# handling for this otherwise-libc++ build -- unlike SGEE's own gated
+# SGEE_USE_POSTGRES path (external/SGEE/CMakeLists.txt ~692-699), this one is
+# unconditional: libpq-dev/libpq5 are already in the builder/runtime images
+# (Dockerfile:401,683) specifically in anticipation of this substrate.
+find_package(PostgreSQL REQUIRED)
+
+# sgee (not sensen_slim) for the same reason test_market_data_resilience links
+# it above: the only sensen-family module this needs is
+# sgee.runtime.resilience::CircuitBreaker, which is part of the standalone
+# SGEE library target, not the 271-module sensen closure.
+add_executable(test_inference_queue_pg
+    tests/test_inference_queue_pg.cpp
+    src/modules/inference_queue.cpp
+)
+target_sources(test_inference_queue_pg
+    PRIVATE
+    FILE_SET CXX_MODULES FILES
+        src/modules/pg.cppm
+        src/modules/inference_queue.cppm
+)
+target_link_libraries(test_inference_queue_pg PRIVATE PostgreSQL::PostgreSQL logger sgee)
+
+# Not registered via add_test(): this suite needs a real, reachable Postgres
+# (DATABASE_URL) and exercises real concurrency/timing (leases, sweeps, a
+# killed connection), which makes it a poor fit for an unconditional `ctest`
+# run on a machine that may have neither Postgres nor time to spare. Run it
+# directly: DATABASE_URL=postgresql://... ./test_inference_queue_pg
+
 # End-to-end smoke client. Verifies a running engine returns live data on all
 # three RPCs; used as the deploy gate.
 add_executable(smoke_client src/smoke_client.cpp)
