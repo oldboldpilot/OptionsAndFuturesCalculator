@@ -823,8 +823,6 @@ add_subdirectory(external/SGEE sgee EXCLUDE_FROM_ALL)
 
 # Include logging and bindings submodules
 # add_subdirectory(cpp23-logger EXCLUDE_FROM_ALL)
-# find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
-# add_subdirectory(nanobind EXCLUDE_FROM_ALL)
 
 # Core engine binary
 add_executable(calculator_engine src/main.cpp src/issue_key.cpp src/modules/calculator_service.cpp src/modules/finance_service.cpp src/modules/quota.cpp src/modules/api_key.cpp src/modules/assistant_service.cpp src/modules/mortgage_assistant_service.cpp src/modules/inference_queue.cpp src/modules/inference_admission.cpp)
@@ -836,14 +834,126 @@ target_link_libraries(calculator_engine PRIVATE proto_lib sensen_slim fastjson l
 # same target, so this does not need find_package() hoisted above this point.
 
 
-# Python Bindings via nanobind
-# nanobind_add_module(
-#     options_futures_engine
-#     src/modules/calculator_service.cppm
-#     src/modules/market_data.cppm
-#     src/bindings.cpp
-# )
-# target_link_libraries(options_futures_engine PRIVATE proto_lib sensen fastjson logger)
+# Python Bindings via nanobind, OFF by default.
+#
+# Two live production sites (optionsandfuturescalculator.com,
+# mortgagefvcalculator.com) are served by this same CMakeLists.txt through
+# `docker build -t options-backend backend/`, and that image build must not
+# suddenly acquire a hard Python3-development dependency it never needed
+# before. Gating the whole block behind an option, rather than putting
+# find_package(Python ... REQUIRED) at top level, is what keeps that true:
+# the option defaults OFF, so an ordinary configure -- including the
+# Dockerfile's -- never evaluates this branch at all.
+#
+# find_package(Python ... Development.Module ...), not Development: nanobind
+# 2.14's own nanobind-config.cmake (cmake/nanobind-config.cmake:4) asserts
+# `find_package(Python COMPONENTS Interpreter Development REQUIRED)` was
+# already called and reads Python_VERSION/Python_EXECUTABLE/Python_SOABI --
+# the unversioned FindPython module, not FindPython3. The full Development
+# component additionally requires a libpython*.so to link against, which a
+# Python built without --enable-shared does not ship and an extension module
+# does not need (CPython extension modules are loaded into an already-running
+# interpreter, not linked against one); Development.Module is nanobind's own
+# documented recommendation for exactly this reason and is enough to satisfy
+# nanobind-config.cmake's checks.
+#
+# The bindings target itself only needs market_data.cppm -- see bindings.cpp's
+# file banner for why calculator_service.cppm (gRPC-only exports) and
+# pricing_engine.cppm (test-only, not part of calculator_engine's own
+# FILE_SET) are not on this surface. market_data.cppm is compiled again here
+# as this target's own FILE_SET source rather than reused from
+# calculator_engine's build, the same way test_market_data_resilience below
+# already recompiles it into ITS own target: CMake's C++ module support
+# resolves a FILE_SET's BMI within the target that declares it, and sharing
+# one across targets is exactly the cross-target BMI reuse config/cpp_details.txt
+# rule 50 warns compiles-with-different-flags into a rejected PCM. Recompiling
+# it as a second, self-contained FILE_SET sidesteps that whole class of
+# failure at the cost of one extra compile of one file.
+#
+# Link line: fastjson, logger, httplib::httplib, OpenSSL::SSL/Crypto, sgee --
+# exactly what test_market_data_resilience links for the same module, and for
+# the same reason (see that target's own comment): proto_lib and sensen_slim
+# are calculator_service's and pricing_engine's dependencies respectively, and
+# market_data.cppm imports neither. The previous, commented-out version of
+# this block named `sensen` on this line; no target by that name exists in
+# this build -- sensen's own CMakeLists exports the curated subset actually
+# used here as `sensen_slim` -- and market_data.cppm does not need even that.
+# Named BUILD_ENGINE_PYTHON_BINDINGS, not BUILD_PYTHON_BINDINGS: sensen's own
+# CMakeLists.txt already defines an option by that exact name, and line ~406
+# above forces it to CACHE ... FORCE OFF before add_subdirectory(sensen ...)
+# to keep sensen from building its own bindings. FORCE means that set() wins
+# over anything else that touches the same cache variable -- an option()
+# here under the same name, or a -DBUILD_PYTHON_BINDINGS=ON on the configure
+# command line, would both be silently overwritten back to OFF by that FORCE,
+# and the mismatch would surface as nothing louder than a build that quietly
+# never enables this block. A different name sidesteps the collision instead
+# of relying on remembering the ordering next to it.
+option(BUILD_ENGINE_PYTHON_BINDINGS
+    "Build the nanobind Python bindings (options_futures_engine) for the market-data engine surface. OFF by default: the production container build must not acquire a Python3 development dependency."
+    OFF)
+
+if(BUILD_ENGINE_PYTHON_BINDINGS)
+    find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
+    add_subdirectory(nanobind EXCLUDE_FROM_ALL)
+
+    # PROTECT_STACK and NOMINSIZE: without them, nanobind_add_module's own
+    # Release-build defaults add -fno-stack-protector and -Os
+    # (nanobind-config.cmake's nanobind_disable_stack_protector/
+    # nanobind_opt_size) to THIS target -- which market_data.cppm's own
+    # FILE_SET compilation below is also part of, since FILE_SET sources
+    # inherit their owning target's compile options like any other source.
+    # market_data.cppm imports the fastjson/logger/sgee BMIs that
+    # calculator_engine already built under CANONICAL_FLAGS
+    # (-fstack-protector-strong -O3, config/cpp_details.txt rule 50), and
+    # clang's module-file-config-mismatch check rejects a PCM built with a
+    # different stack-protector mode or optimization level than the
+    # compilation trying to import it -- confirmed by hitting exactly that
+    # error ("stack protector mode differs in precompiled file ...
+    # fastjson.pcm") before these two flags were added. This is the answer to
+    # "does nanobind_add_module handle FILE_SET CXX_MODULES sources": it does,
+    # but only once its own opinionated Release-mode flags are turned off for
+    # any target that also imports a module compiled under this repo's
+    # canonical flags.
+    nanobind_add_module(
+        options_futures_engine
+        PROTECT_STACK
+        NOMINSIZE
+        src/bindings.cpp
+    )
+    target_sources(options_futures_engine
+        PRIVATE
+        FILE_SET CXX_MODULES FILES
+            src/modules/market_data.cppm
+    )
+    target_link_libraries(options_futures_engine PRIVATE fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto sgee)
+
+    # enable_testing() has not run yet at this point in the file -- it is
+    # called once, unconditionally, a little further down -- but add_test()
+    # only registers a test with whatever CTest state exists at generate
+    # time, so calling it here ahead of that line is fine; the CoreEngineTest
+    # and MarketDataResilienceTest registrations later in this file behave
+    # identically with respect to ordering, and depend on the same fact.
+    add_test(
+        NAME PythonBindingsTest
+        COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_python_bindings.py
+    )
+    # LD_PRELOAD=libjemalloc: fastjson (sensen/external/fastestjsoninthewest)
+    # links jemalloc (found via find_library(JEMALLOC_LIBRARY jemalloc), same
+    # cache variable reused here) and pulls it transitively into
+    # options_futures_engine. A normal executable links it at process start
+    # and reserves static TLS space for it up front; a Python extension
+    # module is dlopen()'d by the interpreter well after Python's own TLS
+    # layout is fixed, and jemalloc's arenas want initial-exec TLS -- so
+    # `import options_futures_engine` failed outright with "cannot allocate
+    # memory in static TLS block" until jemalloc was preloaded instead,
+    # which reserves its TLS slots before the interpreter (or anything it
+    # loads) claims the rest. Verified directly: the bare
+    # `python3 -c "import options_futures_engine"` reproduces the failure
+    # without this and succeeds with it.
+    set_tests_properties(PythonBindingsTest PROPERTIES
+        ENVIRONMENT "PYTHONPATH=$<TARGET_FILE_DIR:options_futures_engine>;LD_PRELOAD=${JEMALLOC_LIBRARY}"
+    )
+endif()
 
 # Setup testing
 enable_testing()
