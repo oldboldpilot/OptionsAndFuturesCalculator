@@ -56,3 +56,6 @@ agent/dataset/out/
 
 # Generated training datasets (regenerate deterministically with --seed)
 agent/dataset/data_mortgage/
+
+# Serena MCP language-server workspace (local analysis cache, per-machine)
+.serena/
