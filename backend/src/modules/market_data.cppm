@@ -317,7 +317,42 @@ export [[nodiscard]] auto fetch_with_resilience(const std::string& host_key,
         }
 
         last_error = result.error().code;
-        {
+
+        // Only a failure that indicates the UPSTREAM is unhealthy may count
+        // toward the circuit breaker: a dropped connection/timeout, or an
+        // HTTP 429/5xx. A 4xx client error (404 unknown symbol, 401/403 bad
+        // credentials, ...) means the provider answered correctly -- the
+        // REQUEST was wrong, not the service -- so it must never push this
+        // shared, process-wide breaker toward Open. Five anonymous callers
+        // requesting five nonexistent symbols must not take market data
+        // down for every other caller for the cooldown period; that is a
+        // denial-of-service lever wearing a resilience mechanism's clothes,
+        // not resilience.
+        //
+        // `retryable` already encodes exactly this distinction (see
+        // FetchAttemptError's doc comment above): it is true precisely for
+        // the transient/server-side conditions that are evidence of
+        // upstream unhealth, and false for the deterministic client-side
+        // ones that are not. Reusing it here, instead of inventing a
+        // second predicate, keeps "should this be retried" and "should
+        // this count as upstream unhealth" from silently drifting apart --
+        // they describe the same underlying question (is this the
+        // provider's fault or the request's?) and this codebase's failure
+        // taxonomy already answers it once, in get_text().
+        //
+        // 401/403 deliberately falls on the "do not count" side too, even
+        // though it IS our fault (a misconfigured/rotated credential), not
+        // the request's. Two reasons: (1) the fix is rotating the
+        // credential, not retrying or tripping a breaker -- Alpaca is
+        // healthy and correctly rejecting us, so nothing about "upstream is
+        // sick" is true here; (2) it already fails fast and loudly on every
+        // single call that uses it, via the non-retryable short-circuit
+        // below -- tripping the SHARED breaker on top of that would widen
+        // the blast radius from "this credential is wrong" to "market data
+        // is down for every symbol and every caller", which is a stranger
+        // and more damaging way to surface a config error than simply
+        // refusing the calls that actually depend on it.
+        if (result.error().retryable) {
             const std::lock_guard lock{guard.mutex};
             guard.breaker.on_failure(steady_now_ms());
         }
