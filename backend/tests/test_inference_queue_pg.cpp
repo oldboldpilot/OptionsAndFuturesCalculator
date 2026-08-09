@@ -304,12 +304,26 @@ auto main() -> int {
 
         check(awaited1.has_value() && awaited1->state == JobState::Done,
               "await_result() observes the completion with the pump running");
-        check(elapsed1 < 200ms,
+        // NOTE: deliberately no absolute upper bound here. The obvious
+        // assertion -- elapsed1 < 200ms -- passes against a local Postgres and
+        // FAILS against the real Railway database, where the WAN hop puts the
+        // same correct behaviour at 202-236ms. That is not a defect: the
+        // completer sleeps 60ms and then complete() and the NOTIFY delivery
+        // each cost a round trip, so elapsed1 is 60ms + O(RTT) by
+        // construction. A constant tuned on loopback silently encodes "the
+        // database is 1ms away" as a correctness requirement.
+        //
+        // What the test actually wants to prove is RELATIVE: the NOTIFY hint
+        // woke the waiter EARLY, rather than it merely surviving to the next
+        // 250ms poll tick. The suppressed-notify case below measures exactly
+        // that same work over the same link, so the comparison is made there
+        // (see elapsed2) and cancels the round trip out of both sides.
+        check(elapsed1 >= 60ms,
               "await_result() returned in " +
                   std::to_string(
                       std::chrono::duration_cast<std::chrono::milliseconds>(elapsed1).count()) +
-                  "ms, well under one 250ms poll_interval -- the NOTIFY hint woke it early "
-                  "rather than it merely surviving to the next poll tick");
+                  "ms, at least the completer's own 60ms delay -- it did not return early by "
+                  "accident");
 
         queue.stop_notify_pump();
 
@@ -339,6 +353,34 @@ auto main() -> int {
         check(elapsed2 >= 60ms,
               "this run took at least as long as the completer's own delay (sanity: it did not "
               "return instantly by accident)");
+
+        // THE discriminating assertion, and the reason the absolute bound above
+        // was dropped. Both runs did identical work over the identical link --
+        // same completer delay, same complete() round trip, same await. The
+        // ONLY difference is whether the NOTIFY pump was running. So whatever
+        // the network latency is, it is present in both and subtracts out.
+        //
+        // With the pump: woken by NOTIFY at ~60ms + RTT.
+        // Without it:    woken by the next 250ms poll tick after the 60ms mark,
+        //                i.e. ~250ms + RTT.
+        // The gap is therefore ~150ms+ and is a property of the poll interval,
+        // not of the link. 100ms is the floor to leave room for scheduling
+        // jitter without letting a regression through: if NOTIFY ever stops
+        // waking the waiter, both paths fall back to the poll tick, the gap
+        // collapses toward zero, and this fails.
+        const auto notify_saving = elapsed2 - elapsed1;
+        check(notify_saving > 100ms,
+              "the NOTIFY pump saved " +
+                  std::to_string(
+                      std::chrono::duration_cast<std::chrono::milliseconds>(notify_saving).count()) +
+                  "ms against the poll-only path (" +
+                  std::to_string(
+                      std::chrono::duration_cast<std::chrono::milliseconds>(elapsed1).count()) +
+                  "ms vs " +
+                  std::to_string(
+                      std::chrono::duration_cast<std::chrono::milliseconds>(elapsed2).count()) +
+                  "ms) -- the hint genuinely woke it early, measured relative to the same link "
+                  "rather than against a constant tuned for loopback");
     }
 
     // -----------------------------------------------------------------
