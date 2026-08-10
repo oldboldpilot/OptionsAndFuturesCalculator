@@ -162,13 +162,45 @@ for f in "${CHANGED_FILES[@]}"; do
     esac
 done
 
-RAW_NEW="$(scan_raw_new "${CHANGED_CPP_FILES[@]+"${CHANGED_CPP_FILES[@]}"}")"
+# Gate on ADDED LINES, not whole changed files.
+#
+# The comment above says a pre-commit gate "should judge what is being
+# committed, not flag pre-existing code the diff never touches" -- and then
+# scanned entire files, which does the opposite. On 2026-08-10 that rejected a
+# fully-verified prefix-cache commit because mortgage_assistant_service.cpp
+# contains a pre-existing `new SensenBackend(...)` the diff never went near.
+#
+# That failure mode matters more than it sounds: a gate that blocks correct
+# work over unrelated existing debt is a gate people learn to bypass, and a
+# bypassed gate protects nothing. Scanning the diff's own '+' lines gates
+# exactly what the author wrote and nothing else. The full-tree count below
+# still reports the pre-existing sites, informationally.
+ADDED_CPP_LINES="$WORKDIR/added_cpp.txt"
+awk '
+  /^\+\+\+ b\// { f = substr($0, 7); next }
+  /^\+/ && !/^\+\+\+/ {
+      if (f ~ /\.(cpp|cc|cxx|h|hpp|hh|cppm|ixx)$/ &&
+          (f ~ /^backend\/src\// || f ~ /^backend\/tests\// || f ~ /^frontend\/src\//)) {
+          print f "\t" substr($0, 2)
+      }
+  }
+' "$WORKDIR/diff.patch" > "$ADDED_CPP_LINES" 2>/dev/null || true
+
+RAW_NEW="$(awk -F'\t' '
+  {
+    line = $2
+    sub(/\/\/.*/, "", line)
+    if (line ~ /new[ \t]+[A-Za-z_][A-Za-z0-9_:<>]*[ \t]*[(\[]/) print "  " $1 ": " $2
+  }
+' "$ADDED_CPP_LINES" 2>/dev/null | grep -v NOLINT || true)"
+
+ADDED_LINE_COUNT=$(wc -l < "$ADDED_CPP_LINES" 2>/dev/null | tr -d ' ')
 if [[ -n "$RAW_NEW" ]]; then
-    echo "  [REJECT] Check 1: raw 'new' allocation in changed code:"
+    echo "  [REJECT] Check 1: raw 'new' allocation on lines this diff ADDS:"
     echo "$RAW_NEW" | sed 's/^/    /'
     ERRORS=$((ERRORS + 1))
 else
-    echo "  [PASS] Check 1: no raw 'new' allocation in changed C++ files (${#CHANGED_CPP_FILES[@]} scanned)."
+    echo "  [PASS] Check 1: no raw 'new' allocation among the ${ADDED_LINE_COUNT:-0} C++ line(s) this diff adds."
 fi
 
 FULLTREE_FILES=()
