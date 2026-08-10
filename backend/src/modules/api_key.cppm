@@ -69,6 +69,27 @@ struct Identity {
     bool authenticated = false;
 
     /**
+     * WHY authentication did not produce a Pro identity -- distinct from
+     * `authenticated`/`tier`, which only say WHAT the caller ended up as.
+     *
+     * This is what lets a downstream entitlement gate tell a caller with a
+     * malformed key apart from one who sent no key at all: both resolve to
+     * the same unauthenticated, free-tier `Identity`, but only one of them
+     * has a key to fix. Carried on `Identity` rather than threaded through as
+     * a second out-parameter because every call site already plumbs one
+     * `Identity` from `authenticate()`/`check()` to the entitlement check a
+     * few lines later (see calculator_service.cpp, assistant_service.cpp,
+     * mortgage_assistant_service.cpp) -- adding a field costs nothing extra
+     * on that path, where a second parameter would have to be threaded
+     * through each of them by hand.
+     *
+     * Defaults to `Ok` so a hand-built `Identity` (tests, or a call site that
+     * never touches the registry) reads as "nothing went wrong" rather than
+     * as some other outcome that never happened.
+     */
+    Outcome outcome = Outcome::Ok;
+
+    /**
      * Limits carried by the KEY itself, overriding whatever its tier says.
      *
      * A tier is the right unit when many customers share a shape ("free",
@@ -267,8 +288,16 @@ enum class GateMode : std::uint8_t { Off, Warn, Enforce };
  *
  * Single-leg positions -- a plain long call or put -- stay free. Anything the
  * caller had to combine (spreads, straddles, condors, butterflies) is the paid
- * feature. Returns OK when allowed, PERMISSION_DENIED with an upgrade message
- * when not, and always OK while the gate is Off or Warn.
+ * feature. Returns OK when allowed, PERMISSION_DENIED when not, and always OK
+ * while the gate is Off or Warn.
+ *
+ * The PERMISSION_DENIED message is chosen from `identity.outcome`: a
+ * malformed, unknown, or revoked key gets a message that names THAT problem
+ * -- not the generic "this is a Pro feature" line, which is reserved for a
+ * caller who sent no key, or a well-formed key that is simply free-tier. See
+ * check_assistant_entitlement's doc comment for the incident that motivated
+ * this (mortgagefvcalculator.com read a rejected key SHAPE as an entitlement
+ * refusal because both looked identical on the wire).
  */
 [[nodiscard]] auto check_strategy_entitlement(const Identity& identity, int leg_count)
     -> grpc::Status;
@@ -294,6 +323,21 @@ enum class GateMode : std::uint8_t { Off, Warn, Enforce };
  * Same Off/Warn/Enforce semantics as `check_strategy_entitlement`: OK while
  * the gate is Off, OK-but-logged while Warn, PERMISSION_DENIED under Enforce
  * for a non-Pro identity.
+ *
+ * The message is chosen from `identity.outcome`, not just `identity.tier`:
+ * `KeyRegistry::authenticate()` resolves a malformed, unknown, or revoked key
+ * down to the SAME free, unauthenticated `Identity` as a caller who sent no
+ * key at all, so `is_pro(identity)` alone cannot tell them apart. That
+ * collapse is exactly what turned a shape rejection into hours of a live
+ * partner integration (mortgagefvcalculator.com) chasing an entitlement bug:
+ * production logs showed 206 requests refused with `outcome=malformed`
+ * against 4 with `outcome=no-key` and zero authenticated, all answered with
+ * the same "is a Pro feature" text -- true of the 4, misleading for the 206,
+ * whose actual problem was a key that failed the `pk_live_`/`sk_live_` + 43
+ * character shape check in `api_key.cpp` before ever reaching the registry.
+ * `surface.malformed_message` / `.unknown_message` / `.revoked_message` name
+ * that distinction; `surface.message` is unchanged and still covers NoKey and
+ * a well-formed free-tier identity, which genuinely are the same story.
  */
 /**
  * Names the calling surface, so a refusal describes the site the caller is
@@ -311,20 +355,46 @@ enum class GateMode : std::uint8_t { Off, Warn, Enforce };
  */
 struct AssistantSurface {
     std::string_view rpc;      // e.g. "ParseStrategy" -- for the log line
-    std::string_view message;  // the WHOLE refusal, not a fragment to splice
+    std::string_view message;  // the WHOLE refusal for NoKey / a well-formed free identity
+
+    // Three more WHOLE refusals, one per auth-side `Outcome` that means "this
+    // is not an entitlement problem, it is a key problem" -- see
+    // check_assistant_entitlement's own doc comment for why these three, and
+    // only these three, get their own text instead of falling back to
+    // `message`. Each is a complete sentence for the same reason `message`
+    // is: see the comment below this struct.
+    std::string_view malformed_message;
+    std::string_view unknown_message;
+    std::string_view revoked_message;
 };
 
-// The message is stored whole rather than assembled from a template and a
-// couple of clauses. The templated version lasted one deploy: the template's
-// own "--" collided with an em-dash inside the mortgage clause and pushed the
-// upgrade offer out behind a subordinate clause, producing a sentence no one
-// would have written on purpose. Two complete sentences cost a few duplicated
-// words and cannot come out ungrammatical.
+// Every *_message field below is stored whole rather than assembled from a
+// template and a couple of clauses. The templated version lasted one deploy:
+// the template's own "--" collided with an em-dash inside the mortgage clause
+// and pushed the upgrade offer out behind a subordinate clause, producing a
+// sentence no one would have written on purpose. Complete sentences cost a
+// few duplicated words across the two surfaces and cannot come out
+// ungrammatical.
 inline constexpr AssistantSurface kStrategySurface{
     .rpc = "ParseStrategy",
     .message = "The natural-language strategy assistant is a Pro feature. The calculator "
                "itself remains free -- build your strategy manually with the symbol and "
-               "strategy selectors, or upgrade for assisted parsing."};
+               "strategy selectors, or upgrade for assisted parsing.",
+    .malformed_message =
+        "The API key on this request is malformed, not just unentitled. A key must start "
+        "with `pk_live_` or `sk_live_` followed by 43 characters, 51 in total, and this one "
+        "does not match that shape -- check for a copy-paste error. The calculator itself "
+        "remains free in the meantime: build your strategy manually with the symbol and "
+        "strategy selectors.",
+    .unknown_message =
+        "The API key on this request is well-formed but does not match any key on record. "
+        "Check that it was copied in full, or upgrade for a new one. The calculator itself "
+        "remains free in the meantime: build your strategy manually with the symbol and "
+        "strategy selectors.",
+    .revoked_message =
+        "The API key on this request has been revoked and can no longer authenticate. "
+        "Contact support for a replacement. The calculator itself remains free in the "
+        "meantime: build your strategy manually with the symbol and strategy selectors."};
 
 // Names the Finance service, because that is genuinely what this caller wants
 // and it is free: the assistant only ever SELECTS a Finance operation and fills
@@ -333,7 +403,22 @@ inline constexpr AssistantSurface kMortgageSurface{
     .rpc = "ParseOperation",
     .message = "The natural-language mortgage assistant is a Pro feature. The calculations "
                "themselves remain free: call the sensen.finance.Finance operation you want "
-               "directly, or upgrade to have it chosen and filled in for you."};
+               "directly, or upgrade to have it chosen and filled in for you.",
+    .malformed_message =
+        "The API key on this request is malformed, not just unentitled. A key must start "
+        "with `pk_live_` or `sk_live_` followed by 43 characters, 51 in total, and this one "
+        "does not match that shape -- check for a copy-paste error. The calculations "
+        "themselves remain free in the meantime: call the sensen.finance.Finance operation "
+        "you want directly.",
+    .unknown_message =
+        "The API key on this request is well-formed but does not match any key on record. "
+        "Check that it was copied in full, or upgrade for a new one. The calculations "
+        "themselves remain free in the meantime: call the sensen.finance.Finance operation "
+        "you want directly.",
+    .revoked_message =
+        "The API key on this request has been revoked and can no longer authenticate. "
+        "Contact support for a replacement. The calculations themselves remain free in the "
+        "meantime: call the sensen.finance.Finance operation you want directly."};
 
 [[nodiscard]] auto check_assistant_entitlement(const Identity& identity,
                                                const AssistantSurface& surface) -> grpc::Status;

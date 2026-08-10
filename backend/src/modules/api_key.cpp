@@ -402,6 +402,46 @@ auto is_pro(const Identity& identity) noexcept -> bool {
     return identity.tier == "pro" || identity.tier == "partner";
 }
 
+namespace {
+
+/**
+ * The `identity.outcome`-specific clause for check_strategy_entitlement's
+ * refusal, or empty for the outcomes that keep the original generic
+ * "Multi-leg strategies are a Pro feature" text (NoKey, and a well-formed but
+ * non-Pro identity -- genuinely the same story: nothing is wrong with what
+ * the caller sent, they simply are not entitled).
+ *
+ * Whole sentences, not fragments -- see api_key.cppm's comment on
+ * AssistantSurface's *_message fields for why a templated composition is not
+ * an option here (it broke grammar in production once already). This gate
+ * has no per-surface AssistantSurface to hang alternates off, hence a local
+ * switch rather than a struct field, but the same rule applies: each string
+ * below reads correctly on its own, with only the trailing leg count appended
+ * as plain, unambiguous data.
+ */
+[[nodiscard]] auto strategy_outcome_clause(Outcome outcome) noexcept -> std::string_view {
+    switch (outcome) {
+        case Outcome::Malformed:
+            return "The API key on this request is malformed, not just unentitled. A key must "
+                   "start with `pk_live_` or `sk_live_` followed by 43 characters, 51 in total, "
+                   "and this one does not match that shape -- check for a copy-paste error. "
+                   "Single-leg calls and puts remain free in the meantime.";
+        case Outcome::Unknown:
+            return "The API key on this request is well-formed but does not match any key on "
+                   "record. Check that it was copied in full, or upgrade for a new one. "
+                   "Single-leg calls and puts remain free in the meantime.";
+        case Outcome::Revoked:
+            return "The API key on this request has been revoked and can no longer "
+                   "authenticate. Contact support for a replacement. Single-leg calls and puts "
+                   "remain free in the meantime.";
+        default:
+            return "Multi-leg strategies are a Pro feature. Single-leg calls and puts remain "
+                   "free.";
+    }
+}
+
+}  // namespace
+
 auto check_strategy_entitlement(const Identity& identity, int leg_count) -> grpc::Status {
     const auto mode = pro_gate_mode();
     if (mode == GateMode::Off) return grpc::Status::OK;
@@ -412,19 +452,40 @@ auto check_strategy_entitlement(const Identity& identity, int leg_count) -> grpc
     const std::string who = identity.id.empty() ? "<anonymous>" : identity.id;
 
     if (mode == GateMode::Warn) {
-        log.error("pro-gate would-deny: key={} legs={} tier={}", who, leg_count,
-                  identity.tier.empty() ? "free" : identity.tier);
+        log.error("pro-gate would-deny: key={} legs={} tier={} auth={}", who, leg_count,
+                  identity.tier.empty() ? "free" : identity.tier, to_string(identity.outcome));
         return grpc::Status::OK;
     }
 
-    log.info("pro-gate deny: key={} legs={} tier={}", who, leg_count,
-             identity.tier.empty() ? "free" : identity.tier);
+    log.info("pro-gate deny: key={} legs={} tier={} auth={}", who, leg_count,
+             identity.tier.empty() ? "free" : identity.tier, to_string(identity.outcome));
     return grpc::Status(
         grpc::StatusCode::PERMISSION_DENIED,
-        "Multi-leg strategies are a Pro feature. Single-leg calls and puts remain free. "
-        "This position has " +
+        std::string{strategy_outcome_clause(identity.outcome)} + " This position has " +
             std::to_string(leg_count) + " legs.");
 }
+
+namespace {
+
+/**
+ * Picks the WHOLE message for this surface and outcome. Malformed, Unknown
+ * and Revoked each get the surface's own dedicated sentence; every other
+ * outcome (NoKey, or a well-formed identity that is simply free-tier) falls
+ * back to `surface.message` -- the original, unchanged "is a Pro feature"
+ * text, because those two genuinely are the same story: nothing is wrong
+ * with what the caller sent.
+ */
+[[nodiscard]] auto assistant_outcome_message(const AssistantSurface& surface,
+                                             Outcome outcome) noexcept -> std::string_view {
+    switch (outcome) {
+        case Outcome::Malformed: return surface.malformed_message;
+        case Outcome::Unknown: return surface.unknown_message;
+        case Outcome::Revoked: return surface.revoked_message;
+        default: return surface.message;
+    }
+}
+
+}  // namespace
 
 auto check_assistant_entitlement(const Identity& identity, const AssistantSurface& surface)
     -> grpc::Status {
@@ -436,14 +497,15 @@ auto check_assistant_entitlement(const Identity& identity, const AssistantSurfac
     const std::string who = identity.id.empty() ? "<anonymous>" : identity.id;
 
     if (mode == GateMode::Warn) {
-        log.error("pro-gate would-deny: key={} rpc={} tier={}", who, surface.rpc,
-                  identity.tier.empty() ? "free" : identity.tier);
+        log.error("pro-gate would-deny: key={} rpc={} tier={} auth={}", who, surface.rpc,
+                  identity.tier.empty() ? "free" : identity.tier, to_string(identity.outcome));
         return grpc::Status::OK;
     }
 
-    log.info("pro-gate deny: key={} rpc={} tier={}", who, surface.rpc,
-             identity.tier.empty() ? "free" : identity.tier);
-    return grpc::Status(grpc::StatusCode::PERMISSION_DENIED, std::string{surface.message});
+    log.info("pro-gate deny: key={} rpc={} tier={} auth={}", who, surface.rpc,
+             identity.tier.empty() ? "free" : identity.tier, to_string(identity.outcome));
+    return grpc::Status(grpc::StatusCode::PERMISSION_DENIED,
+                        std::string{assistant_outcome_message(surface, identity.outcome)});
 }
 
 class KeyRegistry::Impl {
@@ -598,9 +660,27 @@ class KeyRegistry::Impl {
      * refused before it costs anything: shape before hash, hash before
      * binding. Step 2 is what keeps step 3 cheap under a probing attack -- a
      * malformed key never reaches SHA-512 at all.
+     *
+     * Thin wrapper around check_impl(): every one of check_impl()'s several
+     * early returns sets `r.outcome` but leaves `r.identity` at whatever it
+     * built along the way (default-constructed for most refusals). Mirroring
+     * `outcome` onto `r.identity.outcome` in exactly one place here -- rather
+     * than at each of check_impl()'s returns -- is what lets a downstream
+     * entitlement gate (check_assistant_entitlement,
+     * check_strategy_entitlement) recover WHY an identity is not Pro from the
+     * `Identity` alone, without a second out-parameter threaded through every
+     * call site. One extra field copy on a value already being returned by
+     * value; not measurable against the SHA-512/CRYPTO_memcmp work above it.
      */
     [[nodiscard]] auto check(std::string_view key, std::string_view origin,
                              std::string_view service) const -> AuthResult {
+        auto r = check_impl(key, origin, service);
+        r.identity.outcome = r.outcome;
+        return r;
+    }
+
+    [[nodiscard]] auto check_impl(std::string_view key, std::string_view origin,
+                                  std::string_view service) const -> AuthResult {
         AuthResult r;
 
         // A subscription licence is SIGNED, not registered, so it is checked

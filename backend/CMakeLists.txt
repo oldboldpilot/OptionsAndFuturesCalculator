@@ -1147,6 +1147,34 @@ target_link_libraries(test_calculator_service PRIVATE proto_lib sensen_slim fast
 
 add_test(NAME CalculatorServiceTest COMMAND test_calculator_service)
 
+# Unit coverage for the entitlement gate itself (check_strategy_entitlement /
+# check_assistant_entitlement) discriminating WHY an identity is not Pro --
+# malformed key vs unknown key vs revoked key vs no key at all vs a genuinely
+# free-tier identity -- rather than collapsing all of them into the same "is
+# a Pro feature" message. See tests/test_api_key_entitlement.cpp's own header
+# for the mortgagefvcalculator.com incident this fixes.
+#
+# Deliberately proto- and gRPC-service-free, unlike the three targets above:
+# the gate functions under test take an Identity directly and return a
+# grpc::Status with no I/O, so this needs only api_key.cppm/.cpp (for
+# fastjson-backed FINANCE_API_KEYS parsing and OpenSSL-backed hashing, even
+# though this file's hand-built Identity values never reach KeyRegistry) and
+# grpc++ (for grpc::Status/StatusCode, which api_key.cppm's own interface
+# exposes) -- not proto_lib, not sensen_slim, not quota.cppm, none of which
+# the gate touches.
+add_executable(test_api_key_entitlement
+    tests/test_api_key_entitlement.cpp
+    src/modules/api_key.cpp
+)
+target_sources(test_api_key_entitlement
+    PRIVATE
+    FILE_SET CXX_MODULES FILES
+        src/modules/api_key.cppm
+)
+target_link_libraries(test_api_key_entitlement PRIVATE grpc++ fastjson logger OpenSSL::SSL OpenSSL::Crypto)
+
+add_test(NAME ApiKeyEntitlementTest COMMAND test_api_key_entitlement)
+
 # ---------------------------------------------------------------------------
 # Shared inference queue substrate (pg.cppm + inference_queue.cppm), and the
 # admission layer built on top of it (inference_admission.cppm) -- the
