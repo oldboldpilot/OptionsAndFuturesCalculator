@@ -106,6 +106,43 @@ auto job_state_from_string(std::string_view s) noexcept -> std::optional<JobStat
 Queue::Queue(std::shared_ptr<pg::Pool> pool, Config config)
     : pool_(std::move(pool)), config_(std::move(config)) {}
 
+Queue::~Queue() { stop_sweep_ticker(); }
+
+auto Queue::start_sweep_ticker() -> void {
+    // Replace any already-running ticker cleanly rather than leaking a
+    // second thread alongside it -- see this method's own doc.
+    stop_sweep_ticker();
+
+    {
+        const std::lock_guard lock{sweep_mu_};
+        sweep_stop_ = false;
+    }
+    sweep_thread_ = std::thread([this] {
+        std::unique_lock lock{sweep_mu_};
+        while (!sweep_stop_) {
+            lock.unlock();
+            // Errors from sweep_once() (a transient Postgres outage, a
+            // circuit briefly open) are deliberately swallowed here, exactly
+            // as a failed tick simply not happening -- the next tick tries
+            // again. There is no caller here to report the error TO: this
+            // thread has no RPC in flight, and a sweep that could not run
+            // this time is not a reason to stop trying on the next tick.
+            static_cast<void>(sweep_once());
+            lock.lock();
+            sweep_cv_.wait_for(lock, config_.sweep_interval, [this] { return sweep_stop_; });
+        }
+    });
+}
+
+auto Queue::stop_sweep_ticker() noexcept -> void {
+    {
+        const std::lock_guard lock{sweep_mu_};
+        sweep_stop_ = true;
+    }
+    sweep_cv_.notify_all();
+    if (sweep_thread_.joinable()) sweep_thread_.join();
+}
+
 auto Queue::start_notify_pump() -> std::expected<void, SubmitError> {
     auto result = pool_->start_listen_pump(
         {std::string(kNotifyChannel)},

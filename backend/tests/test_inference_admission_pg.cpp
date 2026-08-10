@@ -43,6 +43,8 @@
 #include <stop_token>
 #include <string>
 #include <thread>
+#include <sys/wait.h>
+#include <unistd.h>
 
 import pg;
 import inference_queue;
@@ -120,6 +122,22 @@ auto reset_db(pg::Connection& admin) -> void {
     return std::string{res->text(0, 0)};
 }
 
+/** `lease_owner` is set ONLY by Queue::lease()'s own UPDATE -- never by
+ *  PostgresAdmission's fallback path, which calls the wrapped local
+ *  backend directly and never touches inference_jobs at all. A non-null
+ *  lease_owner on a `done` row is therefore direct, unambiguous proof that
+ *  a real lease() call served the request, independent of anything the
+ *  decode text itself says (which two backends sharing one process can tag
+ *  identically -- see the "single-process production wiring" section
+ *  below for exactly that case). */
+[[nodiscard]] auto row_owner(pg::Connection& admin, std::int64_t id) -> std::optional<std::string> {
+    std::array<std::optional<std::string>, 1> params{std::to_string(id)};
+    auto res = admin.exec_params("SELECT lease_owner FROM inference_jobs WHERE id = $1::bigint",
+                                   params);
+    if (!res || res->rows() == 0 || res->is_null(0, 0)) return std::nullopt;
+    return std::string{res->text(0, 0)};
+}
+
 auto force_expire_lease(pg::Connection& admin, std::int64_t id) -> void {
     std::array<std::optional<std::string>, 1> params{std::to_string(id)};
     auto res = admin.exec_params(
@@ -157,7 +175,16 @@ class LocalStubBackend final : public InferenceBackend {
  *  submission or -- the case this suite actually exercises -- from a
  *  PostgresLeaseSource fill(). No gate: always runs immediately, since these
  *  tests care about the cross-worker/fencing protocol, not fine-grained
- *  admission-queue timing (that is test_inference_admission.cpp's job). */
+ *  admission-queue timing (that is test_inference_admission.cpp's job).
+ *
+ *  Deliberately does NOT start its owner thread in the constructor -- every
+ *  section below that installs a lease source calls set_lease_source() THEN
+ *  start(), mirroring the exact order assistant_service.cpp/mortgage_
+ *  assistant_service.cpp's Worker constructors now enforce (see
+ *  QueuedBackend::start()'s own doc in inference_admission.cppm for the
+ *  startup race that order exists to make impossible). Starting eagerly here
+ *  is exactly the bug this task's own regression test (below) exists to
+ *  catch. */
 class MockDecodeBackend final : public QueuedBackend {
   public:
     /** `decode_delay` is 0 for the cross-worker/fallback sections (fast is
@@ -170,15 +197,20 @@ class MockDecodeBackend final : public QueuedBackend {
         : QueuedBackend("mock decode backend shutting down"), decode_delay_(decode_delay) {
         max_concurrent_ = max_concurrent;
         max_queue_depth_ = 8;
-        worker_ = std::jthread([this](std::stop_token st) { run(st); });
     }
     ~MockDecodeBackend() override {
-        worker_.request_stop();
-        worker_.join();
+        if (worker_.joinable()) {
+            worker_.request_stop();
+            worker_.join();
+        }
         drain_and_fail("mock decode backend shutting down");
     }
 
     [[nodiscard]] auto name() const noexcept -> std::string_view override { return "mock-decode"; }
+
+    auto start() -> void override {
+        worker_ = std::jthread([this](std::stop_token st) { run(st); });
+    }
 
   private:
     auto run(std::stop_token st) -> void {
@@ -231,6 +263,10 @@ auto main() -> int {
         auto lease_source_b = std::make_shared<PostgresLeaseSource>(
             queue_b, inference_queue::Surface::Strategy, "worker-B");
         backend_b.set_lease_source(lease_source_b);
+        // start() AFTER set_lease_source(), never before -- see
+        // MockDecodeBackend's own class banner and QueuedBackend::start()'s
+        // doc for why the order is load-bearing, not stylistic.
+        backend_b.start();
 
         std::optional<InferenceOutcome> result;
         std::thread submitter([&] { result = admission_a.submit("hello-cross-worker"); });
@@ -242,6 +278,194 @@ auto main() -> int {
               "the result is replica B's decode ('leased:hello-cross-worker'), NOT replica A's "
               "local fallback -- proving the job crossed from A to B through the shared queue, "
               "not through PostgresAdmission's own degrade path");
+    }
+
+    // -----------------------------------------------------------------
+    section("Cross-PROCESS hand-off: job submitted by process A is served by a GENUINELY "
+            "SEPARATE process B (fork(), not merely two objects in one process)");
+    {
+        reset_db(admin);
+
+        // No other threads are alive in this process at this point -- every
+        // earlier section's backend/worker threads have already been joined
+        // by their own destructors on scope exit -- so fork() here is safe:
+        // the child inherits a single-threaded, consistent copy of this
+        // process's state. The child never touches `admin` (the parent's own
+        // already-open connection); it opens its own fresh connections after
+        // forking, the same safe pattern any libpq + fork() program follows.
+        const pid_t pid = fork();
+        if (pid < 0) {
+            std::printf("FATAL: fork() failed\n");
+            std::exit(1);
+        }
+        if (pid == 0) {
+            // ---- Child: replica B, lease + decode only, in its own process.
+            auto queue_b = make_queue("admission_test_fork_child");
+            MockDecodeBackend backend_b;
+            auto lease_source_b = std::make_shared<PostgresLeaseSource>(
+                queue_b, inference_queue::Surface::Strategy, "fork-child-worker");
+            backend_b.set_lease_source(lease_source_b);
+            backend_b.start();
+
+            // Serve for up to 5s -- long enough for the parent to submit and
+            // observe completion -- then exit unconditionally. _Exit (not
+            // exit) skips static destructors and atexit handlers: this
+            // child shares fd's with the parent (stdout, the inherited-but-
+            // unused `admin` socket) that a normal exit's teardown could
+            // otherwise disturb.
+            std::this_thread::sleep_for(5000ms);
+            std::_Exit(0);
+        }
+
+        // ---- Parent: replica A, submit-only, via PostgresAdmission wrapping
+        // a stub local backend that must NEVER answer if the cross-process
+        // path works -- exactly the same discriminating trick as the
+        // single-process hand-off section above, just across a real process
+        // boundary this time.
+        auto queue_a = make_queue("admission_test_fork_parent");
+        LocalStubBackend local_a{"LOCAL_FALLBACK"};
+        PostgresAdmission admission_a{queue_a, inference_queue::Surface::Strategy, local_a, 8000ms};
+
+        auto result = admission_a.submit("hello-from-another-process");
+
+        int status = 0;
+        waitpid(pid, &status, 0);
+
+        check(result.has_value() && result->ok,
+              "the parent process's submit() returned a successful InferenceOutcome");
+        check(result.has_value() && result->ok &&
+                  result->text == "leased:hello-from-another-process",
+              "the result is the CHILD PROCESS's decode ('leased:hello-from-another-process'), "
+              "NOT the parent's own LOCAL_FALLBACK stub -- proving the job crossed a real OS "
+              "process boundary through Postgres, the cross-process property this whole feature "
+              "exists for");
+    }
+
+    // -----------------------------------------------------------------
+    section("Production wiring shape: PostgresAdmission wraps the SAME backend that also leases "
+            "from Postgres (exactly assistant_service.cpp/mortgage_assistant_service.cpp's own "
+            "Worker classes) -- job served via PG, fallback proven NOT to have fired");
+    {
+        reset_db(admin);
+        auto queue = make_queue("admission_test_same_object");
+
+        MockDecodeBackend backend;
+        auto lease_source = std::make_shared<PostgresLeaseSource>(
+            queue, inference_queue::Surface::Strategy, "same-object-worker");
+        backend.set_lease_source(lease_source);
+        backend.start();  // correct order, exactly like the real Worker constructors
+
+        // The SAME object is both the lease source's decode target AND
+        // PostgresAdmission's local fallback -- because both tag results
+        // "leased:..." regardless of which internal path fed them, text
+        // alone cannot tell "served by leasing from Postgres" apart from
+        // "served by PostgresAdmission's fallback calling backend.submit()
+        // directly" here. The row's own `lease_owner` column can: it is set
+        // ONLY by Queue::lease(), never touched by the fallback path -- see
+        // row_owner()'s own doc.
+        PostgresAdmission admission{queue, inference_queue::Surface::Strategy, backend, 8000ms};
+
+        const auto t0 = std::chrono::steady_clock::now();
+        auto result = admission.submit("same-object-request");
+        const auto elapsed = std::chrono::steady_clock::now() - t0;
+
+        check(result.has_value() && result->ok, "submit() returned a successful outcome");
+        check(elapsed < 2000ms,
+              "returned in " +
+                  std::to_string(
+                      std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count()) +
+                  "ms, well under the 8000ms remote_deadline -- consistent with a healthy lease "
+                  "completing normally rather than a timeout being exhausted first");
+
+        // Job id is 1: this section's reset_db() TRUNCATEs with RESTART
+        // IDENTITY and submits exactly once before this point.
+        check(row_state(admin, 1) == "done", "the row reached 'done'");
+        check(row_result(admin, 1).has_value() &&
+                  row_result(admin, 1)->find("same-object-request") != std::string::npos,
+              "the row's own result carries the decoded text");
+        const auto owner = row_owner(admin, 1);
+        check(owner.has_value() && *owner == "same-object-worker",
+              "lease_owner is 'same-object-worker' -- set ONLY by a real Queue::lease() call. "
+              "THE key assertion: this proves the request was served by leasing from Postgres, "
+              "not by PostgresAdmission's fallback, which never calls lease() and never touches "
+              "lease_owner at all");
+    }
+
+    // -----------------------------------------------------------------
+    // Regression pair for the actual production bug this task fixes: a
+    // backend whose owner thread's FIRST take_jobs() call happens before
+    // set_lease_source() installs a lease source commits that thread to an
+    // UNBOUNDED wait keyed only on the local queue (see take_jobs()'s own
+    // doc in inference_admission.cppm) -- and nothing about installing a
+    // lease source afterward ever wakes it. In production this manifested
+    // as: a row appears, attempts stays 0, lease_owner stays NULL, forever.
+    // These two sections reproduce the WRONG order deliberately (proving the
+    // failure mode is real, not hypothetical) and then the FIXED order
+    // (proving the same job is served once the order is corrected) --
+    // exactly the "break it, see FAIL; fix it, see PASS" discriminating
+    // pair this task's own testing brief asks for, kept as a standing
+    // regression test rather than a one-off manual check.
+    // -----------------------------------------------------------------
+    section("Regression (broken order): start() BEFORE set_lease_source() -- the job is NEVER "
+            "leased");
+    {
+        reset_db(admin);
+        auto queue = make_queue("admission_test_startup_race_broken");
+
+        MockDecodeBackend broken_backend;
+        broken_backend.start();  // WRONG ORDER, deliberately -- see the section banner above.
+        // Give the owner thread a real chance to enter its first take_jobs()
+        // wait before the lease source lands -- production's own gap here
+        // (model load, LISTEN pump setup) is far larger than this.
+        std::this_thread::sleep_for(50ms);
+        auto broken_lease_source = std::make_shared<PostgresLeaseSource>(
+            queue, inference_queue::Surface::Strategy, "broken-worker");
+        broken_backend.set_lease_source(broken_lease_source);
+
+        auto submitted = queue->submit_remote(inference_queue::Surface::Strategy,
+                                               R"({"prompt":"stuck"})", kFarFuture());
+        check(submitted.has_value(), "job submitted to the broken backend's queue");
+        const auto stuck_id = submitted->job_id;
+
+        std::this_thread::sleep_for(1500ms);  // generous: real leasing takes milliseconds
+        check(row_state(admin, stuck_id) == "pending",
+              "with start() called BEFORE set_lease_source(), the job is STILL 'pending' 1.5s "
+              "later, with no lease_owner -- reproducing the production bug exactly");
+        check(!row_owner(admin, stuck_id).has_value(),
+              "lease_owner is still NULL -- lease() was never even attempted successfully");
+    }
+
+    section("Regression (fixed order): set_lease_source() BEFORE start() -- the same job leases "
+            "and completes promptly");
+    {
+        reset_db(admin);
+        auto queue = make_queue("admission_test_startup_race_fixed");
+
+        MockDecodeBackend fixed_backend;
+        auto fixed_lease_source = std::make_shared<PostgresLeaseSource>(
+            queue, inference_queue::Surface::Strategy, "fixed-worker");
+        fixed_backend.set_lease_source(fixed_lease_source);
+        fixed_backend.start();  // CORRECT ORDER -- the fix this task makes.
+
+        auto submitted = queue->submit_remote(inference_queue::Surface::Strategy,
+                                               R"({"prompt":"unstuck"})", kFarFuture());
+        check(submitted.has_value(), "job submitted to the fixed backend's queue");
+        const auto unstuck_id = submitted->job_id;
+
+        bool done = false;
+        for (int attempt = 0; attempt < 50 && !done; ++attempt) {
+            std::this_thread::sleep_for(50ms);
+            done = (row_state(admin, unstuck_id) == "done");
+        }
+        check(done, "with set_lease_source() called BEFORE start(), the SAME shape of job reaches "
+                    "'done' well within 2.5s -- the owner thread's first take_jobs() call already "
+                    "saw the lease source");
+        check(row_result(admin, unstuck_id).has_value() &&
+                  row_result(admin, unstuck_id)->find("leased:unstuck") != std::string::npos,
+              "the result is the leased decode ('leased:unstuck'), proving the PG path served it");
+        check(row_owner(admin, unstuck_id).has_value() &&
+                  *row_owner(admin, unstuck_id) == "fixed-worker",
+              "lease_owner is 'fixed-worker' -- a real lease() call served this job");
     }
 
     // -----------------------------------------------------------------
@@ -326,6 +550,7 @@ auto main() -> int {
         auto lease_source = std::make_shared<PostgresLeaseSource>(
             queue, inference_queue::Surface::Mortgage, "worker-recovers");
         backend.set_lease_source(lease_source);
+        backend.start();  // AFTER set_lease_source() -- see the class banner.
 
         // Wait for the fresh lease to land (state -> 'leased' again, with a
         // DIFFERENT token than the stale worker's), but not yet for

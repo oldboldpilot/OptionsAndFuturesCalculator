@@ -8,6 +8,7 @@ module;
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_set>
 #include <vector>
 
@@ -46,7 +47,12 @@ import pg;
  *                                  pg_notify in the same transaction.
  *   sweep_once      any replica,   requeues/kills expired leases, fails
  *                   single-flight. pending rows past their submit_deadline,
- *                                  and reaps old terminal rows.
+ *                                  and reaps old terminal rows. Nothing
+ *                                  calls this on a timer by itself --
+ *                                  start_sweep_ticker() is the optional
+ *                                  scheduler below; without it, sweep_once()
+ *                                  only ever runs when some caller invokes
+ *                                  it directly (a test, or an operator).
  *
  * FENCING is the one property every worker-side write depends on. A lease
  * hands out a fencing_token; every later write from that lease (heartbeat,
@@ -234,6 +240,16 @@ export struct QueueConfig {
     std::chrono::milliseconds poll_interval{250};
     std::chrono::hours done_retention{24};
     std::chrono::hours dead_retention{24 * 7};
+
+    /** How often start_sweep_ticker()'s background thread calls sweep_once().
+     *  Independent of lease_duration/submit_deadline -- this only bounds how
+     *  PROMPTLY an abandoned lease or an unleased pending row past its
+     *  submit_deadline gets noticed, not how long either window itself is.
+     *  15s comfortably undercuts both the default 30s lease_duration and a
+     *  90s submit window, so a lease that just expired or a job that just
+     *  timed out is swept well within one more lease_duration/submit window,
+     *  not left to accumulate until some other caller happens to sweep. */
+    std::chrono::seconds sweep_interval{15};
 };
 
 export class Queue {
@@ -242,11 +258,42 @@ export class Queue {
 
     explicit Queue(std::shared_ptr<pg::Pool> pool, Config config = {});
 
+    /** Joins the sweep ticker thread, if one was started -- see
+     *  stop_sweep_ticker()'s own doc. User-declared only because a
+     *  std::thread member needs an explicit join before it is destroyed;
+     *  nothing else about Queue's destruction requires this class to give up
+     *  the implicit special members it would otherwise get for free (Queue
+     *  is already non-copyable/non-movable via its std::mutex/
+     *  std::condition_variable members, so this changes nothing about that). */
+    ~Queue();
+
     /** Starts the LISTEN pump on the shared pool (channel kNotifyChannel).
      *  Optional -- await_result() works correctly, just less promptly,
      *  without ever calling this. See the module banner. */
     [[nodiscard]] auto start_notify_pump() -> std::expected<void, SubmitError>;
     auto stop_notify_pump() noexcept -> void;
+
+    /** Starts a background thread that calls sweep_once() every
+     *  config().sweep_interval, until stop_sweep_ticker() or destruction.
+     *  Optional, exactly like start_notify_pump() -- no correctness property
+     *  of lease()/heartbeat()/complete()/fail() depends on a ticker running
+     *  anywhere; without one, an abandoned lease or a job that timed out
+     *  while still pending simply waits for SOME caller (a ticker on another
+     *  Queue instance, an operator, a test) to call sweep_once(), rather than
+     *  being noticed within sweep_interval. Safe to call from every replica,
+     *  and from more than one Queue instance in the same process (both
+     *  assistant surfaces each own a Queue against the same table) --
+     *  sweep_once()'s own pg_try_advisory_lock makes every ticker but one a
+     *  no-op on any given tick. Calling this twice on the same Queue without
+     *  an intervening stop_sweep_ticker() replaces the running thread (the
+     *  old one is stopped first). */
+    auto start_sweep_ticker() -> void;
+
+    /** Stops the ticker started by start_sweep_ticker(), if any, and joins
+     *  its thread. Safe to call when no ticker is running (a no-op). Also
+     *  called from the destructor so a Queue never outlives its own ticker
+     *  thread -- see this class's own destructor. */
+    auto stop_sweep_ticker() noexcept -> void;
 
     // --- caller side ---------------------------------------------------
 
@@ -336,6 +383,25 @@ export class Queue {
     std::mutex notify_mu_;
     std::condition_variable notify_cv_;
     std::unordered_set<std::int64_t> notified_ids_;
+
+    /** The sweep ticker's own thread/mutex/condition_variable/stop-flag --
+     *  deliberately a PLAIN std::thread/std::condition_variable rather than
+     *  std::jthread/std::condition_variable_any + std::stop_token. This is
+     *  not a style preference: inference_admission.cppm's own
+     *  force_take_jobs_symbol_emission documents a confirmed, unresolved
+     *  upstream Clang bug where an out-of-line module member function that
+     *  calls condition_variable_any::wait(lock, stop_token, pred) fails to
+     *  LINK when the calling TU also independently #includes <stop_token>
+     *  (as this module's own callers do, transitively). start_sweep_ticker()/
+     *  stop_sweep_ticker() are defined out-of-line in inference_queue.cpp --
+     *  a module IMPLEMENTATION unit, the exact shape that bug requires -- so
+     *  this sidesteps it entirely by never naming stop_token or
+     *  condition_variable_any at all, rather than depending on a fix that,
+     *  as of this writing, has not landed. */
+    std::thread sweep_thread_;
+    std::mutex sweep_mu_;
+    std::condition_variable sweep_cv_;
+    bool sweep_stop_ = false;
 };
 
 }  // namespace options_calculator::inference_queue

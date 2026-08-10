@@ -60,8 +60,15 @@ class GatedEchoBackend final : public QueuedBackend {
         : QueuedBackend(shutting_down_message), shutting_down_message_(shutting_down_message) {
         max_concurrent_ = max_concurrent;
         max_queue_depth_ = queue_depth;
-        worker_ = std::jthread([this](std::stop_token st) { run(st); });
+        start();
     }
+
+    // This test never installs a lease source (it is the pure-local-mode
+    // suite -- see this file's own banner), so starting the owner thread
+    // from the constructor is safe: there is no set_lease_source() call this
+    // could ever race. See QueuedBackend::start()'s own doc for why
+    // production code must NOT do this.
+    auto start() -> void override { worker_ = std::jthread([this](std::stop_token st) { run(st); }); }
 
     ~GatedEchoBackend() override {
         worker_.request_stop();

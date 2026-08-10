@@ -212,6 +212,41 @@ export class QueuedBackend : public InferenceBackend {
     }
 
     /**
+     * Starts this backend's owner thread (spawns it and returns immediately
+     * -- never blocks waiting for it to do anything). Every concrete backend
+     * (SensenBackend, LlamaCppBackend, and this codebase's test doubles)
+     * implements this as little more than `worker_ = std::jthread(...)`.
+     *
+     * CALLER-ENFORCED ORDERING, AND WHY IT IS A SEPARATE METHOD RATHER THAN
+     * PART OF CONSTRUCTION: `set_lease_source()` -- if a caller is going to
+     * call it at all -- MUST be called before start(), never after. The
+     * owner thread's `take_jobs()` decides, on its VERY FIRST call, which of
+     * two structurally different waits to enter (see take_jobs()'s own doc):
+     * an UNBOUNDED wait keyed only on the local queue when `lease_source_` is
+     * null at that moment, or a periodic, lease-source-polling wait when it
+     * is not. That decision is made once, from whatever `lease_source_` holds
+     * the instant take_jobs() is first entered -- it is not re-decided later.
+     * A backend started before its lease source is installed can therefore
+     * commit its owner thread to the unbounded local-only branch and never
+     * revisit that decision: nothing about set_lease_source() (installed
+     * afterward) wakes a thread already parked there, since the predicate it
+     * is waiting on is "the local queue is non-empty", which installing a
+     * lease source does not change. The thread then never leases anything
+     * from Postgres for the rest of the process's life -- a shared queue that
+     * accumulates rows and serves none of them, indistinguishable from the
+     * outside from Postgres itself being broken. This is exactly the failure
+     * this ordering contract exists to make impossible: every production
+     * Worker constructor calls `configure_inference_queue()` (which calls
+     * `set_lease_source()` when `INFERENCE_QUEUE=postgres`) BEFORE calling
+     * `backend_->start()`, so the owner thread's first take_jobs() call
+     * always observes the correct, final `lease_source_` -- non-null in
+     * postgres mode, still null (and staying null for the process's whole
+     * life) in local mode, where nothing about this ordering is observable
+     * at all.
+     */
+    virtual auto start() -> void = 0;
+
+    /**
      * Installs (or, with `nullptr`, removes) the Postgres lease source this
      * backend's owner thread will additionally draw from. Thread-safe: may be
      * called once at Worker construction (the only case this codebase
@@ -256,27 +291,43 @@ export class QueuedBackend : public InferenceBackend {
      *   `lease_source_ == nullptr` (local mode, the default): byte-identical
      *   to the pre-extraction code -- `cv_.wait(lock, stoken, pred)`, an
      *   UNBOUNDED wait for either a local job or a stop request. Nothing
-     *   about this branch changed.
+     *   about this branch changed, and nothing below it is reachable when
+     *   this one is taken.
      *
-     *   `lease_source_ != nullptr` (postgres mode): a BOUNDED
-     *   `cv_.wait_for(lock, kLeasePollTick, pred)` instead (the plain,
-     *   non-stop_token-aware overload -- deliberately, not
-     *   `wait_for(lock, stoken, tick, pred)`: that stop_token-aware
+     *   `lease_source_ != nullptr` (postgres mode): TRY FIRST, WAIT ONLY AS A
+     *   BACKSTOP -- the local queue is drained and `lease_source->fill()` is
+     *   attempted BEFORE this thread ever waits on anything. Only if that
+     *   attempt comes up completely empty (and `block` is true) does it wait
+     *   -- for one `kLeasePollTick`, via the plain, non-stop_token-aware
+     *   `cv_.wait_for(lock, kLeasePollTick, pred)` overload (deliberately,
+     *   not `wait_for(lock, stoken, tick, pred)`: that stop_token-aware
      *   timed-wait template failed to LINK against this build's libc++ when
      *   tried, with the same undefined reference to
      *   `std::__1::__atomic_unique_lock<...>::__set_locked_bit` diagnosed at
      *   `force_take_jobs_symbol_emission` below -- this file works around it
      *   by simply not using that overload here, rather than by forcing a
      *   second symbol; the plain overload used here and the no-timeout
-     *   `wait(lock, stoken, pred)` used in the `local` branch below are both
-     *   covered by that one forced definition instead), so this thread
-     *   periodically comes back to try leasing from Postgres
-     *   even when the local queue stays empty and nothing new is submitted
-     *   locally. A stop request is still noticed promptly by the caller's
-     *   own `while (!stoken.stop_requested())` loop, at worst one
-     *   `kLeasePollTick` later. This is the only behavioural change postgres
-     *   mode makes to the wait itself, and it is reachable only through that
-     *   mode.
+     *   `wait(lock, stoken, pred)` used in the `local` branch above are both
+     *   covered by that one forced definition instead) -- and tries once
+     *   more before returning. A stop request is still noticed promptly by
+     *   the caller's own `while (!stoken.stop_requested())` loop, at worst
+     *   one `kLeasePollTick` later.
+     *
+     *   THIS ORDER IS LOAD-BEARING FOR LATENCY, NOT JUST A STYLE CHOICE: an
+     *   earlier version of this function waited FIRST, unconditionally,
+     *   whenever a lease source was installed and `block` was true -- so
+     *   EVERY request to an otherwise-idle worker paid up to a full
+     *   `kLeasePollTick` before this thread even asked Postgres whether
+     *   anything was waiting, even when a job was sitting there ready to
+     *   lease the instant it asked. Measured against a local Postgres this
+     *   was up to 200ms of pure, avoidable latency on every request in
+     *   INFERENCE_QUEUE=postgres mode, stacked on top of a decode that only
+     *   takes ~1.4s -- see this task's own latency breakdown for the
+     *   before/after numbers. Trying first collapses that to the cost of one
+     *   `lease()` round trip (low single-digit ms against a same-datacentre
+     *   Postgres) on the common case of a job already waiting, and only pays
+     *   the poll tick on the genuinely idle case, where nothing is waiting
+     *   to be leased and there is nothing faster to do.
      */
     [[nodiscard]] auto take_jobs(std::stop_token stoken, std::size_t want, bool block)
         -> std::vector<PendingJob>;
@@ -404,10 +455,24 @@ export class QueuedBackend : public InferenceBackend {
     [[maybe_unused, gnu::used]] static auto force_take_jobs_symbol_emission() noexcept
         -> std::vector<PendingJob> (QueuedBackend::*)(std::stop_token, std::size_t, bool);
 
-    /** How often `take_jobs()`'s postgres-mode wait re-checks for local work
-     *  before falling through to try leasing again. Local mode never uses
-     *  this constant at all. */
-    static constexpr std::chrono::milliseconds kLeasePollTick{200};
+    /** The BACKSTOP idle-poll interval for `take_jobs()`'s postgres mode --
+     *  only ever paid when an immediate lease attempt already came up empty
+     *  (see that function's own doc for the try-first ordering this backs
+     *  up). Local mode never uses this constant at all.
+     *
+     *  50ms, not the 200ms this was originally set to: the try-first fix
+     *  means this value no longer gates the common case (a job already
+     *  waiting), only the genuinely-idle case (nothing to lease at all,
+     *  where a worker thread is going to retry regardless and the only
+     *  question is how soon) -- so a smaller value buys a tighter worst-case
+     *  discovery latency for whatever arrives WHILE this thread happens to
+     *  be mid-wait, at the cost of a cheap indexed no-op lease() query up to
+     *  20x/sec/idle-worker instead of 5x/sec against Postgres. Against a
+     *  same-datacentre Postgres (low single-digit ms per round trip) that
+     *  cost is negligible; the latency this buys back is not, when the
+     *  budget for the whole postgres-mode path is ~10-15% over local mode's
+     *  1.6-2.5s (see this task's own latency breakdown). */
+    static constexpr std::chrono::milliseconds kLeasePollTick{50};
 
     std::mutex mutex_;
     std::condition_variable_any cv_;
@@ -492,35 +557,54 @@ inline auto QueuedBackend::take_jobs(std::stop_token stoken, std::size_t want, b
 
     const auto lease_source = lease_source_snapshot();
 
-    std::unique_lock lock{mutex_};
-    if (block) {
-        if (lease_source == nullptr) {
-            // BYTE-IDENTICAL to the pre-extraction code: an unbounded wait,
-            // exactly as `local` mode has always had. Nothing in this branch
-            // is new.
+    if (lease_source == nullptr) {
+        // BYTE-IDENTICAL to the pre-extraction code: local mode is entirely
+        // self-contained in this branch, untouched by anything below it.
+        std::unique_lock lock{mutex_};
+        if (block) {
             const bool has_job = cv_.wait(lock, stoken, [this] { return !queue_.empty(); });
             if (!has_job) return taken;
-        } else {
-            // Postgres mode only. See this function's own declaration-site
-            // doc for why this is the plain (non-stop_token) wait_for
-            // overload.
-            static_cast<void>(
-                cv_.wait_for(lock, kLeasePollTick, [this] { return !queue_.empty(); }));
         }
+        while (!queue_.empty() && taken.size() < want) {
+            taken.push_back(std::move(queue_.front()));
+            queue_.pop_front();
+        }
+        return taken;
     }
-    while (!queue_.empty() && taken.size() < want) {
-        taken.push_back(std::move(queue_.front()));
-        queue_.pop_front();
-    }
-    lock.unlock();
 
-    if (lease_source != nullptr && taken.size() < want) {
-        // "Lease late, never early": local submissions were already drained
-        // above and always win a free slot; this only tops up whatever slots
-        // are STILL empty after that.
-        auto leased = lease_source->fill(want - taken.size());
-        for (auto& job : leased) taken.push_back(std::move(job));
+    // Postgres mode: drain the local queue and try leasing from Postgres
+    // BEFORE waiting on anything -- see this function's own declaration-site
+    // doc for why the order (try first, wait only as a backstop) is
+    // load-bearing for latency, not merely a style choice.
+    const auto drain_and_fill = [&] {
+        {
+            const std::lock_guard lock{mutex_};
+            while (!queue_.empty() && taken.size() < want) {
+                taken.push_back(std::move(queue_.front()));
+                queue_.pop_front();
+            }
+        }
+        if (taken.size() < want) {
+            // "Lease late, never early": local submissions were already
+            // drained above and always win a free slot; this only tops up
+            // whatever slots are STILL empty after that.
+            auto leased = lease_source->fill(want - taken.size());
+            for (auto& job : leased) taken.push_back(std::move(job));
+        }
+    };
+
+    drain_and_fill();
+    if (!taken.empty() || !block) return taken;
+
+    // Nothing was ready on the first attempt and the caller has nothing
+    // else to do -- NOW it is worth waiting, for one tick, before trying
+    // once more. See this function's own declaration-site doc for why this
+    // is the plain (non-stop_token) wait_for overload.
+    {
+        std::unique_lock lock{mutex_};
+        static_cast<void>(cv_.wait_for(lock, kLeasePollTick, [this] { return !queue_.empty(); }));
     }
+    drain_and_fill();
     return taken;
 }
 

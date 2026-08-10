@@ -273,6 +273,80 @@ auto main() -> int {
     }
 
     // -----------------------------------------------------------------
+    // start_sweep_ticker(): everything above calls sweep_once() manually,
+    // which only ever proved the SQL correct, never that anything schedules
+    // it. In production, before this task, nothing did -- an expired lease
+    // or a timed-out pending job sat until an operator ran sweep_once() by
+    // hand. These two sections prove the scheduler itself works, with zero
+    // manual sweep_once() calls anywhere in them.
+    // -----------------------------------------------------------------
+    section("start_sweep_ticker() fails an expired-pending row on its own, no manual sweep_once()");
+    {
+        reset_db(admin);
+        auto pool = make_pool("iq_test_ticker_pending");
+        Queue::Config qcfg;
+        qcfg.sweep_interval = 1s;  // fast, so this test does not need to wait long
+        Queue queue{pool, qcfg};
+
+        auto submitted = queue.submit_remote(Surface::Strategy, R"({"p":1})",
+                                              std::chrono::system_clock::now() - 1s);
+        check(submitted.has_value(), "job submitted with an already-past submit_deadline");
+        const auto id = submitted->job_id;
+        check(row_state(admin, id) == "pending",
+              "the row starts out 'pending' -- submit_remote() does not itself check the "
+              "deadline, only sweep_once() (Step 2) does");
+
+        queue.start_sweep_ticker();
+
+        bool failed = false;
+        for (int attempt = 0; attempt < 30 && !failed; ++attempt) {
+            std::this_thread::sleep_for(100ms);
+            failed = (row_state(admin, id) == "failed");
+        }
+        check(failed, "the ticker moved the row to 'failed' on its own within ~3s -- NO manual "
+                      "sweep_once() call anywhere in this section");
+
+        queue.stop_sweep_ticker();
+    }
+
+    section("start_sweep_ticker() requeues an abandoned lease on its own, no manual sweep_once()");
+    {
+        reset_db(admin);
+        auto pool = make_pool("iq_test_ticker_lease");
+        Queue::Config qcfg;
+        qcfg.lease_duration = 1s;  // short, so the test does not need to wait 30s
+        qcfg.sweep_interval = 1s;
+        Queue queue{pool, qcfg};
+
+        auto submitted = queue.submit_remote(Surface::Mortgage, R"({"p":1})", kFarFuture());
+        check(submitted.has_value(), "job submitted");
+        const auto id = submitted->job_id;
+
+        auto leased = queue.lease(Surface::Mortgage, "ticker-test-worker");
+        check(leased.has_value() && leased->has_value(), "a worker leases it");
+        // No heartbeat, no complete(), no fail() -- simulated crash, same
+        // shape as the manual-sweep abandoned-lease section above, but this
+        // time nobody calls sweep_once() at all.
+
+        queue.start_sweep_ticker();
+
+        bool requeued = false;
+        for (int attempt = 0; attempt < 30 && !requeued; ++attempt) {
+            std::this_thread::sleep_for(150ms);
+            requeued = (row_state(admin, id) == "pending");
+        }
+        check(requeued, "the ticker requeued the abandoned lease back to 'pending' on its own -- "
+                        "NO manual sweep_once() call anywhere in this section");
+
+        auto second_lease = queue.lease(Surface::Mortgage, "ticker-test-worker-2");
+        check(second_lease.has_value() && second_lease->has_value() &&
+                  (*second_lease)->id == id,
+              "the job is leasable again afterward -- it was not lost");
+
+        queue.stop_sweep_ticker();
+    }
+
+    // -----------------------------------------------------------------
     section("LISTEN/NOTIFY wakes await_result() early; suppressing it falls back to the poll");
     {
         reset_db(admin);

@@ -348,9 +348,18 @@ constexpr std::int64_t kMaxQuantity = 100'000;
 class SensenBackend final : public QueuedBackend {
   public:
     /**
-     * Loads the model and starts the owner thread. Returns nullptr -- never a
-     * half-constructed object -- if anything about the load fails, so the
-     * caller's only decision is "did I get a backend or not".
+     * Loads the model. Returns nullptr -- never a half-constructed object --
+     * if anything about the load fails, so the caller's only decision is
+     * "did I get a backend or not".
+     *
+     * Deliberately does NOT start the owner thread -- that used to happen
+     * here, and starting it before the caller has had a chance to call
+     * set_lease_source() is exactly the startup race documented on
+     * QueuedBackend::start() itself (inference_admission.cppm), which left a
+     * live INFERENCE_QUEUE=postgres deployment leasing nothing, forever. The
+     * caller MUST call start() itself, and -- if it is going to install a
+     * lease source at all -- only after doing so; see AssistantWorker's own
+     * constructor for the enforced order.
      */
     [[nodiscard]] static auto create(const std::string& model_path, std::size_t max_concurrent,
                                      std::size_t queue_depth, std::size_t kv_max_seq_len,
@@ -380,13 +389,19 @@ class SensenBackend final : public QueuedBackend {
             return nullptr;
         }
 
-        auto backend = std::unique_ptr<SensenBackend>(
+        return std::unique_ptr<SensenBackend>(
             new SensenBackend(std::move(pipeline), max_concurrent, queue_depth));
-        backend->start();
-        return backend;
     }
 
     [[nodiscard]] auto name() const noexcept -> std::string_view override { return "sensen"; }
+
+    /** Public (moved out of `private:` below) because the OWNING Worker --
+     *  a different class -- must be able to call it after create() returns,
+     *  once it has decided whether to install a lease source first. See
+     *  QueuedBackend::start()'s own doc for why the ordering matters. */
+    auto start() -> void override {
+        worker_ = std::jthread([this](std::stop_token stoken) { run(stoken); });
+    }
 
     ~SensenBackend() override = default;
 
@@ -408,10 +423,6 @@ class SensenBackend final : public QueuedBackend {
         : pipeline_{std::move(pipeline)} {
         max_concurrent_ = max_concurrent;
         max_queue_depth_ = queue_depth;
-    }
-
-    auto start() -> void {
-        worker_ = std::jthread([this](std::stop_token stoken) { run(stoken); });
     }
 
     /**
@@ -757,6 +768,13 @@ class SensenBackend final : public QueuedBackend {
  */
 class LlamaCppBackend final : public QueuedBackend {
   public:
+    /**
+     * Deliberately does NOT start the owner thread -- see SensenBackend::
+     * create()'s own doc, right above this class, for the startup race that
+     * used to cause when it did. The caller MUST call start() itself, after
+     * deciding whether to install a lease source; see AssistantWorker's
+     * constructor for the enforced order.
+     */
     [[nodiscard]] static auto create(const std::string& model_path, std::size_t max_concurrent,
                                      std::size_t queue_depth, std::size_t n_ctx_per_seq,
                                      int threads) -> std::unique_ptr<LlamaCppBackend> {
@@ -813,13 +831,17 @@ class LlamaCppBackend final : public QueuedBackend {
             return nullptr;
         }
 
-        auto backend = std::unique_ptr<LlamaCppBackend>(
+        return std::unique_ptr<LlamaCppBackend>(
             new LlamaCppBackend(model, ctx, max_concurrent, queue_depth, n_ctx_per_seq));
-        backend->start();
-        return backend;
     }
 
     [[nodiscard]] auto name() const noexcept -> std::string_view override { return "llamacpp"; }
+
+    /** Public (moved out of `private:` below) -- see SensenBackend::start()'s
+     *  own doc, right above this class, for why. */
+    auto start() -> void override {
+        worker_ = std::jthread([this](std::stop_token stoken) { run(stoken); });
+    }
 
     ~LlamaCppBackend() override {
         // worker_ is declared last, so by the time this body runs the owner
@@ -858,10 +880,6 @@ class LlamaCppBackend final : public QueuedBackend {
         for (std::size_t i = 0; i < max_concurrent; ++i) {
             free_slots_.push_back(static_cast<llama_seq_id>(i));
         }
-    }
-
-    auto start() -> void {
-        worker_ = std::jthread([this](std::stop_token stoken) { run(stoken); });
     }
 
     /** Clears the shared batch without freeing it. */
@@ -1295,7 +1313,16 @@ class AssistantWorker {
             "max_concurrent={} queue_depth={} context_tokens={}",
             backend_->name(), *path, threads, max_concurrent, queue_depth, kv_max_seq_len);
 
+        // configure_inference_queue() MUST run before backend_->start(): it is
+        // what calls backend_->set_lease_source() in INFERENCE_QUEUE=postgres
+        // mode, and start() must never be called before that decision is
+        // made -- see QueuedBackend::start()'s own doc (inference_admission.
+        // cppm) for the startup race this order exists to make impossible.
+        // In `local` mode configure_inference_queue() is a fast no-op (no
+        // lease source is ever installed), so this reordering changes
+        // nothing observable about that path.
         configure_inference_queue();
+        backend_->start();
     }
 
     /**
@@ -1343,6 +1370,20 @@ class AssistantWorker {
         pool_config.conninfo = *database_url;
         pool_config.connect_timeout = std::chrono::milliseconds(2000);
         pool_config.statement_timeout = std::chrono::milliseconds(2000);
+        // 16, not PoolConfig's own default of 4: this ONE pool is shared by
+        // every submitter's submit_remote()/await_result() polling AND the
+        // worker's own lease()/complete() calls (this Worker's admission_ and
+        // its backend_'s lease source both hold the SAME queue_/pool_). At
+        // max_concurrent=4 (the default), worst-case simultaneous need is
+        // roughly 4 submitters + up to 4 write-back helper threads + the
+        // worker's own lease loop -- comfortably under 16, with headroom.
+        // Leaving this at 4 lets Pool::acquire()'s own bounded
+        // acquire_timeout (250ms) start silently queuing requests for a
+        // connection under ordinary load, which shows up as added latency,
+        // not as an error -- see this task's own latency breakdown for why
+        // that mattered enough to size explicitly rather than accept the
+        // default. Revisit if MAX_CONCURRENT is raised well beyond 4.
+        pool_config.size = 16;
         pool_ = std::make_shared<pg::Pool>(std::move(pool_config));
         queue_ = std::make_shared<inference_queue::Queue>(pool_);
         // LISTEN/NOTIFY is a wakeup hint only (see inference_queue.cppm's own
@@ -1355,6 +1396,14 @@ class AssistantWorker {
                 "promptly.",
                 inference_queue::to_string(pump.error()));
         }
+        // Without this, an abandoned lease or a job that timed out while
+        // still pending sits until some OTHER replica's ticker (or an
+        // operator's manual sweep_once()) happens to reap it -- see
+        // Queue::start_sweep_ticker()'s own doc. Safe to start unconditionally
+        // here even though the mortgage assistant's Worker starts its own
+        // ticker too: sweep_once()'s pg_try_advisory_lock makes every ticker
+        // but one a no-op on any given tick, cluster-wide.
+        queue_->start_sweep_ticker();
 
         const std::string worker_id = "strategy-" + std::to_string(::getpid());
         auto lease_source = std::make_shared<inference_admission::PostgresLeaseSource>(
@@ -1362,13 +1411,19 @@ class AssistantWorker {
         backend_->set_lease_source(lease_source);
         lease_source_ = std::move(lease_source);
 
-        // Round-trip budget for one remote submission: bounded well above
-        // this assistant's own decode time (kMaxNewTokens at ~34 tok/s is
-        // roughly a second) so a healthy remote worker has real headroom, but
-        // still bounded -- a caller waiting past this falls back to the local
-        // backend rather than ever hanging.
+        // 90s, matching this queue's own design (was 20s here, a drift from
+        // that design this task's own measurement caught: a 20s window gave
+        // a healthy worker under transient load far less room than intended
+        // before the caller gave up and fell back). This is a CEILING, not a
+        // target latency: await_result() returns the instant the job reaches
+        // a terminal state, so a healthy worker (one that actually leases --
+        // see the startup-race fix on QueuedBackend::start()) answers in
+        // roughly one decode's worth of time (kMaxNewTokens at ~34 tok/s is
+        // roughly a second), and this bound is only ever fully paid by a
+        // genuinely stuck request, at which point falling back late is still
+        // strictly better than an anonymous MODEL_UNAVAILABLE.
         admission_ = std::make_unique<inference_admission::PostgresAdmission>(
-            queue_, inference_queue::Surface::Strategy, *backend_, std::chrono::milliseconds(20000));
+            queue_, inference_queue::Surface::Strategy, *backend_, std::chrono::milliseconds(90000));
 
         logger::Logger::getInstance().info(
             "Strategy assistant: INFERENCE_QUEUE=postgres -- submitting through the shared "
