@@ -66,11 +66,34 @@ import inference_queue;
  */
 namespace options_calculator::inference_admission {
 
-/** What a backend hands back for one generation request. */
+/**
+ * What a backend hands back for one generation request.
+ *
+ * The three timing fields exist because, before they did, nobody could tell
+ * where a slow request's time actually went -- "the model" was the only
+ * available answer, and it was often wrong (see the investigation that added
+ * these: production's ~5s ParseOperation calls turned out to be ordinary
+ * single-stream decode throughput on the deployed CPU, not queueing,
+ * contention, or grammar overhead, and the only way to tell was to measure
+ * prefill and decode separately and log it on every real request). Populated
+ * on a best-effort basis -- `0.0`/`0` on any path that predates or bypasses
+ * the timed admit()/finish() sequence (e.g. an early admission failure) --
+ * so a caller must not treat a zero as "instant", only as "not measured".
+ */
 export struct InferenceOutcome {
     bool ok = false;
     std::string text;   // the model's raw decoded output, valid iff ok
     std::string error;  // human-readable failure detail, valid iff !ok
+
+    // Wall-clock milliseconds from admission (prompt handed to the engine)
+    // to the first sampled token -- tokenisation + prefill + first sample.
+    double prefill_ms = 0.0;
+    // Wall-clock milliseconds from the first token to the last, across every
+    // batched decode_step() this sequence rode in (so it includes whatever
+    // time other sequences in the same batch cost this one, which is the
+    // real number a caller waited, not an isolated-model number).
+    double decode_ms = 0.0;
+    std::size_t tokens_generated = 0;
 };
 
 /**

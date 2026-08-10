@@ -416,6 +416,13 @@ class SensenBackend final : public QueuedBackend {
         std::promise<InferenceOutcome> promise;
         std::uint32_t next_token = 0;
         std::vector<std::uint32_t> generated;
+
+        // Set in admit(); read in finish() to split the request's wall time
+        // into prefill vs decode. See InferenceOutcome's own doc comment for
+        // why this exists.
+        std::chrono::steady_clock::time_point admit_start{};
+        std::chrono::steady_clock::time_point first_token{};
+        double prefill_ms = 0.0;
     };
 
     SensenBackend(std::unique_ptr<sensen::LLMPipeline> pipeline, std::size_t max_concurrent,
@@ -594,6 +601,7 @@ class SensenBackend final : public QueuedBackend {
      */
     [[nodiscard]] auto admit(const std::string& prompt, Sequence& seq,
                              const sensen::GenerationConfig& params, std::size_t agent_id) -> bool {
+        seq.admit_start = std::chrono::steady_clock::now();
         try {
             const auto prompt_tokens = pipeline_->schedulerEncode(prompt);
             seq.agent = pipeline_->schedulerMakeAgent(agent_id);
@@ -610,6 +618,9 @@ class SensenBackend final : public QueuedBackend {
                 return false;
             }
             seq.next_token = pipeline_->schedulerSample(logits, params, seq.agent->getContext());
+            seq.first_token = std::chrono::steady_clock::now();
+            seq.prefill_ms =
+                std::chrono::duration<double, std::milli>(seq.first_token - seq.admit_start).count();
             return true;
         } catch (const std::exception& e) {
             seq.promise.set_value(InferenceOutcome{.ok = false, .text = {}, .error = e.what()});
@@ -710,6 +721,23 @@ class SensenBackend final : public QueuedBackend {
             outcome.ok = false;
             outcome.error = "unknown failure decoding the generated tokens";
         }
+        outcome.prefill_ms = seq.prefill_ms;
+        outcome.tokens_generated = seq.generated.size();
+        // seq.first_token stays default-constructed (epoch) if admit() never
+        // reached it -- can't happen here, since finish() is only reachable
+        // for a sequence that made it into `active`, which requires admit()
+        // to have succeeded and set it.
+        const double decode_ms = std::chrono::duration<double, std::milli>(
+                                     std::chrono::steady_clock::now() - seq.first_token)
+                                     .count();
+        outcome.decode_ms = decode_ms;
+        logger::Logger::getInstance().info(
+            "[assistant] timing: prefill={:.1f}ms decode={:.1f}ms tokens={} decode_tok_s={:.1f} "
+            "total={:.1f}ms",
+            outcome.prefill_ms, decode_ms, outcome.tokens_generated,
+            decode_ms > 0.0 ? (static_cast<double>(outcome.tokens_generated) * 1000.0 / decode_ms)
+                            : 0.0,
+            outcome.prefill_ms + decode_ms);
         seq.promise.set_value(std::move(outcome));
         pipeline_->schedulerEvict(*seq.agent);
     }

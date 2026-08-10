@@ -1551,6 +1551,26 @@ if(ENABLE_LLAMACPP_BACKEND)
     add_executable(assistant_throughput_probe src/assistant_throughput_probe.cpp)
     target_link_libraries(assistant_throughput_probe PRIVATE sensen_slim)
 
+    # Diagnostic-only: real per-token cost of MortgageParamsGrammar::accept()
+    # (recompute() over the real tokenizer vocabulary) against a REAL model's
+    # tokenizer, measured on this machine, rather than the unspecified-machine
+    # figure quoted in mortgage_grammar.cppm's own header comment. Needs
+    # sensen_slim (for the tokenizer via LLMPipeline) PLUS the app's own
+    # mortgage_verification/mortgage_grammar modules -- gp_ara_interfaces and
+    # sensen.grammar are already provided by sensen_slim (see its own FILE_SET
+    # a few hundred lines up), so they are NOT re-added here to avoid a
+    # duplicate-PCM conflict.
+    add_executable(bench_mortgage_grammar_timing src/bench_mortgage_grammar_timing.cpp)
+    target_sources(bench_mortgage_grammar_timing
+        PRIVATE
+        FILE_SET CXX_MODULES FILES
+            src/modules/mortgage_verification.cppm
+            src/modules/mortgage_grammar.cppm
+    )
+    target_compile_definitions(bench_mortgage_grammar_timing PRIVATE
+        MORTGAGE_FINANCE_PROTO_PATH="${CMAKE_CURRENT_SOURCE_DIR}/proto/finance.proto")
+    target_link_libraries(bench_mortgage_grammar_timing PRIVATE sensen_slim)
+
     # Bit-exactness gate for the decode path. Captures the exact token-id stream
     # for a fixed prompt battery under greedy deterministic decoding, and later
     # re-checks it. Every change that claims to be numerically identical -- a
