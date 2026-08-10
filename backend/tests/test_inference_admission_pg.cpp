@@ -503,6 +503,63 @@ auto main() -> int {
     }
 
     // -----------------------------------------------------------------
+    // Distinct from the "Postgres unreachable" section above: THIS section
+    // keeps Postgres perfectly healthy and reachable the whole time. The job
+    // is submitted successfully (submit_remote() returns Ok) and simply sits
+    // `pending` forever because no QueuedBackend anywhere has a
+    // PostgresLeaseSource installed for this surface -- exactly what "the GPU
+    // worker never leases it" looks like from the submitting side, whether
+    // that worker is a genuinely remote, unreachable host or merely one that
+    // was never started. await_result()'s own deadline loop (see
+    // inference_queue.cpp) has no notion of WHY nobody leased -- it only
+    // knows `now() >= deadline`, so this section is the direct evidence that
+    // the fallback path this task's own brief asks about ("does the fallback
+    // fire cleanly at the deadline?") fires the same way regardless of
+    // whether the absent worker is idle or absent because it is on another
+    // host entirely.
+    section("No worker ever leases (Postgres healthy, surface simply has no lease source) -- "
+            "PostgresAdmission falls back at its own deadline via Timeout, not ConnectFailed");
+    {
+        reset_db(admin);
+        auto queue = make_queue("admission_test_no_lessor");
+
+        LocalStubBackend local_fallback{"LOCAL_FALLBACK"};
+        constexpr auto kShortDeadline = 400ms;
+        PostgresAdmission admission{queue, inference_queue::Surface::Strategy, local_fallback,
+                                     kShortDeadline};
+
+        const auto t0 = std::chrono::steady_clock::now();
+        auto result = admission.submit("nobody-is-listening");
+        const auto elapsed = std::chrono::steady_clock::now() - t0;
+
+        check(result.has_value() && result->ok &&
+                  result->text == "LOCAL_FALLBACK:nobody-is-listening",
+              "with nothing ever leasing it, submit() still returns the LOCAL backend's answer "
+              "via the timeout path, not a hang and not an error");
+        check(elapsed >= kShortDeadline,
+              "returned after at least the " +
+                  std::to_string(kShortDeadline.count()) +
+                  "ms remote_deadline elapsed (took " +
+                  std::to_string(
+                      std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count()) +
+                  "ms) -- this is await_result() actually waiting out its deadline and reporting "
+                  "Timeout, not a fast-fail like ConnectFailed above");
+        check(elapsed < kShortDeadline + 2000ms,
+              "the wait was bounded, not unbounded -- returned well within a couple of seconds "
+              "of the deadline rather than hanging indefinitely");
+
+        // The row itself: submit_remote() DID succeed (unlike the unreachable
+        // -Postgres section above, where no row is ever created), so job id 1
+        // exists and is still genuinely 'pending' -- proving submit_remote()
+        // is not what failed here; only leasing never happened.
+        check(row_state(admin, 1) == "pending",
+              "the row was created and is still 'pending' -- submit_remote() succeeded, the "
+              "fallback fired purely because nobody ever called lease() on it before the "
+              "deadline, exactly the shape of a GPU worker that is unreachable or simply not "
+              "running");
+    }
+
+    // -----------------------------------------------------------------
     section("Fenced completion is discarded even when the REAL write-back went through "
             "PostgresLeaseSource's own helper thread");
     {

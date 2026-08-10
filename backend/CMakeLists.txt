@@ -406,6 +406,46 @@ target_link_libraries(proto_lib PUBLIC grpc++ libprotobuf)
 set(BUILD_PYTHON_BINDINGS OFF CACHE BOOL "Disable sensen python bindings" FORCE)
 set(BUILD_TESTS OFF CACHE BOOL "Disable sensen tests" FORCE)
 set(BUILD_EXAMPLES OFF CACHE BOOL "Disable sensen examples" FORCE)
+# ENABLE_CUDA -- propagated into sensen's cache, deliberately WITHOUT FORCE,
+# unlike every other line in this block.
+#
+# sensen's own CMakeLists.txt (sensen/CMakeLists.txt:600-639) auto-detects
+# ENABLE_CUDA from the CONFIGURING MACHINE (nvidia-smi, CUDA_PATH/CUDA_BIN_PATH,
+# nvcc-in-PATH) whenever it is not already a defined cache variable by the time
+# add_subdirectory(sensen) below reaches it. Left alone, that makes this
+# engine's CUDA setting a property of whichever host happens to run `cmake`,
+# not a decision anyone made -- exactly the class of non-reproducibility
+# CLAUDE.md's "make the container image build reproducibly" fix (4f11e29)
+# exists to prevent elsewhere in this same file. Declaring it HERE, explicitly,
+# pins the default to OFF regardless of host, while still leaving it
+# genuinely settable: `set(... CACHE BOOL ...)` without FORCE only seeds a
+# cache entry that does not already exist, so a caller's own
+# `-DENABLE_CUDA=ON` on the original `cmake` invocation (which lands in the
+# cache before ANY CMakeLists.txt runs) passes through this line untouched and
+# is what add_subdirectory(sensen) below -- and therefore sensen's own
+# `option(ENABLE_CUDA ...)` -- actually sees. FORCE would instead clobber that
+# override back to OFF every configure, defeating the entire point of a Wave-0
+# GPU worker being able to opt in at all.
+#
+# This does NOT itself make sensen_slim (below) CUDA-aware: sensen_slim
+# compiles a curated subset of sensen's .cppm/.cpp files directly, never
+# sensen's own `sensen`/`sensen_cuda` CMake targets, so this variable's only
+# effect today is on whatever sensen builds INSIDE its own
+# add_subdirectory(sensen EXCLUDE_FROM_ALL) scope below (EXCLUDE_FROM_ALL, so
+# nothing in there builds unless something outside this file explicitly links
+# it -- a future GPU-worker target would be that something). Making
+# sensen_slim itself compile real CUDA kernels needs three further, separate
+# things this line does not provide: (1) SENSEN_HAS_CUDA as a compile
+# definition on the sensen_slim target -- of the 79 files sensen_slim already
+# curates, 28 already contain `#ifdef SENSEN_HAS_CUDA` bodies that compile to
+# an inert CPU-only surface without it (verified by grep,
+# `docs/*` GPU-serving investigation); (2) CUDA enabled as a language on this
+# project (`project(OptionsCalculatorEngine CXX)` above is C++-only); and (3)
+# the actual .cu device-kernel translation units those 28 files' CUDA branches
+# call into via extern "C" -- sensen_slim's own target_sources lists zero .cu
+# files today, so even (1)+(2) together would fail at LINK time with
+# undefined references, not configure or compile time.
+set(ENABLE_CUDA OFF CACHE BOOL "Enable CUDA GPU acceleration in the sensen subproject (propagated, not forced -- see this line's own comment)")
 # sensen defaults BUILD_BENCHMARKS to ON and calls add_subdirectory(benchmarks)
 # unconditionally when it is set. The deploy image has no use for them, and
 # .dockerignore excludes backend/sensen/benchmarks from the build context, so
