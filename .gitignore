@@ -56,3 +56,6 @@ agent/dataset/out/
 
 # Generated training datasets (regenerate deterministically with --seed)
 agent/dataset/data_mortgage/
+
+# Issued API keys in plaintext. Never committed; hand to the customer and delete.
+config/keys/

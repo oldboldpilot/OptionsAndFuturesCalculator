@@ -17,13 +17,50 @@ frontend
 node_modules
 **/node_modules
 
-# Build outputs
-backend/build
+# Model training / dataset tooling. The container build never references it --
+# `grep -c 'agent' backend/Dockerfile` is 0 -- and it is 35 MB of Python and
+# datasets that would otherwise ride along on every deploy.
+agent
+
+# Build outputs.
+#
+# `backend/build` alone is NOT enough and its absence broke `railway up`
+# outright: the CLI uploads the WORKING TREE, not git, so every local build
+# directory travels with it. On 2026-08-09 the upload died with "operation
+# timed out" twice before the cause was found -- backend/build-int8 alone is
+# 7.3 GB, and backend/sensen carries two more. Total payload was measured in
+# multiple GB against a CLI that already fails at tens of MB.
+#
+# Anything matching a build directory must be listed here, and a new one
+# appearing locally is a deploy outage waiting to happen -- hence the glob
+# rather than three more literal paths.
+# Literal paths are NOT sufficient here and listing them one by one is how
+# this kept breaking: backend/external/SGEE/build is 1.2 GB of today's
+# verification builds and matched none of the specific rules above it. Match
+# any build directory at any depth instead -- no source directory in this tree
+# is named `build`, so the glob is safe, and a build dir appearing somewhere
+# new no longer silently becomes a deploy outage.
+**/build
+**/build-*
+**/build_*
+**/__pycache__
 .next
 out
 
 # Editor / agent tooling
-docs
+# Root-level prose only -- anchored with a leading slash ON PURPOSE.
+#
+# A bare `docs` matches a directory named `docs` at ANY depth, and on
+# 2026-08-09 that silently broke the container build: SGEE grew a
+# `tests/docs/` directory holding dsl_format_examples_test.cpp (the test that
+# parses every example in the DSL reference, so a doc example cannot rot into
+# unparseable syntax). Excluding it made CMake fail at configure with
+# "Cannot find source file: docs/dsl_format_examples_test.cpp" -- a build
+# break with no obvious connection to an ignore file.
+#
+# The lesson generalises: an unanchored directory name here is a trap that
+# springs whenever anyone anywhere in the tree picks that name.
+/docs
 .playwright-mcp
 .claude
 config
@@ -81,3 +118,14 @@ backend/sensen/docs
 # private Railway bucket (SigV4, checksum-verified). Re-admitting a 639 MB file
 # here only reproduces the measured HTTP 413 -- 619 MB compressed already failed.
 
+# Editor/LSP caches. Never a build input, and backend/sensen/.cache/clangd
+# alone is 4.5 MB against a ~30 s upload deadline.
+**/.cache
+
+# SGEE's PROSE docs, by explicit path. Note this is deliberately NOT a bare
+# `docs` rule -- that is exactly what broke the build (see the /docs comment
+# above): SGEE's tests/docs/ holds dsl_format_examples_test.cpp and MUST ship.
+backend/external/SGEE/docs
+
+# A screenshot committed at the repo root; not a build input.
+current-ui.png
