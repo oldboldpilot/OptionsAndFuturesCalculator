@@ -427,24 +427,28 @@ set(BUILD_EXAMPLES OFF CACHE BOOL "Disable sensen examples" FORCE)
 # override back to OFF every configure, defeating the entire point of a Wave-0
 # GPU worker being able to opt in at all.
 #
-# This does NOT itself make sensen_slim (below) CUDA-aware: sensen_slim
-# compiles a curated subset of sensen's .cppm/.cpp files directly, never
-# sensen's own `sensen`/`sensen_cuda` CMake targets, so this variable's only
-# effect today is on whatever sensen builds INSIDE its own
+# By itself, this line does NOT make sensen_slim (below) CUDA-aware -- it
+# only controls what sensen builds INSIDE its own
 # add_subdirectory(sensen EXCLUDE_FROM_ALL) scope below (EXCLUDE_FROM_ALL, so
 # nothing in there builds unless something outside this file explicitly links
-# it -- a future GPU-worker target would be that something). Making
-# sensen_slim itself compile real CUDA kernels needs three further, separate
-# things this line does not provide: (1) SENSEN_HAS_CUDA as a compile
-# definition on the sensen_slim target -- of the 79 files sensen_slim already
-# curates, 28 already contain `#ifdef SENSEN_HAS_CUDA` bodies that compile to
-# an inert CPU-only surface without it (verified by grep,
-# `docs/*` GPU-serving investigation); (2) CUDA enabled as a language on this
-# project (`project(OptionsCalculatorEngine CXX)` above is C++-only); and (3)
-# the actual .cu device-kernel translation units those 28 files' CUDA branches
-# call into via extern "C" -- sensen_slim's own target_sources lists zero .cu
-# files today, so even (1)+(2) together would fail at LINK time with
-# undefined references, not configure or compile time.
+# it). sensen_slim itself compiles a curated subset of sensen's .cppm/.cpp
+# files directly, never sensen's own `sensen` CMake target, and three further
+# things were needed before it could compile real CUDA kernels: (1)
+# SENSEN_HAS_CUDA as a compile definition on the sensen_slim target -- of the
+# 79 files sensen_slim curates, 28 contain `#ifdef SENSEN_HAS_CUDA` bodies
+# that compile to an inert CPU-only surface without it; (2) CUDA enabled as a
+# language for this CMake run (`project(OptionsCalculatorEngine CXX)` above
+# is C++-only, but sensen's own `project(Sensen ... LANGUAGES CXX CUDA)`
+# inside add_subdirectory(sensen EXCLUDE_FROM_ALL) below already does this
+# WHENEVER ENABLE_CUDA=ON, and enable_language() is a whole-configure effect
+# that reaches past that subdirectory's own scope); and (3) the actual .cu
+# device-kernel translation units those 28 files' CUDA branches call into via
+# extern "C" -- sensen_slim's own target_sources lists zero .cu files. All
+# three are now wired up just after sensen_slim's target definition below
+# (search this file for "GPU-capable sensen_slim"), which links sensen's own
+# `sensen_cuda` target in rather than curating a second .cu file list --
+# see that block's own comment for the full justification and the honest
+# cost (a hard CUTLASS dependency once ENABLE_CUDA=ON) it was weighed against.
 set(ENABLE_CUDA OFF CACHE BOOL "Enable CUDA GPU acceleration in the sensen subproject (propagated, not forced -- see this line's own comment)")
 # sensen defaults BUILD_BENCHMARKS to ON and calls add_subdirectory(benchmarks)
 # unconditionally when it is set. The deploy image has no use for them, and
@@ -808,6 +812,128 @@ elseif(DEFINED TBB_LIB AND TBB_LIB)
 else()
     message(FATAL_ERROR "sensen_slim needs TBB for sensen.parallel, and neither "
                         "TBB::tbb nor TBB_LIB is defined after configuring sensen.")
+endif()
+
+# --------------------------------------------------------------------------
+# GPU-capable sensen_slim: SENSEN_HAS_CUDA + the actual device kernels.
+#
+# The ENABLE_CUDA comment above (~line 409-447) already laid out exactly
+# three things still needed, past propagating the cache variable, before
+# sensen_slim itself becomes CUDA-aware: (1) SENSEN_HAS_CUDA as a compile
+# definition on sensen_slim -- 28 of the 79 files this target curates
+# already contain `#ifdef SENSEN_HAS_CUDA` bodies that compile to an inert
+# CPU-only stub surface without it; (2) CUDA enabled as a language for this
+# CMake run; (3) the .cu device-kernel translation units those 28 files'
+# CUDA branches call into via extern "C" -- sensen_slim's own target_sources
+# lists zero .cu files. This block closes all three.
+#
+# (2) needs no action here: sensen's own `project(Sensen ... LANGUAGES CXX
+# CUDA)` (sensen/CMakeLists.txt:329, reached only when ENABLE_CUDA=ON) already
+# ran inside the add_subdirectory(sensen EXCLUDE_FROM_ALL) call above, and
+# enable_language() is a whole-configure effect, not scoped to that
+# subdirectory -- CMAKE_CUDA_COMPILER and the CUDA::cudart imported target
+# are already live by the time this line runs. sensen_slim compiles no .cu
+# sources of its own, so it needs nothing further from the language itself;
+# it only needs (1) and (3) below.
+#
+# MECHANISM CHOICE for (3): link sensen's OWN `sensen_cuda` target (built by
+# sensen/src/cuda/CMakeLists.txt, ~150 .cu files compiled into one static
+# archive, EXCLUDE_FROM_ALL so it costs nothing when ENABLE_CUDA=OFF) rather
+# than curating a second, parallel .cu file list the way the FILE_SET above
+# curates .cppm/.cpp files. Justification, weighed explicitly against the
+# alternative:
+#
+#   - The curated-module-list precedent immediately above (this file, ~line
+#     511) has ALREADY broken twice this session when sensen added an import
+#     the list didn't have. Each break was recoverable only because the
+#     configure error ("module 'sensen.x' not found") names the missing
+#     entry outright. A hand-curated .cu list has no equivalent safety net:
+#     a missing .cu surfaces at LINK time as an opaque "undefined reference
+#     to sensen_cuda_foo_kernel", with nothing in the error naming which of
+#     the 28 gated files' SENSEN_HAS_CUDA branch needed it, or which of
+#     sensen's ~150 kernel files supplies it. A mechanism that tracks
+#     sensen's own device-kernel list automatically -- by construction,
+#     forever -- is strictly preferable to one that needs the same kind of
+#     manual sync this file has already had to redo twice.
+#   - sensen_cuda's own CUDA_SEPARABLE_COMPILATION is OFF (verified:
+#     src/cuda/CMakeLists.txt:169,469,585,708 -- every .cu target it defines
+#     sets this the same way). Each .cu compiles to a self-contained object
+#     with its device code already resolved, with no cross-TU nvlink device-
+#     link step. That means linking the WHOLE static archive behaves exactly
+#     like linking any other static library: the host linker pulls in only
+#     the .o members that resolve an actual undefined reference from
+#     sensen_slim's 28 gated files. calculator_engine's binary size and link
+#     time are governed by what it actually calls, not by the archive's
+#     ~150-file breadth -- reuse costs nothing at link time that curation
+#     would have saved.
+#
+#   The real, non-hypothetical cost of this choice, stated plainly rather
+#   than glossed over: sensen_cuda unconditionally compiles cuTile/CUTLASS-
+#   backed kernels, and its own CMakeLists FATAL_ERRORs at CONFIGURE time if
+#   CUTLASS 3.x headers cannot be found anywhere (no explicit -DCUTLASS_DIR
+#   override) -- see sensen/src/cuda/CMakeLists.txt:305-324. A curated .cu
+#   subset could, in principle, dodge that requirement if none of the 28
+#   gated sensen_slim files happen to route through a cuTile/CUTLASS kernel.
+#   That possibility was judged not worth reintroducing the manual-sync
+#   fragility documented above: -DENABLE_CUDA=ON is already an opt-in to
+#   sensen's full GPU toolchain, and whoever sets it is already expected to
+#   have that toolchain -- CUTLASS included -- available, the same way this
+#   file's own gp_ara/Z3 pieces already expect their optional dependencies
+#   to be present when the feature that needs them is turned on.
+#
+# UNVERIFIED locally -- this machine has no nvcc, see this task's own report
+# for the full statement. Reproduction command for whoever runs this on the
+# GPU box (the three non-obvious requirements below are already established
+# by a prior successful sensen-alone CUDA build at commit f2615167, not
+# reproven here):
+#
+#     SKIP_CLANG_TIDY=1 CC=/usr/bin/clang-22 CXX=/usr/bin/clang++-22 \
+#         cmake -S backend -B backend/build-cuda -G Ninja \
+#         -DENABLE_CUDA=ON -DCMAKE_BUILD_TYPE=Release
+#     cmake --build backend/build-cuda --target calculator_engine
+#
+# (SKIP_CLANG_TIDY must be an environment variable -- sensen's own
+# CMakeLists checks $ENV{SKIP_CLANG_TIDY}, not a CMake cache variable;
+# compilers must be named explicitly, since auto-detection has been observed
+# to fall through to GCC on this class of machine; submodules need
+# `git submodule update --init --recursive` first if this is a fresh clone.)
+if(ENABLE_CUDA)
+    # PRIVATE: this only changes which function bodies compile inside
+    # sensen_slim's own translation units. C++20/23 modules do not leak
+    # preprocessor macros across the import boundary -- a consumer's BMI-
+    # visible interface shape was already fixed when sensen_slim's modules
+    # were compiled, so calculator_engine and test_runner need no matching
+    # definition of their own to see the CUDA-enabled interface correctly.
+    # This is a different situation from _LIBCPP_NO_ABI_TAG at the top of
+    # this file, which changes name mangling and therefore genuinely must
+    # agree, whole-binary, across an ODR boundary a compile definition alone
+    # cannot express; SENSEN_HAS_CUDA has no such cross-TU ABI concern.
+    target_compile_definitions(sensen_slim PRIVATE SENSEN_HAS_CUDA)
+
+    # PUBLIC: sensen_slim's compiled objects call into sensen_cuda's
+    # extern "C" kernels, so the *link* step -- not just sensen_slim's own
+    # compile -- needs sensen_cuda's symbols resolved. Any consumer that
+    # links sensen_slim (calculator_engine, test_runner, ...) must therefore
+    # also link sensen_cuda transitively, exactly mirroring how sensen's own
+    # sensen_objects links it (sensen/src/CMakeLists.txt:634-639) and for
+    # the identical reason given there.
+    target_link_libraries(sensen_slim PUBLIC sensen_cuda CUDA::cudart)
+
+    # Cheap insurance, not strictly required: the 28 gated files already
+    # #include their CUDA bridge headers via a "cuda/..." quoted path
+    # relative to their own location in ${SENSEN_SRC}, which resolves
+    # without this on every compiler tested so far. Added anyway because
+    # sensen_objects adds the identical include directory for the same
+    # files (sensen/src/CMakeLists.txt:641) -- keeping sensen_slim's search
+    # path a superset of sensen_objects' avoids a future bridge header that
+    # itself uses an unprefixed quoted include (relative to ITS OWN
+    # location under .../cuda/) becoming a sensen_slim-only build break.
+    target_include_directories(sensen_slim PRIVATE "${SENSEN_SRC}/cuda")
+
+    message(STATUS "  sensen_slim: SENSEN_HAS_CUDA + sensen_cuda linked in "
+                    "(GPU-capable calculator_engine build; UNVERIFIED on "
+                    "this machine -- no nvcc here, see this file's own "
+                    "comment above for the reproduction command)")
 endif()
 
 # Include StochasticGraphExecutionEngine for distributed execution.
