@@ -66,6 +66,86 @@ import inference_queue;
  */
 namespace options_calculator::inference_admission {
 
+// ---------------------------------------------------------------------------
+// Device selection (ASSISTANT_DEVICE / MORTGAGE_DEVICE)
+// ---------------------------------------------------------------------------
+
+/**
+ * Which physical device a backend's decode loop actually runs on.
+ *
+ * There is no third value. Hybrid decode is unimplemented in sensen and
+ * hybrid prefill is broken for its Q8_0 kernel, so a device is either `Cpu`
+ * or fully `Cuda` -- never a partial layer split. Everywhere this codebase
+ * would otherwise be tempted to offer a fraction, it must not.
+ */
+export enum class Device : std::uint8_t { Cpu, Cuda };
+
+/** `device`'s wire/log spelling -- "cpu" or "cuda", the same two strings
+ *  `ASSISTANT_DEVICE`/`MORTGAGE_DEVICE` accept. Centralised so a ready-line
+ *  log and a `device()` override never drift into spelling it differently. */
+export [[nodiscard]] constexpr auto device_name(Device device) noexcept -> std::string_view {
+    return device == Device::Cuda ? "cuda" : "cpu";
+}
+
+/**
+ * The result of resolving one surface's `*_DEVICE` env var against what this
+ * build and this process can actually do. `device` is only meaningful when
+ * `refuse` is false -- a refusal means the caller must return without
+ * constructing any backend at all, the same shape as the pre-existing
+ * `ASSISTANT_BACKEND=llamacpp`-without-`ENABLE_LLAMACPP_BACKEND` refusal.
+ */
+export struct DeviceResolution {
+    Device device = Device::Cpu;
+    bool refuse = false;
+};
+
+/**
+ * Pure decision function behind `ASSISTANT_DEVICE`/`MORTGAGE_DEVICE`, factored
+ * out of both Worker constructors so it is unit-testable without an actual
+ * CUDA build or a real device: `cuda_build`/`cuda_device_ready` are the two
+ * facts a caller has already established (a compile-time `#ifdef
+ * SENSEN_HAS_CUDA` and a runtime `sensen::cuda::CudaBackend::is_available()`
+ * call respectively), passed in rather than queried here so this function has
+ * no build-configuration dependency of its own and every branch is reachable
+ * from a plain unit test.
+ *
+ * Four cases, matching this task's own brief exactly:
+ *
+ *   - `requested != "cuda"` (unset, "cpu", or anything unrecognised) ->
+ *     `{Cpu, false}`, byte-identical to every build before this selector
+ *     existed. An unrecognised string is intentionally treated as "cpu", NOT
+ *     refused -- unlike `ASSISTANT_BACKEND`'s own unrecognised-value branch --
+ *     because the brief for this selector specifically calls out "cpu (or
+ *     anything unrecognised) -> byte-identical to today" as the contract.
+ *   - `requested == "cuda"` and `!cuda_build` -> `{_, true}` (refuse). Never
+ *     silently substitute an engine, or here a device, the gates do not
+ *     cover -- the exact `ENABLE_LLAMACPP_BACKEND=OFF` precedent
+ *     (assistant_service.cpp's own three-branch ASSISTANT_BACKEND selector).
+ *   - `requested == "cuda"`, `cuda_build`, `!cuda_device_ready` -> `{Cpu,
+ *     false}`. Loud degrade, not a refusal: a missing or broken device at
+ *     runtime is not the build-configuration mistake the branch above is.
+ *     The caller is expected to log this at error level itself (this
+ *     function stays silent -- see its own "no logger dependency" note above)
+ *     precisely so the ready line can still report `device=cpu`, ground
+ *     truth, not the abandoned request.
+ *   - `requested == "cuda"`, `cuda_build`, `cuda_device_ready` -> `{Cuda,
+ *     false}`.
+ */
+export [[nodiscard]] constexpr auto resolve_device(std::string_view requested, bool cuda_build,
+                                                    bool cuda_device_ready) noexcept
+    -> DeviceResolution {
+    if (requested != "cuda") {
+        return DeviceResolution{.device = Device::Cpu, .refuse = false};
+    }
+    if (!cuda_build) {
+        return DeviceResolution{.device = Device::Cpu, .refuse = true};
+    }
+    if (!cuda_device_ready) {
+        return DeviceResolution{.device = Device::Cpu, .refuse = false};
+    }
+    return DeviceResolution{.device = Device::Cuda, .refuse = false};
+}
+
 /**
  * What a backend hands back for one generation request.
  *
@@ -142,6 +222,22 @@ export class InferenceBackend {
 
     /** Identifier for logs and for the startup banner. Never user-facing. */
     [[nodiscard]] virtual auto name() const noexcept -> std::string_view = 0;
+
+    /**
+     * Which device is ACTUALLY serving requests through this backend right
+     * now -- "cpu" or "cuda" (see `device_name`), never a partial value.
+     * Distinct from what a deployment REQUESTED via `ASSISTANT_DEVICE`/
+     * `MORTGAGE_DEVICE`: a backend that degraded from a `cuda` request to
+     * `cpu` at runtime (see `resolve_device`) reports "cpu" here, so a caller
+     * logging this states ground truth, not the abandoned request.
+     *
+     * Defaults to "cpu" so every backend that never offloads anything --
+     * `LlamaCppBackend` (this task does not extend GPU offload to it; see
+     * this project's CLAUDE.md on llama.cpp being a cross-checking tool, not
+     * a serving alternative) and every `QueuedBackend` test double in this
+     * tree -- needs no override at all.
+     */
+    [[nodiscard]] virtual auto device() const noexcept -> std::string_view { return "cpu"; }
 };
 
 export class PostgresLeaseSource;  // defined below; QueuedBackend only needs a pointer to it.
@@ -657,6 +753,13 @@ export class PostgresAdmission final : public InferenceBackend {
 
     [[nodiscard]] auto submit(std::string prompt) -> std::optional<InferenceOutcome> override;
     [[nodiscard]] auto name() const noexcept -> std::string_view override { return "postgres"; }
+
+    /** Forwards to the wrapped local backend -- a leased-out job still
+     *  decodes on whatever device that backend's own owner thread runs on,
+     *  so this is the honest answer, not a hardcoded "cpu". */
+    [[nodiscard]] auto device() const noexcept -> std::string_view override {
+        return local_.device();
+    }
 
   private:
     std::shared_ptr<options_calculator::inference_queue::Queue> queue_;

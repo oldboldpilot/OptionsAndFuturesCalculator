@@ -35,6 +35,11 @@ module mortgage_assistant_service;
 
 import sensen.llm_pipeline;
 import sensen.tokenizer;  // Tokenizer, for the grammar's id -> text vocabulary
+// Only its always-present declarations are used here (the ComputeBackend enum
+// value and the CudaBackend::is_available() runtime probe) -- see
+// assistant_service.cpp's identical import for why this needs no build-file
+// change and how the compile-time/runtime facts stay separate.
+import sensen.cuda_backend;
 import fastjson;
 import logger;
 import quota;
@@ -351,7 +356,7 @@ class SensenBackend final : public QueuedBackend {
      */
     [[nodiscard]] static auto create(const std::string& model_path, std::size_t max_concurrent,
                                      std::size_t queue_depth, std::size_t kv_max_seq_len,
-                                     int threads) -> std::unique_ptr<SensenBackend> {
+                                     int threads, Device device) -> std::unique_ptr<SensenBackend> {
         std::unique_ptr<sensen::LLMPipeline> pipeline;
         try {
             pipeline = sensen::LLMPipeline::fromGGUF(model_path)
@@ -376,10 +381,17 @@ class SensenBackend final : public QueuedBackend {
         }
 
         return std::unique_ptr<SensenBackend>(
-            new SensenBackend(std::move(pipeline), max_concurrent, queue_depth));
+            new SensenBackend(std::move(pipeline), max_concurrent, queue_depth, device));
     }
 
     [[nodiscard]] auto name() const noexcept -> std::string_view override { return "sensen"; }
+
+    /** The device actually decoding here -- see InferenceBackend::device()'s
+     *  own doc for why this reports ground truth, not the MORTGAGE_DEVICE
+     *  request that may have been degraded away from at construction time. */
+    [[nodiscard]] auto device() const noexcept -> std::string_view override {
+        return device_name(device_);
+    }
 
     /** Public (moved out of `private:` below) because the OWNING Worker --
      *  a different class -- must be able to call it after create() returns,
@@ -438,7 +450,7 @@ class SensenBackend final : public QueuedBackend {
     static constexpr std::size_t kNoSlot = static_cast<std::size_t>(-1);
 
     SensenBackend(std::unique_ptr<sensen::LLMPipeline> pipeline, std::size_t max_concurrent,
-                  std::size_t queue_depth)
+                  std::size_t queue_depth, Device device)
         // The pre-extraction QueuedBackend::submit() in THIS file hardcoded
         // "mortgage assistant backend is shutting down" -- distinct from
         // assistant_service.cpp's "assistant backend is shutting down".
@@ -446,7 +458,7 @@ class SensenBackend final : public QueuedBackend {
         // matches the strategy assistant's original wording) does not change
         // this service's own text.
         : QueuedBackend("mortgage assistant backend is shutting down"),
-          pipeline_{std::move(pipeline)} {
+          pipeline_{std::move(pipeline)}, device_{device} {
         max_concurrent_ = max_concurrent;
         max_queue_depth_ = queue_depth;
     }
@@ -454,8 +466,12 @@ class SensenBackend final : public QueuedBackend {
     /**
      * The sampling configuration every request through this service is
      * generated with.
+     *
+     * No longer `static`: the `Device::Cuda` branch needs both `device_` and
+     * `pipeline_->getModel().num_layers()`. See assistant_service.cpp's
+     * identical change for the full rationale; this file mirrors it exactly.
      */
-    [[nodiscard]] static auto generation_config(std::size_t max_new_tokens)
+    [[nodiscard]] auto generation_config(std::size_t max_new_tokens) const
         -> sensen::GenerationConfig {
         sensen::GenerationConfig config;
 
@@ -522,6 +538,19 @@ class SensenBackend final : public QueuedBackend {
         // checkpoint; an independent llama.cpp rollout on the same GGUF agreed
         // with sensen at 8/30 both ways.
         config.repetition_penalty = 1.0F;
+
+        // Device offload. Mirrors assistant_service.cpp's identical block
+        // exactly -- see that file's own comment for the full rationale
+        // (why AUTO never survives n_gpu_layers=0, why compute_backend is
+        // set EXPLICITLY to CUDA and never AUTO, why n_gpu_layers is always
+        // every layer or zero, never a split). `device_` is `Device::Cpu` on
+        // every process that existed before MORTGAGE_DEVICE did, so this is
+        // a no-op there and the two lines above stay this service's exact
+        // pre-existing behaviour.
+        if (device_ == Device::Cuda) {
+            config.n_gpu_layers = pipeline_->getModel().num_layers();
+            config.compute_backend = sensen::cuda::ComputeBackend::CUDA;
+        }
 
         return config;
     }
@@ -1034,6 +1063,12 @@ class SensenBackend final : public QueuedBackend {
 
     std::unique_ptr<sensen::LLMPipeline> pipeline_;
 
+    // The device generation_config() offloads onto -- Device::Cpu unless
+    // MortgageAssistantWorker resolved a genuinely ready Device::Cuda. See
+    // create()'s own parameter and generation_config()'s own comment on the
+    // one place this is read.
+    Device device_ = Device::Cpu;
+
     // System-prompt KV prefix cache -- see ensure_prefix_cache()/admit()
     // above, and assistant_service.cpp's identical members for the full
     // rationale. This service's own copy: separate pipeline, separate
@@ -1154,8 +1189,44 @@ class MortgageAssistantWorker {
         const auto kv_max_seq_len =
             static_cast<std::size_t>(env_positive_int("MORTGAGE_ASSISTANT_CONTEXT_TOKENS", 4096));
 
-        backend_ =
-            SensenBackend::create(*path, max_concurrent, queue_depth, kv_max_seq_len, threads);
+        // Device selection: mirrors AssistantWorker's own MORTGAGE_DEVICE-vs-
+        // ASSISTANT_DEVICE handling in assistant_service.cpp exactly (see
+        // that constructor's own comment for the full rationale); this
+        // service has only one selectable backend (sensen -- there is no
+        // MORTGAGE_BACKEND=llamacpp), so there is no second engine this
+        // could land on instead, but the refuse-before-construct shape stays
+        // identical for the same reason: never silently substitute a device
+        // the gates do not cover.
+        const std::string requested_device = env_string("MORTGAGE_DEVICE").value_or("cpu");
+#ifdef SENSEN_HAS_CUDA
+        constexpr bool kCudaBuild = true;
+#else
+        constexpr bool kCudaBuild = false;
+#endif
+        const bool cuda_device_ready =
+            kCudaBuild && sensen::cuda::CudaBackend::is_available();
+        const auto device_resolution =
+            resolve_device(requested_device, kCudaBuild, cuda_device_ready);
+        if (device_resolution.refuse) {
+            logger::Logger::getInstance().error(
+                "MORTGAGE_DEVICE=cuda was requested, but this binary was built without CUDA "
+                "support (SENSEN_HAS_CUDA was not defined at configure time) -- the mortgage "
+                "assistant will return a Refusal on every call rather than silently serving on "
+                "CPU; rebuild with CUDA enabled or set MORTGAGE_DEVICE=cpu.");
+            return;
+        }
+        if (requested_device == "cuda" && device_resolution.device == Device::Cpu) {
+            logger::Logger::getInstance().error(
+                "MORTGAGE_DEVICE=cuda was requested and this binary was built with CUDA "
+                "support, but no usable CUDA device was found at runtime -- the mortgage "
+                "assistant is serving on CPU instead of failing outright, since a missing or "
+                "broken device is not the build-configuration mistake the branch above guards "
+                "against.");
+        }
+        const Device device = device_resolution.device;
+
+        backend_ = SensenBackend::create(*path, max_concurrent, queue_depth, kv_max_seq_len,
+                                         threads, device);
         if (backend_ == nullptr) {
             logger::Logger::getInstance().error(
                 "The mortgage assistant backend failed to initialise from MORTGAGE_MODEL_PATH ({}) "
@@ -1166,9 +1237,10 @@ class MortgageAssistantWorker {
         }
 
         logger::Logger::getInstance().info(
-            "Mortgage assistant ready: backend={} model={} inference_threads={} max_concurrent={} "
-            "queue_depth={} context_tokens={}",
-            backend_->name(), *path, threads, max_concurrent, queue_depth, kv_max_seq_len);
+            "Mortgage assistant ready: backend={} device={} model={} inference_threads={} "
+            "max_concurrent={} queue_depth={} context_tokens={}",
+            backend_->name(), backend_->device(), *path, threads, max_concurrent, queue_depth,
+            kv_max_seq_len);
 
         // configure_inference_queue() MUST run before backend_->start(): it is
         // what calls backend_->set_lease_source() in INFERENCE_QUEUE=postgres

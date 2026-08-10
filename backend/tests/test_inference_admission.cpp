@@ -24,8 +24,10 @@
 import inference_admission;
 
 using namespace std::chrono_literals;
+using options_calculator::inference_admission::Device;
 using options_calculator::inference_admission::InferenceOutcome;
 using options_calculator::inference_admission::QueuedBackend;
+using options_calculator::inference_admission::resolve_device;
 
 namespace {
 
@@ -225,6 +227,92 @@ auto main() -> int {
               "the still-queued job is failed with the CUSTOM shutting-down message (matches "
               "mortgage_assistant_service.cpp's original wording) -- proving the two surfaces' "
               "wording did not homogenize when the class was unified");
+    }
+
+    // -----------------------------------------------------------------
+    // resolve_device() -- the ASSISTANT_DEVICE/MORTGAGE_DEVICE selector's
+    // decision logic, factored into inference_admission.cppm as a pure
+    // function precisely so every branch is testable here without an actual
+    // CUDA build or a real device: cuda_build/cuda_device_ready are passed in
+    // as plain booleans rather than queried from #ifdef SENSEN_HAS_CUDA or
+    // sensen::cuda::CudaBackend::is_available() (which assistant_service.cpp
+    // and mortgage_assistant_service.cpp do at their own real call sites).
+    section("resolve_device() -- ASSISTANT_DEVICE/MORTGAGE_DEVICE selector");
+    {
+        // Default: no env var set, both callers pass "cpu" (env_string(...)
+        // .value_or("cpu")) -- byte-identical to every build before this
+        // selector existed, on a build/process combination that could not be
+        // further from CUDA (neither compiled in nor ready).
+        {
+            const auto r = resolve_device("cpu", /*cuda_build=*/false, /*cuda_device_ready=*/false);
+            check(r.device == Device::Cpu && !r.refuse,
+                  "default (\"cpu\", no CUDA anywhere) resolves to {Cpu, refuse=false}");
+        }
+
+        // Explicit cpu, even on a hypothetical build that DOES have CUDA
+        // compiled in and ready -- requesting cpu always wins; this proves
+        // resolve_device() never "helpfully" upgrades an explicit cpu
+        // request just because the machine happens to be capable.
+        {
+            const auto r = resolve_device("cpu", /*cuda_build=*/true, /*cuda_device_ready=*/true);
+            check(r.device == Device::Cpu && !r.refuse,
+                  "explicit \"cpu\" resolves to {Cpu, refuse=false} even on a CUDA-capable "
+                  "build/process -- cpu always wins when it is what was asked for");
+        }
+
+        // An unrecognised value is treated exactly like "cpu", per this
+        // task's own brief ("cpu (or anything unrecognised) -> byte-identical
+        // to today") -- deliberately NOT refused, unlike ASSISTANT_BACKEND's
+        // own unrecognised-value branch.
+        {
+            const auto r =
+                resolve_device("tpu", /*cuda_build=*/false, /*cuda_device_ready=*/false);
+            check(r.device == Device::Cpu && !r.refuse,
+                  "an unrecognised device string (\"tpu\") resolves to {Cpu, refuse=false}, not "
+                  "a refusal -- this axis's contract differs from ASSISTANT_BACKEND's on purpose");
+        }
+
+        // THE branch this build can actually exercise end-to-end today: cuda
+        // requested, this binary was NOT built with CUDA support. Must
+        // refuse -- the exact ENABLE_LLAMACPP_BACKEND=OFF precedent, never a
+        // silent substitution.
+        {
+            const auto r =
+                resolve_device("cuda", /*cuda_build=*/false, /*cuda_device_ready=*/false);
+            check(r.refuse,
+                  "\"cuda\" on a build without CUDA support refuses (the loud "
+                  "build-configuration error), regardless of cuda_device_ready");
+        }
+        {
+            // cuda_device_ready=true here is deliberately incoherent (a real
+            // build never reports a ready device on a build that lacks CUDA
+            // support at all) -- included to prove refuse is keyed on
+            // cuda_build alone, not accidentally on cuda_device_ready too.
+            const auto r =
+                resolve_device("cuda", /*cuda_build=*/false, /*cuda_device_ready=*/true);
+            check(r.refuse,
+                  "\"cuda\" on a build without CUDA support still refuses even if "
+                  "cuda_device_ready is (incoherently) true -- cuda_build is the only gate");
+        }
+
+        // The two branches this box cannot reach through a real CUDA build,
+        // exercised here as pure decision logic (no faking of hardware or
+        // compiler flags -- see this section's own banner): a CUDA build
+        // with no ready device degrades loudly to CPU rather than refusing,
+        // and a CUDA build with a ready device is honoured.
+        {
+            const auto r = resolve_device("cuda", /*cuda_build=*/true, /*cuda_device_ready=*/false);
+            check(r.device == Device::Cpu && !r.refuse,
+                  "\"cuda\" on a CUDA build with no ready device degrades to {Cpu, "
+                  "refuse=false} -- a driver hiccup is not the build-configuration mistake "
+                  "the branch above guards against, so it does not refuse");
+        }
+        {
+            const auto r = resolve_device("cuda", /*cuda_build=*/true, /*cuda_device_ready=*/true);
+            check(r.device == Device::Cuda && !r.refuse,
+                  "\"cuda\" on a CUDA build with a ready device resolves to {Cuda, "
+                  "refuse=false}");
+        }
     }
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);

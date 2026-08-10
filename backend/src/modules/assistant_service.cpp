@@ -43,6 +43,14 @@ module;
 module assistant_service;
 
 import sensen.llm_pipeline;
+// Only its always-present declarations are used here (Device/ComputeBackend
+// enum values and the CudaBackend::is_available() runtime probe, which is
+// itself compiled to an unconditional `return false;` when SENSEN_HAS_CUDA
+// was undefined for sensen_slim -- see resolve_device's own call site below
+// for exactly how the compile-time and runtime facts are kept separate).
+// sensen_slim's own FILE_SET already includes cuda_backend.cppm regardless
+// of ENABLE_CUDA, so this import needs no build-file change.
+import sensen.cuda_backend;
 import fastjson;
 import logger;
 import quota;
@@ -364,7 +372,7 @@ class SensenBackend final : public QueuedBackend {
      */
     [[nodiscard]] static auto create(const std::string& model_path, std::size_t max_concurrent,
                                      std::size_t queue_depth, std::size_t kv_max_seq_len,
-                                     int threads) -> std::unique_ptr<SensenBackend> {
+                                     int threads, Device device) -> std::unique_ptr<SensenBackend> {
         std::unique_ptr<sensen::LLMPipeline> pipeline;
         try {
             pipeline = sensen::LLMPipeline::fromGGUF(model_path)
@@ -391,10 +399,17 @@ class SensenBackend final : public QueuedBackend {
         }
 
         return std::unique_ptr<SensenBackend>(
-            new SensenBackend(std::move(pipeline), max_concurrent, queue_depth));
+            new SensenBackend(std::move(pipeline), max_concurrent, queue_depth, device));
     }
 
     [[nodiscard]] auto name() const noexcept -> std::string_view override { return "sensen"; }
+
+    /** The device actually decoding here -- see InferenceBackend::device()'s
+     *  own doc for why this reports ground truth, not the ASSISTANT_DEVICE
+     *  request that may have been degraded away from at construction time. */
+    [[nodiscard]] auto device() const noexcept -> std::string_view override {
+        return device_name(device_);
+    }
 
     /** Public (moved out of `private:` below) because the OWNING Worker --
      *  a different class -- must be able to call it after create() returns,
@@ -427,8 +442,8 @@ class SensenBackend final : public QueuedBackend {
     };
 
     SensenBackend(std::unique_ptr<sensen::LLMPipeline> pipeline, std::size_t max_concurrent,
-                  std::size_t queue_depth)
-        : pipeline_{std::move(pipeline)} {
+                  std::size_t queue_depth, Device device)
+        : pipeline_{std::move(pipeline)}, device_{device} {
         max_concurrent_ = max_concurrent;
         max_queue_depth_ = queue_depth;
     }
@@ -436,9 +451,15 @@ class SensenBackend final : public QueuedBackend {
     /**
      * The sampling configuration every request in this process is generated
      * with. Built fresh per call rather than cached because it is three field
-     * writes and sharing mutable state with the decode loop buys nothing.
+     * writes (four on a `Device::Cuda` instance) and sharing mutable state
+     * with the decode loop buys nothing.
+     *
+     * No longer `static`: the `Device::Cuda` branch below needs both
+     * `device_` and `pipeline_->getModel().num_layers()`, neither of which a
+     * static function can see. This changes nothing about the `Device::Cpu`
+     * path -- see that branch's own comment.
      */
-    [[nodiscard]] static auto generation_config(std::size_t max_new_tokens)
+    [[nodiscard]] auto generation_config(std::size_t max_new_tokens) const
         -> sensen::GenerationConfig {
         sensen::GenerationConfig config;
 
@@ -507,6 +528,40 @@ class SensenBackend final : public QueuedBackend {
         // checkpoint; an independent llama.cpp rollout on the same GGUF agreed
         // with sensen at 8/30 both ways.
         config.repetition_penalty = 1.0F;
+
+        // Device offload. `device_` is `Device::Cpu` on every process that
+        // existed before ASSISTANT_DEVICE did (the default, and every build
+        // without genuine CUDA support -- see AssistantWorker's own
+        // resolve_device() call site), so this block is a no-op there:
+        // `n_gpu_layers` stays the 0 pinned two comments up, and
+        // `compute_backend` is left at GenerationConfig's own default (AUTO)
+        // exactly as that comment already explains is safe -- AUTO never
+        // survives the `n_gpu_layers=0` conjunction it depends on. This is
+        // the "cpu (or anything unrecognised) -> byte-identical to today"
+        // branch of this task's brief, and it is enforced by this being the
+        // only place `device_` is read: nothing above this line changed.
+        //
+        // Only a genuinely resolved `Device::Cuda` (real CUDA support
+        // compiled in AND a ready device found at runtime -- never merely
+        // requested) touches either field, and when it does:
+        //
+        //   - `compute_backend` is set EXPLICITLY to CUDA, never left at
+        //     AUTO. Leaving it AUTO is the exact defect this project's
+        //     CLAUDE.md documents: GenerationConfig defaults compute_backend
+        //     to AUTO, sensen counted that as a GPU request on its own, and a
+        //     build that could not honour it then cast a raw float logit to
+        //     a token id -- garbage tokens, no crash. Setting it explicitly
+        //     here removes AUTO from the decision entirely.
+        //   - `n_gpu_layers` is set to every layer this model has
+        //     (`pipeline_->getModel().num_layers()`), never a split. Hybrid
+        //     decode is unimplemented in sensen and hybrid prefill is broken
+        //     for Q8_0 (the format both fine-tuned assistants ship), so
+        //     there is no partial value this service may offer -- all or
+        //     zero, matching `Device`'s own two-value contract.
+        if (device_ == Device::Cuda) {
+            config.n_gpu_layers = pipeline_->getModel().num_layers();
+            config.compute_backend = sensen::cuda::ComputeBackend::CUDA;
+        }
 
         return config;
     }
@@ -865,6 +920,12 @@ class SensenBackend final : public QueuedBackend {
     }
 
     std::unique_ptr<sensen::LLMPipeline> pipeline_;
+
+    // The device generation_config() offloads onto -- Device::Cpu unless
+    // AssistantWorker resolved a genuinely ready Device::Cuda. See
+    // create()'s own parameter and generation_config()'s own comment on the
+    // one place this is read.
+    Device device_ = Device::Cpu;
 
     // System-prompt KV prefix cache (see ensure_prefix_cache()/admit()
     // above). prefix_match_tokens_ is the FULL (natural, not block-aligned)
@@ -1443,11 +1504,62 @@ class AssistantWorker {
         const auto kv_max_seq_len =
             static_cast<std::size_t>(env_positive_int("ASSISTANT_CONTEXT_TOKENS", 4096));
 
+        // Device selection: `cpu` (default, byte-identical to every build
+        // before this selector existed) or `cuda` (only ever real on a build
+        // this project's CMakeLists.txt compiled with genuine CUDA support
+        // AND a process that finds a usable device at runtime). See
+        // resolve_device's own doc (inference_admission.cppm) for exactly
+        // what each of "cuda on a non-CUDA build", "cuda on a CUDA build
+        // with no ready device", and "cuda selected and usable" resolves to.
+        //
+        // Resolved BEFORE the ASSISTANT_BACKEND selector just below, not
+        // after: ASSISTANT_DEVICE names a property of the whole build and
+        // process, not of whichever decode engine ASSISTANT_BACKEND names,
+        // so a cuda request this build cannot honour refuses the whole
+        // assistant rather than quietly landing on a CPU-only llama.cpp
+        // backend nobody asked for.
+        const std::string requested_device = env_string("ASSISTANT_DEVICE").value_or("cpu");
+#ifdef SENSEN_HAS_CUDA
+        constexpr bool kCudaBuild = true;
+#else
+        constexpr bool kCudaBuild = false;
+#endif
+        // sensen.cuda_backend's CudaBackend::is_available() runs the MODULE's
+        // own compiled-in runtime probe (sensen_cuda_available()) -- it is
+        // only a meaningful "yes" here because calculator_engine and
+        // sensen_slim are configured with the SAME CUDA setting (backend/
+        // CMakeLists.txt's job, not this file's); if that ever drifted,
+        // is_available() would read as "no device ready" here, which still
+        // degrades honestly rather than crashing. Short-circuited on
+        // kCudaBuild so this call is never reached at all on a build that
+        // never compiled the real probe in.
+        const bool cuda_device_ready =
+            kCudaBuild && sensen::cuda::CudaBackend::is_available();
+        const auto device_resolution =
+            resolve_device(requested_device, kCudaBuild, cuda_device_ready);
+        if (device_resolution.refuse) {
+            logger::Logger::getInstance().error(
+                "ASSISTANT_DEVICE=cuda was requested, but this binary was built without CUDA "
+                "support (SENSEN_HAS_CUDA was not defined at configure time) -- the strategy "
+                "assistant will return a Refusal on every call rather than silently serving on "
+                "CPU; rebuild with CUDA enabled or set ASSISTANT_DEVICE=cpu.");
+            return;
+        }
+        if (requested_device == "cuda" && device_resolution.device == Device::Cpu) {
+            logger::Logger::getInstance().error(
+                "ASSISTANT_DEVICE=cuda was requested and this binary was built with CUDA "
+                "support, but no usable CUDA device was found at runtime -- the strategy "
+                "assistant is serving on CPU instead of failing outright, since a missing or "
+                "broken device is not the build-configuration mistake the branch above guards "
+                "against.");
+        }
+        const Device device = device_resolution.device;
+
         const std::string requested = env_string("ASSISTANT_BACKEND").value_or("sensen");
 
         if (requested == "sensen") {
             backend_ = SensenBackend::create(*path, max_concurrent, queue_depth, kv_max_seq_len,
-                                             threads);
+                                             threads, device);
         } else if (requested == "llamacpp") {
 #ifdef ASSISTANT_HAVE_LLAMACPP
             backend_ = LlamaCppBackend::create(*path, max_concurrent, queue_depth, kv_max_seq_len,
@@ -1479,9 +1591,10 @@ class AssistantWorker {
         }
 
         logger::Logger::getInstance().info(
-            "Strategy assistant ready: backend={} model={} inference_threads={} "
+            "Strategy assistant ready: backend={} device={} model={} inference_threads={} "
             "max_concurrent={} queue_depth={} context_tokens={}",
-            backend_->name(), *path, threads, max_concurrent, queue_depth, kv_max_seq_len);
+            backend_->name(), backend_->device(), *path, threads, max_concurrent, queue_depth,
+            kv_max_seq_len);
 
         // configure_inference_queue() MUST run before backend_->start(): it is
         // what calls backend_->set_lease_source() in INFERENCE_QUEUE=postgres
