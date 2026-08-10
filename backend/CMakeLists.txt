@@ -1551,6 +1551,19 @@ if(ENABLE_LLAMACPP_BACKEND)
     add_executable(assistant_throughput_probe src/assistant_throughput_probe.cpp)
     target_link_libraries(assistant_throughput_probe PRIVATE sensen_slim)
 
+    # DIAGNOSTIC, not a shipped feature -- see the probe's own header comment.
+    # Reproduces, in isolation, sensen's CPU/Q8_0 batched quantized-matvec
+    # batch-size dependence (GEMM::matvecQuantizedBatch's
+    # matvecQ8_0_Int8BatchSlice groups sequence rows by offset-from-batch-
+    # start, not by absolute row index) that makes a chunked forward pass
+    # (schedulerPrefill + schedulerPrefillContinue) numerically diverge from
+    # an equivalent one-shot schedulerPrefill on this build -- the reason a
+    # system-prompt KV prefix-reuse fast path was investigated and NOT
+    # shipped for the strategy/mortgage assistants. Links sensen alone; it
+    # compares two code paths within one process, not two engines.
+    add_executable(prefix_cache_verify_probe src/prefix_cache_verify_probe.cpp)
+    target_link_libraries(prefix_cache_verify_probe PRIVATE sensen_slim)
+
     # Diagnostic-only: real per-token cost of MortgageParamsGrammar::accept()
     # (recompute() over the real tokenizer vocabulary) against a REAL model's
     # tokenizer, measured on this machine, rather than the unspecified-machine
