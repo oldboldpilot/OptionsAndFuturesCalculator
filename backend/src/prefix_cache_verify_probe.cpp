@@ -5,83 +5,134 @@
  * precomputed prefix's KV into a fresh AgentSession via
  * MultiLayerKVCache::share_from, then continue the forward pass over only
  * the request's own tokens via schedulerPrefillContinue, instead of
- * recomputing the fixed system-prompt prefix's KV on every request). That
- * change was NOT shipped -- see the investigation this probe now exists to
- * document.
+ * recomputing the fixed system-prompt prefix's KV on every request).
  *
- * `diagnose_chunking_invariance()` below isolates the root cause with NO
- * caching/sharing involved at all: it splits ONE prompt's own forward pass
- * into `schedulerPrefill(first K tokens)` followed by
+ * `diagnose_chunking_invariance()` below isolates the underlying question
+ * with NO caching/sharing involved at all: it splits ONE prompt's own
+ * forward pass into `schedulerPrefill(first K tokens)` followed by
  * `schedulerPrefillContinue(remaining tokens)`, against the SAME single
  * agent, and compares the result to one `schedulerPrefill(all tokens)`
- * call. On this build (CPU-only, Q8_0-quantized model -- both production
- * assistants' checkpoints), THEY DIFFER, and by an amount large enough to
- * flip the greedy argmax and diverge the full generated token sequence.
+ * call.
  *
- * Root cause, traced into sensen (`backend/sensen`, READ-ONLY for this
- * repo): `GEMM::matvecQuantizedBatch`'s Q8_0 fast path
- * (`matvecQ8_0_Int8BatchSlice`, `src/gemm_kernels.cppm`) peels the M
- * activation rows of a batched forward pass into groups of 8, then 4, then
- * 2, then 1, STARTING FROM ROW 0 OF THE BATCH -- so which micro-kernel
- * template (`q8_0_Int8Batch_VNNI<8,8>` vs `<4,4>` vs `<2,2>` vs the
- * single-row `matvecQ8_0_Int8Slice`) computes a given LOGICAL row depends
- * on the TOTAL row count M of whichever call it was part of, not on that
- * row's own position. A prefix's tail rows near an 8-row boundary are
- * therefore computed by a different micro-kernel (different SIMD
- * accumulation/rounding) when forwarded alone (M = prefix length) than
- * when forwarded as the leading rows of a longer one-shot prompt (M =
- * whole prompt). This is the CPU/Q8_0 analogue of the batch-invariant-GEMM-
- * dispatch class of bug this codebase has already fixed repeatedly on the
- * CUDA decode/prefill paths (see CLAUDE.md's history) -- but
- * `GEMM::matvecQuantizedBatch` has no `deterministic`-gated batch-invariant
- * mode, and `TransformerBlock::forward_prefill`'s call chain
- * (`MultiHeadAttention::forward_prefill_flat`, `FeedForwardNetwork::
- * forward_batch_flat`) carries no `deterministic` parameter at all, so
- * `GenerationConfig::deterministic=true` (which both assistants already
- * set) has ZERO effect on this CPU-only build. sensen also ships a
- * purpose-built `sensen.batch_invariant` module ("bitwise batch-invariant
- * GEMM/softmax/attention for reproducible serving") that is NOT wired into
- * this call chain at all -- its only production consumer today is an
- * unrelated CUDA dispatch-resolution pin in llama_model.cpp.
+ * CORRECTED ROOT CAUSE (this header previously blamed sensen's Q8_0 GEMM
+ * peel -- `GEMM::matvecQuantizedBatch`'s row-grouping-by-batch-offset --
+ * and prescribed pinning the micro-kernel to a row's index modulo 8. That
+ * diagnosis was WRONG and has been retracted; the fix it prescribed would
+ * not have touched the real defect. Left here only as a pointer for anyone
+ * who finds an old copy of this file: do not re-attempt it.
  *
- * Consequence: ANY caller that splits a forward pass across two calls
- * against the same evolving KV cache -- not just a hypothetical prefix
- * cache, but the PRE-EXISTING `schedulerPrefillContinue` API itself (its
- * own doc comment describes it as backing a genuine stateful multi-turn
- * chat continuation, H5) -- can silently diverge from what a single
- * one-shot forward over the equivalent full history would have produced,
- * on this CPU/Q8_0 configuration. That is a pre-existing, broader property
- * of sensen's CPU serving path this investigation surfaced, not something
- * introduced here.
+ * The GEMM-peel theory was DISPROVEN, not merely superseded, by two
+ * independent checks, and the negative result is the valuable part of this
+ * investigation:
  *
- * What sensen would need before a prefix-KV-reuse (or any chunked-forward)
- * optimization is safe on this path: `matvecQ8_0_Int8BatchSlice` (or a
- * `deterministic`-gated sibling of it, mirroring the CUDA fixes'
- * `m_disp`-pinning pattern) needs to compute a given row's output the same
- * way regardless of which other rows share its batch -- e.g. by fixing the
- * micro-kernel grouping to the row's OWN index modulo 8 rather than an
- * offset from the batch start, or by exposing `sensen.batch_invariant`'s
- * primitives through this call chain -- verified against exactly the
- * `diagnose_chunking_invariance` check this probe already runs.
+ *   1. Disabling the entire Q8_0 batched-GEMM kernel family outright
+ *      (`SENSEN_GEMM_Q8_PRECISE=1`, which reverts every batched matvec to
+ *      the single-row scalar/AVX path sensen already ships as a reference)
+ *      left the chunked-vs-one-shot divergence COMPLETELY UNCHANGED --
+ *      same magnitude, same flipped tokens. If the GEMM peel were the
+ *      cause, disabling it had to change something; it changed nothing.
+ *   2. Direct bit-testing of `matvecQ8_0_Int8BatchSlice` across many row
+ *      counts and batch splits found it bit-exactly batch-invariant: a
+ *      given logical row's output does not depend on which other rows
+ *      share its call, contradicting the "peel groups by offset-from-
+ *      batch-start" theory outright.
+ *
+ * The REAL defect was a missing causal mask in
+ * `MultiHeadAttention::compute_attention_paged_flat`
+ * (`backend/sensen/src/multi_head_attention.cppm`, around line 4192): the
+ * causal predicate was gated `causal_ && q_len == total_seq_len && j > i`,
+ * so it applied ONLY on a fresh full prefill, where the local row index `i`
+ * happens to coincide with the row's absolute sequence position. On a
+ * CONTINUATION forward -- `q_len < total_seq_len`, exactly the shape
+ * `schedulerPrefillContinue` produces for a chunked-prefill tail or a
+ * shared-prefix continuation -- the whole causal-mask branch was skipped,
+ * so a continuation row could attend to its own chunk-mates' FUTURE
+ * tokens: non-causal attention within the chunk. The correct absolute
+ * position, `q_pos = total_seq_len - q_len + i`, was already computed a few
+ * lines above for the sliding-window-attention mask; the fix was gating the
+ * causal predicate on that absolute position uniformly (`j > q_pos`)
+ * instead of re-deriving the fresh-prefill special case. A structurally
+ * identical, unreached-in-production sibling, `compute_attention_paged`
+ * (the vector-of-vectors variant, zero callers anywhere in the tree,
+ * confirmed via grep rather than assumed), carried the same defect and was
+ * fixed the same way for consistency.
+ *
+ * Fixed in sensen commit `4ef7ebe7` ("fix(attention): apply paged-prefill
+ * causal mask by absolute position"), pushed to both remotes.
+ *
+ * Verified there (not re-verified independently by this repo, which is
+ * read-only against `backend/sensen`): 20/20 cases now bit-identical --
+ * both production checkpoints (`mortgagefv-assistant-v2-q8_0.gguf`,
+ * `strategy-assistant.gguf`) x {`SENSEN_KV_DTYPE=fp32`, `f16`} x 5 cases --
+ * against 5/5 DIFFERING before, with two cases previously flipping the
+ * greedy rollout's token (mortgage case 3: token 15 vs 19 at position 36;
+ * strategy case 3: token 4825 vs 69 at position 20). Fresh-prefill and
+ * decode paths are provably untouched by the fix (both are cases where
+ * `q_pos == i` or the single-decode-token case, bit-identical by
+ * construction), so the deployed models' quality record (the defect
+ * holdout, the mortgage 25/90, the 95.0% params bar) stands.
+ *
+ * A SECOND, INDEPENDENT MECHANISM remains and is NOT fixed by the causal-
+ * mask patch: this build's default KV-cache dtype on CPU is Q8 (see
+ * `kv_half.cppm`'s `parseKvDtypeEnv()` -- an unset `SENSEN_KV_DTYPE`
+ * resolves to `KvDtype::Q8`, not fp32/fp16, per that file's own "default
+ * was flipped" comment), and `PagedKVCache::update()`
+ * (`backend/sensen/src/kv_cache.cppm`, around lines 1077-1083) quantises a
+ * Q8 KV block only when its 16th token has just landed (deferred
+ * quantisation: a block stays an OPEN fp16 buffer until it is full, then is
+ * quantised once, whole-block). A chunked forward (`schedulerPrefill(K)` +
+ * `schedulerPrefillContinue(rest)`) and an equivalent one-shot
+ * `schedulerPrefill(all)` therefore read DIFFERENT quantisation states of
+ * the SAME logical tokens whenever the split point `K` does not fall on a
+ * 16-token block boundary: the chunked call quantises (or leaves open) a
+ * block based on where ITS OWN forward call happened to end, while the
+ * one-shot call quantises based on the whole prompt's blocks. Both
+ * production system prompts' natural prefix length (76 tokens for
+ * mortgage, 60 for strategy -- both ≡ 12 mod 16) is NOT block-aligned, so
+ * this mechanism alone predicts a residual divergence at the natural split
+ * even with the causal-mask fix applied, and predicts BIT-IDENTITY at a
+ * 16-aligned split. See `diagnose_chunking_invariance()`'s `--split`
+ * override below, added specifically to exercise the aligned case, and this
+ * repo's own session report for whether the measurement bore this out.
+ *
+ * Consequence, independent of both mechanisms above: ANY caller that splits
+ * a forward pass across two calls against the same evolving KV cache -- not
+ * just a hypothetical prefix cache, but the PRE-EXISTING
+ * `schedulerPrefillContinue` API itself (its own doc comment describes it
+ * as backing a genuine stateful multi-turn chat continuation, H5) -- must
+ * either land on a block-aligned split under the default Q8 KV dtype, or
+ * accept that a non-aligned split reads a different quantisation state than
+ * an equivalent one-shot forward would have. That is a pre-existing,
+ * narrower property of sensen's CPU serving path than the causal-mask bug
+ * was; the prefix-cache feature this probe exists to validate works around
+ * it by snapshotting the cached prefix at `floor(P/16)*16` tokens rather
+ * than at the natural (unaligned) prefix length `P`.
  *
  * Not part of the production binary or the required test suite; a
  * diagnostic/regression tool, matching this repo's existing
- * decode_golden_probe.cpp / assistant_throughput_probe.cpp convention. Once
- * sensen closes this gap, re-running this probe (it should then report
- * IDENTICAL for every case) is the acceptance check before reattempting the
- * prefix-cache feature.
+ * decode_golden_probe.cpp / assistant_throughput_probe.cpp convention.
  *
- *   prefix_cache_verify_probe <model.gguf> --system mortgage|strategy
+ *   prefix_cache_verify_probe <model.gguf> --system mortgage|strategy \
+ *       [--split N]
+ *
+ * `--split N` overrides the chunk point `diagnose_chunking_invariance()`
+ * uses for its no-caching-involved chunked-vs-one-shot check (default:
+ * this checkpoint's own natural system-prompt-prefix token count, the
+ * pre-existing, non-block-aligned behaviour). Use it to exercise a
+ * 16-aligned split the natural prefix length never lands on.
  *
  * @author Olumuyiwa Oluwasanmi
  */
 #include <algorithm>
+#include <charconv>
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <vector>
 
 import sensen.llm_pipeline;
@@ -258,14 +309,26 @@ auto diagnose_chunking_invariance(sensen::LLMPipeline& pipeline,
 auto main(int argc, char** argv) -> int {
     if (argc < 2) {
         std::fprintf(stderr,
-                     "usage: prefix_cache_verify_probe <model.gguf> --system mortgage|strategy\n");
+                     "usage: prefix_cache_verify_probe <model.gguf> --system mortgage|strategy "
+                     "[--split N]\n");
         return 2;
     }
     const std::string model_path = argv[1];
     std::string which = "mortgage";
+    std::optional<std::size_t> split_override;
     for (int i = 2; i < argc; ++i) {
         if (std::string_view{argv[i]} == "--system" && i + 1 < argc) {
             which = argv[++i];
+        } else if (std::string_view{argv[i]} == "--split" && i + 1 < argc) {
+            const std::string_view raw{argv[++i]};
+            std::size_t value = 0;
+            const auto result = std::from_chars(raw.data(), raw.data() + raw.size(), value);
+            if (result.ec != std::errc{} || value == 0) {
+                std::fprintf(stderr, "invalid --split value: %.*s\n",
+                            static_cast<int>(raw.size()), raw.data());
+                return 2;
+            }
+            split_override = value;
         }
     }
 
@@ -327,8 +390,16 @@ auto main(int argc, char** argv) -> int {
                     c.prior_clarification.data(),
                     c.prior_clarification.size() > 30 ? "..." : "", prefix_matches ? 1 : 0);
 
-        diagnose_chunking_invariance(*pipeline, prompt_tokens, params, prefix_tokens.size(),
-                                     next_agent_id);
+        const std::size_t natural_split = prefix_tokens.size();
+        const std::size_t requested_split = split_override.value_or(natural_split);
+        if (requested_split == 0 || requested_split >= prompt_tokens.size()) {
+            std::printf("  [chunk-invariance split=%zu/%zu] SKIPPED -- split out of range for "
+                       "this case's %zu-token prompt\n",
+                       requested_split, prompt_tokens.size(), prompt_tokens.size());
+        } else {
+            diagnose_chunking_invariance(*pipeline, prompt_tokens, params, requested_split,
+                                         next_agent_id);
+        }
         next_agent_id += 2;
 
         const auto before = full_rollout(*pipeline, prompt_tokens, params, eos_id, im_end_id,

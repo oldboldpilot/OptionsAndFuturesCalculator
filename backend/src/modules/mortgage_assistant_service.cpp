@@ -527,6 +527,85 @@ class SensenBackend final : public QueuedBackend {
     }
 
     /**
+     * The fixed prefix a prefill can potentially reuse: the mandatory system
+     * turn plus the opening of the user turn, byte-for-byte the string
+     * `build_prompt` emits before it appends `utterance`.
+     */
+    [[nodiscard]] static auto fixed_prefix_text() -> std::string {
+        std::string prefix;
+        prefix += "<|im_start|>system\n";
+        prefix += kSystemPrompt;
+        prefix += "<|im_end|>\n";
+        prefix += "<|im_start|>user\n";
+        return prefix;
+    }
+
+    /**
+     * Builds the cached system-prompt prefix once, on the owner thread,
+     * before the first request is ever admitted -- same mechanism as the
+     * strategy assistant's own `ensure_prefix_cache` (assistant_service.cpp),
+     * built for this service's separate pipeline/model/system prompt. See
+     * that copy's doc comment for why the cache is snapshotted at
+     * floor(P/16)*16 tokens rather than at the natural (unaligned) prefix
+     * length P: sensen's default CPU KV dtype is Q8 (kv_half.cppm's
+     * parseKvDtypeEnv resolves an unset SENSEN_KV_DTYPE to Q8), and Q8 KV
+     * blocks are quantised only once their 16th token lands
+     * (PagedKVCache::update(), kv_cache.cppm) -- a chunked forward and an
+     * equivalent one-shot forward read different quantisation states of the
+     * same tokens unless the split is block-aligned. Confirmed on this exact
+     * checkpoint by prefix_cache_verify_probe's --split sweep: this
+     * service's own natural 76-token prefix (not a multiple of 16) DIFFERS
+     * at every case tested; a 16-aligned split (64) is bit-identical at
+     * every case tested.
+     *
+     * A failure here disables the cache, not the service: admit() falls back
+     * to a full schedulerPrefill on every request, exactly today's behaviour
+     * without this feature.
+     */
+    auto ensure_prefix_cache(const sensen::GenerationConfig& params) -> void {
+        if (prefix_cache_ready_) return;
+        prefix_cache_ready_ = true;  // set first: a failure must not retry per request
+
+        prefix_match_tokens_ = pipeline_->schedulerEncode(fixed_prefix_text());
+        prefix_aligned_len_ = (prefix_match_tokens_.size() / 16) * 16;
+        if (prefix_aligned_len_ == 0) {
+            logger::Logger::getInstance().warn(
+                "mortgage assistant: system-prompt prefix is only {} tokens -- shorter than "
+                "one 16-token KV block, so the prefix cache is disabled (nothing block-aligned "
+                "to share). Every request will prefill from scratch, as before this feature.",
+                prefix_match_tokens_.size());
+            return;
+        }
+
+        auto agent = pipeline_->schedulerMakeAgent(kPrefixAgentId);
+        if (agent == nullptr) {
+            logger::Logger::getInstance().warn(
+                "mortgage assistant: could not allocate the prefix-cache agent -- the prefix "
+                "cache is disabled. Every request will prefill from scratch, as before this "
+                "feature.");
+            return;
+        }
+        const std::span<const std::uint32_t> aligned_span(prefix_match_tokens_.data(),
+                                                           prefix_aligned_len_);
+        const auto logits = pipeline_->schedulerPrefill(*agent, aligned_span, params);
+        if (logits.empty()) {
+            logger::Logger::getInstance().warn(
+                "mortgage assistant: prefix-cache prefill produced no logits -- the prefix "
+                "cache is disabled. Every request will prefill from scratch, as before this "
+                "feature.");
+            return;
+        }
+
+        prefix_agent_ = std::move(agent);
+        logger::Logger::getInstance().info(
+            "mortgage assistant: prefix cache ready -- {} of {} system-prompt tokens cached "
+            "(block-aligned); {} trailing token(s) plus the caller's own turn are recomputed "
+            "on every request.",
+            prefix_aligned_len_, prefix_match_tokens_.size(),
+            prefix_match_tokens_.size() - prefix_aligned_len_);
+    }
+
+    /**
      * The owner thread: admit, decode one fused step across everything in
      * flight, retire whatever finished, repeat. This thread is the SOLE caller
      * of `pipeline_`'s forward path for this model's lifetime.
@@ -534,6 +613,7 @@ class SensenBackend final : public QueuedBackend {
     auto run(std::stop_token stoken) -> void {
         const auto params = generation_config(kMaxNewTokens);
         const std::uint32_t eos_id = pipeline_->schedulerEosToken();
+        ensure_prefix_cache(params);
 
         // `<|im_end|>` is how ChatML ends an assistant turn, and on this
         // fine-tune it is what actually terminates a response; the model's
@@ -623,7 +703,30 @@ class SensenBackend final : public QueuedBackend {
                     .ok = false, .text = {}, .error = "could not allocate an inference session"});
                 return false;
             }
-            const auto logits = pipeline_->schedulerPrefill(*seq.agent, prompt_tokens, params);
+
+            // Reuse the cached system-prompt prefix's KV when this request's
+            // own tokens genuinely open with it -- VERIFIED by comparing
+            // actual token ids below, never assumed from the source strings
+            // matching. See assistant_service.cpp's identical comment on its
+            // own admit() for the full rationale (COW block sharing, why
+            // this can never write into a shared block, why a request
+            // arriving without the system prompt safely falls through).
+            std::vector<float> logits;
+            if (prefix_agent_ != nullptr && prompt_tokens.size() > prefix_match_tokens_.size() &&
+                std::equal(prefix_match_tokens_.begin(), prefix_match_tokens_.end(),
+                          prompt_tokens.begin())) {
+                auto& context = seq.agent->getContext();
+                context.assign(prompt_tokens.begin(),
+                               prompt_tokens.begin() +
+                                   static_cast<std::ptrdiff_t>(prefix_aligned_len_));
+                seq.agent->kv_cache->share_from(*prefix_agent_->kv_cache);
+                logits = pipeline_->schedulerPrefillContinue(
+                    *seq.agent, std::span<const std::uint32_t>(prompt_tokens).subspan(
+                                    prefix_aligned_len_),
+                    params);
+            } else {
+                logits = pipeline_->schedulerPrefill(*seq.agent, prompt_tokens, params);
+            }
             if (logits.empty()) {
                 pipeline_->schedulerEvict(*seq.agent);
                 seq.promise.set_value(InferenceOutcome{
@@ -931,6 +1034,17 @@ class SensenBackend final : public QueuedBackend {
 
     std::unique_ptr<sensen::LLMPipeline> pipeline_;
 
+    // System-prompt KV prefix cache -- see ensure_prefix_cache()/admit()
+    // above, and assistant_service.cpp's identical members for the full
+    // rationale. This service's own copy: separate pipeline, separate
+    // weights, separate cache, exactly like the rest of this class relative
+    // to the strategy assistant's.
+    std::vector<std::uint32_t> prefix_match_tokens_;
+    std::size_t prefix_aligned_len_ = 0;
+    std::unique_ptr<sensen::AgentSession> prefix_agent_;
+    bool prefix_cache_ready_ = false;
+    static constexpr std::size_t kPrefixAgentId = std::numeric_limits<std::size_t>::max() - 1;
+
     // Constrained decoding. All of this is touched ONLY by the owner thread
     // (`run` and the functions it calls), which is the same reason the rest of
     // the decode state needs no lock.
@@ -942,9 +1056,9 @@ class SensenBackend final : public QueuedBackend {
 
     // Declared LAST: member destruction order is the reverse of declaration
     // order, so `worker_`'s destructor (request_stop + join) runs BEFORE
-    // pipeline_ and the queue in the base are torn down, guaranteeing run() has
-    // fully exited -- and therefore touched none of them -- by the time they are
-    // destroyed.
+    // pipeline_, prefix_agent_ and the queue in the base are torn down,
+    // guaranteeing run() has fully exited -- and therefore touched none of
+    // them -- by the time they are destroyed.
     std::jthread worker_;
 };
 

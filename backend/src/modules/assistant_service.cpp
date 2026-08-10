@@ -11,6 +11,7 @@ module;
 #include <deque>
 #include <exception>
 #include <future>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -511,6 +512,95 @@ class SensenBackend final : public QueuedBackend {
     }
 
     /**
+     * The fixed prefix a prefill can potentially reuse: the mandatory system
+     * turn plus the opening of the user turn, byte-for-byte the string
+     * `build_prompt` emits before it appends `utterance`. Rebuilt on every
+     * call rather than cached as a std::string member because it is four
+     * concatenations and this runs exactly once, from `ensure_prefix_cache`.
+     */
+    [[nodiscard]] static auto fixed_prefix_text() -> std::string {
+        std::string prefix;
+        prefix += "<|im_start|>system\n";
+        prefix += kSystemPrompt;
+        prefix += "<|im_end|>\n";
+        prefix += "<|im_start|>user\n";
+        return prefix;
+    }
+
+    /**
+     * Builds the cached system-prompt prefix once, on the owner thread,
+     * before the first request is ever admitted.
+     *
+     * WHY floor(P/16)*16, NOT THE FULL NATURAL PREFIX LENGTH P:
+     *
+     * sensen's Q8 KV cache (the default on this CPU-only build -- see
+     * kv_half.cppm's parseKvDtypeEnv, which resolves an unset
+     * SENSEN_KV_DTYPE to Q8, not fp32/fp16) quantises a 16-token KV block
+     * only once its 16th token has landed (PagedKVCache::update(),
+     * kv_cache.cppm, "deferred quantisation"). A chunked forward
+     * (schedulerPrefill(K) + schedulerPrefillContinue(rest)) and an
+     * equivalent one-shot schedulerPrefill(all) read DIFFERENT
+     * quantisation states of the SAME tokens whenever the split K does not
+     * land on a 16-token boundary -- confirmed on this exact checkpoint by
+     * prefix_cache_verify_probe's --split sweep: the natural system-prompt
+     * prefix length (not a multiple of 16) DIFFERS at every case tested,
+     * while a 16-aligned split is bit-identical at every case tested.
+     * Snapshotting the cache at floor(P/16)*16 rather than at the natural
+     * P tokens sidesteps that mechanism entirely: the cached blocks are
+     * always whole, quantised, closed blocks, identical to what a one-shot
+     * forward over the same prefix would have produced. The remaining
+     * (P - floor(P/16)*16) tail tokens of the fixed prefix -- at most 15 of
+     * them -- are recomputed fresh on every request, folded into the same
+     * schedulerPrefillContinue call that also carries the caller's own
+     * turn, exactly like any other non-cached tail.
+     *
+     * A failure here (no model loaded far enough to prefill, or a system
+     * prompt shorter than one block) disables the cache, not the service:
+     * admit() falls back to a full schedulerPrefill on every request, which
+     * is exactly today's behaviour without this feature.
+     */
+    auto ensure_prefix_cache(const sensen::GenerationConfig& params) -> void {
+        if (prefix_cache_ready_) return;
+        prefix_cache_ready_ = true;  // set first: a failure must not retry per request
+
+        prefix_match_tokens_ = pipeline_->schedulerEncode(fixed_prefix_text());
+        prefix_aligned_len_ = (prefix_match_tokens_.size() / 16) * 16;
+        if (prefix_aligned_len_ == 0) {
+            logger::Logger::getInstance().warn(
+                "assistant: system-prompt prefix is only {} tokens -- shorter than one "
+                "16-token KV block, so the prefix cache is disabled (nothing block-aligned to "
+                "share). Every request will prefill from scratch, as before this feature.",
+                prefix_match_tokens_.size());
+            return;
+        }
+
+        auto agent = pipeline_->schedulerMakeAgent(kPrefixAgentId);
+        if (agent == nullptr) {
+            logger::Logger::getInstance().warn(
+                "assistant: could not allocate the prefix-cache agent -- the prefix cache is "
+                "disabled. Every request will prefill from scratch, as before this feature.");
+            return;
+        }
+        const std::span<const std::uint32_t> aligned_span(prefix_match_tokens_.data(),
+                                                           prefix_aligned_len_);
+        const auto logits = pipeline_->schedulerPrefill(*agent, aligned_span, params);
+        if (logits.empty()) {
+            logger::Logger::getInstance().warn(
+                "assistant: prefix-cache prefill produced no logits -- the prefix cache is "
+                "disabled. Every request will prefill from scratch, as before this feature.");
+            return;
+        }
+
+        prefix_agent_ = std::move(agent);
+        logger::Logger::getInstance().info(
+            "assistant: prefix cache ready -- {} of {} system-prompt tokens cached "
+            "(block-aligned); {} trailing token(s) plus the caller's own turn are recomputed "
+            "on every request.",
+            prefix_aligned_len_, prefix_match_tokens_.size(),
+            prefix_match_tokens_.size() - prefix_aligned_len_);
+    }
+
+    /**
      * The owner thread: admit, decode one fused step across everything in
      * flight, retire whatever finished, repeat.
      *
@@ -526,6 +616,7 @@ class SensenBackend final : public QueuedBackend {
     auto run(std::stop_token stoken) -> void {
         const auto params = generation_config(kMaxNewTokens);
         const std::uint32_t eos_id = pipeline_->schedulerEosToken();
+        ensure_prefix_cache(params);
 
         // `<|im_end|>` is how ChatML ends an assistant turn, and on this
         // fine-tune it is what actually terminates a response; the model's
@@ -610,7 +701,38 @@ class SensenBackend final : public QueuedBackend {
                     .ok = false, .text = {}, .error = "could not allocate an inference session"});
                 return false;
             }
-            const auto logits = pipeline_->schedulerPrefill(*seq.agent, prompt_tokens, params);
+
+            // Reuse the cached system-prompt prefix's KV when this request's
+            // own tokens genuinely open with it -- VERIFIED by comparing
+            // actual token ids below, never assumed from the source strings
+            // matching (the tokenizer can merge differently across the
+            // prefix/utterance boundary, and a request that arrived without
+            // the system prompt at all -- which should not happen, but must
+            // not be trusted blindly -- must fall through to a full prefill
+            // rather than silently reusing a stale prefix).
+            std::vector<float> logits;
+            if (prefix_agent_ != nullptr && prompt_tokens.size() > prefix_match_tokens_.size() &&
+                std::equal(prefix_match_tokens_.begin(), prefix_match_tokens_.end(),
+                          prompt_tokens.begin())) {
+                auto& context = seq.agent->getContext();
+                context.assign(prompt_tokens.begin(),
+                               prompt_tokens.begin() +
+                                   static_cast<std::ptrdiff_t>(prefix_aligned_len_));
+                // COW block sharing (MultiLayerKVCache::share_from): no KV
+                // bytes are copied here, only the shared block pointers --
+                // sensen's own PagedKVCache copies a block on the first
+                // WRITE to it (use_count() > 1 gate), and this agent never
+                // writes to a block it shares with prefix_agent_, since its
+                // own new tokens all land at or after prefix_aligned_len_,
+                // strictly past every shared (block-aligned) block.
+                seq.agent->kv_cache->share_from(*prefix_agent_->kv_cache);
+                logits = pipeline_->schedulerPrefillContinue(
+                    *seq.agent, std::span<const std::uint32_t>(prompt_tokens).subspan(
+                                    prefix_aligned_len_),
+                    params);
+            } else {
+                logits = pipeline_->schedulerPrefill(*seq.agent, prompt_tokens, params);
+            }
             if (logits.empty()) {
                 pipeline_->schedulerEvict(*seq.agent);
                 seq.promise.set_value(InferenceOutcome{
@@ -744,11 +866,31 @@ class SensenBackend final : public QueuedBackend {
 
     std::unique_ptr<sensen::LLMPipeline> pipeline_;
 
+    // System-prompt KV prefix cache (see ensure_prefix_cache()/admit()
+    // above). prefix_match_tokens_ is the FULL (natural, not block-aligned)
+    // tokenized prefix -- used only to verify a request's own tokens
+    // genuinely open with it, never to decide how much KV is shared.
+    // prefix_aligned_len_ (<= prefix_match_tokens_.size(), always a
+    // multiple of 16) is how much of it prefix_agent_'s KV cache actually
+    // holds. prefix_agent_ stays null, and every request falls back to a
+    // full prefill exactly as before this feature existed, until
+    // ensure_prefix_cache() successfully builds it on the owner thread --
+    // and forever if it never does.
+    std::vector<std::uint32_t> prefix_match_tokens_;
+    std::size_t prefix_aligned_len_ = 0;
+    std::unique_ptr<sensen::AgentSession> prefix_agent_;
+    bool prefix_cache_ready_ = false;
+
+    // Reserved agent id for prefix_agent_, far outside the range
+    // next_agent_id (0, 1, 2, ... in run()) will ever reach on a live
+    // process, so the two id spaces can never collide.
+    static constexpr std::size_t kPrefixAgentId = std::numeric_limits<std::size_t>::max() - 1;
+
     // Declared LAST: member destruction order is the reverse of declaration
     // order, so `worker_`'s destructor (request_stop + join) runs BEFORE
-    // pipeline_ and the queue in the base are torn down, guaranteeing run()
-    // has fully exited -- and therefore touched none of them -- by the time
-    // they are destroyed.
+    // pipeline_, prefix_agent_ and the queue in the base are torn down,
+    // guaranteeing run() has fully exited -- and therefore touched none of
+    // them -- by the time they are destroyed.
     std::jthread worker_;
 };
 
