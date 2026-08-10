@@ -43,13 +43,11 @@ module;
 module assistant_service;
 
 import sensen.llm_pipeline;
-// Only its always-present declarations are used here (Device/ComputeBackend
-// enum values and the CudaBackend::is_available() runtime probe, which is
-// itself compiled to an unconditional `return false;` when SENSEN_HAS_CUDA
-// was undefined for sensen_slim -- see resolve_device's own call site below
-// for exactly how the compile-time and runtime facts are kept separate).
-// sensen_slim's own FILE_SET already includes cuda_backend.cppm regardless
-// of ENABLE_CUDA, so this import needs no build-file change.
+// ComputeBackend enum values and CudaBackend::query()/is_available(), the
+// runtime probes AssistantWorker's own ASSISTANT_DEVICE resolution reads --
+// see that call site for why this file cannot use `#ifdef SENSEN_HAS_CUDA`
+// itself. sensen_slim's own FILE_SET already includes cuda_backend.cppm
+// regardless of ENABLE_CUDA, so this import needs no build-file change.
 import sensen.cuda_backend;
 import fastjson;
 import logger;
@@ -1519,28 +1517,38 @@ class AssistantWorker {
         // assistant rather than quietly landing on a CPU-only llama.cpp
         // backend nobody asked for.
         const std::string requested_device = env_string("ASSISTANT_DEVICE").value_or("cpu");
-#ifdef SENSEN_HAS_CUDA
-        constexpr bool kCudaBuild = true;
-#else
-        constexpr bool kCudaBuild = false;
-#endif
-        // sensen.cuda_backend's CudaBackend::is_available() runs the MODULE's
-        // own compiled-in runtime probe (sensen_cuda_available()) -- it is
-        // only a meaningful "yes" here because calculator_engine and
-        // sensen_slim are configured with the SAME CUDA setting (backend/
-        // CMakeLists.txt's job, not this file's); if that ever drifted,
-        // is_available() would read as "no device ready" here, which still
-        // degrades honestly rather than crashing. Short-circuited on
-        // kCudaBuild so this call is never reached at all on a build that
-        // never compiled the real probe in.
-        const bool cuda_device_ready =
-            kCudaBuild && sensen::cuda::CudaBackend::is_available();
+
+        // Whether THIS compiled binary has genuine CUDA support at all --
+        // established at RUNTIME, not via `#ifdef SENSEN_HAS_CUDA` in this
+        // file. That macro cannot answer the question here: backend/
+        // CMakeLists.txt defines it PRIVATE to the sensen_slim target only
+        // (see that file's own comment on the block that adds it -- C++20/23
+        // modules do not leak preprocessor macros across the import
+        // boundary), so calculator_engine's own translation units, this one
+        // included, never see it, on ANY build, CUDA-enabled or not.
+        //
+        // sensen.cuda_backend's CudaBackend::query() is the one call in the
+        // module whose FAILURE MESSAGE distinguishes "never compiled in"
+        // from "compiled in, nothing usable right now" -- its own source
+        // (read-only from this task) returns the literal string "CUDA not
+        // compiled (ENABLE_CUDA=OFF)" from its non-CUDA branch and a
+        // DIFFERENT message ("CUDA device query failed (error N)") from its
+        // CUDA branch when a real device probe fails. Should that exact
+        // wording ever change upstream, this degrades soft, not silent: it
+        // simply stops recognising the build-configuration case and always
+        // takes the runtime-degrade branch below instead -- still an honest
+        // error log, still CPU service, never a silent substitution of a
+        // working GPU path for one that was never asked for.
+        const auto cuda_query = sensen::cuda::CudaBackend::query();
+        const bool cuda_build =
+            cuda_query.has_value() || cuda_query.error() != "CUDA not compiled (ENABLE_CUDA=OFF)";
+        const bool cuda_device_ready = cuda_query.has_value();
         const auto device_resolution =
-            resolve_device(requested_device, kCudaBuild, cuda_device_ready);
+            resolve_device(requested_device, cuda_build, cuda_device_ready);
         if (device_resolution.refuse) {
             logger::Logger::getInstance().error(
-                "ASSISTANT_DEVICE=cuda was requested, but this binary was built without CUDA "
-                "support (SENSEN_HAS_CUDA was not defined at configure time) -- the strategy "
+                "ASSISTANT_DEVICE=cuda was requested, but this binary was not built with CUDA "
+                "support (-DENABLE_CUDA=ON was not set at configure time) -- the strategy "
                 "assistant will return a Refusal on every call rather than silently serving on "
                 "CPU; rebuild with CUDA enabled or set ASSISTANT_DEVICE=cpu.");
             return;

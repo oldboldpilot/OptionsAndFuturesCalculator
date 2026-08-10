@@ -35,10 +35,10 @@ module mortgage_assistant_service;
 
 import sensen.llm_pipeline;
 import sensen.tokenizer;  // Tokenizer, for the grammar's id -> text vocabulary
-// Only its always-present declarations are used here (the ComputeBackend enum
-// value and the CudaBackend::is_available() runtime probe) -- see
-// assistant_service.cpp's identical import for why this needs no build-file
-// change and how the compile-time/runtime facts stay separate.
+// ComputeBackend enum value and CudaBackend::query()/is_available(), the
+// runtime probes MortgageAssistantWorker's own MORTGAGE_DEVICE resolution
+// reads -- see assistant_service.cpp's identical import for why this needs
+// no build-file change and why this file cannot use `#ifdef SENSEN_HAS_CUDA`.
 import sensen.cuda_backend;
 import fastjson;
 import logger;
@@ -1198,19 +1198,22 @@ class MortgageAssistantWorker {
         // identical for the same reason: never silently substitute a device
         // the gates do not cover.
         const std::string requested_device = env_string("MORTGAGE_DEVICE").value_or("cpu");
-#ifdef SENSEN_HAS_CUDA
-        constexpr bool kCudaBuild = true;
-#else
-        constexpr bool kCudaBuild = false;
-#endif
-        const bool cuda_device_ready =
-            kCudaBuild && sensen::cuda::CudaBackend::is_available();
+
+        // Runtime, not `#ifdef SENSEN_HAS_CUDA` -- see AssistantWorker's
+        // identical block in assistant_service.cpp for why this file cannot
+        // see that macro (backend/CMakeLists.txt defines it PRIVATE to the
+        // sensen_slim target only) and for the exact coupling this depends
+        // on (sensen.cuda_backend's CudaBackend::query() error message).
+        const auto cuda_query = sensen::cuda::CudaBackend::query();
+        const bool cuda_build =
+            cuda_query.has_value() || cuda_query.error() != "CUDA not compiled (ENABLE_CUDA=OFF)";
+        const bool cuda_device_ready = cuda_query.has_value();
         const auto device_resolution =
-            resolve_device(requested_device, kCudaBuild, cuda_device_ready);
+            resolve_device(requested_device, cuda_build, cuda_device_ready);
         if (device_resolution.refuse) {
             logger::Logger::getInstance().error(
-                "MORTGAGE_DEVICE=cuda was requested, but this binary was built without CUDA "
-                "support (SENSEN_HAS_CUDA was not defined at configure time) -- the mortgage "
+                "MORTGAGE_DEVICE=cuda was requested, but this binary was not built with CUDA "
+                "support (-DENABLE_CUDA=ON was not set at configure time) -- the mortgage "
                 "assistant will return a Refusal on every call rather than silently serving on "
                 "CPU; rebuild with CUDA enabled or set MORTGAGE_DEVICE=cpu.");
             return;

@@ -103,11 +103,17 @@ export struct DeviceResolution {
  * Pure decision function behind `ASSISTANT_DEVICE`/`MORTGAGE_DEVICE`, factored
  * out of both Worker constructors so it is unit-testable without an actual
  * CUDA build or a real device: `cuda_build`/`cuda_device_ready` are the two
- * facts a caller has already established (a compile-time `#ifdef
- * SENSEN_HAS_CUDA` and a runtime `sensen::cuda::CudaBackend::is_available()`
- * call respectively), passed in rather than queried here so this function has
- * no build-configuration dependency of its own and every branch is reachable
- * from a plain unit test.
+ * facts a caller has already established -- both at RUNTIME, via one
+ * `sensen::cuda::CudaBackend::query()` call whose failure message tells the
+ * two apart ("CUDA not compiled (ENABLE_CUDA=OFF)" vs a device-probe
+ * failure); NOT via a compile-time `#ifdef SENSEN_HAS_CUDA` in the caller's
+ * own file, which cannot see that macro at all -- backend/CMakeLists.txt
+ * defines it PRIVATE to the sensen_slim target, and C++20/23 modules do not
+ * leak preprocessor macros across the import boundary. See
+ * AssistantWorker's own call site (assistant_service.cpp) for the full
+ * story. Both facts are passed in rather than queried here so this function
+ * has no build-configuration or sensen-module dependency of its own and
+ * every branch is reachable from a plain unit test.
  *
  * Four cases, matching this task's own brief exactly:
  *
