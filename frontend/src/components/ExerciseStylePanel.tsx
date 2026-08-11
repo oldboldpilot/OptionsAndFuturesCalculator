@@ -185,15 +185,22 @@ export function ExerciseStylePanel() {
             </label>
           )}
 
-          {/* An Asian priced here is a SINGLE contract on the tree. It cannot
-              be added to the strategy as a leg -- calculator.proto carries no
-              averaging field on OptionLeg -- so the payoff, P&L and surface
-              panels never see it. Said here because the two panels sit in
-              adjacent columns and otherwise look like one instrument. */}
+          {/* An Asian priced here is a SINGLE contract on the tree.
+              This note used to say Asian legs could not be added to a strategy
+              and that the payoff panels "still show the vanilla position".
+              BOTH halves are now false: calculator.proto carries asian_type on
+              Leg, the ticket can set it, and the engine refuses the whole
+              response rather than drawing anything. Left as a correction
+              rather than a deletion because the old sentence described the
+              exact misreading -- a vanilla curve standing in for an Asian --
+              that the refusal exists to prevent. Said here because the two
+              panels sit in adjacent columns and otherwise look like one
+              instrument. */}
           {isAsian && (
             <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--color-ink-400)' }}>
-              Priced as a single contract on this tree. Asian legs cannot be added to a
-              strategy yet, so the payoff and P&amp;L panels still show the vanilla position.
+              Priced as a single contract on this tree. An Asian leg can be added to a
+              strategy, but the payoff, P&amp;L and probability panels are drawn against the
+              price at expiry and will say so rather than plot it.
             </span>
           )}
         </div>
