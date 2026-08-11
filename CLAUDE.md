@@ -388,16 +388,41 @@ a full outage for both sites lasting restart plus the 20 s
 crash-looping deployment stops being restarted at all, which is survivable at
 two replicas and a hard outage at one.
 
-**Why three rather than two, as of 2026-08-10.** An even cluster is the worst
-size for any quorum protocol: two nodes need both to agree, so losing either one
-halts progress — strictly worse than a single node, and it defeats the very
-availability argument above. SGEE's own deterministic simulation proves it
-(`replicated_queue_runtime_dst_test.cpp:555`: a 2-node cluster cannot commit
-after one node dies). Three nodes tolerate one failure with a 2-of-3 majority.
-Whether SGEE consensus is actually wired across these replicas is a separate,
-still-open question — the network transports it would need have never been
-compiled in this tree — but the replica count is the precondition, and an odd
-count is correct for availability regardless of whether consensus ever lands.
+**Why three rather than two, as of 2026-08-10 — and what it does NOT buy.**
+Three is for plain availability and capacity headroom: one more simultaneous
+container loss survivable, and one more instance absorbing the crash-restart
+window that `restartPolicyMaxRetries: 3` can otherwise turn into a hard outage.
+
+It buys **nothing toward running a consensus cluster**, and the first version of
+this note claimed otherwise. Raft across Railway *replicas of one service* is
+structurally impossible here, for reasons that have nothing to do with how many
+there are:
+
+- **No stable per-replica address.** `<service>.railway.internal` resolves to a
+  randomly chosen replica IPv6, not to a node. `RAILWAY_REPLICA_ID` is a UUID in
+  each container's own environment, for logging — peers cannot query it, and
+  there is no ordinal index (the feature request for one is open, uncommitted).
+  A `dig` against the internal name does return one record per replica, so the
+  current address SET is discoverable, but nothing binds an address to a durable
+  identity across a restart.
+- **Volumes cannot be attached to a service with `numReplicas > 1` at all.**
+  Railway disallows the combination. So there is nowhere for a node to persist
+  its Raft log, currentTerm or votedFor — the exact state Raft must fsync before
+  replying to any RPC. This is also why the Postgres substrate is not merely the
+  better choice for durable work but the ONLY one available while replicas are
+  in use.
+- **Every deploy is a whole-cluster replacement.** Railway's zero-downtime
+  release is a blue/green cutover at the *deployment* level: an entirely new set
+  of containers is stood up, health-gated, then traffic cuts over and the old set
+  disappears together. Raft's reconfiguration protocol is designed for
+  incremental single-node membership change, not for its whole quorum being
+  swapped at once.
+
+Railway's own idiom for N individually-addressable, durable peers is **N
+separate services**, each with its own volume and its own stable
+`*.railway.internal` name — which is how their MongoDB replica-set template is
+built. That is a materially different topology from a `numReplicas` bump, and it
+is not what this service is.
 
 The known costs, all accepted, and now scaling by three rather than two: the
 quota multiplication above, ~3x model memory once weights are deployed,

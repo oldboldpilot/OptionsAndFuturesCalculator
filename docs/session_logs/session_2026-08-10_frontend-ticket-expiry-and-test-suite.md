@@ -90,3 +90,75 @@ that already worked, which is the equivalence that matters.
 - The review gate returned APPROVED on **one** responding reviewer: `agy` was
   auto-denied a permission in headless mode and `cursor-agent` is
   unauthenticated. Treat it as one opinion, not the 2-of-3 consensus.
+
+---
+
+# Addendum — SGEE durable services, replicas and workflow: what is actually possible
+
+Investigated 2026-08-10 after the frontend work, to answer whether the four
+gRPC services can be enqueued onto SGEE durable services, replicas and workflow.
+
+## Verdict per capability
+
+| capability | state | usable here |
+| --- | --- | --- |
+| durable execution (`TaskBroker`, `DurableSession`) | complete, crash-tested, tests discriminate | **not on Railway** — needs a volume |
+| replication (Raft, `ReplicatedTaskBroker`) | real, DST-tested, in-process only | **no** — see below |
+| workflow (DSL, builder, interpreter) | real, and ALREADY LIVE in production | **yes** |
+
+Workflow is not aspirational: `calculator_service.cpp:940` builds an
+`sgee::Builder<Ctx>("OptionsWorkflow")` and `:1122` runs the interpreter on every
+`CalculateStrategy`. The other three services have no graph.
+
+## Why replication cannot be wired here
+
+Two independent blockers, either one sufficient.
+
+**The transport has never been compiled.** `SGEE_USE_GRPC`, `SGEE_USE_MPI` and
+`SGEE_USE_UPCXX` are all `option(... OFF)`; the backend sets none. Standalone
+configure fails at `SGEE/CMakeLists.txt:731` on `find_package(gRPC CONFIG
+REQUIRED)`. No SGEE CI workflow references the flag. The five `Transport_Grpc_*`
+tests are `#if defined(SGEE_USE_GRPC)` and have never executed in this tree.
+Separately, that transport carries **only Raft/SWIM frames** over a single
+generic `/sgee.consensus.Transport/Deliver` method — it exposes no queue
+operation across a process boundary, so it is not a route to a distributed queue
+even once it builds.
+
+**Railway cannot host the topology.** Raft needs stable, individually
+addressable peers with durable local state, and this platform provides neither:
+
+- `<service>.railway.internal` resolves to a *randomly picked* replica address.
+  `RAILWAY_REPLICA_ID` is a UUID in the container's own environment, unreadable
+  by peers; there is no ordinal index.
+- **Volumes are incompatible with `numReplicas > 1`.** There is nowhere to fsync
+  currentTerm, votedFor or the log — the state Raft must persist before replying
+  to any RPC.
+- Deploys are a blue/green cutover of the *whole* container set, so every
+  release replaces the entire membership at once rather than one node at a time.
+
+Railway's own idiom for N durable addressable peers is **N separate services**,
+each with its own volume and stable DNS name — how their MongoDB replica-set
+template is built. That is a different topology from a `numReplicas` bump.
+
+## Consequences
+
+1. **Postgres is not merely the better durable substrate — it is the only one
+   available.** Volumes and replicas are mutually exclusive, so as long as this
+   service runs more than one replica, no local WAL can exist. `inference_jobs`
+   already reimplements TaskBroker's protocol (fenced lease, heartbeat, complete,
+   DLQ, sweeper) on a substrate that is shared across replicas and survives
+   redeploys.
+2. **`numReplicas: 3` stands on availability grounds only.** It buys nothing
+   toward consensus; the blockers are structural, not headcount. The first
+   version of that commit's rationale said otherwise and was wrong — CLAUDE.md
+   is corrected.
+3. **The workflow extension is the part worth building**, and it needs no
+   volume, no transport and no consensus.
+
+## Trap for whoever writes the next graph
+
+Bind actions by `graph_->GetActionId(name)`, never by name.
+`ActionRegistry::Register` hashes the name (`hash(name) % 10000`) while
+`Builder::Execute` assigns sequential IDs from its own table. The two numbering
+schemes never agree, so registering by name compiles, runs, and silently never
+executes the action. `calculator_service.cpp:975-983` documents this.
