@@ -3079,6 +3079,22 @@ auto calculator_asian_type(sensen::finance::AsianType parsed) -> calculator::Leg
         case sensen::finance::NOT_ASIAN:
             return calculator::Leg::NOT_ASIAN;
         default:
+            // Reached, not theoretical: proto3 enums are OPEN, so a peer built
+            // against a newer finance.proto can put a value here that this
+            // binary has no name for, and the field arrives as a plain integer.
+            //
+            // NOT_ASIAN remains the answer -- pricing a vanilla is the only
+            // safe wrong one. But it is now SAID. Without this line the
+            // downstream signal is a stamped-leg count of 0, which is exactly
+            // what a trader who never mentioned averaging produces: "you asked
+            // for a style I do not know" and "you asked for nothing" would be
+            // the same observation, and the first is a version skew somebody
+            // needs to fix.
+            logger::Logger::getInstance().warn(
+                "[assistant] Unrecognised sensen AsianType {} -- this binary knows "
+                "NOT_ASIAN, AVERAGE_PRICE and AVERAGE_STRIKE. Treating as NOT_ASIAN "
+                "and pricing a vanilla. A peer is built against a newer finance.proto.",
+                static_cast<int>(parsed));
             return calculator::Leg::NOT_ASIAN;
     }
 }
