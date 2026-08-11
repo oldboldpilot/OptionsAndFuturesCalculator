@@ -359,3 +359,35 @@ describe('loadChain: strike field mapping', () => {
     expect(row.put.openInterest).toBe(1200);
   });
 });
+
+describe('loadChain: fetched_at propagation', () => {
+  beforeEach(() => reset());
+
+  it('populates chainFetchedAt from the response fetched_at timestamp', async () => {
+    chainHandler = () => ({
+      ok: chainResponse(
+        [chainExpiration('2026-08-17', 7)],
+        [distinctStrike(650)],
+        '2026-08-17',
+        [],
+        '2026-08-11T14:15:00Z'
+      ),
+    });
+    useCalculatorStore.getState().loadChain();
+    await settle(() => useCalculatorStore.getState().chainStatus === 'ready', 'chain ready');
+
+    expect(useCalculatorStore.getState().chainFetchedAt).toBe('2026-08-11T14:15:00Z');
+  });
+
+  it('clears chainFetchedAt to null when load fails', async () => {
+    useCalculatorStore.getState().loadChain();
+    await settle(() => useCalculatorStore.getState().chainStatus === 'ready', 'chain ready');
+    expect(useCalculatorStore.getState().chainFetchedAt).not.toBeNull();
+
+    chainHandler = () => ({ fail: { code: GRPC_UNAVAILABLE, message: 'chain service down' } });
+    useCalculatorStore.getState().loadChain();
+    await settle(() => useCalculatorStore.getState().chainStatus === 'error', 'second load error');
+
+    expect(useCalculatorStore.getState().chainFetchedAt).toBeNull();
+  });
+});

@@ -1165,6 +1165,16 @@ target_link_libraries(test_market_data_resilience PRIVATE fastjson logger httpli
 
 add_test(NAME MarketDataResilienceTest COMMAND test_market_data_resilience)
 
+add_executable(test_option_chain_cache tests/test_option_chain_cache.cpp)
+target_sources(test_option_chain_cache
+    PRIVATE
+    FILE_SET CXX_MODULES FILES
+        src/modules/market_data.cppm
+)
+target_link_libraries(test_option_chain_cache PRIVATE fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto sgee)
+
+add_test(NAME OptionChainCacheTest COMMAND test_option_chain_cache)
+
 # GP-ARA mandatory verification stage for the strategy assistant
 # (assistant_verification.cppm). Deliberately proto- and gRPC-free (see that
 # module's own file banner) AND deliberately does NOT link sensen_slim: the

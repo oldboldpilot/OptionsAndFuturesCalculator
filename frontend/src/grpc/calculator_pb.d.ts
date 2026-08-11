@@ -688,6 +688,9 @@ export class ChainResponse extends jspb.Message {
   getProvider(): string;
   setProvider(value: string): ChainResponse;
 
+  getFetchedAt(): string;
+  setFetchedAt(value: string): ChainResponse;
+
   serializeBinary(): Uint8Array;
   toObject(includeInstance?: boolean): ChainResponse.AsObject;
   static toObject(includeInstance: boolean, msg: ChainResponse): ChainResponse.AsObject;
@@ -705,6 +708,7 @@ export namespace ChainResponse {
     selectedExpirationDate: string,
     availableExpirationsList: Array<ExpirationDate.AsObject>,
     provider: string,
+    fetchedAt: string,
   }
 }
 

@@ -99,6 +99,7 @@ export interface FakeChainResponse {
   getOptionStrikesList(): FakeChainStrike[];
   getFuturesContractsList(): unknown[];
   getSelectedExpirationDate(): string;
+  getFetchedAt?(): string;
 }
 
 export interface FakeStrategyResponse {
@@ -324,13 +325,15 @@ export function chainResponse(
   expirations: FakeChainExpiration[],
   strikes: FakeChainStrike[],
   selected = '',
-  futures: unknown[] = []
+  futures: unknown[] = [],
+  fetchedAt = '2026-08-11T14:00:00Z'
 ): FakeChainResponse {
   return {
     getAvailableExpirationsList: () => expirations,
     getOptionStrikesList: () => strikes,
     getFuturesContractsList: () => futures,
     getSelectedExpirationDate: () => selected,
+    getFetchedAt: () => fetchedAt,
   };
 }
 

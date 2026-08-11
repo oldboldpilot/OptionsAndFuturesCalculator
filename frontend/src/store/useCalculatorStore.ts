@@ -293,6 +293,7 @@ interface CalculatorState {
   selectedExpiration: string;
   chainStatus: ChainStatus;
   chainError: string | null;
+  chainFetchedAt: string | null;
 
   ticket: TicketDraft;
 
@@ -414,6 +415,7 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
   selectedExpiration: '',
   chainStatus: 'idle',
   chainError: null,
+  chainFetchedAt: null,
 
   // Zero is not a price. The ticket starts empty and the chain fills it in;
   // committing with a null premium is refused rather than defaulted, because a
@@ -452,6 +454,7 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
       selectedExpiration: '',
       chainStatus: 'idle',
       chainError: null,
+      chainFetchedAt: null,
       result: null,
     });
 
@@ -669,6 +672,7 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
           futuresCurve: [],
           chainStatus: 'error',
           chainError: err?.message || 'Chain service unreachable',
+          chainFetchedAt: null,
         });
         return;
       }
@@ -707,6 +711,7 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
           state: c.getState(),
         })),
         selectedExpiration: resolvedExpiration,
+        chainFetchedAt: typeof res.getFetchedAt === 'function' ? res.getFetchedAt() || null : null,
         // Seed the ticket's own expiration from the same value in the same
         // breath. OptionTicket DISPLAYS `ticket.expiration || selectedExpiration`
         // but commitTicket read only `ticket.expiration`, so a user who never

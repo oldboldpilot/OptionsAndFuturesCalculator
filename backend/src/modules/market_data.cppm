@@ -96,7 +96,7 @@ export enum class MarketDataError {
     return impl;
 }
 
-[[nodiscard]] auto make_error_code(MarketDataError e) -> std::error_code {
+export [[nodiscard]] auto make_error_code(MarketDataError e) -> std::error_code {
     return {static_cast<int>(e), market_data_category()};
 }
 
@@ -118,6 +118,32 @@ struct Credentials {
 [[nodiscard]] auto env_or(const char* name, std::string fallback) -> std::string {
     const char* raw = std::getenv(name);
     return (raw != nullptr && *raw != '\0') ? std::string{raw} : std::move(fallback);
+}
+
+[[nodiscard]] auto env_seconds_or(const char* name, long long fallback_seconds) -> std::chrono::seconds {
+    const auto s = env_or(name, "");
+    if (s.empty()) return std::chrono::seconds{fallback_seconds};
+    try {
+        const auto val = std::stoll(s);
+        if (val > 0) return std::chrono::seconds{val};
+    } catch (...) {}
+    return std::chrono::seconds{fallback_seconds};
+}
+
+export using ClockFn = std::chrono::steady_clock::time_point (*)();
+
+inline auto default_clock() -> std::chrono::steady_clock::time_point {
+    return std::chrono::steady_clock::now();
+}
+
+inline std::atomic<ClockFn> g_clock_fn{default_clock};
+
+export auto set_clock_provider(ClockFn fn) -> void {
+    g_clock_fn.store(fn != nullptr ? fn : default_clock);
+}
+
+export [[nodiscard]] auto clock_now() -> std::chrono::steady_clock::time_point {
+    return g_clock_fn.load()();
 }
 
 [[nodiscard]] auto credentials() -> const Credentials& {
@@ -620,6 +646,7 @@ export struct Chain {
     std::string selected_expiration;
     std::vector<Expiration> expirations;
     std::vector<StrikeRow> strikes;
+    std::string fetched_at;        // RFC3339, when the backend obtained it
 };
 
 /** One tenor on the published curve. */
@@ -659,7 +686,7 @@ export struct RiskFreeRate {
  * so it is held far longer. Guarded by a shared_mutex because reads vastly
  * outnumber writes.
  */
-template <typename T>
+export template <typename T>
 class TtlCache {
 public:
     explicit TtlCache(std::chrono::seconds ttl) noexcept : ttl_{ttl} {}
@@ -668,13 +695,28 @@ public:
         const std::shared_lock lock{mutex_};
         const auto it = entries_.find(key);
         if (it == entries_.end()) return std::nullopt;
-        if (std::chrono::steady_clock::now() - it->second.stored_at > ttl_) return std::nullopt;
+        if (clock_now() - it->second.stored_at > ttl_) return std::nullopt;
         return it->second.value;
     }
 
     auto put(const std::string& key, T value) -> void {
         const std::unique_lock lock{mutex_};
-        entries_.insert_or_assign(key, Entry{std::move(value), std::chrono::steady_clock::now()});
+        entries_.insert_or_assign(key, Entry{std::move(value), clock_now()});
+    }
+
+    auto clear() -> void {
+        const std::unique_lock lock{mutex_};
+        entries_.clear();
+    }
+
+    auto set_ttl(std::chrono::seconds ttl) noexcept -> void {
+        const std::unique_lock lock{mutex_};
+        ttl_ = ttl;
+    }
+
+    [[nodiscard]] auto get_ttl() const noexcept -> std::chrono::seconds {
+        const std::shared_lock lock{mutex_};
+        return ttl_;
     }
 
 private:
@@ -688,28 +730,52 @@ private:
     std::unordered_map<std::string, Entry> entries_;
 };
 
-[[nodiscard]] auto quote_cache() -> TtlCache<Quote>& {
-    static TtlCache<Quote> cache{std::chrono::seconds{15}};
+export [[nodiscard]] auto option_chain_max_stale_seconds() -> std::chrono::seconds {
+    return env_seconds_or("OPTION_CHAIN_MAX_STALE_SECONDS", 3600);
+}
+
+export [[nodiscard]] auto quote_cache() -> TtlCache<Quote>& {
+    static TtlCache<Quote> cache{env_seconds_or("OPTION_QUOTE_TTL_SECONDS", 60)};
     return cache;
 }
 
-[[nodiscard]] auto expiration_cache() -> TtlCache<std::vector<Expiration>>& {
+export [[nodiscard]] auto expiration_cache() -> TtlCache<std::vector<Expiration>>& {
     static TtlCache<std::vector<Expiration>> cache{std::chrono::seconds{12 * 60 * 60}};
     return cache;
 }
 
-[[nodiscard]] auto chain_cache() -> TtlCache<Chain>& {
-    static TtlCache<Chain> cache{std::chrono::seconds{15}};
+export [[nodiscard]] auto chain_cache() -> TtlCache<Chain>& {
+    static TtlCache<Chain> cache{env_seconds_or("OPTION_CHAIN_TTL_SECONDS", 900)};
     return cache;
 }
 
-[[nodiscard]] auto rate_cache() -> TtlCache<RiskFreeRate>& {
+export [[nodiscard]] auto rate_cache() -> TtlCache<RiskFreeRate>& {
     // One publication per business day at about 15:30 ET, so a long TTL costs
     // nothing in freshness: at most four requests a day to the source, and a
     // new print is picked up within hours. The 12 h expiration_cache above is
     // the precedent for this shape.
     static TtlCache<RiskFreeRate> cache{std::chrono::hours{6}};
     return cache;
+}
+
+export struct LastGoodChainEntry {
+    Chain chain;
+    std::chrono::steady_clock::time_point fetched_at_time;
+};
+
+[[nodiscard]] auto last_good_chain() -> std::unordered_map<std::string, LastGoodChainEntry>& {
+    static std::unordered_map<std::string, LastGoodChainEntry> map;
+    return map;
+}
+
+[[nodiscard]] auto last_good_chain_mutex() -> std::shared_mutex& {
+    static std::shared_mutex mutex;
+    return mutex;
+}
+
+export auto clear_last_good_chain() -> void {
+    const std::unique_lock lock{last_good_chain_mutex()};
+    last_good_chain().clear();
 }
 
 [[nodiscard]] auto last_good_rate() -> std::optional<RiskFreeRate>& {
@@ -1360,32 +1426,95 @@ export [[nodiscard]] auto fetch_expirations(const std::string& symbol, double sp
 
 export [[nodiscard]] auto fetch_chain(const std::string& symbol, const std::string& expiration_in)
     -> std::expected<Chain, std::error_code> {
-    auto quote = fetch_quote(symbol);
-    if (!quote) return std::unexpected(quote.error());
-    const double spot = quote->price;
-
-    auto expirations = fetch_expirations(symbol, spot);
-    if (!expirations) return std::unexpected(expirations.error());
-
-    // Default to the first expiry at least a week out — front-week contracts
-    // are dominated by gamma and make a poor default view.
-    std::string expiration = expiration_in;
-    if (expiration.empty()) {
-        for (const auto& e : *expirations) {
-            if (e.days >= 7) { expiration = e.date; break; }
-        }
-        if (expiration.empty() && !expirations->empty()) expiration = expirations->back().date;
+    std::string cache_key;
+    if (!expiration_in.empty()) {
+        cache_key = symbol + "|" + expiration_in;
+        if (auto hit = chain_cache().get(cache_key)) return *hit;
     }
 
-    const std::string cache_key = symbol + "|" + expiration;
-    if (auto hit = chain_cache().get(cache_key)) return *hit;
+    auto quote = fetch_quote(symbol);
+    std::error_code last_error = make_error_code(MarketDataError::NetworkError);
 
-    auto result = provider()->chain(symbol, expiration, spot);
-    if (!result) return result;
+    if (quote) {
+        const double spot = quote->price;
+        auto expirations = fetch_expirations(symbol, spot);
+        if (expirations) {
+            std::string expiration = expiration_in;
+            if (expiration.empty()) {
+                for (const auto& e : *expirations) {
+                    if (e.days >= 7) { expiration = e.date; break; }
+                }
+                if (expiration.empty() && !expirations->empty()) expiration = expirations->back().date;
+            }
 
-    result->expirations = *expirations;
-    chain_cache().put(cache_key, *result);
-    return result;
+            if (!expiration.empty()) {
+                cache_key = symbol + "|" + expiration;
+                if (expiration_in.empty()) {
+                    if (auto hit = chain_cache().get(cache_key)) return *hit;
+                }
+
+                auto result = provider()->chain(symbol, expiration, spot);
+                if (result) {
+                    result->expirations = *expirations;
+                    if (result->fetched_at.empty()) {
+                        result->fetched_at = rfc3339_now();
+                    }
+                    chain_cache().put(cache_key, *result);
+
+                    const std::unique_lock lock{last_good_chain_mutex()};
+                    last_good_chain()[cache_key] = LastGoodChainEntry{
+                        .chain = *result,
+                        .fetched_at_time = clock_now()
+                    };
+                    return result;
+                } else {
+                    last_error = result.error();
+                }
+            } else {
+                last_error = make_error_code(MarketDataError::NotFound);
+            }
+        } else {
+            last_error = expirations.error();
+        }
+    } else {
+        last_error = quote.error();
+    }
+
+    // Upstream failure -- serve-stale from last_good_chain if within max_stale hard cap
+    {
+        const std::shared_lock lock{last_good_chain_mutex()};
+        const auto& lg_map = last_good_chain();
+
+        auto it = lg_map.end();
+        if (!cache_key.empty()) {
+            it = lg_map.find(cache_key);
+        }
+        if (it == lg_map.end()) {
+            for (auto search_it = lg_map.begin(); search_it != lg_map.end(); ++search_it) {
+                if (search_it->first.starts_with(symbol + "|")) {
+                    it = search_it;
+                    break;
+                }
+            }
+        }
+
+        if (it != lg_map.end()) {
+            const auto now = clock_now();
+            const auto age = std::chrono::duration_cast<std::chrono::seconds>(now - it->second.fetched_at_time);
+            const auto max_stale = option_chain_max_stale_seconds();
+            if (age <= max_stale) {
+                logger::Logger::getInstance().warn(
+                    "Option chain refresh failed ({}); serving stale print from {} (age {}s)",
+                    last_error.message(), it->second.chain.fetched_at, age.count());
+                return it->second.chain;
+            }
+            logger::Logger::getInstance().warn(
+                "Option chain refresh failed and last good print from {} is stale (age {}s > max {}s); refusing",
+                it->second.chain.fetched_at, age.count(), max_stale.count());
+        }
+    }
+
+    return std::unexpected(last_error);
 }
 
 export [[nodiscard]] auto fetch_risk_free_rate() -> std::expected<RiskFreeRate, std::error_code> {

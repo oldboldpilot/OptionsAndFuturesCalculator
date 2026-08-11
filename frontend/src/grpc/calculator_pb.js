@@ -5295,7 +5295,8 @@ proto.calculator.ChainResponse.toObject = function(includeInstance, msg) {
     selectedExpirationDate: jspb.Message.getFieldWithDefault(msg, 5, ""),
     availableExpirationsList: jspb.Message.toObjectList(msg.getAvailableExpirationsList(),
     proto.calculator.ExpirationDate.toObject, includeInstance),
-    provider: jspb.Message.getFieldWithDefault(msg, 7, "")
+    provider: jspb.Message.getFieldWithDefault(msg, 7, ""),
+    fetchedAt: jspb.Message.getFieldWithDefault(msg, 8, "")
   };
 
   if (includeInstance) {
@@ -5362,6 +5363,10 @@ proto.calculator.ChainResponse.deserializeBinaryFromReader = function(msg, reade
     case 7:
       var value = /** @type {string} */ (reader.readString());
       msg.setProvider(value);
+      break;
+    case 8:
+      var value = /** @type {string} */ (reader.readString());
+      msg.setFetchedAt(value);
       break;
     default:
       reader.skipField();
@@ -5441,6 +5446,13 @@ proto.calculator.ChainResponse.serializeBinaryToWriter = function(message, write
   if (f.length > 0) {
     writer.writeString(
       7,
+      f
+    );
+  }
+  f = message.getFetchedAt();
+  if (f.length > 0) {
+    writer.writeString(
+      8,
       f
     );
   }
@@ -5630,6 +5642,24 @@ proto.calculator.ChainResponse.prototype.getProvider = function() {
  */
 proto.calculator.ChainResponse.prototype.setProvider = function(value) {
   return jspb.Message.setProto3StringField(this, 7, value);
+};
+
+
+/**
+ * optional string fetched_at = 8;
+ * @return {string}
+ */
+proto.calculator.ChainResponse.prototype.getFetchedAt = function() {
+  return /** @type {string} */ (jspb.Message.getFieldWithDefault(this, 8, ""));
+};
+
+
+/**
+ * @param {string} value
+ * @return {!proto.calculator.ChainResponse} returns this
+ */
+proto.calculator.ChainResponse.prototype.setFetchedAt = function(value) {
+  return jspb.Message.setProto3StringField(this, 8, value);
 };
 
 

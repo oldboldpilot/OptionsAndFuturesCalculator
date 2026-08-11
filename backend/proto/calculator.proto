@@ -269,6 +269,7 @@ message ChainResponse {
   string selected_expiration_date = 5;
   repeated ExpirationDate available_expirations = 6;
   string provider = 7;
+  string fetched_at = 8;       // RFC3339, when the backend obtained the chain
 }
 
 // --------------------------------------------------------------------------

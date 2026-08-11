@@ -1448,6 +1448,7 @@ public:
 
         res.set_symbol(symbol);
         res.set_spot_price(spot);
+        res.set_fetched_at(md::rfc3339_now());
 
         // The quarterly cycle (March, June, September, December) is the listed
         // convention for index futures, and the single-letter month codes are
@@ -1560,6 +1561,7 @@ public:
         res.set_spot_price(chain->spot);
         res.set_selected_expiration_date(chain->selected_expiration);
         res.set_provider("alpaca");
+        res.set_fetched_at(chain->fetched_at);
 
         for (const auto& e : chain->expirations) {
             auto& exp = *res.add_available_expirations();

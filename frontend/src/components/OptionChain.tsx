@@ -21,13 +21,29 @@ const pct = (v: number) => (Number.isFinite(v) && v > 0 ? `${(v * 100).toFixed(1
  */
 export function OptionChain() {
   const {
-    chainStrikes, chainExpirations, selectedExpiration, chainStatus, chainError,
+    chainStrikes, chainExpirations, selectedExpiration, chainStatus, chainError, chainFetchedAt,
     setSelectedExpiration, loadChain, setTicket, ticket,
   } = useCalculatorStore();
 
   const [side, setSide] = useState<SideFilter>('both');
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const atmRef = useRef<HTMLTableRowElement | null>(null);
+
+  const chainAgeSeconds = (() => {
+    if (!chainFetchedAt) return null;
+    const fetchedMs = Date.parse(chainFetchedAt);
+    if (Number.isNaN(fetchedMs)) return null;
+    return (Date.now() - fetchedMs) / 1000;
+  })();
+
+  const isLive = chainAgeSeconds !== null && chainAgeSeconds < 60;
+
+  const asOfTime = (() => {
+    if (!chainFetchedAt) return '';
+    const fetchedMs = Date.parse(chainFetchedAt);
+    if (Number.isNaN(fetchedMs)) return chainFetchedAt;
+    return new Date(fetchedMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  })();
 
   useEffect(() => {
     if (chainStatus === 'idle') loadChain();
@@ -110,7 +126,15 @@ export function OptionChain() {
           <span className="panel-title">Option Chain</span>
           {chainStatus === 'ready' && (
             <>
-              <span className="chip chip-live"><i className="dot" />LIVE</span>
+              {isLive ? (
+                <span className="chip chip-live" title={chainFetchedAt ? `Fetched at ${chainFetchedAt}` : ''}>
+                  <i className="dot" />LIVE
+                </span>
+              ) : (
+                <span className="chip chip-stale" title={chainFetchedAt ? `Fetched at ${chainFetchedAt}` : ''}>
+                  DELAYED {asOfTime ? `· ${asOfTime}` : ''}
+                </span>
+              )}
               <span className="chip">{chainStrikes.length} strikes</span>
             </>
           )}
