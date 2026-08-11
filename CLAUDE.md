@@ -447,6 +447,21 @@ hostname, so the peers could not address each other.
 **It is a non-authoritative mirror. Postgres remains the system of record**, and
 `docs/SGEE_QUEUE_CLUSTER.md` carries the evidence for why.
 
+**The first deployment crash-looped, and how it presented is the lesson.** All
+three nodes died on an uncaught `std::bad_variant_access` seconds after boot,
+while **Railway reported every deployment SUCCESS** — the healthcheck passes
+before the throw, so `railway status` is not evidence a service is running; read
+the logs for repeated boot banners. It was invisible for a whole deployment
+cycle because the node never flushed stdout: in a container that is a pipe and
+therefore fully buffered, so eight boot lines never reached the log stream at
+all. The cause was a data race on `ReplicatedQueueRuntime::inbound_` — the gRPC
+transport delivers frames on its **own** drain thread, while the runtime's
+header argued no lock was needed. That argument is about *reentrancy* and is
+correct; it says nothing about *concurrency*, and it held only while the sole
+transport was the in-process one. Fixed, but **not confirmed fixed in place** —
+it never reproduced locally, and the local three-node durability test passes
+with the race present.
+
 Four things are easy to get wrong here:
 
 - **`SGEE_PEERS` means two different things.** The nodes read it and dial

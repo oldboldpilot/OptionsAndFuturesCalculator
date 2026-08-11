@@ -97,6 +97,44 @@ Duplicate delivery is deliberately *not* asserted when the drain took more than
 one attempt: a task leased by an aborted attempt reappears legitimately on the
 next one, and claiming "no duplicates" from that output would be unsupported.
 
+## The first deployment crash-looped
+
+All three nodes died on an uncaught `std::bad_variant_access` seconds after
+finishing initialisation, restarted, and repeated — six to seven times each.
+
+Two things about how it presented are worth more than the bug itself:
+
+- **Railway reported every deployment `SUCCESS` throughout.** `/healthz` answers
+  as soon as the driver is running, which is deliberate (see above), so it
+  passes before the throw. `railway status` is not evidence a service is
+  running; repeated boot banners in `railway logs` are what a crash loop looks
+  like.
+- **It was invisible for an entire deployment cycle.** `sgee::Log` writes with
+  `std::println(std::cout, ...)` and never flushed. In a container stdout is a
+  pipe and therefore fully buffered, so the node's eight boot lines never
+  reached the log stream — the container answered `/healthz` while its log
+  showed only Railway's own "Mounting volume" / "Starting Container". Fixing
+  that (`std::cout << std::unitbuf`) is what made the crash visible at all.
+
+**Cause:** a data race on `ReplicatedQueueRuntime::inbound_`.
+`GrpcConsensusTransport` delivers inbound frames on its **own** server drain
+thread; the runtime's `tick()` swaps that same `std::vector` on the owner
+thread; neither took a lock. The module header argued none was needed — an
+argument about *reentrancy*, correct on its own terms, that says nothing about
+*concurrency* and held only while the sole transport was `InProcessTransport`
+(which delivers synchronously, on the caller's thread).
+
+**Fixed** with one mutex guarding that queue and nothing else. **Not confirmed
+fixed in place:** it never reproduced locally. Five hypotheses were refuted
+first — unreachable peers, unresolvable peer DNS, a three-node cluster with
+leader SIGKILL, mismatched tokens, and a health-endpoint fuzz of fourteen
+malformed shapes plus a 120-probe storm — and the local three-node durability
+test passes **with the race present**, which is exactly why it was never caught.
+
+A `std::set_terminate` handler now prints the exception type, `what()` and a
+symbolised backtrace, so a recurrence names its own thread and frame instead of
+one line naming neither.
+
 ## Before this is promoted to authoritative
 
 - Fix the post-failover lease stall (`WalError: TimedOut`).
