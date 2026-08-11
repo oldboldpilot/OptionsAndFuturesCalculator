@@ -363,20 +363,22 @@ is sized as what it is:
 | partner | 2400 | 1,200,000 | per caller, **per replica** |
 
 **Every number in that table is multiplied by the replica count, and
-`railway.json` sets `numReplicas: 2`.** `callers_` is an in-process
+`railway.json` sets `numReplicas: 3`** (raised from 2 on 2026-08-10). `callers_` is an in-process
 `std::unordered_map` behind a process mutex (`quota.cpp:82`), a Meyers singleton
 with no persistence of any kind, so each replica refills its own buckets. The
-effective anonymous ceiling is 12,000 req/min, not 6000, and which replica a
-caller lands on decides whether they are refused. An earlier version of this
+effective anonymous ceiling is **18,000 req/min at three replicas**, not 6000,
+and which replica a caller lands on decides whether they are refused. Every
+other row multiplies the same way: free 360, pro 1800, partner 7200. An earlier version of this
 file called the anonymous bucket "shared site-wide" full stop; that was written
 before `numReplicas: 2` arrived in `9445ac5` and was wrong from that commit
 onward. Envoy's local rate limit (100 tokens, 10/s refill, `envoy.yaml:105-127`)
 is per-replica for the same reason — it is a per-container sidecar, not a
 cross-replica balancer.
 
-**`numReplicas: 2` is intentional** (confirmed 2026-08-08). The reason is crash
-and host-failure availability for two live sites plus capacity headroom — **not**
-deploys. Railway's blue/green deploy overlap is gated on `/healthz` at the
+**`numReplicas: 3` is intentional** (raised from 2 on 2026-08-10; 2 was
+confirmed intentional on 2026-08-08 for the reasons below, and all of them still
+apply). The reason is crash and host-failure availability for two live sites
+plus capacity headroom — **not** deploys. Railway's blue/green deploy overlap is gated on `/healthz` at the
 *deployment* level and gives zero-downtime releases identically at one replica,
 so "we need 2 for deploys" is a wrong argument that has already been made once
 in this repository. What 2 replicas genuinely buys: `start.sh:185-189` exits the
@@ -386,10 +388,23 @@ a full outage for both sites lasting restart plus the 20 s
 crash-looping deployment stops being restarted at all, which is survivable at
 two replicas and a hard outage at one.
 
-The known costs, all accepted: the quota multiplication above, ~2x model memory
-once weights are deployed, per-replica assistant admission queues (one replica
-can answer `RESOURCE_EXHAUSTED` while the other's owner thread idles), and ~2x
-Alpaca calls with independently-tripping circuit breakers. None is a correctness
+**Why three rather than two, as of 2026-08-10.** An even cluster is the worst
+size for any quorum protocol: two nodes need both to agree, so losing either one
+halts progress — strictly worse than a single node, and it defeats the very
+availability argument above. SGEE's own deterministic simulation proves it
+(`replicated_queue_runtime_dst_test.cpp:555`: a 2-node cluster cannot commit
+after one node dies). Three nodes tolerate one failure with a 2-of-3 majority.
+Whether SGEE consensus is actually wired across these replicas is a separate,
+still-open question — the network transports it would need have never been
+compiled in this tree — but the replica count is the precondition, and an odd
+count is correct for availability regardless of whether consensus ever lands.
+
+The known costs, all accepted, and now scaling by three rather than two: the
+quota multiplication above, ~3x model memory once weights are deployed,
+per-replica assistant admission queues (one replica can answer
+`RESOURCE_EXHAUSTED` while another's owner thread idles), and ~3x Alpaca calls
+with independently-tripping circuit breakers. Container cost rises by half
+again over two replicas. None is a correctness
 break — every RPC is stateless per request and there is no durable local state
 to split-brain, because there is no volume. The admission-queue fragmentation is
 what the shared inference queue is being built to fix.
