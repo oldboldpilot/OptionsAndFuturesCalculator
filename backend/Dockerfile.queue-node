@@ -1,0 +1,191 @@
+# SGEE Raft queue node image (sgee_queue_node).
+#
+# @author Olumuyiwa Oluwasanmi
+#
+# One node of the replicated task queue. THREE Railway services run this image,
+# one replica each, each with its own volume -- not one service with three
+# replicas. That is not a preference, it is the only shape Railway allows:
+# "Replicas cannot be used with volumes", and a Raft node must fsync
+# currentTerm, votedFor and its log before replying to any RPC, so it cannot
+# run without durable local storage. It is also the only shape that gives each
+# node a stable address: `<service>.railway.internal` resolves to a randomly
+# chosen replica when a service has several, so peers could not name each other.
+#
+# --- Why this is a separate Dockerfile from backend/Dockerfile ---------------
+#
+# It builds a different binary from the same source tree and ships almost none
+# of the same runtime: no Envoy, no model weights, no gRPC-JSON descriptor. A
+# `--target` would have expressed that in one file, but Railway cannot select a
+# Dockerfile target (their own feature request for it is open), so the choice
+# was between an ARG-driven `FROM ${STAGE}` in the 776-line engine Dockerfile --
+# where a mistake takes production down -- and this.
+#
+# THE COST IS REAL AND IS THIS: the builder stage below duplicates
+# backend/Dockerfile's toolchain, and the two must not drift. Clang 22, CMake
+# 4.2.7, libc++, and the --gcc-install-dir pin are not independent choices here;
+# they are the configuration this tree is verified against, and the reasons are
+# argued at length in backend/Dockerfile rather than repeated here. If you
+# change a toolchain version there, change it here in the same commit.
+#
+# --- What it deliberately does NOT default -----------------------------------
+#
+# SGEE_NODE_ID and SGEE_PEERS have no ENV default and must come from the
+# service. A default node id is worse than a missing one: three nodes that all
+# believe they are node 1 form three single-node clusters that each accept
+# writes, and nothing in the logs says so. Missing, the binary refuses to start
+# and names the variable.
+
+# ---------------------------------------------------------------------------
+# Builder
+# ---------------------------------------------------------------------------
+FROM docker.io/library/ubuntu:24.04 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Same list as backend/Dockerfile's builder, and libtbb-dev is excluded here for
+# the same reason it is excluded there: sensen probes for a system oneTBB and
+# silently prefers it, and Ubuntu's copy is built against libstdc++ while this
+# tree is libc++. This image does not link sensen, but it CONFIGURES the same
+# CMake project, and diverging the two package lists is how a build that works
+# in one image stops configuring in the other.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates wget gnupg lsb-release software-properties-common \
+        ninja-build git pkg-config make \
+        libssl-dev liburing-dev libjemalloc-dev libpq-dev \
+        libevent-dev libunwind-dev libbrotli-dev zlib1g-dev \
+        libkrb5-dev libldap2-dev libsasl2-dev libsystemd-dev libcap-dev \
+        libpcre2-dev libatomic1 \
+        libstdc++-14-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV GCC_TOOLCHAIN_FLAGS="--gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/14"
+
+ARG CMAKE_VERSION=4.2.7
+RUN wget -qO /tmp/cmake.tar.gz \
+        "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.tar.gz" \
+    && tar -xzf /tmp/cmake.tar.gz -C /opt \
+    && ln -sf /opt/cmake-${CMAKE_VERSION}-linux-x86_64/bin/cmake /usr/local/bin/cmake \
+    && ln -sf /opt/cmake-${CMAKE_VERSION}-linux-x86_64/bin/ctest /usr/local/bin/ctest \
+    && rm /tmp/cmake.tar.gz \
+    && cmake --version
+
+ARG LLVM_VERSION=22
+RUN wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh \
+    && chmod +x /tmp/llvm.sh \
+    && /tmp/llvm.sh ${LLVM_VERSION} \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        libc++-${LLVM_VERSION}-dev libc++abi-${LLVM_VERSION}-dev lld-${LLVM_VERSION} \
+    && rm -rf /var/lib/apt/lists/* /tmp/llvm.sh \
+    && ln -sf /usr/bin/clang-${LLVM_VERSION} /usr/bin/clang \
+    && ln -sf /usr/bin/clang++-${LLVM_VERSION} /usr/bin/clang++
+
+WORKDIR /src
+
+COPY backend/ /src/backend/
+
+# Configured through the BACKEND CMake project rather than SGEE standalone, and
+# that is the whole point: backend/CMakeLists.txt forces SGEE_NO_IMPORT_STD=ON
+# and SGEE_USE_GRPC=ON and brings gRPC in via FetchContent, and that exact
+# combination is the one 77/77 SGEE suites are green under. A standalone SGEE
+# configure would pick a system gRPC and `import std`, which is a configuration
+# nothing in this repository has ever tested.
+#
+# Only the two queue targets are built. sensen and calculator_engine are
+# configured (cheap) and never compiled (not cheap) -- nothing this binary
+# links reaches them.
+#
+# ENABLE_LLAMACPP_BACKEND=OFF for the same reason as the engine image: it is a
+# cross-checking tool, not a serving path, and OFF removes a ~167 MB clone and
+# one more host this build has to reach.
+RUN cmake -S /src/backend -B /src/build -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_C_COMPILER=clang \
+        -DCMAKE_CXX_COMPILER=clang++ \
+        -DCMAKE_CXX_FLAGS="${GCC_TOOLCHAIN_FLAGS}" \
+        -DLIBCXX_MODULES_PATH=/usr/lib/llvm-${LLVM_VERSION}/share/libc++/v1 \
+        -DCPP23_LOGGER_LIBCXX_MODULES_PATH=/usr/lib/llvm-${LLVM_VERSION}/share/libc++/v1 \
+        -DENABLE_LLAMACPP_BACKEND=OFF \
+    && cmake --build /src/build --target sgee_queue_node sgee_queue_node_client
+
+# Collect the libc++ runtime the way backend/Dockerfile does: ask the freshly
+# linked binaries, do not hardcode a path. Ubuntu 24.04's own libc++1 is LLVM
+# 18 against an LLVM 22 binary -- same soname, one major version apart -- so
+# installing the distro package in the runtime stage would produce a container
+# that starts and then fails somewhere inside libc++. An unresolved entry fails
+# the build HERE, loudly, rather than at container start.
+RUN set -eu; \
+    mkdir -p /src/build/lib; \
+    NEEDED="$(ldd /src/build/sgee_queue_node /src/build/sgee_queue_node_client | grep -E 'libc\+\+|libunwind' || true)"; \
+    echo "libc++/libunwind entries ldd found:"; \
+    echo "${NEEDED}"; \
+    if [ -z "${NEEDED}" ]; then \
+        echo "FATAL: ldd named no libc++/libunwind shared object for either binary." >&2; \
+        echo "Under -stdlib=libc++ this build must depend on at least libc++.so.1. Either the link did not happen against libc++, or ldd's output no longer matches this filter -- investigate, do not assume libstdc++ is fine." >&2; \
+        exit 1; \
+    fi; \
+    if echo "${NEEDED}" | grep -q "not found"; then \
+        echo "FATAL: ldd could not resolve a dependency inside the builder itself:" >&2; \
+        echo "${NEEDED}" >&2; \
+        exit 1; \
+    fi; \
+    for lib in $(echo "${NEEDED}" | awk '{print $3}' | sort -u); do \
+        cp -Lv "${lib}" /src/build/lib/; \
+    done; \
+    ls -l /src/build/lib
+
+# ---------------------------------------------------------------------------
+# Runtime
+# ---------------------------------------------------------------------------
+FROM docker.io/library/ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# This is backend/Dockerfile's runtime list, unchanged and deliberately not
+# trimmed. A shorter list is certainly possible -- this binary links neither
+# sensen nor Envoy -- but the failure mode of getting it wrong is a container
+# that builds clean and dies at process start on a missing shared object, and
+# the saving is a few megabytes. `ldd /app/sgee_queue_node` inside the built
+# image is the authority if anyone does trim it; reasoning about which
+# subproject "owns" a library is how the wrong answer gets reached. liburing2
+# in particular is NOT vestigial here: it arrives through SGEE's own io_uring
+# use, which is precisely what this image ships.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libstdc++6 libssl3t64 libtbb12 liburing2 libjemalloc2 libpq5 \
+        libevent-2.1-7t64 libunwind8 libbrotli1 zlib1g libgssapi-krb5-2 \
+        libldap2 libsasl2-2 libsystemd0 libcap2 libpcre2-8-0 libatomic1 \
+        libz3-4 ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY --from=builder /src/build/sgee_queue_node        /app/sgee_queue_node
+COPY --from=builder /src/build/sgee_queue_node_client /app/sgee_queue_node_client
+COPY --from=builder /src/build/lib/                   /app/lib/
+
+ENV LD_LIBRARY_PATH=/app/lib
+
+# Image-invariant configuration. Anything that must DIFFER between the three
+# nodes is absent on purpose -- see the header.
+#
+# /data is the volume mount path. The node stamps node.id there on first boot
+# and refuses to start if it later sees a different SGEE_NODE_ID, which is what
+# stops a volume being reattached to the wrong service and corrupting a log.
+ENV SGEE_DATA_DIR=/data
+ENV SGEE_CONSENSUS_PORT=50052
+ENV SGEE_QUEUE_PORT=50053
+ENV SGEE_SNAPSHOT_RETENTION_MS=21600000
+ENV PORT=8080
+
+# Created so a first boot without a mounted volume fails on Raft's own terms
+# rather than on a missing directory. It is NOT a substitute for the volume:
+# without one, the log lives in the container layer and every restart is a
+# fresh node.
+RUN mkdir -p /data
+
+# 8080 health/status (HTTP), 50052 Raft consensus, 50053 client task queue.
+# All three bind [::] -- Railway's private network is IPv6-only, and a node
+# bound to 0.0.0.0 is unreachable by its peers there.
+EXPOSE 8080 50052 50053
+
+ENTRYPOINT []
+CMD ["/app/sgee_queue_node"]
