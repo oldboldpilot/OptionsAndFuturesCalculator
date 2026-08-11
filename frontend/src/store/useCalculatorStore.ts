@@ -4,6 +4,21 @@ import { authMetadata } from '../lib/licence';
 import { OptionsCalculatorClient } from '../grpc/CalculatorServiceClientPb';
 import { StrategyRequest, Leg as ProtoLeg, QuoteRequest, ChainRequest, RiskFreeRateRequest } from '../grpc/calculator_pb';
 
+/**
+ * The averaging vocabulary, borrowed rather than restated.
+ *
+ * `useTreePricerStore` already owns `AsianStyle` for the Exercise & Averaging
+ * panel, and a second copy here is exactly how the two surfaces would come to
+ * disagree about what "Asian" means -- the panel calling a style AVERAGE_STRIKE
+ * while a leg spelt it AVG_STRIKE would compile on both sides and only diverge
+ * on the wire.
+ *
+ * A TYPE-ONLY import, which `isolatedModules` erases entirely at emit, so it
+ * cannot form the runtime cycle a value import would: `useTreePricerStore`
+ * imports THIS module for spot, strike and rate.
+ */
+import type { AsianStyle } from './useTreePricerStore';
+
 export interface Leg {
   id: string;
   instrument_type: string;
@@ -14,6 +29,13 @@ export interface Leg {
   quantity: number;
   expiration_days?: number;
   implied_volatility?: number;
+  /**
+   * Averaging style. Absent means NOT_ASIAN -- the same meaning the proto's
+   * zero value carries, so a leg built before this field existed (the strategy
+   * templates in `StrategySelector` still build legs without it) keeps its
+   * current wire meaning and its current answers.
+   */
+  asian_type?: AsianStyle;
 }
 
 /** A point on the at-expiry payoff curve, exactly as the engine returns it. */
@@ -214,6 +236,13 @@ export interface TicketDraft {
   premium: number | null;
   quantity: number;
   impliedVolatility: number | null;
+  /**
+   * Averaging style for the leg being composed. Defaults to 'NOT_ASIAN' --
+   * a vanilla option is what a trader who never touches the control meant,
+   * and it is also the proto's zero value, so the default costs nothing on
+   * the wire.
+   */
+  asianType: AsianStyle;
 }
 
 interface CalculatorState {
@@ -397,6 +426,7 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
     premium: null,
     quantity: 1,
     impliedVolatility: null,
+    asianType: 'NOT_ASIAN',
   },
 
   setSymbol: (symbolInput, customPrice, customAssetClass) => {
@@ -596,6 +626,12 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
       quantity: t.quantity > 0 ? t.quantity : 1,
       expiration_days: dte,
       implied_volatility: t.impliedVolatility ?? undefined,
+      // Carried, not defaulted. The engine refuses an Asian leg today, and
+      // that refusal is the honest answer -- dropping the style here instead
+      // would put a vanilla leg into the position under a ticket that said
+      // Asian, which is the same class of silent substitution as the
+      // fabricated `expiration_days: 0` this guard block exists to prevent.
+      asian_type: t.asianType,
     });
     set({ error: null });
   },
@@ -793,6 +829,17 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
       // Black-Scholes, so this cannot perturb a non-dividend position.
       req.setDividendYield(get().dividendYield);
 
+      // Averaging style onto the wire enum. Written as an exhaustive record
+      // rather than a chain of ternaries so that adding a style to
+      // `AsianStyle` fails to compile here instead of silently falling
+      // through to NOT_ASIAN -- the one value that means "there is nothing
+      // special about this leg".
+      const WIRE_ASIAN_TYPE: Record<AsianStyle, ProtoLeg.AsianType> = {
+        NOT_ASIAN: ProtoLeg.AsianType.NOT_ASIAN,
+        AVERAGE_PRICE: ProtoLeg.AsianType.AVERAGE_PRICE,
+        AVERAGE_STRIKE: ProtoLeg.AsianType.AVERAGE_STRIKE,
+      };
+
       const legType = (l: Leg) => {
         switch (l.option_type) {
           case 'CALL': return ProtoLeg.Type.CALL;
@@ -816,6 +863,15 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
           pLeg.setPremium(l.premium);
           pLeg.setImpliedVolatility(l.implied_volatility ?? 0);
           pLeg.setContractMultiplier(isOption ? 100 : 1);
+          // Sent for EVERY leg, not only option legs. A futures or stock leg
+          // has no averaging window, so nothing in this client ever marks one
+          // Asian -- but suppressing the field here on a leg that did carry a
+          // style would drop it silently, and the engine is the side that gets
+          // to say a leg is malformed. `averaging_states` is deliberately not
+          // sent: zero means "engine default", and this UI has no control for
+          // it, so sending a client-chosen grid size would be an assumption
+          // the trader never made.
+          pLeg.setAsianType(WIRE_ASIAN_TYPE[l.asian_type ?? 'NOT_ASIAN']);
           return pLeg;
         }),
       );

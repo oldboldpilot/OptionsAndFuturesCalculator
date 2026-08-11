@@ -18,7 +18,7 @@ type ValueMode = 'dollars' | 'percent';
  * which the engine now fills correctly; wiring it up here is separate work.
  */
 export function PayoffLadder() {
-  const { result, spotPrice, isLoading, error } = useCalculatorStore();
+  const { result, spotPrice, isLoading, error, modelLimit } = useCalculatorStore();
   const [mode, setMode] = useState<ValueMode>('dollars');
 
   /**
@@ -97,7 +97,22 @@ export function PayoffLadder() {
       </div>
 
       <div className="panel-body panel-body--flush" style={{ flex: 1 }}>
-        {error ? (
+        {/* Checked BEFORE `error`, and rendered through the PLAIN empty state
+            rather than the error one. The store sets exactly one of the two
+            per attempt, so the order cannot change what shows -- it says which
+            reading is right. A modelling limit is not an outage: nothing is
+            broken, retrying will not help, and the loss-red "Unavailable"
+            heading would tell a trader the calculator had fallen over when in
+            fact their position is fine and this model does not cover it. The
+            engine's own sentence is shown verbatim, exactly as `gateDenied` is
+            in StrategyMetrics -- a client paraphrase of a refusal drifts from
+            what the engine actually did. */}
+        {modelLimit ? (
+          <div className="empty-state">
+            <span className="empty-state-title">Not modelled</span>
+            <span>{modelLimit}</span>
+          </div>
+        ) : error ? (
           <div className="empty-state empty-state--error">
             <span className="empty-state-title">Unavailable</span>
             <span>{error}</span>

@@ -74,6 +74,27 @@ export function PositionLegs() {
                     }}
                   >
                     {leg.option_type}
+                    {/* An Asian leg is badged, not merely stored.
+                        `option_type` says CALL for both a vanilla and an
+                        average-price contract, and those are two different
+                        instruments with two different payoffs -- a position
+                        that reads as four vanilla calls when one of them is
+                        Asian is misread, and the whole reason the engine
+                        refuses to model it is that the difference is
+                        invisible in every number on this row. */}
+                    {leg.asian_type && leg.asian_type !== 'NOT_ASIAN' && (
+                      <span
+                        className="chip chip-accent"
+                        style={{ marginLeft: '0.3125rem' }}
+                        title={
+                          leg.asian_type === 'AVERAGE_PRICE'
+                            ? 'Asian, average price: pays max(A − K, 0) on the realised average A, not on the price at expiry.'
+                            : 'Asian, average strike: struck at the realised average A, not at a fixed K.'
+                        }
+                      >
+                        {leg.asian_type === 'AVERAGE_PRICE' ? 'ASIAN·AVG PX' : 'ASIAN·AVG K'}
+                      </span>
+                    )}
                   </td>
                   <td>{leg.strike_price.toFixed(2)}</td>
                   <td style={{ width: '52px' }}>

@@ -177,7 +177,21 @@ function clampAveragingStates(states: number): number {
 }
 
 export const useTreePricerStore = create<TreePricerState>((set, get) => ({
-  exerciseType: 'EUROPEAN',
+  /**
+   * AMERICAN, by decision, and pinned by a test.
+   *
+   * Every listed US equity option -- which is every contract the option chain
+   * beside this panel quotes -- is American-style. A panel that opens on
+   * European opens on the one style the instrument in the ticket is NOT, and
+   * the segment is the first thing a trader reads as "what am I pricing".
+   *
+   * This does NOT contradict `assistant.proto`'s extractor, which defaults to
+   * EUROPEAN on an utterance that never says a style. That default answers a
+   * different question: silence in a trader's own words is not evidence they
+   * meant American, so the extractor refuses to infer one. Here there is no
+   * utterance to be silent -- there is a listed contract, and it is American.
+   */
+  exerciseType: 'AMERICAN',
   bermudanDates: [],
 
   asianExpanded: false,

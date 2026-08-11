@@ -69,7 +69,7 @@ function Surface({ rows, cols, heights, maxAbs }: {
 }
 
 export function PnLSurface() {
-  const { result, isLoading, error } = useCalculatorStore();
+  const { result, isLoading, error, modelLimit } = useCalculatorStore();
   const [enabled, setEnabled] = useState(false);
 
   const field = useMemo(() => {
@@ -109,7 +109,18 @@ export function PnLSurface() {
       </div>
 
       <div className="panel-body panel-body--flush" style={{ flex: 1, minHeight: 0 }}>
-        {error ? (
+        {/* Ahead of BOTH `error` and the Off state. The surface being switched
+            off is a choice the user made; this is the engine saying the
+            position cannot be drawn as a height field at all, and a trader who
+            turns 3D on to find out why deserves the reason rather than a
+            second click. Plain empty state, never the loss-red error branch --
+            see PayoffLadder for the full reasoning. */}
+        {modelLimit ? (
+          <div className="empty-state">
+            <span className="empty-state-title">Not modelled</span>
+            <span>{modelLimit}</span>
+          </div>
+        ) : error ? (
           <div className="empty-state empty-state--error">
             <span className="empty-state-title">Unavailable</span>
             <span>{error}</span>

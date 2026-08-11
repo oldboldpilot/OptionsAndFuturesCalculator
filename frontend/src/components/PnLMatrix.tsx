@@ -27,7 +27,7 @@ type ValueMode = 'dollars' | 'percent';
  * calendar spread's peak is mid-life, not at expiry).
  */
 export function PnLMatrix() {
-  const { result, spotPrice, isLoading, error } = useCalculatorStore();
+  const { result, spotPrice, isLoading, error, modelLimit } = useCalculatorStore();
   const [mode, setMode] = useState<ValueMode>('percent');
 
   const grid = useMemo(() => {
@@ -140,7 +140,16 @@ export function PnLMatrix() {
       </div>
 
       <div className="panel-body panel-body--flush" style={{ flex: 1, overflow: 'auto' }}>
-        {error ? (
+        {/* A modelling limit, not a fault -- plain empty state, never the
+            loss-red error branch. See PayoffLadder for the full reasoning;
+            the engine's own sentence is shown verbatim so the client never
+            paraphrases a refusal it did not make. */}
+        {modelLimit ? (
+          <div className="empty-state">
+            <span className="empty-state-title">Not modelled</span>
+            <span>{modelLimit}</span>
+          </div>
+        ) : error ? (
           <div className="empty-state empty-state--error">
             <span className="empty-state-title">Unavailable</span>
             <span>{error}</span>

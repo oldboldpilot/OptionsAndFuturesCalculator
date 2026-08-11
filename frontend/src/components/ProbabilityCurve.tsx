@@ -78,7 +78,7 @@ const money = (v: number) =>
  * drawn at all until those real inputs exist.
  */
 export function ProbabilityCurve() {
-  const { result, error, isLoading, symbol } = useCalculatorStore();
+  const { result, error, isLoading, symbol, modelLimit } = useCalculatorStore();
   const [hoverX, setHoverX] = useState<number | null>(null);
 
   const model = useMemo(() => {
@@ -217,6 +217,22 @@ export function ProbabilityCurve() {
       </div>
     </div>
   );
+
+  // Checked before `error` and rendered through the PLAIN empty state. The
+  // distinction matters most on this panel: the curve it draws is the terminal
+  // price distribution, and an Asian leg is refused precisely BECAUSE its
+  // payoff is not a function of that variable. Saying "unavailable" in loss red
+  // would describe a broken feed; what actually happened is that the question
+  // this panel asks does not apply to the position. See PayoffLadder for the
+  // shared reasoning, and the store for why it is matched on the gRPC code.
+  if (modelLimit) {
+    return shell(
+      <div className="empty-state">
+        <span className="empty-state-title">Distribution not modelled</span>
+        <span>{modelLimit}</span>
+      </div>,
+    );
+  }
 
   if (error) {
     return shell(

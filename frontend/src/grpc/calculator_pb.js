@@ -28,6 +28,7 @@ goog.exportSymbol('proto.calculator.FuturesContract', null, global);
 goog.exportSymbol('proto.calculator.Greeks', null, global);
 goog.exportSymbol('proto.calculator.Leg', null, global);
 goog.exportSymbol('proto.calculator.Leg.Action', null, global);
+goog.exportSymbol('proto.calculator.Leg.AsianType', null, global);
 goog.exportSymbol('proto.calculator.Leg.Type', null, global);
 goog.exportSymbol('proto.calculator.LegRisk', null, global);
 goog.exportSymbol('proto.calculator.MatrixCell', null, global);
@@ -458,7 +459,9 @@ proto.calculator.Leg.toObject = function(includeInstance, msg) {
     quantity: jspb.Message.getFieldWithDefault(msg, 5, 0),
     premium: jspb.Message.getFloatingPointFieldWithDefault(msg, 6, 0.0),
     impliedVolatility: jspb.Message.getFloatingPointFieldWithDefault(msg, 7, 0.0),
-    contractMultiplier: jspb.Message.getFloatingPointFieldWithDefault(msg, 8, 0.0)
+    contractMultiplier: jspb.Message.getFloatingPointFieldWithDefault(msg, 8, 0.0),
+    asianType: jspb.Message.getFieldWithDefault(msg, 9, 0),
+    averagingStates: jspb.Message.getFieldWithDefault(msg, 10, 0)
   };
 
   if (includeInstance) {
@@ -526,6 +529,14 @@ proto.calculator.Leg.deserializeBinaryFromReader = function(msg, reader) {
     case 8:
       var value = /** @type {number} */ (reader.readDouble());
       msg.setContractMultiplier(value);
+      break;
+    case 9:
+      var value = /** @type {!proto.calculator.Leg.AsianType} */ (reader.readEnum());
+      msg.setAsianType(value);
+      break;
+    case 10:
+      var value = /** @type {number} */ (reader.readInt32());
+      msg.setAveragingStates(value);
       break;
     default:
       reader.skipField();
@@ -612,6 +623,20 @@ proto.calculator.Leg.serializeBinaryToWriter = function(message, writer) {
       f
     );
   }
+  f = message.getAsianType();
+  if (f !== 0.0) {
+    writer.writeEnum(
+      9,
+      f
+    );
+  }
+  f = message.getAveragingStates();
+  if (f !== 0) {
+    writer.writeInt32(
+      10,
+      f
+    );
+  }
 };
 
 
@@ -631,6 +656,15 @@ proto.calculator.Leg.Type = {
   PUT: 1,
   FUTURE: 2,
   STOCK: 3
+};
+
+/**
+ * @enum {number}
+ */
+proto.calculator.Leg.AsianType = {
+  NOT_ASIAN: 0,
+  AVERAGE_PRICE: 1,
+  AVERAGE_STRIKE: 2
 };
 
 /**
@@ -774,6 +808,42 @@ proto.calculator.Leg.prototype.getContractMultiplier = function() {
  */
 proto.calculator.Leg.prototype.setContractMultiplier = function(value) {
   return jspb.Message.setProto3FloatField(this, 8, value);
+};
+
+
+/**
+ * optional AsianType asian_type = 9;
+ * @return {!proto.calculator.Leg.AsianType}
+ */
+proto.calculator.Leg.prototype.getAsianType = function() {
+  return /** @type {!proto.calculator.Leg.AsianType} */ (jspb.Message.getFieldWithDefault(this, 9, 0));
+};
+
+
+/**
+ * @param {!proto.calculator.Leg.AsianType} value
+ * @return {!proto.calculator.Leg} returns this
+ */
+proto.calculator.Leg.prototype.setAsianType = function(value) {
+  return jspb.Message.setProto3EnumField(this, 9, value);
+};
+
+
+/**
+ * optional int32 averaging_states = 10;
+ * @return {number}
+ */
+proto.calculator.Leg.prototype.getAveragingStates = function() {
+  return /** @type {number} */ (jspb.Message.getFieldWithDefault(this, 10, 0));
+};
+
+
+/**
+ * @param {number} value
+ * @return {!proto.calculator.Leg} returns this
+ */
+proto.calculator.Leg.prototype.setAveragingStates = function(value) {
+  return jspb.Message.setProto3IntField(this, 10, value);
 };
 
 

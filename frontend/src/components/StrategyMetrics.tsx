@@ -30,7 +30,7 @@ const money = (v: number) =>
 const tone = (v: number) => (v > 0 ? 'profit' : v < 0 ? 'loss' : 'flat');
 
 export function StrategyMetrics() {
-  const { result, error, gateDenied } = useCalculatorStore();
+  const { result, error, gateDenied, modelLimit } = useCalculatorStore();
 
   const shell = (body: React.ReactNode) => (
     <div className="panel" style={{ flex: 'none' }}>
@@ -49,6 +49,22 @@ export function StrategyMetrics() {
   // "Unavailable" over a message that was really an offer.
   if (gateDenied) {
     return shell(<UpgradePrompt reason={gateDenied} />);
+  }
+
+  // Third refusal state, and the third that is NOT `error`. gateDenied is
+  // something the trader can buy; this is something neither of them can fix,
+  // because the position is fine and the model does not cover it. Rendering it
+  // red under "Unavailable" would be the same misreading the gate branch above
+  // was built to end -- and on THIS panel it matters most, because the
+  // alternative to an explicit refusal is a max profit of $0 that looks
+  // exactly like a computed one.
+  if (modelLimit) {
+    return shell(
+      <div className="empty-state">
+        <span className="empty-state-title">Not modelled</span>
+        <span>{modelLimit}</span>
+      </div>,
+    );
   }
 
   if (error) {

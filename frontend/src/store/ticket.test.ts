@@ -92,6 +92,7 @@ function resetStore() {
       premium: null,
       quantity: 1,
       impliedVolatility: null,
+      asianType: 'NOT_ASIAN',
     },
   });
 }

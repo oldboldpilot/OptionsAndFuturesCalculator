@@ -171,6 +171,7 @@ function reset(over: Record<string, unknown> = {}) {
       premium: null,
       quantity: 1,
       impliedVolatility: null,
+      asianType: 'NOT_ASIAN',
     },
     ...over,
   });

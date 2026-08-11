@@ -2,6 +2,24 @@
 
 import { useMemo } from 'react';
 import { useCalculatorStore } from '../store/useCalculatorStore';
+import type { AsianStyle } from '../store/useTreePricerStore';
+
+/**
+ * The averaging segment's vocabulary, character for character the same as
+ * `ExerciseStylePanel`'s.
+ *
+ * The two panels sit in adjacent columns and describe the same axis of the
+ * same contract, so a different word here -- "Average price" against
+ * "Avg price", or "None" against "Vanilla" -- would read as two different
+ * settings rather than one. Kept as a literal array rather than imported from
+ * that panel because it is copy, not contract: the CONTRACT is `AsianStyle`,
+ * which both files take from the same module.
+ */
+const AVERAGING_CHOICES: [AsianStyle, string][] = [
+  ['NOT_ASIAN', 'Vanilla'],
+  ['AVERAGE_PRICE', 'Avg price'],
+  ['AVERAGE_STRIKE', 'Avg strike'],
+];
 
 /**
  * The order ticket: compose one leg, then add it.
@@ -134,6 +152,42 @@ export function OptionTicket() {
           </div>
         </div>
 
+        {/* Averaging. A peer of the Buy/Sell and Call/Put segments above and
+            always visible, exactly as in ExerciseStylePanel -- hiding it
+            behind a disclosure there made a shipped feature read as missing,
+            and the same reasoning applies harder here, where the answer to
+            "is this leg Asian?" changes what every downstream panel is even
+            able to say. Vanilla is the default, so the row costs one segment
+            and answers that question without a click. */}
+        <div style={{ display: 'grid', gap: '0.1875rem' }}>
+          <span className="stat-label">Averaging</span>
+          <div className="segment" style={{ width: '100%' }}>
+            {AVERAGING_CHOICES.map(([type, label]) => (
+              <button
+                key={type}
+                className="segment-item"
+                style={{ flex: 1 }}
+                data-active={ticket.asianType === type}
+                onClick={() => setTicket({ asianType: type })}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          {/* Said BEFORE the leg is added, not after the engine refuses it.
+              The refusal is correct and will still arrive, but a trader who
+              learns of it only once the whole position has gone blank cannot
+              tell which leg caused it. */}
+          {ticket.asianType !== 'NOT_ASIAN' && (
+            <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--color-ink-400)' }}>
+              An Asian leg pays on the average price over its averaging window. The payoff,
+              P&amp;L and probability panels are drawn against the price at expiry, so a
+              position holding this leg will not be modelled &mdash; price it on its own in
+              Exercise &amp; Averaging.
+            </span>
+          )}
+        </div>
+
         <label style={{ display: 'grid', gap: '0.1875rem' }}>
           <span className="stat-label">Expiry</span>
           <select
@@ -231,7 +285,18 @@ export function OptionTicket() {
           disabled={!ready}
           title={ready ? 'Add this leg to the position' : 'Pick a strike with a price first'}
         >
-          Add {ticket.action === 'BUY' ? 'long' : 'short'} {ticket.optionType.toLowerCase()}
+          {/* The averaging style is named on the button because it is the one
+              ticket field with no other trace in the committed leg's own row
+              wording -- "Add long call" for an average-price contract would
+              be the button describing a different instrument from the one it
+              adds. */}
+          Add {ticket.action === 'BUY' ? 'long' : 'short'}{' '}
+          {ticket.asianType === 'AVERAGE_PRICE'
+            ? 'avg-price '
+            : ticket.asianType === 'AVERAGE_STRIKE'
+              ? 'avg-strike '
+              : ''}
+          {ticket.optionType.toLowerCase()}
         </button>
       </div>
     </div>

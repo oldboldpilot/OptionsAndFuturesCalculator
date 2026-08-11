@@ -27,6 +27,12 @@ export class Leg extends jspb.Message {
   getContractMultiplier(): number;
   setContractMultiplier(value: number): Leg;
 
+  getAsianType(): Leg.AsianType;
+  setAsianType(value: Leg.AsianType): Leg;
+
+  getAveragingStates(): number;
+  setAveragingStates(value: number): Leg;
+
   serializeBinary(): Uint8Array;
   toObject(includeInstance?: boolean): Leg.AsObject;
   static toObject(includeInstance: boolean, msg: Leg): Leg.AsObject;
@@ -45,6 +51,8 @@ export namespace Leg {
     premium: number,
     impliedVolatility: number,
     contractMultiplier: number,
+    asianType: Leg.AsianType,
+    averagingStates: number,
   }
 
   export enum Action { 
@@ -57,6 +65,12 @@ export namespace Leg {
     PUT = 1,
     FUTURE = 2,
     STOCK = 3,
+  }
+
+  export enum AsianType { 
+    NOT_ASIAN = 0,
+    AVERAGE_PRICE = 1,
+    AVERAGE_STRIKE = 2,
   }
 }
 
