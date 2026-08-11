@@ -113,13 +113,29 @@ RUN cmake -S /src/backend -B /src/build -G Ninja \
 # installing the distro package in the runtime stage would produce a container
 # that starts and then fails somewhere inside libc++. An unresolved entry fails
 # the build HERE, loudly, rather than at container start.
+#
+# The binaries live under /src/build/sgee/, not /src/build/: backend's
+# CMakeLists adds SGEE with `add_subdirectory(external/SGEE sgee)`, and the
+# client is a tests/ target, so it lands one level deeper again. Getting this
+# wrong is how the first build of this image failed -- and it failed with
+# "ldd named no libc++ shared object", which is why the two causes are told
+# apart explicitly below rather than sharing one message. A missing binary and
+# a binary that did not link against libc++ are different problems, and being
+# sent after the wrong one costs a rebuild.
 RUN set -eu; \
     mkdir -p /src/build/lib; \
-    NEEDED="$(ldd /src/build/sgee_queue_node /src/build/sgee_queue_node_client | grep -E 'libc\+\+|libunwind' || true)"; \
+    for bin in /src/build/sgee/sgee_queue_node /src/build/sgee/tests/sgee_queue_node_client; do \
+        if [ ! -f "${bin}" ]; then \
+            echo "FATAL: ${bin} was not produced by the build." >&2; \
+            echo "The target names are right (the build above would have failed otherwise), so this is a PATH problem: SGEE is added as add_subdirectory(external/SGEE sgee), which puts its binaries under /src/build/sgee/, and tests/ targets one level below that. Do not relax the check -- correct the path." >&2; \
+            exit 1; \
+        fi; \
+    done; \
+    NEEDED="$(ldd /src/build/sgee/sgee_queue_node /src/build/sgee/tests/sgee_queue_node_client | grep -E 'libc\+\+|libunwind' || true)"; \
     echo "libc++/libunwind entries ldd found:"; \
     echo "${NEEDED}"; \
     if [ -z "${NEEDED}" ]; then \
-        echo "FATAL: ldd named no libc++/libunwind shared object for either binary." >&2; \
+        echo "FATAL: both binaries exist but ldd named no libc++/libunwind shared object." >&2; \
         echo "Under -stdlib=libc++ this build must depend on at least libc++.so.1. Either the link did not happen against libc++, or ldd's output no longer matches this filter -- investigate, do not assume libstdc++ is fine." >&2; \
         exit 1; \
     fi; \
@@ -158,9 +174,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-COPY --from=builder /src/build/sgee_queue_node        /app/sgee_queue_node
-COPY --from=builder /src/build/sgee_queue_node_client /app/sgee_queue_node_client
-COPY --from=builder /src/build/lib/                   /app/lib/
+COPY --from=builder /src/build/sgee/sgee_queue_node              /app/sgee_queue_node
+COPY --from=builder /src/build/sgee/tests/sgee_queue_node_client /app/sgee_queue_node_client
+COPY --from=builder /src/build/lib/                              /app/lib/
 
 ENV LD_LIBRARY_PATH=/app/lib
 
