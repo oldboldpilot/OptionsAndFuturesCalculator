@@ -129,3 +129,7 @@ backend/external/SGEE/docs
 
 # A screenshot committed at the repo root; not a build input.
 current-ui.png
+
+# CTest scratch, generated at whatever directory ctest runs from.
+Testing
+**/Testing

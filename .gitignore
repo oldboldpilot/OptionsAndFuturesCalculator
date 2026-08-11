@@ -59,3 +59,9 @@ agent/dataset/data_mortgage/
 
 # Issued API keys in plaintext. Never committed; hand to the customer and delete.
 config/keys/
+
+# CTest's per-run scratch directory. Generated wherever ctest is invoked, so it
+# appears at the repo root whenever anyone runs the suite from here. Never an
+# input to any build, and untracked build output at the ROOT is exactly what
+# rides along in `railway up`, which uploads the working tree rather than git.
+Testing/
