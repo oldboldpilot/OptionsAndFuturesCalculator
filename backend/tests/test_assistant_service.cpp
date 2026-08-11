@@ -63,6 +63,12 @@
 #include <grpcpp/grpcpp.h>
 #include "assistant.pb.h"
 #include "assistant.grpc.pb.h"
+// Section 6 asserts the StrategyParams -> calculator.Leg averaging handoff, so
+// this file needs the calculator contract as well as the assistant one. The
+// two protos are deliberately independent -- calculator.proto imports nothing
+// -- which is exactly why the mapping between their AsianType enums is worth a
+// test rather than a static_cast.
+#include "calculator.pb.h"
 
 import assistant_service;
 
@@ -318,6 +324,125 @@ auto main() -> int {
         check(resp.has_refusal() &&
                   resp.refusal().reason() == calculator::assistant::Refusal::MODEL_UNAVAILABLE,
               "...and reaches the exact same MODEL_UNAVAILABLE outcome as section 1");
+    }
+
+    // =======================================================================
+    section("6. THE AVERAGING HANDOFF: StrategyParams.asian_type reaches a "
+            "calculator Leg, and only where it applies");
+    // =======================================================================
+    // `StrategyParams` has carried `asian_type` since the exercise/Asian
+    // extractor landed, and `calculator.Leg` gained its own `asian_type` only
+    // recently -- so until now the assistant could parse "Asian call on SPY"
+    // into a field the calculator had no way to accept. These are the two
+    // functions that close that, and they are exercised DIRECTLY rather than
+    // through the RPC because they are pure: no model, no market data, no
+    // server. That matters in this environment, which ships no model at all
+    // (see section 1) -- an RPC-level test of this edge would be skipped
+    // exactly where the edge is most likely to be got wrong.
+    //
+    // The mapping is between two DELIBERATELY separate enums. calculator.proto
+    // imports nothing and gains nothing, because a cross-package reference
+    // would pull finance.proto into the generated browser bundle and into
+    // Envoy's transcoder list. That separation is the whole reason a test is
+    // needed: two enums that merely happen to agree today are one edit away
+    // from disagreeing silently.
+    {
+        // ---- The mapping itself, value by value. ----
+        check(options_calculator::assistant::calculator_asian_type(
+                  sensen::finance::AVERAGE_PRICE) == calculator::Leg::AVERAGE_PRICE,
+              "AVERAGE_PRICE maps to the calculator's AVERAGE_PRICE");
+        check(options_calculator::assistant::calculator_asian_type(
+                  sensen::finance::AVERAGE_STRIKE) == calculator::Leg::AVERAGE_STRIKE,
+              "AVERAGE_STRIKE maps to the calculator's AVERAGE_STRIKE");
+        // Asserted as DISTINCT, not merely as non-zero. A mapping that
+        // collapsed both styles onto AVERAGE_PRICE would satisfy "it is
+        // Asian" while pricing a different instrument -- an average-strike
+        // option is struck at the realised average, not struck at K.
+        check(options_calculator::assistant::calculator_asian_type(
+                  sensen::finance::AVERAGE_STRIKE) !=
+                  options_calculator::assistant::calculator_asian_type(
+                      sensen::finance::AVERAGE_PRICE),
+              "...and the two styles stay distinct through the mapping");
+        check(options_calculator::assistant::calculator_asian_type(
+                  sensen::finance::NOT_ASIAN) == calculator::Leg::NOT_ASIAN,
+              "NOT_ASIAN maps to NOT_ASIAN, so a vanilla parse cannot become an Asian leg");
+
+        // ---- Applied to a request. ----
+        // Two option legs and one futures leg, because the interesting rule is
+        // which legs may carry a style at all.
+        const auto build_request = [] {
+            calculator::StrategyRequest req;
+            req.set_underlying_symbol("SPY");
+            req.set_current_price(590.0);
+            auto* call = req.add_legs();
+            call->set_action(calculator::Leg::BUY);
+            call->set_type(calculator::Leg::CALL);
+            call->set_strike(580.0);
+            auto* put = req.add_legs();
+            put->set_action(calculator::Leg::SELL);
+            put->set_type(calculator::Leg::PUT);
+            put->set_strike(560.0);
+            auto* fut = req.add_legs();
+            fut->set_action(calculator::Leg::BUY);
+            fut->set_type(calculator::Leg::FUTURE);
+            fut->set_strike(5900.0);
+            return req;
+        };
+
+        calculator::assistant::StrategyParams asian;
+        asian.set_symbol("SPY");
+        asian.set_strategy("long_call");
+        asian.set_asian_type(sensen::finance::AVERAGE_PRICE);
+
+        auto req = build_request();
+        const int stamped =
+            options_calculator::assistant::apply_averaging_to_legs(asian, req);
+        check(stamped == 2,
+              "an AVERAGE_PRICE parse stamps exactly the two OPTION legs (got " +
+                  std::to_string(stamped) + ")");
+        check(req.legs(0).asian_type() == calculator::Leg::AVERAGE_PRICE &&
+                  req.legs(1).asian_type() == calculator::Leg::AVERAGE_PRICE,
+              "...both the call and the put carry the style");
+        // A future has no averaging window. Marking one Asian would describe an
+        // instrument that does not exist, and the engine would then refuse the
+        // whole position over a leg the trader's words never touched.
+        check(req.legs(2).asian_type() == calculator::Leg::NOT_ASIAN,
+              "...and the FUTURES leg is left alone: a future has no averaging window");
+
+        // THE REGRESSION GUARD, and the reason the count is returned at all.
+        // Without this, "the style reaches the legs" is satisfied by a function
+        // that marks every leg Asian unconditionally -- which would make the
+        // engine refuse every position the assistant ever produced, vanilla
+        // included.
+        calculator::assistant::StrategyParams vanilla;
+        vanilla.set_symbol("SPY");
+        vanilla.set_strategy("long_call");
+        // asian_type deliberately left at its zero value, which is NOT_ASIAN.
+
+        auto vanilla_req = build_request();
+        const int vanilla_stamped =
+            options_calculator::assistant::apply_averaging_to_legs(vanilla, vanilla_req);
+        check(vanilla_stamped == 0,
+              "a parse that never mentioned averaging stamps NOTHING (got " +
+                  std::to_string(vanilla_stamped) + ")");
+        check(vanilla_req.SerializeAsString() == build_request().SerializeAsString(),
+              "...and leaves the request byte-identical to one that never called this, "
+              "which is the gate the whole Asian change is measured against");
+
+        // An options word on a futures structure lands on no legs, and the
+        // caller can SEE that rather than being handed a silent success. This
+        // is not hypothetical: the model's training set restricts futures
+        // roots to ES and NQ and contains no Asian rows at all, so "Asian" in
+        // a futures utterance is exactly the shape of request that gets here.
+        calculator::StrategyRequest futures_only;
+        auto* only_fut = futures_only.add_legs();
+        only_fut->set_action(calculator::Leg::BUY);
+        only_fut->set_type(calculator::Leg::FUTURE);
+        const int futures_stamped =
+            options_calculator::assistant::apply_averaging_to_legs(asian, futures_only);
+        check(futures_stamped == 0,
+              "an Asian parse over a futures-only structure stamps nothing and SAYS so, "
+              "rather than reporting a success that landed on no leg");
     }
 
     // -----------------------------------------------------------------

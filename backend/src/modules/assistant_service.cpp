@@ -30,6 +30,11 @@ module;
 #include <grpcpp/grpcpp.h>
 #include "assistant.pb.h"
 #include "assistant.grpc.pb.h"
+// The calculator contract, for the StrategyParams -> calculator.Leg averaging
+// handoff at the foot of this file. Included here as well as in the module
+// interface because a module implementation unit gets no header from its
+// interface's global module fragment.
+#include "calculator.pb.h"
 
 // The selectable llama.cpp backend. Included in the GLOBAL MODULE FRAGMENT,
 // like every other header this translation unit uses, because `llama.h` is a
@@ -3049,6 +3054,58 @@ auto RegisterAssistantServiceForTest(grpc::ServerBuilder& builder,
     // the test's own lifetime.
     auto* service = new StrategyAssistantImpl(bound_action_names);  // NOLINT(cppcoreguidelines-owning-memory) -- see comment above: gRPC's RegisterService does NOT take ownership and the service must outlive the server, while a function-local static would freeze the bound action set at the first call and break the discriminating tests that register different action subsets in one binary.
     builder.RegisterService(service);
+}
+
+// ---------------------------------------------------------------------------
+// StrategyParams -> calculator.Leg averaging handoff. See the declarations in
+// assistant_service.cppm for why these exist, why the two enums are separate,
+// and for the training-set caveat that bounds how much any of this can be
+// trusted.
+// ---------------------------------------------------------------------------
+
+auto calculator_asian_type(sensen::finance::AsianType parsed) -> calculator::Leg::AsianType {
+    // Written out rather than static_cast even though the values coincide.
+    // A cast here would keep compiling if either enum gained a value or
+    // reordered, and would then reinterpret one style as another -- silently,
+    // in the one field whose whole purpose is to say which payoff applies.
+    // The default is NOT_ASIAN, which is also the only safe wrong answer:
+    // it makes the calculator price a vanilla and say so, rather than price a
+    // vanilla while claiming an Asian.
+    switch (parsed) {
+        case sensen::finance::AVERAGE_PRICE:
+            return calculator::Leg::AVERAGE_PRICE;
+        case sensen::finance::AVERAGE_STRIKE:
+            return calculator::Leg::AVERAGE_STRIKE;
+        case sensen::finance::NOT_ASIAN:
+            return calculator::Leg::NOT_ASIAN;
+        default:
+            return calculator::Leg::NOT_ASIAN;
+    }
+}
+
+auto apply_averaging_to_legs(const calculator::assistant::StrategyParams& params,
+                             calculator::StrategyRequest& request) -> int {
+    const auto style = calculator_asian_type(params.asian_type());
+    if (style == calculator::Leg::NOT_ASIAN) {
+        // Return before touching the request at all. Setting the field to its
+        // own zero value would be harmless on the wire and is still avoided,
+        // so that "a vanilla parse leaves the request untouched" is a property
+        // of the code and not an accident of proto3's defaults.
+        return 0;
+    }
+
+    int stamped = 0;
+    for (int i = 0; i < request.legs_size(); ++i) {
+        auto* leg = request.mutable_legs(i);
+        if (leg->type() != calculator::Leg::CALL && leg->type() != calculator::Leg::PUT) {
+            // A future or a share has no averaging window. Left alone, not
+            // refused: the leg is valid, it is the style that does not apply.
+            continue;
+        }
+        leg->set_asian_type(style);
+        ++stamped;
+    }
+    return stamped;
 }
 
 }  // namespace options_calculator::assistant
