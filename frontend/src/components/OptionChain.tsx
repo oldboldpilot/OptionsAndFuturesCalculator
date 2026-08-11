@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useCalculatorStore, type ChainStrike } from '../store/useCalculatorStore';
+import { chainFreshness } from '../lib/chainFreshness';
 
 type SideFilter = 'both' | 'calls' | 'puts';
 
@@ -29,21 +30,37 @@ export function OptionChain() {
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const atmRef = useRef<HTMLTableRowElement | null>(null);
 
-  const chainAgeSeconds = (() => {
-    if (!chainFetchedAt) return null;
-    const fetchedMs = Date.parse(chainFetchedAt);
-    if (Number.isNaN(fetchedMs)) return null;
-    return (Date.now() - fetchedMs) / 1000;
-  })();
+  /**
+   * The clock the freshness chip is measured against.
+   *
+   * It is state, not `Date.now()` read during render, because age computed at
+   * render is frozen at render. The chain cache TTL is 15 minutes, so a chain
+   * fetched fresh would otherwise render LIVE and — with nothing else on the
+   * page changing — still say LIVE a quarter of an hour later. The ticker is
+   * what lets the chip go stale on its own.
+   *
+   * 15s is chosen against the 60s live window: the label can never be more
+   * than one tick behind the truth, and the interval costs one state write a
+   * minute-and-a-bit against a panel that already re-renders on every quote.
+   */
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNowMs(Date.now()), 15_000);
+    return () => clearInterval(id);
+  }, []);
 
-  const isLive = chainAgeSeconds !== null && chainAgeSeconds < 60;
+  const { ageSeconds: chainAgeSeconds, isLive, asOfTime } = chainFreshness(chainFetchedAt, nowMs);
 
-  const asOfTime = (() => {
-    if (!chainFetchedAt) return '';
-    const fetchedMs = Date.parse(chainFetchedAt);
-    if (Number.isNaN(fetchedMs)) return chainFetchedAt;
-    return new Date(fetchedMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-  })();
+  /**
+   * The chip is two words; the tooltip is where the actual number goes. A null
+   * age is stated as unknown rather than omitted — "this clock cannot measure
+   * it" and "it is current" must not look the same on hover.
+   */
+  const freshnessTitle = !chainFetchedAt
+    ? ''
+    : chainAgeSeconds === null
+      ? `Backend print: ${chainFetchedAt} (age unknown — this device's clock disagrees with the server)`
+      : `Backend print: ${chainFetchedAt} (${Math.round(chainAgeSeconds)}s ago)`;
 
   useEffect(() => {
     if (chainStatus === 'idle') loadChain();
@@ -127,11 +144,11 @@ export function OptionChain() {
           {chainStatus === 'ready' && (
             <>
               {isLive ? (
-                <span className="chip chip-live" title={chainFetchedAt ? `Fetched at ${chainFetchedAt}` : ''}>
+                <span className="chip chip-live" title={freshnessTitle}>
                   <i className="dot" />LIVE
                 </span>
               ) : (
-                <span className="chip chip-stale" title={chainFetchedAt ? `Fetched at ${chainFetchedAt}` : ''}>
+                <span className="chip chip-stale" title={freshnessTitle}>
                   DELAYED {asOfTime ? `· ${asOfTime}` : ''}
                 </span>
               )}
