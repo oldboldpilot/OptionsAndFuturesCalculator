@@ -171,4 +171,50 @@ describe('entitlement refusals', () => {
     await useCalculatorStore.getState().calculateStrategy();
     expect(useCalculatorStore.getState().isLoading).toBe(false);
   });
+
+  /**
+   * A denial outlives the position that caused it unless emptying the legs
+   * clears it.
+   *
+   * `calculateStrategy` clears `gateDenied` and `modelLimit` at its top, which
+   * covers every recalculation -- but `StrategyWorkspace` only recalculates
+   * when `legs.length > 0`. So emptying the leg set is the one transition that
+   * runs no calculation, and it is also the one where a stale denial is worst:
+   * "Needs Pro" and its checkout buttons sit over a position the user has just
+   * deleted, and no further edit to an empty ticket can clear it.
+   */
+  describe('a denial does not outlive its position', () => {
+    async function deny() {
+      nextOutcome = { fail: { code: GRPC_PERMISSION_DENIED, message: 'Needs Pro.' } };
+      await useCalculatorStore.getState().calculateStrategy();
+      await settle(() => useCalculatorStore.getState().gateDenied !== null, 'denied');
+    }
+
+    it('clears the refusal when the legs are cleared', async () => {
+      await deny();
+      useCalculatorStore.getState().clearLegs();
+
+      const st = useCalculatorStore.getState();
+      expect(st.legs).toHaveLength(0);
+      expect(st.gateDenied).toBeNull();
+      expect(st.modelLimit).toBeNull();
+      expect(st.result).toBeNull();
+    });
+
+    it('clears the refusal when the LAST leg is removed', async () => {
+      await deny();
+      const { legs } = useCalculatorStore.getState();
+      useCalculatorStore.getState().removeLeg(legs[0].id);
+
+      // One leg left, so a recalculation follows and does the clearing itself
+      // -- the store must not have cleared it here.
+      expect(useCalculatorStore.getState().gateDenied).not.toBeNull();
+
+      useCalculatorStore.getState().removeLeg(useCalculatorStore.getState().legs[0].id);
+      const st = useCalculatorStore.getState();
+      expect(st.legs).toHaveLength(0);
+      expect(st.gateDenied).toBeNull();
+      expect(st.modelLimit).toBeNull();
+    });
+  });
 });

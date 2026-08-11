@@ -457,9 +457,18 @@ auto main() -> int {
         check(status.error_code() == grpc::StatusCode::FAILED_PRECONDITION,
               "an AVERAGE_PRICE leg is refused with FAILED_PRECONDITION -- a modelling "
               "limit, not malformed input, and discriminated by CODE not text");
-        check(resp.pnl_matrix_size() == 0 && resp.max_profit() == 0.0,
-              "...and returns NO payoff points, so nothing can be read off a curve that "
-              "was never drawn against the right variable");
+        // Deliberately NOT asserting that `resp` is empty here. gRPC does not
+        // deliver a message body alongside a non-OK status, so `resp` is a
+        // default-constructed StrategyResponse whatever the engine did --
+        // `pnl_matrix_size() == 0 && max_profit() == 0.0` is a property of the
+        // transport, not of this service, and cannot fail. A line that reads
+        // like a check but has no failing input is worse than no line: it makes
+        // the refusal look better covered than it is.
+        //
+        // The content that assertion was reaching for is real and is asserted
+        // below instead, on the direction that CAN fail: the vanilla request
+        // must come back carrying a payoff curve. That is what makes "no curve
+        // on refusal" mean anything.
 
         // BREAK DIRECTION. Without this, the check above is satisfied by an
         // engine that refuses every request, including vanilla ones -- which

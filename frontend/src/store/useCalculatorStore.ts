@@ -497,11 +497,26 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
     legs: [...state.legs, { ...leg, id: Math.random().toString(36).substring(7) }]
   })),
 
-  removeLeg: (id) => set((state) => ({
-    legs: state.legs.filter(l => l.id !== id)
-  })),
+  // Emptying the leg set clears the denial and the model limit with it.
+  //
+  // `calculateStrategy` clears both at its top, which covers every path that
+  // recalculates — and `StrategyWorkspace` recalculates on `legs.length > 0`,
+  // so the ONE case it does not cover is the leg set becoming empty. That is
+  // the case where a stale denial is most visible: the user reads "Needs Pro"
+  // with its checkout buttons over a position they have just deleted, and
+  // nothing they can do to an empty ticket will clear it.
+  //
+  // Removing a leg down to zero is the same event as pressing Clear, so it is
+  // handled the same way. Removing down to one or more is not, because the
+  // recalculation that follows does the clearing itself.
+  removeLeg: (id) => set((state) => {
+    const legs = state.legs.filter(l => l.id !== id);
+    return legs.length === 0
+      ? { legs, result: null, gateDenied: null, modelLimit: null }
+      : { legs };
+  }),
 
-  clearLegs: () => set({ legs: [], result: null }),
+  clearLegs: () => set({ legs: [], result: null, gateDenied: null, modelLimit: null }),
 
   updateLeg: (id, updates) => set((state) => ({
     legs: state.legs.map(l => l.id === id ? { ...l, ...updates } : l)

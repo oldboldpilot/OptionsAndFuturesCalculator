@@ -505,7 +505,16 @@ export [[nodiscard]] auto fetch_with_resilience(const std::string& host_key,
            std::string{mdy.substr(3, 2)};
 }
 
-[[nodiscard]] auto rfc3339_now() -> std::string {
+/**
+ * The instant a print was obtained, in the one format the wire uses.
+ *
+ * EXPORTED because calculator_service stamps `fetched_at` on the futures-chain
+ * response with it. It was added unexported, which does not fail where it is
+ * defined -- it fails at the CALL SITE, as "declaration of 'rfc3339_now' must
+ * be imported from module 'market_data' before it is required", and only once
+ * something builds that translation unit.
+ */
+export [[nodiscard]] auto rfc3339_now() -> std::string {
     return std::format("{:%Y-%m-%dT%H:%M:%SZ}",
                        std::chrono::floor<std::chrono::seconds>(
                            std::chrono::system_clock::now()));

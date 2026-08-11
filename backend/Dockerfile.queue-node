@@ -122,6 +122,13 @@ RUN cmake -S /src/backend -B /src/build -G Ninja \
 # apart explicitly below rather than sharing one message. A missing binary and
 # a binary that did not link against libc++ are different problems, and being
 # sent after the wrong one costs a rebuild.
+#
+# The linkage check runs PER BINARY. It used to pass both paths to one `ldd`
+# and grep the combined output, which asks "did EITHER of these link libc++"
+# and answers yes while one of them did not -- the check was an OR wearing the
+# shape of an AND. The whole point is that a binary reaching the runtime stage
+# without libc++ dies at process start on a missing shared object, and that is
+# a per-binary property.
 RUN set -eu; \
     mkdir -p /src/build/lib; \
     for bin in /src/build/sgee/sgee_queue_node /src/build/sgee/tests/sgee_queue_node_client; do \
@@ -131,20 +138,24 @@ RUN set -eu; \
             exit 1; \
         fi; \
     done; \
-    NEEDED="$(ldd /src/build/sgee/sgee_queue_node /src/build/sgee/tests/sgee_queue_node_client | grep -E 'libc\+\+|libunwind' || true)"; \
-    echo "libc++/libunwind entries ldd found:"; \
-    echo "${NEEDED}"; \
-    if [ -z "${NEEDED}" ]; then \
-        echo "FATAL: both binaries exist but ldd named no libc++/libunwind shared object." >&2; \
-        echo "Under -stdlib=libc++ this build must depend on at least libc++.so.1. Either the link did not happen against libc++, or ldd's output no longer matches this filter -- investigate, do not assume libstdc++ is fine." >&2; \
-        exit 1; \
-    fi; \
-    if echo "${NEEDED}" | grep -q "not found"; then \
-        echo "FATAL: ldd could not resolve a dependency inside the builder itself:" >&2; \
-        echo "${NEEDED}" >&2; \
-        exit 1; \
-    fi; \
-    for lib in $(echo "${NEEDED}" | awk '{print $3}' | sort -u); do \
+    : > /tmp/needed.txt; \
+    for bin in /src/build/sgee/sgee_queue_node /src/build/sgee/tests/sgee_queue_node_client; do \
+        NEEDED="$(ldd "${bin}" | grep -E 'libc\+\+|libunwind' || true)"; \
+        echo "libc++/libunwind entries ldd found for ${bin}:"; \
+        echo "${NEEDED}"; \
+        if [ -z "${NEEDED}" ]; then \
+            echo "FATAL: ${bin} exists but ldd named no libc++/libunwind shared object." >&2; \
+            echo "Under -stdlib=libc++ this build must depend on at least libc++.so.1. Either the link did not happen against libc++, or ldd's output no longer matches this filter -- investigate, do not assume libstdc++ is fine." >&2; \
+            exit 1; \
+        fi; \
+        if echo "${NEEDED}" | grep -q "not found"; then \
+            echo "FATAL: ldd could not resolve a dependency of ${bin} inside the builder itself:" >&2; \
+            echo "${NEEDED}" >&2; \
+            exit 1; \
+        fi; \
+        echo "${NEEDED}" >> /tmp/needed.txt; \
+    done; \
+    for lib in $(awk '{print $3}' /tmp/needed.txt | sort -u); do \
         cp -Lv "${lib}" /src/build/lib/; \
     done; \
     ls -l /src/build/lib

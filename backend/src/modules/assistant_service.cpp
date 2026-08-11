@@ -3083,8 +3083,8 @@ auto calculator_asian_type(sensen::finance::AsianType parsed) -> calculator::Leg
     }
 }
 
-auto apply_averaging_to_legs(const calculator::assistant::StrategyParams& params,
-                             calculator::StrategyRequest& request) -> int {
+[[nodiscard]] auto apply_averaging_to_legs(const calculator::assistant::StrategyParams& params,
+                                           calculator::StrategyRequest& request) -> int {
     const auto style = calculator_asian_type(params.asian_type());
     if (style == calculator::Leg::NOT_ASIAN) {
         // Return before touching the request at all. Setting the field to its

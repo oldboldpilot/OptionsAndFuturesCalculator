@@ -57,8 +57,16 @@ message Leg {
   AsianType asian_type = 9;
 
   // Averaging grid states for the Hull-White tree. Zero means "engine
-  // default" (50), matching the tree-pricer panel. Bounded 10..200, which is
-  // the same range that panel already enforces.
+  // default" (50), matching the tree-pricer panel.
+  //
+  // The SERVICE accepts 0, or 2..200 — that is what CalculateStrategy and the
+  // Finance boundary both enforce, and 2 is a hard floor rather than a taste:
+  // at 1 the grid has no width and the pricer subscripts out of bounds.
+  //
+  // The tree-pricer PANEL offers a narrower 10..200, which is a UI choice, not
+  // this contract. An earlier version of this comment quoted the panel's range
+  // as the wire range; a client trusting it would have thought 5 invalid when
+  // the service accepts it.
   int32 averaging_states = 10;
 }
 

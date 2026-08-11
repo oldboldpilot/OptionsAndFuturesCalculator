@@ -111,8 +111,20 @@ auto RegisterAssistantServiceForTest(grpc::ServerBuilder& builder,
  * request price as an ordinary one. A NOT_ASIAN parse stamps nothing and
  * returns 0, so a vanilla request is bit-identical to one that never called
  * this at all.
+ *
+ * [[nodiscard]] because the paragraph above is the whole reason the count
+ * exists: a caller that drops it cannot tell the two cases apart, which is the
+ * silent-vanilla-pricing outcome this function was written to prevent. Without
+ * the attribute the compiler permits exactly that, and the return value becomes
+ * documentation rather than a control.
+ *
+ * NOTE: as of 2026-08-11 the only callers are in test_assistant_service.cpp.
+ * That is deliberate staging, not dead code -- CalculateStrategy still refuses
+ * every Asian leg with FAILED_PRECONDITION, so stamping one today would only
+ * produce a refusal. It is written and tested ahead of the pricer for the same
+ * reason the averaging_states bound is enforced ahead of it.
  */
-auto apply_averaging_to_legs(const calculator::assistant::StrategyParams& params,
-                             calculator::StrategyRequest& request) -> int;
+[[nodiscard]] auto apply_averaging_to_legs(const calculator::assistant::StrategyParams& params,
+                                           calculator::StrategyRequest& request) -> int;
 
 }  // namespace options_calculator::assistant

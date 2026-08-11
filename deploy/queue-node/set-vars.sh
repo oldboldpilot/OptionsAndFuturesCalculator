@@ -56,9 +56,19 @@ fi
 for n in 1 2 3; do
     svc="sgee-queue-${n}"
     echo "[set-vars] ${svc}"
-    # --skip-deploys on every call but the last: each `variable set` otherwise
-    # triggers its own deploy, and a node restarting three times in a row while
-    # its peers are mid-election is noise that looks like instability.
+    # --skip-deploys on EVERY call, including the last, and deploy.sh is what
+    # rolls them out afterwards.
+    #
+    # Each `variable set` otherwise triggers its own deploy, so setting three
+    # variables on three services would restart every node up to six times
+    # while its peers are mid-election -- noise indistinguishable from
+    # instability. Deploying from here would also roll out in whatever order
+    # the loop happens to reach, while deploy.sh serialises on /statusz.
+    #
+    # (An earlier version of this comment said "every call but the last",
+    # describing an intent the code never had: the flag was always passed
+    # unconditionally. Reading the comment rather than the code would leave an
+    # operator waiting for a rollout that is not coming.)
     railway variable set \
         --environment "${ENVIRONMENT}" --service "${svc}" \
         --skip-deploys \
