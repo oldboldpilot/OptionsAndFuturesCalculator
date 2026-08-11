@@ -52,8 +52,6 @@ export function ExerciseStylePanel() {
     exerciseType,
     setExerciseType,
     droppedDateCount,
-    asianExpanded,
-    setAsianExpanded,
     asianType,
     setAsianType,
     averagingStates,
@@ -100,6 +98,7 @@ export function ExerciseStylePanel() {
       <div className="panel-body" style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
         {/* Exercise style -- a 3-way segment, the Buy/Sell idiom from
             OptionTicket.tsx widened to three states. */}
+        <span className="stat-label">Exercise</span>
         <div className="segment" style={{ width: '100%' }}>
           {(['EUROPEAN', 'AMERICAN', 'BERMUDAN'] as ExerciseStyle[]).map((s) => (
             <button
@@ -141,61 +140,61 @@ export function ExerciseStylePanel() {
           </>
         )}
 
-        {/* Asian averaging -- collapsed behind one row by default. */}
-        <div>
-          <button
-            className="btn"
-            style={{ width: '100%', justifyContent: 'space-between' }}
-            onClick={() => setAsianExpanded(!asianExpanded)}
-            aria-expanded={asianExpanded}
-          >
-            <span>Asian averaging</span>
-            <span className={isAsian ? 'chip chip-accent' : 'chip'}>
-              {isAsian
-                ? asianType === 'AVERAGE_PRICE'
-                  ? 'Avg price'
-                  : 'Avg strike'
-                : 'Vanilla'}
+        {/* Averaging -- a peer of the exercise segment above, not a disclosure
+            row beneath it. Exercise style and averaging are two independent
+            axes of the SAME contract, and hiding one behind a collapsed
+            button made the app read as though it could not price an Asian at
+            all: the feature shipped, reached production, and was reported
+            missing by the person who asked for it. The default is Vanilla, so
+            the row costs one segment and answers "is Asian here?" without a
+            click. */}
+        <div style={{ display: 'grid', gap: '0.1875rem' }}>
+          <span className="stat-label">Averaging</span>
+          <div className="segment" style={{ width: '100%' }}>
+            {(
+              [
+                ['NOT_ASIAN', 'Vanilla'],
+                ['AVERAGE_PRICE', 'Avg price'],
+                ['AVERAGE_STRIKE', 'Avg strike'],
+              ] as [AsianStyle, string][]
+            ).map(([type, label]) => (
+              <button
+                key={type}
+                className="segment-item"
+                style={{ flex: 1 }}
+                data-active={asianType === type}
+                onClick={() => setAsianType(type)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
+          {isAsian && (
+            <label style={{ display: 'grid', gap: '0.1875rem' }}>
+              <span className="stat-label">Averaging states (10-200)</span>
+              <input
+                className="input num"
+                type="number"
+                min={10}
+                max={200}
+                step={1}
+                value={averagingStates}
+                onChange={(e) => setAveragingStates(Number(e.target.value))}
+              />
+            </label>
+          )}
+
+          {/* An Asian priced here is a SINGLE contract on the tree. It cannot
+              be added to the strategy as a leg -- calculator.proto carries no
+              averaging field on OptionLeg -- so the payoff, P&L and surface
+              panels never see it. Said here because the two panels sit in
+              adjacent columns and otherwise look like one instrument. */}
+          {isAsian && (
+            <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--color-ink-400)' }}>
+              Priced as a single contract on this tree. Asian legs cannot be added to a
+              strategy yet, so the payoff and P&amp;L panels still show the vanilla position.
             </span>
-          </button>
-
-          {asianExpanded && (
-            <div style={{ display: 'grid', gap: '0.375rem', marginTop: '0.375rem' }}>
-              <div className="segment" style={{ width: '100%' }}>
-                {(
-                  [
-                    ['NOT_ASIAN', 'Vanilla'],
-                    ['AVERAGE_PRICE', 'Avg price'],
-                    ['AVERAGE_STRIKE', 'Avg strike'],
-                  ] as [AsianStyle, string][]
-                ).map(([type, label]) => (
-                  <button
-                    key={type}
-                    className="segment-item"
-                    style={{ flex: 1 }}
-                    data-active={asianType === type}
-                    onClick={() => setAsianType(type)}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-
-              {isAsian && (
-                <label style={{ display: 'grid', gap: '0.1875rem' }}>
-                  <span className="stat-label">Averaging states (10-200)</span>
-                  <input
-                    className="input num"
-                    type="number"
-                    min={10}
-                    max={200}
-                    step={1}
-                    value={averagingStates}
-                    onChange={(e) => setAveragingStates(Number(e.target.value))}
-                  />
-                </label>
-              )}
-            </div>
           )}
         </div>
 

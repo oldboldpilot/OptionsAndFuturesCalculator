@@ -77,8 +77,13 @@ vi.mock('../lib/licence', () => ({ authMetadata: () => ({}) }));
 import { useCalculatorStore } from './useCalculatorStore';
 
 /** A priced, well-formed leg. Tests remove exactly one property to isolate a guard. */
+// `id` is here because Leg requires it and these fixtures go in through
+// setState rather than addLeg, which is what mints one in real use. tsc caught
+// its absence; vitest never would -- it does not typecheck, so the suite was
+// green against legs the store's own type says cannot exist.
 function goodLeg(over: Partial<Record<string, unknown>> = {}) {
   return {
+    id: 'leg-guard-1',
     instrument_type: 'INSTRUMENT_EQUITY_OPTION',
     action: 'BUY',
     option_type: 'CALL',

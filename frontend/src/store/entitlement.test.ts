@@ -53,7 +53,11 @@ vi.mock('../lib/licence', () => ({ authMetadata: () => ({}) }));
 
 import { useCalculatorStore } from './useCalculatorStore';
 
+// `id` is required by Leg. These fixtures bypass addLeg (which mints one), so
+// without it the suite typechecked against a leg the store's type forbids --
+// invisible to vitest, which does not run tsc.
 const leg = {
+  id: 'leg-ent-1',
   instrument_type: 'INSTRUMENT_EQUITY_OPTION',
   action: 'BUY',
   option_type: 'CALL',
@@ -69,7 +73,10 @@ function readyToCalculate() {
   fake.calls.length = 0;
   useCalculatorStore.setState({
     symbol: 'SPY',
-    legs: [leg, { ...leg, strike_price: 600, action: 'SELL' }],
+    // Distinct ids on purpose: the spread would otherwise give both legs the
+    // same one, and a two-leg spread whose legs are indistinguishable by id is
+    // not the thing the Pro gate is being tested against.
+    legs: [leg, { ...leg, id: 'leg-ent-2', strike_price: 600, action: 'SELL' }],
     spotPrice: 580,
     riskFreeRate: 0.0385,
     rateSource: 'measured',
