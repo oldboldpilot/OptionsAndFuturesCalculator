@@ -160,3 +160,50 @@ All three hold one `RESOURCE_LOCK`: they bind fixed ports and kill by process
 name, so running them concurrently under `ctest -j` would reproduce the
 `SO_REUSEPORT` trap they each warn about, arriving through the test runner
 instead of a stale developer process.
+
+## Volumes, and a disk asymmetry worth watching (2026-08-11)
+
+`deploy/queue-node/deploy.sh` now refuses to deploy a node whose service has no
+volume mounted at `/data`, checked before the upload. This is not a hypothetical
+guard: a node on ephemeral storage starts, elects, accepts writes and answers
+`/healthz` exactly like a correct one, and the difference appears only at the
+next restart — when the Raft log, `currentTerm` and `votedFor` it must fsync
+before replying to any RPC turn out to have been on the container filesystem.
+It then rejoins with an empty log and votes as though it had never seen the
+cluster. Nothing in the node's own output can tell you this, because the mount
+is a property of the service rather than of the process. Verified in both
+directions: it admits all three queue services and refuses a service without a
+volume.
+
+Measured the same day, and NOT yet explained:
+
+| service | volume | used |
+| --- | --- | --- |
+| sgee-queue-1 | sgee-queue-1-volume → /data | 870 MB |
+| sgee-queue-2 | sgee-queue-2-volume → /data | 852 MB |
+| sgee-queue-3 | sgee-queue-3-volume → /data | **8 MB** |
+
+Node 3 is not crash-looping — its log shows one boot banner, `self=3`,
+`data_dir=/data`, and all four subsystems started. The likeliest explanation is
+simply that it holds a shorter history than 1 and 2: a volume created later, so
+its WAL begins where it joined rather than at the cluster's first entry.
+
+Two things about it are open, and both are recorded rather than assumed:
+
+1. **Node 3's own `last_applied` has not been read.** Only `sgee-queue-1` has a
+   public domain (port 8080, `/statusz`), so 2 and 3 cannot be probed from
+   outside the private network. Whether node 3 is genuinely caught up is
+   therefore unverified — the small volume is *consistent with* a late join and
+   *also* consistent with a node that is not replicating. Do not treat the
+   benign reading as established.
+2. **870 MB is a lot for 4,218 applied entries** — roughly 200 KB each, for a
+   queue whose payloads are small. `sgee-queue-1` reports `compactions: 1` with
+   `snapshot_index 4030` against `last_applied 4218`, so compaction is running
+   but has run once. Whether snapshotting actually reclaims WAL bytes, or only
+   advances the index while the file keeps growing, is the question to ask
+   first; on a 50 GB volume there is time to ask it properly.
+
+Node 1 at the same moment: `running: true`, `is_leader: false`,
+`leader_hint: 2`, `current_term: 1922`, `tick_errors: 0`, `ticks_run: 524151`.
+The term has moved from 1919 to 1922 since the leadership check earlier that
+day — three elections, not zero, which is worth knowing when reading "stable".

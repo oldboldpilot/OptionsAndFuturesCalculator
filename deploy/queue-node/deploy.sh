@@ -112,12 +112,56 @@ stage() {
     fi
 }
 
+# Refuse to deploy a consensus node onto ephemeral storage.
+#
+# A node with no volume at /data starts, elects, accepts writes and answers
+# /healthz exactly like a correct one. The difference appears only at the next
+# restart, when its Raft log, currentTerm and votedFor -- the state Raft must
+# fsync before replying to any RPC -- turn out to have been on the container
+# filesystem and are gone. It then rejoins with an empty log and votes as if it
+# had never seen the cluster. Nothing in the node's own output can tell you
+# this; the mount is a property of the service, not of the process.
+#
+# So it is checked HERE, before an upload, rather than trusted. `railway volume
+# list` prints one stanza per volume: the volume name, "Attached to: <service>"
+# and "Mount path: <path>". Both facts must hold together for THIS service,
+# which is why the check reads the stanza rather than grepping the whole output
+# for the two strings independently -- another service's volume mounted at
+# /data would otherwise satisfy a naive grep.
+require_volume() {
+    local svc="$1"
+    local listing
+    if ! listing="$(railway volume list 2>&1)"; then
+        echo "FATAL: could not list volumes (is the project linked?):" >&2
+        echo "${listing}" >&2
+        exit 1
+    fi
+    # Collapse each stanza to one line so the pairing survives the match.
+    if printf '%s\n' "${listing}" \
+        | awk -v RS='' '{gsub(/\n/, " | "); print}' \
+        | grep -q "Attached to: ${svc} .*Mount path: /data"; then
+        echo "[deploy] ${svc}: volume attached at /data"
+        return 0
+    fi
+    echo "FATAL: ${svc} has no volume mounted at /data." >&2
+    echo "A consensus node without one runs, elects and looks healthy, and loses its" >&2
+    echo "Raft log, currentTerm and votedFor at the next restart -- then rejoins and" >&2
+    echo "votes as though it had never seen the cluster. Attach one before deploying:" >&2
+    echo "    railway volume add --service ${svc} --mount-path /data" >&2
+    echo "" >&2
+    echo "Volumes currently in this project:" >&2
+    printf '%s\n' "${listing}" >&2
+    exit 1
+}
+
 deploy_one() {
     local n="$1"
     local svc="sgee-queue-${n}"
     local dest
     dest="$(mktemp -d)"
     trap 'rm -rf "${dest}"' RETURN
+
+    require_volume "${svc}"
 
     echo "[deploy] staging for ${svc}"
     stage "${dest}"
