@@ -141,16 +141,21 @@ describe('calculate() refusal ladder', () => {
   });
 
   describe('implied volatility', () => {
-    it('tells an EMPTY position to add legs from the chain', async () => {
-      // Unreachable through the UI today (no legs short-circuits earlier), but
-      // this is the branch that is correct advice when it is reachable, and the
-      // store must not lose the distinction.
-      reset({ legs: [] });
-      useCalculatorStore.setState({ legs: [] });
-      await useCalculatorStore.getState().calculateStrategy();
-      expect(useCalculatorStore.getState().error).toBeNull();
-    });
-
+    /*
+     * There is no test here for the "add legs from the option chain" branch.
+     *
+     * It is UNREACHABLE through `calculateStrategy`: the `legs.length === 0`
+     * early return above it fires first, so a position with no legs never gets
+     * as far as the IV check. An earlier version of this file "covered" it by
+     * setting legs to [] and asserting `error` is null -- which passes for the
+     * wrong reason, duplicating the no-legs test while its comment claimed to
+     * be pinning an IV distinction it never exercised. A test that passes for a
+     * reason other than the one it states is worse than no test: it reports
+     * coverage that does not exist.
+     *
+     * The branch is kept in the store as correct advice should the guard order
+     * ever change. If it does, this comment is the note that it now needs one.
+     */
     it('does NOT tell a populated position to add legs it already has', async () => {
       reset({ legs: [goodLeg({ implied_volatility: undefined })] });
       await useCalculatorStore.getState().calculateStrategy();

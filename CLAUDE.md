@@ -474,4 +474,40 @@ Attaching a custom domain needs an account-scoped Railway credential. If
 ## Build Commands
 - **Frontend Production Build:** `cd frontend && npm run build`
 - **Frontend Dev Server:** `cd frontend && npm run dev`
+- **Frontend Tests:** `cd frontend && npm test` (Vitest, `npm run test:watch` to iterate).
+  Needs Node `^20.19.0 || >=22.12.0` — a floor introduced by vite 8, which
+  vitest 4 pulls in. The build itself does not require it; the test suite does.
 - **Backend Docker Build:** `docker build -t options-backend backend/`
+
+### Frontend test suite
+
+The frontend had **no test tooling at all** until 2026-08-10, and that is how a
+defect on the primary user path reached production: picking a strike and
+pressing Add, without touching the Expiry dropdown, committed a leg carrying a
+fabricated `expiration_days: 0`, so payoff, P&L matrix, P&L surface,
+probability distribution and Outcome all refused with "No expiration on any
+leg" while that dropdown visibly showed a date. Nothing threw and nothing was
+null — only a browser session could see it.
+
+The suite is Vitest on the `node` environment, because the stores hold the
+rules that decide whether a position can be priced and those rules are plain
+functions over plain state. `src/test/grpc-harness.ts` is the entire seam: the
+stores talk to `OptionsCalculatorClient` and nothing else reaches the network.
+
+Two invariants there are worth knowing before editing a test:
+
+- **Responses are hand-built objects, not generated message instances.** A
+  generated `StrategyResponse` supplies a zero for every field nobody set, so a
+  getter the store starts calling would silently read a plausible number. The
+  hand-built builders fail by name instead. A default that looks like an answer
+  is the exact failure this suite exists to catch.
+- **The Pro gate is asserted on gRPC status code 7, never on message text**, and
+  `entitlement.test.ts` deliberately varies the wording across three messages to
+  pin that. The gate's copy was reworded twice in a single day; a store matching
+  on text would fall through to the red "Unavailable" branch the moment someone
+  improved a sentence.
+
+`vi.mock` is hoisted, so each test file declares its own mock block at top
+level — there is deliberately no shared `mockAmbient()` helper, because
+wrapping the calls in a function would apply them to the harness rather than to
+the caller.
