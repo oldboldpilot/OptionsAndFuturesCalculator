@@ -363,6 +363,20 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  /* Wrap rather than overflow. Without this the head is a single nowrap row,
+     and a control that does not fit is pushed OUTSIDE the panel entirely --
+     not clipped, not scrollable, just unreachable.
+
+     Measured on the option chain at a 1440px viewport: the head needed 509px
+     of content in a 378px panel, and the expiration <select> landed at
+     x=1407..1562 against a panel ending at 1432 and a viewport ending at 1440.
+     The page itself does not scroll horizontally (by design -- the chain table
+     scrolls inside its own body), so there was no way to reach the date picker
+     at all. Wrapping puts it on a second line instead.
+
+     Fixed here rather than on the one panel because every panel head shares
+     this rule and would fail the same way at a narrow enough width. */
+  flex-wrap: wrap;
   gap: 0.5rem;
   padding: 0.5625rem 0.75rem;
   border-bottom: 1px solid var(--color-line);

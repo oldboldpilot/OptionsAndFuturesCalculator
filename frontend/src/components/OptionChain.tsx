@@ -102,7 +102,11 @@ export function OptionChain() {
   return (
     <div className="panel" style={{ flex: 1, minWidth: 0 }}>
       <div className="panel-head">
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.4375rem' }}>
+        {/* minWidth 0 so this group may shrink. A flex item's default minimum
+            is its min-content width, and these chips are nowrap, so without it
+            the group refuses to give up space and pushes the expiry selector
+            out of the panel. */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.4375rem', minWidth: 0, flexWrap: 'wrap' }}>
           <span className="panel-title">Option Chain</span>
           {chainStatus === 'ready' && (
             <>
@@ -112,7 +116,16 @@ export function OptionChain() {
           )}
         </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.375rem' }}>
+        {/* This group wraps INTERNALLY as well. Wrapping only the outer head is
+            not enough: below roughly 800px the side segment and the expiry
+            selector together still exceed the panel, and a group that can
+            neither shrink nor wrap pushes its last child out of the panel --
+            measured at a 768px viewport, the selector sat at x=704..859 against
+            a panel ending at 852. flexShrink stays on the SELECT itself rather
+            than this group, because that is the one control that must not be
+            squeezed: a truncated date leaves the trader unable to tell which
+            contract they are pricing. */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.375rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
           <div className="segment">
             <button className="segment-item" data-active={side === 'both'} onClick={() => setSide('both')}>Both</button>
             <button className="segment-item" data-active={side === 'calls'} onClick={() => setSide('calls')}>Calls</button>
@@ -120,7 +133,7 @@ export function OptionChain() {
           </div>
           <select
             className="select"
-            style={{ width: 'auto' }}
+            style={{ width: 'auto', flexShrink: 0, maxWidth: '100%' }}
             value={selectedExpiration}
             onChange={(e) => {
               setSelectedExpiration(e.target.value);
