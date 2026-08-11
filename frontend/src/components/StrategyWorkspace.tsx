@@ -14,6 +14,7 @@ import PnLSurface from './PnLSurface';
 import AdSlot from './AdSlot';
 import TermStructure from './TermStructure';
 import { StrategySelector } from './StrategySelector';
+import AssistantPanel from './AssistantPanel';
 import { useCalculatorStore } from '../store/useCalculatorStore';
 
 /**
@@ -85,8 +86,13 @@ export function StrategyWorkspace({ heading }: { heading?: string }) {
           minHeight: 0,
         }}
       >
-        {/* Choose a structure */}
+        {/* Choose a structure. The assistant sits ABOVE the picker because
+            that is the order the work happens in when it is used at all: a
+            parse selects an entry in the picker below it, and the picker's own
+            Apply is still what builds the legs. Putting it below would have
+            the output of one control appear above the control itself. */}
         <div className="stagger" style={{ ...column, overflowY: 'auto' }}>
+          <AssistantPanel />
           <StrategySelector />
         </div>
 

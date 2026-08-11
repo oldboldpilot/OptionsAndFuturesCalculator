@@ -29,9 +29,17 @@ OUT_DIR="${REPO_ROOT}/frontend/src/grpc"
 # is a proto file basename (without .proto) under PROTO_DIR; the generated
 # filenames (e.g. calculator_pb.js, CalculatorServiceClientPb.ts) are derived
 # from it by the plugin, not chosen by this script.
+# `assistant` imports finance.proto (for ExerciseType/AsianType) rather than
+# restating those enums, so its generated runtime `require`s finance_pb.js.
+# That is satisfied by finance being generated into the same OUT_DIR above --
+# order in this array does not matter to protoc (each invocation resolves
+# imports through --proto_path, not through previously generated output), but
+# dropping `finance` from this list while keeping `assistant` would leave the
+# assistant runtime requiring a file nobody generates.
 PROTOS=(
     calculator
     finance
+    assistant
 )
 
 PROTOC="${REPO_ROOT}/frontend/node_modules/grpc-tools/bin/protoc"

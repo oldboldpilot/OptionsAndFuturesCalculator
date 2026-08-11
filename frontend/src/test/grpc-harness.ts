@@ -48,6 +48,8 @@ export interface RpcScript {
   getRiskFreeRate?: (req: unknown) => RpcOutcome<FakeRateResponse>;
   getMarketChain?: (req: unknown) => RpcOutcome<FakeChainResponse>;
   calculateStrategy?: (req: unknown) => RpcOutcome<FakeStrategyResponse>;
+  /** `calculator.assistant.StrategyAssistant/ParseStrategy`. Promise-style. */
+  parseStrategy?: (req: unknown) => RpcOutcome<FakeParseResponse>;
 }
 
 /** Calls recorded by the fake, so a test can assert what was SENT, not only what came back. */
@@ -111,6 +113,136 @@ export interface FakeStrategyResponse {
   getLegRiskList(): unknown[];
   getNetGreeks(): unknown;
   getRiskMetrics(): unknown;
+}
+
+/* ---------------------------------------------------------------------------
+   The strategy assistant.
+
+   `ParseResponse` is a oneof whose THREE branches all arrive with gRPC status
+   OK -- parameters, a clarifying question, and a refusal. The builders below
+   are therefore three separate functions rather than one with optional fields:
+   a builder that could produce two branches at once, or none, would model a
+   response the service cannot send, and the store's discrimination would then
+   be tested against a shape it will never meet.
+
+   `getOutcomeCase()` is set by each builder to the oneof's own field number,
+   which is what the generated message returns. Hand-built for the same reason
+   everything else here is: a generated `ParseResponse` answers every accessor
+   with a plausible zero, so a store reading the wrong branch would read an
+   empty `StrategyParams` -- symbol "", expiry 0 -- and present it as a parse.
+   -------------------------------------------------------------------------- */
+
+export const PARSE_OUTCOME_NOT_SET = 0;
+export const PARSE_OUTCOME_PARAMS = 1;
+export const PARSE_OUTCOME_CLARIFICATION = 2;
+export const PARSE_OUTCOME_REFUSAL = 3;
+
+/** `Refusal.Reason`, by wire value. */
+export const REFUSAL_UNSUPPORTED_STRATEGY = 1;
+export const REFUSAL_UNKNOWN_SYMBOL = 2;
+export const REFUSAL_OUT_OF_SCOPE = 3;
+export const REFUSAL_MODEL_UNAVAILABLE = 4;
+export const REFUSAL_DATA_UNAVAILABLE = 5;
+
+export interface FakeStrategyParams {
+  getSymbol(): string;
+  getAssetClass(): string;
+  getStrategy(): string;
+  getExpirationDays(): number;
+  getQuantity(): number;
+  getFarExpirationDays(): number;
+  getExerciseType(): number;
+  getAsianType(): number;
+}
+
+export interface FakeClarification {
+  getQuestion(): string;
+}
+
+export interface FakeRefusal {
+  getReason(): number;
+  getMessage(): string;
+}
+
+export interface FakeParseResponse {
+  getOutcomeCase(): number;
+  getParams(): FakeStrategyParams | undefined;
+  getClarification(): FakeClarification | undefined;
+  getRefusal(): FakeRefusal | undefined;
+}
+
+/**
+ * A successful parse.
+ *
+ * `symbol`, `assetClass`, `strategy`, `expirationDays` and `quantity` are all
+ * REQUIRED. None of them has a defensible default: an expiry of 0 is exactly
+ * the fabricated value the ticket defect turned on, and an asset class picked
+ * for the caller is how a futures root gets priced off an equity quote.
+ *
+ * `farExpirationDays`, `exerciseType` and `asianType` default to 0 because
+ * `assistant.proto` gives 0 a stated meaning for each -- "not stated",
+ * EUROPEAN and NOT_ASIAN respectively -- so the default here is the contract's
+ * own, not this builder's invention.
+ */
+export function parseParams(p: {
+  symbol: string;
+  assetClass: string;
+  strategy: string;
+  expirationDays: number;
+  quantity: number;
+  farExpirationDays?: number;
+  exerciseType?: number;
+  asianType?: number;
+}): FakeParseResponse {
+  const params: FakeStrategyParams = {
+    getSymbol: () => p.symbol,
+    getAssetClass: () => p.assetClass,
+    getStrategy: () => p.strategy,
+    getExpirationDays: () => p.expirationDays,
+    getQuantity: () => p.quantity,
+    getFarExpirationDays: () => p.farExpirationDays ?? 0,
+    getExerciseType: () => p.exerciseType ?? 0,
+    getAsianType: () => p.asianType ?? 0,
+  };
+  return {
+    getOutcomeCase: () => PARSE_OUTCOME_PARAMS,
+    getParams: () => params,
+    getClarification: () => undefined,
+    getRefusal: () => undefined,
+  };
+}
+
+/** A clarifying question. gRPC status OK -- the model doing its job. */
+export function parseClarification(question: string): FakeParseResponse {
+  return {
+    getOutcomeCase: () => PARSE_OUTCOME_CLARIFICATION,
+    getParams: () => undefined,
+    getClarification: () => ({ getQuestion: () => question }),
+    getRefusal: () => undefined,
+  };
+}
+
+/** A refusal. Also gRPC status OK, and also the model doing its job. */
+export function parseRefusal(reason: number, message: string): FakeParseResponse {
+  return {
+    getOutcomeCase: () => PARSE_OUTCOME_REFUSAL,
+    getParams: () => undefined,
+    getClarification: () => undefined,
+    getRefusal: () => ({ getReason: () => reason, getMessage: () => message }),
+  };
+}
+
+/**
+ * A response with the oneof unset. Not a thing the service sends today, which
+ * is precisely why the store must not read it as one of the three that it does.
+ */
+export function parseNothing(): FakeParseResponse {
+  return {
+    getOutcomeCase: () => PARSE_OUTCOME_NOT_SET,
+    getParams: () => undefined,
+    getClarification: () => undefined,
+    getRefusal: () => undefined,
+  };
 }
 
 /**
@@ -275,6 +407,16 @@ export function createFakeClient(script: RpcScript) {
         const handler = script.calculateStrategy;
         if (!handler) {
           return Promise.reject({ code: GRPC_UNAVAILABLE, message: 'no calculateStrategy handler scripted in this test' });
+        }
+        const outcome = handler(req);
+        return 'fail' in outcome ? Promise.reject(outcome.fail) : Promise.resolve(outcome.ok);
+      },
+      /** Promise-style, like calculateStrategy: the assistant store awaits it. */
+      parseStrategy: (req: unknown) => {
+        calls.push({ method: 'parseStrategy', request: req });
+        const handler = script.parseStrategy;
+        if (!handler) {
+          return Promise.reject({ code: GRPC_UNAVAILABLE, message: 'no parseStrategy handler scripted in this test' });
         }
         const outcome = handler(req);
         return 'fail' in outcome ? Promise.reject(outcome.fail) : Promise.resolve(outcome.ok);

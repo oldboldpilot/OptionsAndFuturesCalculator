@@ -1,7 +1,8 @@
 'use client';
 
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useCalculatorStore, type ChainStrike } from '../store/useCalculatorStore';
+import { useAssistantStore } from '../store/useAssistantStore';
 import { useProStatus } from '../lib/useProStatus';
 import { ProPanel } from './ProPanel';
 
@@ -240,6 +241,28 @@ const CATEGORIES: Category[] = [
   'Bullish', 'Bearish', 'Neutral', 'Volatility', 'Income & Hedge', 'Futures',
 ];
 
+/**
+ * The catalogue as the assistant needs to see it: which ids a user can
+ * actually select, and which of those need two expiries.
+ *
+ * Derived from `STRATEGIES` above rather than restated, because the assistant
+ * and the picker disagreeing about which structures exist is precisely the
+ * failure the `gated` flag was introduced to prevent -- a parse that selects
+ * `crack_321` would point at a picker entry that is deliberately not there.
+ * Exported as data, not as a component concern, so the assistant's own store
+ * can be told what is offered without importing React.
+ */
+export const SELECTABLE_STRATEGY_IDS: string[] =
+  STRATEGIES.filter((s) => !s.gated).map((s) => s.id);
+
+export const MULTI_EXPIRY_STRATEGY_IDS: string[] =
+  STRATEGIES.filter((s) => s.multiExpiry).map((s) => s.id);
+
+/** Display name for a catalogue id, or the id itself when this build has none. */
+export function strategyDisplayName(id: string): string {
+  return STRATEGIES.find((s) => s.id === id)?.name ?? id;
+}
+
 /** Closest listed strike to a target. Returns null when the chain is empty. */
 function nearestStrike(strikes: ChainStrike[], target: number): ChainStrike | null {
   if (strikes.length === 0) return null;
@@ -263,6 +286,41 @@ export const StrategySelector: React.FC = () => {
   // subscription UI. Both read the same store, so activating a licence in one
   // updates the badges in the other.
   const { pro } = useProStatus();
+
+  /*
+   * A parse the user applied selects its structure HERE, in the picker they
+   * already use, rather than opening a second way to build a position. The
+   * assistant deliberately gets no Apply of its own: the legs still come off
+   * the live chain through the button below, so an assisted position and a
+   * hand-built one are the same position built the same way.
+   *
+   * Keyed on `applySeq`, not on the id: applying the same parse twice does not
+   * change the id, and a user who applied, then picked something else by hand,
+   * then pressed Apply again would otherwise watch the button do nothing.
+   *
+   * Written as a SUBSCRIPTION rather than as an effect over a selected value.
+   * The two are not interchangeable here: an effect body that calls setState
+   * synchronously re-renders on every apply and is what
+   * `react-hooks/set-state-in-effect` refuses. Subscribing to the store and
+   * setting state from its callback is the shape that rule points at -- the
+   * store is an external system, and this component is reacting to a change in
+   * it rather than deriving state it could have computed while rendering.
+   */
+  useEffect(() =>
+    useAssistantStore.subscribe((st, prev) => {
+      if (st.applySeq === prev.applySeq || !st.selectedStrategyId) return;
+      const target = STRATEGIES.find((s) => s.id === st.selectedStrategyId);
+      // The store checks this list before it ever sets an id, so a miss here
+      // means the two disagree. Selecting nothing is the safe answer -- the
+      // assistant panel is already saying why it could not apply.
+      if (!target) return;
+      setSelected(st.selectedStrategyId);
+      // Clear any search and switch to the owning category, or the newly
+      // selected entry sits in a list the user is not looking at.
+      setQuery('');
+      setCategory(target.category);
+    }),
+  []);
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
