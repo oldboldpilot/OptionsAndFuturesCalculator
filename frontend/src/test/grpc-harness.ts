@@ -131,9 +131,43 @@ export function chainExpiration(date: string, dte: number, label = date): FakeCh
  */
 export function chainStrike(
   strike: number,
-  opts: { isAtm?: boolean; callBid?: number; callAsk?: number; callIv?: number; callDelta?: number } = {}
+  opts: {
+    isAtm?: boolean;
+    callBid?: number;
+    callAsk?: number;
+    callIv?: number;
+    callDelta?: number;
+    callVolume?: number;
+    callOpenInterest?: number;
+    putBid?: number;
+    putAsk?: number;
+    putIv?: number;
+    putDelta?: number;
+    putVolume?: number;
+    putOpenInterest?: number;
+  } = {}
 ): FakeChainStrike {
-  const { isAtm = false, callBid = 1, callAsk = 1.2, callIv = 0.2, callDelta = 0.5 } = opts;
+  const {
+    isAtm = false,
+    callBid = 1,
+    callAsk = 1.2,
+    callIv = 0.2,
+    callDelta = 0.5,
+    callVolume = 100,
+    callOpenInterest = 500,
+    // The put side defaults MIRROR the call side, which is convenient and
+    // dangerous in equal measure: a test built on the defaults cannot detect a
+    // transposed call/put field, because both sides carry the same numbers. Any
+    // test asserting field FIDELITY must pass disjoint values on every field
+    // below -- see the `distinctStrike` helper in chain.test.ts, which exists
+    // because this builder alone would have let a transposition pass.
+    putBid = 1,
+    putAsk = 1.2,
+    putIv = callIv,
+    putDelta = -0.5,
+    putVolume = 100,
+    putOpenInterest = 500,
+  } = opts;
   return {
     getStrike: () => strike,
     getIsAtm: () => isAtm,
@@ -141,14 +175,14 @@ export function chainStrike(
     getCallAsk: () => callAsk,
     getCallDelta: () => callDelta,
     getCallIv: () => callIv,
-    getCallVolume: () => 100,
-    getCallOpenInterest: () => 500,
-    getPutBid: () => 1,
-    getPutAsk: () => 1.2,
-    getPutDelta: () => -0.5,
-    getPutIv: () => callIv,
-    getPutVolume: () => 100,
-    getPutOpenInterest: () => 500,
+    getCallVolume: () => callVolume,
+    getCallOpenInterest: () => callOpenInterest,
+    getPutBid: () => putBid,
+    getPutAsk: () => putAsk,
+    getPutDelta: () => putDelta,
+    getPutIv: () => putIv,
+    getPutVolume: () => putVolume,
+    getPutOpenInterest: () => putOpenInterest,
   };
 }
 
