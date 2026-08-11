@@ -548,7 +548,24 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
       set({ error: 'This contract has no quoted price. Enter the price you would pay or receive.' });
       return;
     }
-    const dte = get().chainExpirations.find((e) => e.date === t.expiration)?.dte ?? 0;
+    // Resolve the expiration exactly as OptionTicket displays it. Reading only
+    // `t.expiration` here is what produced the defect this guard now closes:
+    // the lookup missed, `?? 0` turned the miss into `expiration_days: 0`, and
+    // the leg went into the position looking complete -- strike, premium and
+    // quantity all present. Every downstream panel (payoff, P&L matrix, P&L
+    // surface, probability distribution, outcome) then refused with "No
+    // expiration on any leg -- pick an expiry from the chain" while the Expiry
+    // dropdown sat there showing the date the user had supposedly not picked.
+    const expiration = t.expiration || get().selectedExpiration;
+    const match = get().chainExpirations.find((e) => e.date === expiration);
+    if (!match) {
+      // Refuse rather than substitute, the same rule the strike and premium
+      // guards above follow. A fabricated 0 is not a safer default than an
+      // error: it is an error that has been made to look like an answer.
+      set({ error: 'Pick an expiry before adding the leg.' });
+      return;
+    }
+    const dte = match.dte;
     get().addLeg({
       instrument_type: 'INSTRUMENT_EQUITY_OPTION',
       action: t.action,
@@ -599,6 +616,8 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
         return;
       }
 
+      const resolvedExpiration = wanted || res.getSelectedExpirationDate() || '';
+
       const expirations: ChainExpiration[] = res.getAvailableExpirationsList().map((e) => ({
         date: e.getDateStr(),
         dte: e.getDaysToExpiry(),
@@ -630,7 +649,15 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
           annualizedYield: c.getAnnualizedYield(),
           state: c.getState(),
         })),
-        selectedExpiration: wanted || res.getSelectedExpirationDate() || '',
+        selectedExpiration: resolvedExpiration,
+        // Seed the ticket's own expiration from the same value in the same
+        // breath. OptionTicket DISPLAYS `ticket.expiration || selectedExpiration`
+        // but commitTicket read only `ticket.expiration`, so a user who never
+        // touched the Expiry dropdown -- the default path -- committed a leg
+        // whose expiration was '' while the dropdown visibly read a real date.
+        // Keeping the two in lockstep here means the displayed value and the
+        // stored value cannot disagree in the first place.
+        ticket: { ...get().ticket, expiration: resolvedExpiration },
         // A futures symbol returns a forward curve and no option strikes. The
         // strikes-only test called that an error and blanked the panel.
         chainStatus:
@@ -669,16 +696,36 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
     }
     const iv = positionIv(legs);
     if (iv === null) {
+      // Same distinction the expiry guard below draws. Telling someone to "add
+      // legs from the option chain" is only useful advice when they have not;
+      // a position that already holds legs got here because the CONTRACTS
+      // carry no published IV, which is the ordinary case for a same-day
+      // expiry -- implied volatility is undefined as time to expiry vanishes,
+      // so the feed omits it rather than inventing one. The remedy there is
+      // the ticket's own IV field, not the chain.
       set({
         result: null,
         error:
-          'No implied volatility on any leg. Add legs from the option chain so IV and premium come from live quotes.',
+          legs.length > 0
+            ? 'These contracts publish no implied volatility — common at a same-day expiry. Enter an IV in the ticket, or choose a later expiration.'
+            : 'No implied volatility on any leg. Add legs from the option chain so IV and premium come from live quotes.',
       });
       return;
     }
     const days = horizonDays(legs);
     if (days <= 0) {
-      set({ result: null, error: 'No expiration on any leg — pick an expiry from the chain.' });
+      // Two different causes reach this branch and they need different words.
+      // A leg with no `expiration_days` at all genuinely has no expiry. A leg
+      // carrying 0 was given one -- the chain lists a same-day expiration, and
+      // picking it is a legitimate choice, not an omission. Telling that user
+      // to "pick an expiry from the chain" denies what they just did.
+      const anyExpiry = legs.some((l) => l.expiration_days !== undefined);
+      set({
+        result: null,
+        error: anyExpiry
+          ? 'Every leg expires today. The payoff model prices remaining time value, so it needs at least one day to expiry — pick a later expiration.'
+          : 'No expiration on any leg — pick an expiry from the chain.',
+      });
       return;
     }
     // Fetch the rate on demand if nothing has yet. This is what makes the rate
