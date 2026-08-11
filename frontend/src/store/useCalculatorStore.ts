@@ -247,6 +247,17 @@ interface CalculatorState {
    */
   gateDenied: string | null;
 
+  /**
+   * The engine's explanation for a position it declines to model, as opposed
+   * to one it failed to price. Set only from gRPC FAILED_PRECONDITION.
+   *
+   * Separate from `error` because the two mean opposite things to a trader:
+   * `error` says the app is broken and retrying might work, this says the
+   * position is fine and the model does not cover it. Rendering the second as
+   * the first is how a documented limitation reads as an outage.
+   */
+  modelLimit: string | null;
+
   chainStrikes: ChainStrike[];
   futuresCurve: FuturesContract[];
   chainExpirations: ChainExpiration[];
@@ -340,6 +351,15 @@ let rateRequest: Promise<void> | null = null;
  */
 const RPC_PERMISSION_DENIED = 7;
 
+// FAILED_PRECONDITION. The engine says the position is real and well formed
+// but outside what this model can describe -- today that means an Asian leg,
+// whose payoff is a function of the average price rather than the price at
+// expiry. It is NOT a failure and must not render in loss-red under
+// "Unavailable": nothing is broken and retrying will not help. Kept separate
+// from `error` for the same reason `gateDenied` is, and matched on the CODE
+// because the sentence is copy and copy gets reworded.
+const RPC_FAILED_PRECONDITION = 9;
+
 export const useCalculatorStore = create<CalculatorState>((set, get) => ({
   symbol: 'SPY',
   assetClass: 'EQUITY',
@@ -357,6 +377,7 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
   isLoading: false,
   error: null,
   gateDenied: null,
+  modelLimit: null,
 
   chainStrikes: [],
   chainExpirations: [],
@@ -676,7 +697,10 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
     // it set while the user empties their legs would show an upgrade prompt
     // for a position that no longer exists, and the early returns are exactly
     // the paths that would have skipped a clear placed further down.
-    set({ gateDenied: null });
+    // modelLimit clears with it, and for the same reason: it describes the
+    // position that provoked it, so leaving it set would explain a limitation
+    // of a position the user has since changed.
+    set({ gateDenied: null, modelLimit: null });
 
     // The rate is deliberately not destructured here: it is read after the
     // fetch below, so a snapshot taken now would be the pre-fetch null.
@@ -889,11 +913,34 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
       // silently both times while still rendering something plausible.
       const code = (err as { code?: number }).code;
       if (code === RPC_PERMISSION_DENIED) {
-        set({ isLoading: false, result: null, error: null, gateDenied: message });
+        set({
+          isLoading: false,
+          result: null,
+          error: null,
+          gateDenied: message,
+          modelLimit: null,
+        });
         return;
       }
 
-      set({ isLoading: false, result: null, error: message, gateDenied: null });
+      if (code === RPC_FAILED_PRECONDITION) {
+        set({
+          isLoading: false,
+          result: null,
+          error: null,
+          gateDenied: null,
+          modelLimit: message,
+        });
+        return;
+      }
+
+      set({
+        isLoading: false,
+        result: null,
+        error: message,
+        gateDenied: null,
+        modelLimit: null,
+      });
     }
   },
 

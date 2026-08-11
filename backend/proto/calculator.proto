@@ -42,6 +42,24 @@ message Leg {
   double implied_volatility = 7;
   // 100 for listed equity options, 50 for ES, and so on.
   double contract_multiplier = 8;
+
+  // Averaging style for an Asian option.
+  //
+  // A LOCAL enum rather than sensen.finance.AsianType, deliberately. This file
+  // has no imports at all; adding one pulls finance.proto into the generated
+  // browser bundle AND into Envoy's grpc_json_transcoder services list, which
+  // makes a schema change into a deployment change. The zero values and
+  // orderings match, so the mapping is one line in the service.
+  //
+  // NOT_ASIAN is zero, so every existing client that never sets this field
+  // keeps its current wire meaning and its current answers.
+  enum AsianType { NOT_ASIAN = 0; AVERAGE_PRICE = 1; AVERAGE_STRIKE = 2; }
+  AsianType asian_type = 9;
+
+  // Averaging grid states for the Hull-White tree. Zero means "engine
+  // default" (50), matching the tree-pricer panel. Bounded 10..200, which is
+  // the same range that panel already enforces.
+  int32 averaging_states = 10;
 }
 
 message StrategyRequest {

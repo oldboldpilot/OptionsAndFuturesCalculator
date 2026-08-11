@@ -430,6 +430,69 @@ auto main() -> int {
               "...and prices to the same maxProfit == 1275 as section 1");
     }
 
+    // =======================================================================
+    section("6. ASIAN LEGS: refused by CODE, and only when actually Asian");
+    // =======================================================================
+    // Every figure this service returns is a function of TERMINAL SPOT. An
+    // average-price Asian pays on the realized AVERAGE, which is a different
+    // random variable -- Var(A) < Var(S_T) for the same sigma. Walking an
+    // Asian leg across the spot grid does not approximate it; it prices a
+    // vanilla and calls it Asian.
+    //
+    // The refusal is whole-response and carries its own status code because
+    // proto3 has no absent: an unset max_profit is indistinguishable from a
+    // real 0.0, so a partial answer would render "max profit $0".
+    {
+        StrategyRequest req;
+        req.set_underlying_symbol("SPY");
+        req.set_current_price(590.0);
+        req.set_risk_free_rate(0.05);
+        req.set_price_range_percent(0.25);
+        req.set_price_steps(81);
+        req.set_date_steps(12);
+        add_leg(req, Leg::BUY, Leg::CALL, 580.0, 30.0, 12.00, 0.20);
+        req.mutable_legs(0)->set_asian_type(Leg::AVERAGE_PRICE);
+
+        auto [status, resp] = call_strategy(stub, req);
+        check(status.error_code() == grpc::StatusCode::FAILED_PRECONDITION,
+              "an AVERAGE_PRICE leg is refused with FAILED_PRECONDITION -- a modelling "
+              "limit, not malformed input, and discriminated by CODE not text");
+        check(resp.pnl_matrix_size() == 0 && resp.max_profit() == 0.0,
+              "...and returns NO payoff points, so nothing can be read off a curve that "
+              "was never drawn against the right variable");
+
+        // BREAK DIRECTION. Without this, the check above is satisfied by an
+        // engine that refuses every request, including vanilla ones -- which
+        // is precisely how a refuse-only gate passes its own test while
+        // taking the product down.
+        StrategyRequest vanilla = req;
+        vanilla.mutable_legs(0)->set_asian_type(Leg::NOT_ASIAN);
+        auto [v_status, v_resp] = call_strategy(stub, vanilla);
+        check(v_status.ok(),
+              "...while the SAME request with asian_type cleared succeeds: the refusal "
+              "is caused by the averaging style, not by the request shape");
+        check(v_resp.pnl_matrix_size() > 0,
+              "...and that vanilla answer really does carry a payoff curve");
+
+        // A malformed Asian must be named as malformed, not as unsupported --
+        // averaging_states < 2 is a CRASH in price_option_double (it
+        // subscripts a vector whose grid has no width), so the bound is
+        // enforced before the unsupported-instrument refusal is reached.
+        StrategyRequest bad_states = req;
+        bad_states.mutable_legs(0)->set_averaging_states(1);
+        auto [b_status, b_resp] = call_strategy(stub, bad_states);
+        check(b_status.error_code() == grpc::StatusCode::INVALID_ARGUMENT,
+              "averaging_states=1 is INVALID_ARGUMENT, distinct from the Asian refusal: "
+              "a malformed Asian is named as malformed");
+
+        StrategyRequest ok_states = req;
+        ok_states.mutable_legs(0)->set_averaging_states(50);
+        auto [o_status, o_resp] = call_strategy(stub, ok_states);
+        check(o_status.error_code() == grpc::StatusCode::FAILED_PRECONDITION,
+              "...while a VALID averaging_states still reaches the Asian refusal, so the "
+              "bounds check is not standing in for it");
+    }
+
     // -----------------------------------------------------------------
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

@@ -111,6 +111,11 @@ static constexpr std::array<FuturesProxy, 2> kFuturesProxies{{
     return (leg.quantity() > 0) ? static_cast<double>(leg.quantity()) : 1.0;
 }
 
+/** True when this leg carries an averaging style, i.e. it is an Asian option. */
+[[nodiscard]] auto is_asian(const calculator::Leg& leg) noexcept -> bool {
+    return leg.asian_type() != calculator::Leg::NOT_ASIAN;
+}
+
 /** Intrinsic value of a settled option leg, per share. */
 [[nodiscard]] auto intrinsic_of(const calculator::Leg& leg, double price) noexcept -> double {
     return (leg.type() == calculator::Leg::CALL) ? std::max(0.0, price - leg.strike())
@@ -588,6 +593,65 @@ inline constexpr std::array<std::string_view, 5> kAllActionNames{
     if (!why.empty()) {
         ctx->status = grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
                                    "Cannot price this position:" + why);
+        return std::unexpected(sgee::ExecutionError::ActionFailed);
+    }
+
+    /*
+     * An Asian leg is refused here, as a WHOLE-RESPONSE refusal with its own
+     * status code, and both halves of that are deliberate.
+     *
+     * WHY REFUSED AT ALL. Every figure this service produces past this point
+     * is a function of TERMINAL SPOT: value_at_elapsed() walks the price grid,
+     * and max_profit, max_loss, the breakevens, the matrix, the surface, POP
+     * and the VaR figures are all read off it. An average-price Asian pays
+     * max(A - K, 0) on the realized AVERAGE, and Var(A) < Var(S_T) for the same
+     * sigma -- a different random variable, not a nearby one. Walking an Asian
+     * leg across the spot grid does not approximate its payoff; it prices a
+     * vanilla and labels it Asian.
+     *
+     * WHY THE WHOLE RESPONSE, rather than filling in the fields we CAN compute
+     * and leaving the rest out. proto3 has no absent: an unset max_profit is
+     * indistinguishable on the wire from a genuine 0.0, so a partial response
+     * would render "max profit $0" to anyone who did not know to check a note
+     * field first. This repository has already shipped that exact failure once,
+     * when a missing expiry lookup became `?? 0` and four analytics panels
+     * priced a fabricated same-day expiry. A refusal cannot be misread.
+     *
+     * WHY FAILED_PRECONDITION specifically. It is a MODELLING limit, not bad
+     * input -- the request is well formed and the instrument is real. The
+     * client discriminates on the CODE, never the text, exactly as the Pro gate
+     * does with PERMISSION_DENIED (7): this message has already been reworded
+     * once and text-matching would break silently the next time.
+     *
+     * The averaging bounds are checked FIRST so a malformed Asian is named as
+     * malformed rather than as unsupported.
+     */
+    for (int i = 0; i < ctx->request.legs_size(); ++i) {
+        const auto& leg = ctx->request.legs(i);
+        if (!is_asian(leg)) continue;
+
+        // averaging_states < 2 is a CRASH, not a bad answer: it discretizes a
+        // continuous running-average range into that many grid states, and at
+        // 1 the grid has no width -- price_option_double then subscripts a
+        // std::vector<double> out of bounds. finance_service refuses the same
+        // value at its own boundary for the same reason; this leg never
+        // reaches a pricer, but the bound is enforced here so the field cannot
+        // become a live crash the day Asian legs are priced.
+        const std::int32_t states = leg.averaging_states();
+        if (states != 0 && (states < 2 || states > 200)) {
+            ctx->status = grpc::Status(
+                grpc::StatusCode::INVALID_ARGUMENT,
+                "Leg " + std::to_string(i) + ": averaging_states must be 0 (engine default) "
+                "or between 2 and 200.");
+            return std::unexpected(sgee::ExecutionError::ActionFailed);
+        }
+
+        ctx->status = grpc::Status(
+            grpc::StatusCode::FAILED_PRECONDITION,
+            "This position contains an Asian option, which pays on the average price over its "
+            "averaging window rather than the price at expiry. The payoff, P&L and probability "
+            "views are all drawn against the price at expiry, so they cannot describe it. "
+            "Price an Asian contract on its own in the Exercise & Averaging panel.");
         return std::unexpected(sgee::ExecutionError::ActionFailed);
     }
 

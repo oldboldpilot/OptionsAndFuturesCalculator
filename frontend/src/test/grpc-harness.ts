@@ -24,6 +24,8 @@
 /** gRPC status codes the stores discriminate on. Fixed by the spec. */
 export const GRPC_OK = 0;
 export const GRPC_PERMISSION_DENIED = 7;
+/** The engine's "well-formed position, outside what this model covers" code. */
+export const GRPC_FAILED_PRECONDITION = 9;
 export const GRPC_UNAVAILABLE = 14;
 
 /** A gRPC-Web error as the generated client surfaces it to a callback. */
