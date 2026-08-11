@@ -52,7 +52,43 @@ export function StrategyWorkspace({ heading }: { heading?: string }) {
   };
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden' }}>
+    /*
+     * `overflowX: 'auto'`, `overflowY: 'hidden'` -- deliberately not the
+     * `overflow: 'hidden'` this shell carried.
+     *
+     * The vertical half stays hidden on purpose: the shell is pinned to the
+     * viewport height and every panel scrolls inside itself, so a page-level
+     * vertical scroll would sit alongside a dozen panel scrollbars scrolling
+     * different things. The HORIZONTAL half was the bug. Measured in Chrome at
+     * a 768px viewport, this div's clientWidth was 768 against a scrollWidth of
+     * 1238, so 470px of the workspace -- the whole right-hand column -- was cut
+     * off. And because it CLIPPED rather than overflowed,
+     * `document.documentElement.scrollWidth` also read 768: the page reported
+     * that everything fitted while 2049 elements had a bounding right edge past
+     * the viewport, and nothing on the page could be scrolled to reach them.
+     *
+     * Re-measured after the change: at 768 the shell scrolls 768 -> 1238 and
+     * the rightmost column's right edge lands inside the viewport once scrolled
+     * fully right; at 1280 and 1440 scrollWidth still equals clientWidth, so no
+     * horizontal scrollbar appears at desktop widths. That last part is the
+     * point -- `auto` produces a scrollbar only where one is needed, and a fix
+     * that made every desktop width scroll sideways would be a regression.
+     *
+     * A sweep for clipping ancestors whose scrollWidth exceeds their clientWidth
+     * returns this element plus four `.panel`s. The panels are not the same
+     * thing: `.panel` clips by design and its `.panel-body` scrolls internally,
+     * so their content is reachable. This div was the only one that clipped
+     * with nothing behind it to scroll.
+     */
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        height: '100vh',
+        overflowX: 'auto',
+        overflowY: 'hidden',
+      }}
+    >
       <TopBar />
 
       {heading && (
