@@ -17,6 +17,7 @@ module;
 export module inference_admission;
 
 import inference_queue;
+import sgee_queue_client;
 
 /**
  * @author Olumuyiwa Oluwasanmi
@@ -772,6 +773,7 @@ export class PostgresAdmission final : public InferenceBackend {
     options_calculator::inference_queue::Surface surface_;
     InferenceBackend& local_;
     std::chrono::milliseconds remote_deadline_;
+    std::optional<SgeeQueueClient> sgee_client_;
 };
 
 }  // namespace options_calculator::inference_admission

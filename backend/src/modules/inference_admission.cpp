@@ -211,7 +211,8 @@ PostgresAdmission::PostgresAdmission(
     std::shared_ptr<options_calculator::inference_queue::Queue> queue,
     options_calculator::inference_queue::Surface surface, InferenceBackend& local,
     std::chrono::milliseconds remote_deadline)
-    : queue_(std::move(queue)), surface_(surface), local_(local), remote_deadline_(remote_deadline) {}
+    : queue_(std::move(queue)), surface_(surface), local_(local), remote_deadline_(remote_deadline),
+      sgee_client_(SgeeQueueClient::create_from_env()) {}
 
 auto PostgresAdmission::submit(std::string prompt) -> std::optional<InferenceOutcome> {
     const auto deadline = std::chrono::system_clock::now() + remote_deadline_;
@@ -230,6 +231,10 @@ auto PostgresAdmission::submit(std::string prompt) -> std::optional<InferenceOut
             "inference_admission: submit_remote failed ({}) -- falling back to the local backend",
             options_calculator::inference_queue::to_string(submitted.error()));
         return local_.submit(std::move(prompt));
+    }
+
+    if (sgee_client_.has_value()) {
+        sgee_client_->enqueue_mirror(payload_json);
     }
 
     auto job = queue_->await_result(submitted->job_id, deadline);

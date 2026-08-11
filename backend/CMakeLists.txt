@@ -960,6 +960,7 @@ endif()
 # be a separate change with its own blast radius, not a tidy-up to fold into this
 # one.
 set(SGEE_NO_IMPORT_STD ON CACHE BOOL "Use SGEE's header shim rather than import std; the standard library is libc++ either way" FORCE)
+set(SGEE_USE_GRPC ON CACHE BOOL "Build the gRPC consensus transport backend for SGEE" FORCE)
 
 # SGEE needs the directory holding the logger BMI when a parent already provides
 # the `logger` target, and only this tree knows where that is. Previously this
@@ -991,8 +992,8 @@ add_subdirectory(external/SGEE sgee EXCLUDE_FROM_ALL)
 # add_subdirectory(cpp23-logger EXCLUDE_FROM_ALL)
 
 # Core engine binary
-add_executable(calculator_engine src/main.cpp src/issue_key.cpp src/modules/calculator_service.cpp src/modules/finance_service.cpp src/modules/quota.cpp src/modules/api_key.cpp src/modules/assistant_service.cpp src/modules/mortgage_assistant_service.cpp src/modules/inference_queue.cpp src/modules/inference_admission.cpp)
-target_sources(calculator_engine PUBLIC FILE_SET CXX_MODULES FILES src/modules/calculator_service.cppm src/modules/market_data.cppm src/modules/finance_service.cppm src/modules/quota.cppm src/modules/api_key.cppm src/modules/strategy_catalogue.cppm src/modules/assistant_verification.cppm src/modules/assistant_service.cppm src/modules/mortgage_verification.cppm src/modules/mortgage_grammar.cppm src/modules/mortgage_assistant_service.cppm src/modules/pg.cppm src/modules/inference_queue.cppm src/modules/inference_admission.cppm)
+add_executable(calculator_engine src/main.cpp src/issue_key.cpp src/modules/calculator_service.cpp src/modules/finance_service.cpp src/modules/quota.cpp src/modules/api_key.cpp src/modules/assistant_service.cpp src/modules/mortgage_assistant_service.cpp src/modules/inference_queue.cpp src/modules/inference_admission.cpp src/modules/sgee_queue_client.cpp)
+target_sources(calculator_engine PUBLIC FILE_SET CXX_MODULES FILES src/modules/calculator_service.cppm src/modules/market_data.cppm src/modules/finance_service.cppm src/modules/quota.cppm src/modules/api_key.cppm src/modules/strategy_catalogue.cppm src/modules/assistant_verification.cppm src/modules/assistant_service.cppm src/modules/mortgage_verification.cppm src/modules/mortgage_grammar.cppm src/modules/mortgage_assistant_service.cppm src/modules/pg.cppm src/modules/inference_queue.cppm src/modules/sgee_queue_client.cppm src/modules/inference_admission.cppm)
 target_link_libraries(calculator_engine PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto sgee)
 # PostgreSQL::PostgreSQL is linked into calculator_engine further down, right
 # after find_package(PostgreSQL REQUIRED) runs (see that comment block) --
@@ -1233,6 +1234,22 @@ target_compile_definitions(test_mortgage_grammar PRIVATE
 
 add_test(NAME MortgageGrammarTest COMMAND test_mortgage_grammar)
 
+# Formal Z3-backed automated reasoning for SGEE workflow graphs
+# (OptionsWorkflow, FinanceRequestLifecycle, StrategyAssistantWorkflow, MortgageAssistantWorkflow).
+# Encodes architectural invariants (action bindings, reachability, termination, error routing,
+# mortgage refusal isolation) as SMT-LIB2 formulas and discharges them via sensen GP-ARA Z3Reasoner.
+add_executable(test_sgee_automated_reasoning tests/test_sgee_automated_reasoning.cpp)
+target_sources(test_sgee_automated_reasoning
+    PRIVATE
+    FILE_SET CXX_MODULES FILES
+        sensen/src/gp_ara_interfaces.cppm
+)
+target_link_libraries(test_sgee_automated_reasoning PRIVATE sgee ${Z3_LIBRARY})
+target_compile_definitions(test_sgee_automated_reasoning PRIVATE SENSEN_HAS_Z3)
+target_include_directories(test_sgee_automated_reasoning PRIVATE /usr/include/z3)
+
+add_test(NAME SgeeAutomatedReasoningTest COMMAND test_sgee_automated_reasoning)
+
 # Option EXERCISE STYLE (European/American/Bermudan) and ASIAN option coverage
 # for the sensen.finance.Finance PriceOptionTree RPC, at the gRPC service
 # layer -- i.e. through options_calculator::finance::RegisterFinanceService on
@@ -1256,7 +1273,7 @@ target_sources(test_option_pricing_service
         src/modules/quota.cppm
         src/modules/api_key.cppm
 )
-target_link_libraries(test_option_pricing_service PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto)
+target_link_libraries(test_option_pricing_service PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto sgee)
 
 add_test(NAME OptionPricingServiceTest COMMAND test_option_pricing_service)
 
@@ -1279,7 +1296,7 @@ target_sources(test_finance_service_validation
         src/modules/quota.cppm
         src/modules/api_key.cppm
 )
-target_link_libraries(test_finance_service_validation PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto)
+target_link_libraries(test_finance_service_validation PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto sgee)
 
 add_test(NAME FinanceServiceValidationTest COMMAND test_finance_service_validation)
 
@@ -1391,6 +1408,87 @@ find_package(PostgreSQL REQUIRED)
 
 target_link_libraries(calculator_engine PRIVATE PostgreSQL::PostgreSQL)
 
+# ---------------------------------------------------------------------------
+# StrategyAssistant / MortgageAssistant SGEE-graph coverage.
+#
+# ParseStrategy and ParseOperation are now real SGEE workflow graphs (see the
+# "SGEE execution context and graph actions" banner in each .cpp) instead of a
+# chain of hand-rolled `if (...) return ...;` checks. Same shape as
+# test_calculator_service just above: a real in-process grpc::Server through a
+# real Stub, plus RegisterAssistantServiceForTest / RegisterMortgageAssistant
+# ServiceForTest for the discriminating section that proves interpreter.Run()'s
+# postconditions actually catch a partial action registry.
+#
+# Needs the same closure calculator_engine itself needs for these two files:
+# sensen_slim (LLMPipeline/cuda_backend), market_data (assistant only --
+# probe_symbol's live-quote check), quota/api_key (admission and the Pro
+# gate), strategy_catalogue (assistant only), assistant_verification (both --
+# shared prompt-injection/advice-request guards), mortgage_verification/
+# mortgage_grammar (mortgage only), and the inference_admission/inference_
+# queue/pg substrate both assistants sit on top of -- hence PostgreSQL::
+# PostgreSQL, linked here (after find_package(PostgreSQL) above) for the same
+# reason calculator_engine's own PostgreSQL link is deferred to this point
+# rather than its initial declaration.
+add_executable(test_assistant_service
+    tests/test_assistant_service.cpp
+    src/modules/assistant_service.cpp
+    src/modules/quota.cpp
+    src/modules/api_key.cpp
+    src/modules/inference_queue.cpp
+    src/modules/sgee_queue_client.cpp
+    src/modules/inference_admission.cpp
+)
+target_sources(test_assistant_service
+    PRIVATE
+    FILE_SET CXX_MODULES FILES
+        src/modules/assistant_service.cppm
+        src/modules/market_data.cppm
+        src/modules/quota.cppm
+        src/modules/api_key.cppm
+        src/modules/strategy_catalogue.cppm
+        src/modules/assistant_verification.cppm
+        src/modules/pg.cppm
+        src/modules/inference_queue.cppm
+        # inference_admission.cppm imports sgee_queue_client, so every target
+        # that compiles it needs the module in its OWN file set -- a C++23
+        # module is not a header and does not come along with the .cpp.
+        src/modules/sgee_queue_client.cppm
+        src/modules/inference_admission.cppm
+)
+target_link_libraries(test_assistant_service PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto sgee PostgreSQL::PostgreSQL)
+
+add_test(NAME AssistantServiceTest COMMAND test_assistant_service)
+
+add_executable(test_mortgage_assistant_service
+    tests/test_mortgage_assistant_service.cpp
+    src/modules/mortgage_assistant_service.cpp
+    src/modules/quota.cpp
+    src/modules/api_key.cpp
+    src/modules/inference_queue.cpp
+    src/modules/sgee_queue_client.cpp
+    src/modules/inference_admission.cpp
+)
+target_sources(test_mortgage_assistant_service
+    PRIVATE
+    FILE_SET CXX_MODULES FILES
+        src/modules/mortgage_assistant_service.cppm
+        src/modules/mortgage_verification.cppm
+        src/modules/mortgage_grammar.cppm
+        src/modules/strategy_catalogue.cppm
+        src/modules/assistant_verification.cppm
+        src/modules/quota.cppm
+        src/modules/api_key.cppm
+        src/modules/pg.cppm
+        src/modules/inference_queue.cppm
+        # See test_assistant_service above: inference_admission.cppm's import of
+        # sgee_queue_client must be satisfied per target.
+        src/modules/sgee_queue_client.cppm
+        src/modules/inference_admission.cppm
+)
+target_link_libraries(test_mortgage_assistant_service PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto sgee PostgreSQL::PostgreSQL)
+
+add_test(NAME MortgageAssistantServiceTest COMMAND test_mortgage_assistant_service)
+
 # sgee (not sensen_slim) for the same reason test_market_data_resilience links
 # it above: the only sensen-family module this needs is
 # sgee.runtime.resilience::CircuitBreaker, which is part of the standalone
@@ -1427,12 +1525,26 @@ target_sources(test_inference_admission
     FILE_SET CXX_MODULES FILES
         src/modules/pg.cppm
         src/modules/inference_queue.cppm
+        src/modules/sgee_queue_client.cppm
         src/modules/inference_admission.cppm
 )
-target_sources(test_inference_admission PRIVATE src/modules/inference_queue.cpp src/modules/inference_admission.cpp)
+target_sources(test_inference_admission PRIVATE src/modules/inference_queue.cpp src/modules/sgee_queue_client.cpp src/modules/inference_admission.cpp)
 target_link_libraries(test_inference_admission PRIVATE PostgreSQL::PostgreSQL fastjson logger sgee)
 
 add_test(NAME InferenceAdmissionTest COMMAND test_inference_admission)
+
+add_executable(test_sgee_queue_client
+    tests/test_sgee_queue_client.cpp
+)
+target_sources(test_sgee_queue_client
+    PRIVATE
+    FILE_SET CXX_MODULES FILES
+        src/modules/sgee_queue_client.cppm
+)
+target_sources(test_sgee_queue_client PRIVATE src/modules/sgee_queue_client.cpp)
+target_link_libraries(test_sgee_queue_client PRIVATE logger sgee)
+
+add_test(NAME SgeeQueueClientTest COMMAND test_sgee_queue_client)
 
 # The Postgres-backed half of the admission layer: PostgresLeaseSource and
 # PostgresAdmission, exercised through two separate process-local Queue/Pool
@@ -1447,6 +1559,7 @@ add_test(NAME InferenceAdmissionTest COMMAND test_inference_admission)
 add_executable(test_inference_admission_pg
     tests/test_inference_admission_pg.cpp
     src/modules/inference_queue.cpp
+    src/modules/sgee_queue_client.cpp
     src/modules/inference_admission.cpp
 )
 target_sources(test_inference_admission_pg
@@ -1454,6 +1567,7 @@ target_sources(test_inference_admission_pg
     FILE_SET CXX_MODULES FILES
         src/modules/pg.cppm
         src/modules/inference_queue.cppm
+        src/modules/sgee_queue_client.cppm
         src/modules/inference_admission.cppm
 )
 target_link_libraries(test_inference_admission_pg PRIVATE PostgreSQL::PostgreSQL fastjson logger sgee)
