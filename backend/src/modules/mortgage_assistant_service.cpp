@@ -11,6 +11,7 @@ module;
 #include <cstdlib>
 #include <deque>
 #include <exception>
+#include <expected>
 #include <future>
 #include <limits>
 #include <memory>
@@ -50,6 +51,19 @@ import mortgage_grammar;
 import inference_admission;
 import inference_queue;
 import pg;
+
+// SGEE: ParseOperation's entitlement/model-availability/generate/verdict
+// sequence is expressed as a real workflow graph -- see assistant_service.cpp's
+// identical import-block comment (studied together with calculator_service.cpp
+// before writing this) for the GetActionId trap this file's own binding below
+// avoids by the same discipline: bind by graph_->GetActionId(name), never by
+// name.
+import sgee.builder.fluent;
+import sgee.runtime.context;
+import sgee.runtime.interpreter;
+import sgee.runtime.action_registry;
+import sgee.core.blueprint;
+import sgee.core.types;
 
 // ============================================================================
 // The mortgage / time-value-of-money assistant.
@@ -381,7 +395,7 @@ class SensenBackend final : public QueuedBackend {
         }
 
         return std::unique_ptr<SensenBackend>(
-            new SensenBackend(std::move(pipeline), max_concurrent, queue_depth, device));
+            new SensenBackend(std::move(pipeline), max_concurrent, queue_depth, device));  // NOLINT(cppcoreguidelines-owning-memory) -- the allocation is owned by the std::unique_ptr constructed on the previous line; the private constructor is why make_unique cannot be used here.
     }
 
     [[nodiscard]] auto name() const noexcept -> std::string_view override { return "sensen"; }
@@ -1792,6 +1806,20 @@ auto populate_clarification(::mortgage::assistant::ParseResponse& response, std:
     response.mutable_clarification()->set_question(std::move(question));
 }
 
+/**
+ * The graph-visible verdict of turning the model's raw text into a response.
+ * Mirrors assistant_service.cpp's identical type: two values, not one per
+ * Refusal::Reason, because the graph only needs to know which edge to take
+ * out of the ParseAndVerify node -- the specific reason (including, when it
+ * applies, the mortgage_verification tri-state's own Unsafe/Indeterminate
+ * split) is still fully preserved in `response.refusal()` either way. See
+ * MortgageAssistantImpl's constructor for where this drives real interpreter
+ * routing: `Refused` is what makes "Proven is the ONLY path to a
+ * FinanceParams; Unsafe and Indeterminate must refuse" a graph edge rather
+ * than only an in-function early return.
+ */
+enum class ModelOutputOutcome : std::uint8_t { Success, Refused };
+
 // ---------------------------------------------------------------------------
 // GP-ARA mandatory verification stage
 // ---------------------------------------------------------------------------
@@ -2133,19 +2161,20 @@ namespace mv = ::mortgage_calculator::assistant::verify;
  * this is the first point in the pipeline where both exist at once.
  */
 auto validate_and_populate_params(std::string_view json_text, std::string_view user_text,
-                                  ::mortgage::assistant::ParseResponse& response) -> void {
+                                  ::mortgage::assistant::ParseResponse& response)
+    -> ModelOutputOutcome {
     auto parsed = fastjson::parse(json_text);
     if (!parsed.has_value() || !parsed->is_object()) {
         populate_refusal(response, ::mortgage::assistant::Refusal::INVALID_PARAMETERS,
                          "The assistant's structured output could not be parsed as a JSON object.");
-        return;
+        return ModelOutputOutcome::Refused;
     }
     const auto& obj = parsed.value();
 
     if (!obj.contains("operation") || !obj["operation"].is_string()) {
         populate_refusal(response, ::mortgage::assistant::Refusal::UNSUPPORTED_OPERATION,
                          "The assistant did not name a calculation for this request.");
-        return;
+        return ModelOutputOutcome::Refused;
     }
     const std::string operation{obj["operation"].as_string()};
     const Operation* op = find_operation(operation);
@@ -2160,7 +2189,7 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
         populate_refusal(response, ::mortgage::assistant::Refusal::UNSUPPORTED_OPERATION,
                          "\"" + operation +
                              "\" is not one of the finance operations this assistant covers.");
-        return;
+        return ModelOutputOutcome::Refused;
     }
 
     // (4) -- reject unknown keys BEFORE filling anything in, so a response
@@ -2172,7 +2201,7 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
             populate_refusal(response, ::mortgage::assistant::Refusal::INVALID_PARAMETERS,
                              "\"" + key + "\" is not a parameter of " + operation + " (" +
                                  std::string{op->request_message} + ").");
-            return;
+            return ModelOutputOutcome::Refused;
         }
     }
 
@@ -2194,14 +2223,14 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
                              "The assistant left out \"" + key + "\", which " + operation +
                                  " needs. Filling it in with a default would compute an exact "
                                  "answer to a question nobody asked.");
-            return;
+            return ModelOutputOutcome::Refused;
         }
         std::string encoded;
         if (const auto problem = validate_and_encode(field, obj[key], encoded);
             problem.has_value()) {
             populate_refusal(response, ::mortgage::assistant::Refusal::INVALID_PARAMETERS,
                              "The assistant's " + *problem + ".");
-            return;
+            return ModelOutputOutcome::Refused;
         }
         const bool repeated =
             field.kind == Kind::RepeatedDouble || field.kind == Kind::RepeatedInt;
@@ -2254,10 +2283,11 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
                              ? "The assistant's parameters could not be verified against your "
                                "request."
                              : verdict.message);
-        return;
+        return ModelOutputOutcome::Refused;
     }
 
     *response.mutable_params() = std::move(params);
+    return ModelOutputOutcome::Success;
 }
 
 // ---------------------------------------------------------------------------
@@ -2310,7 +2340,7 @@ constexpr std::array<std::string_view, 16> kMortgageAdviceSignals{{
 
 auto interpret_model_output(const std::string& raw_text, std::string_view utterance,
                             std::string_view prior_clarification,
-                            ::mortgage::assistant::ParseResponse& response) -> void {
+                            ::mortgage::assistant::ParseResponse& response) -> ModelOutputOutcome {
     // LOG THE RAW OUTPUT FIRST, BEFORE ANY VERIFICATION RUNS.
     //
     // The model's raw output is otherwise invisible: nothing else logs it and
@@ -2330,9 +2360,8 @@ auto interpret_model_output(const std::string& raw_text, std::string_view uttera
         // The utterance travels with the params block from here down. It is the
         // ONLY object that can falsify a structurally perfect answer, so the
         // params path is the one path that must never be walked without it.
-        validate_and_populate_params(trim(*block),
-                                     grounding_text(utterance, prior_clarification), response);
-        return;
+        return validate_and_populate_params(trim(*block),
+                                            grounding_text(utterance, prior_clarification), response);
     }
 
     // NO PARAMS BLOCK IS NOT ROUTED THROUGH THE VERIFIER, DELIBERATELY.
@@ -2357,9 +2386,10 @@ auto interpret_model_output(const std::string& raw_text, std::string_view uttera
         populate_refusal(response, ::mortgage::assistant::Refusal::OUT_OF_SCOPE,
                          "The assistant could not produce structured parameters or a short "
                          "clarifying question for this request.");
-        return;
+        return ModelOutputOutcome::Refused;
     }
     populate_clarification(response, question);
+    return ModelOutputOutcome::Success;
 }
 
 // ---------------------------------------------------------------------------
@@ -2380,140 +2410,323 @@ auto interpret_model_output(const std::string& raw_text, std::string_view uttera
  * one and not the other is not a distinction anyone has asked to draw. Splitting
  * the scope later is a deliberate change with a migration, not a default.
  */
-#define CHARGE(method_name, cost)                                                    \
-    ::options_calculator::auth::Identity _id;                                        \
-    do {                                                                             \
-        if (auto _a = ::options_calculator::auth::KeyRegistry::instance().authenticate( \
-                *context, "assistant", (method_name), _id);                          \
-            !_a.ok()) {                                                              \
-            return _a;                                                               \
-        }                                                                            \
-        ::options_calculator::quota::TierLimits _lim{_id.requests_per_minute,          \
-                                                    _id.compute_units_per_hour};      \
-        if (auto _q = ::options_calculator::quota::QuotaEnforcer::instance().admit_identity( \
-                _id.id, _id.tier, (method_name), (cost), _id.has_limits ? &_lim : nullptr); \
-            !_q.ok()) {                                                              \
-            return _q;                                                               \
-        }                                                                            \
-    } while (false)
+// ---------------------------------------------------------------------------
+// SGEE execution context and graph actions
+//
+// ParseOperation is now a real SGEE workflow graph, mirroring
+// assistant_service.cpp's StrategyAssistantWorkflow node-for-node (Admission
+// -> CheckModel -> Generate -> ParseAndVerify -> Done, with every node's
+// OnError routed to a shared Refused terminal) -- see that file's own banner
+// comment for the full rationale, which applies here unchanged.
+//
+// The one thing genuinely specific to THIS graph: `ParseAndVerify`'s OnError
+// edge is what makes "Proven is the ONLY path to a FinanceParams; Unsafe and
+// Indeterminate must refuse" (CLAUDE.md's own framing of this service's
+// central invariant) a real, provable interpreter transition rather than
+// only an early return inside validate_and_populate_params. That function's
+// tri-state handling (mv::Outcome::Proven/Unsafe/Indeterminate) is otherwise
+// untouched -- it now RETURNS ModelOutputOutcome::Refused for the latter two
+// (and every other structural refusal) instead of silently falling through,
+// which is what lets action_parse_and_verify's `return
+// std::unexpected(...)` -- and therefore the graph's OnError("Refused") edge
+// -- actually fire on that specific verdict.
+// ---------------------------------------------------------------------------
+
+struct MortgageCtx {
+    std::string utterance;
+    std::string prior_clarification;
+
+    // Non-owning; safe for the same reason AssistantCtx::context is in
+    // assistant_service.cpp -- this graph runs synchronously, entirely
+    // within ParseOperation's own stack frame.
+    grpc::ServerContext* context = nullptr;
+
+    ::mortgage::assistant::ParseResponse response;
+    grpc::Status status{grpc::Status::OK};
+    ::options_calculator::auth::Identity identity;
+    std::string model_text;
+};
+using Ctx = std::shared_ptr<MortgageCtx>;
+using ActionRegistry = sgee::runtime::ActionRegistry<Ctx>;
+
+using sgee::ExecutionResult;
+
+/** The four action names the MortgageAssistantWorkflow graph defines, in
+ * graph order. See assistant_service.cpp's kAllActionNames for why this is
+ * shared between the production and test-only constructors. */
+inline constexpr std::array<std::string_view, 4> kAllActionNames{
+    "Admission", "CheckModel", "Generate", "ParseAndVerify"};
+
+/** Authenticate, charge, bound-check, and gate. Manually inlines what the
+ * removed CHARGE macro did, for the same reason assistant_service.cpp's
+ * action_admission does: a macro built around `return` cannot early-exit an
+ * RPC from inside a graph action. */
+[[nodiscard]] auto action_admission(Ctx& ctx) -> ExecutionResult<> {
+    if (auto s = ::options_calculator::auth::KeyRegistry::instance().authenticate(
+            *ctx->context, "assistant", "ParseOperation", ctx->identity);
+        !s.ok()) {
+        ctx->status = s;
+        return std::unexpected(sgee::ExecutionError::ActionFailed);
+    }
+    ::options_calculator::quota::TierLimits lim{ctx->identity.requests_per_minute,
+                                                ctx->identity.compute_units_per_hour};
+    if (auto q = ::options_calculator::quota::QuotaEnforcer::instance().admit_identity(
+            ctx->identity.id, ctx->identity.tier, "ParseOperation",
+            ::options_calculator::quota::cost_llm_generate(1, static_cast<int>(kMaxNewTokens)),
+            ctx->identity.has_limits ? &lim : nullptr);
+        !q.ok()) {
+        ctx->status = q;
+        return std::unexpected(sgee::ExecutionError::ActionFailed);
+    }
+
+    if (ctx->utterance.size() > kMaxUtteranceLength) {
+        ctx->status = grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                                   "utterance exceeds the " + std::to_string(kMaxUtteranceLength) +
+                                       "-character limit for this RPC.");
+        return std::unexpected(sgee::ExecutionError::ActionFailed);
+    }
+    if (ctx->prior_clarification.size() > kMaxPriorClarificationLength) {
+        ctx->status = grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                                   "prior_clarification exceeds the " +
+                                       std::to_string(kMaxPriorClarificationLength) +
+                                       "-character limit for this RPC.");
+        return std::unexpected(sgee::ExecutionError::ActionFailed);
+    }
+
+    if (::options_calculator::assistant::verify::looks_like_prompt_injection(ctx->utterance) ||
+        ::options_calculator::assistant::verify::looks_like_prompt_injection(
+            ctx->prior_clarification)) {
+        populate_refusal(
+            ctx->response, ::mortgage::assistant::Refusal::OUT_OF_SCOPE,
+            "This reads like an instruction to the assistant rather than a calculation. "
+            "Describe the numbers you want worked out (e.g. \"$420,000 at 6.25% over 30 "
+            "years\") without instructions aimed at the assistant itself.");
+        return std::unexpected(sgee::ExecutionError::ActionFailed);
+    }
+    if (::options_calculator::assistant::verify::looks_like_advice_request(ctx->utterance) ||
+        looks_like_domain_advice_request(ctx->utterance)) {
+        populate_refusal(
+            ctx->response, ::mortgage::assistant::Refusal::OUT_OF_SCOPE,
+            "I don't give financial, tax or legal advice -- describe a specific calculation "
+            "(e.g. \"what would a $420,000 loan at 6.25% over 30 years cost per month\") and "
+            "I will work it out.");
+        return std::unexpected(sgee::ExecutionError::ActionFailed);
+    }
+
+    // The Pro gate, server-side and before any inference work.
+    // `check_assistant_entitlement` is shared with the strategy assistant
+    // deliberately -- see this function's removed CHARGE macro's own former
+    // doc comment (now folded into this file's SGEE banner above) for why.
+    if (auto s = ::options_calculator::auth::check_assistant_entitlement(
+            ctx->identity, ::options_calculator::auth::kMortgageSurface);
+        !s.ok()) {
+        ctx->status = s;
+        return std::unexpected(sgee::ExecutionError::ActionFailed);
+    }
+    return {};
+}
+
+/** Model-availability gate -- mirrors assistant_service.cpp's
+ * action_check_model exactly, against MortgageAssistantWorker instead. */
+[[nodiscard]] auto action_check_model(Ctx& ctx) -> ExecutionResult<> {
+    if (!MortgageAssistantWorker::instance().available()) {
+        populate_refusal(ctx->response, ::mortgage::assistant::Refusal::MODEL_UNAVAILABLE,
+                         "The mortgage assistant is not available right now.");
+        return std::unexpected(sgee::ExecutionError::ActionFailed);
+    }
+    return {};
+}
+
+/** Builds the prompt and submits it to the worker -- mirrors
+ * assistant_service.cpp's action_generate exactly. */
+[[nodiscard]] auto action_generate(Ctx& ctx) -> ExecutionResult<> {
+    const std::string prompt = build_prompt(ctx->utterance, ctx->prior_clarification);
+
+    auto outcome = MortgageAssistantWorker::instance().submit(prompt);
+    if (!outcome.has_value()) {
+        ctx->status = grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED,
+                                   "The mortgage assistant is at capacity; please retry shortly.");
+        return std::unexpected(sgee::ExecutionError::ActionFailed);
+    }
+    if (!outcome->ok) {
+        populate_refusal(ctx->response, ::mortgage::assistant::Refusal::MODEL_UNAVAILABLE,
+                         "The mortgage assistant failed to produce a response: " + outcome->error);
+        return std::unexpected(sgee::ExecutionError::ActionFailed);
+    }
+    ctx->model_text = std::move(outcome->text);
+    return {};
+}
+
+/**
+ * Parse the model's raw text, run the mandatory GP-ARA / mortgage_verification
+ * gate, and populate the final response. interpret_model_output (and, inside
+ * it, validate_and_populate_params) is untouched in substance -- same
+ * messages, same field checks, same verify_mortgage_output call -- and now
+ * RETURNS the Success/Refused verdict so this node's OnError edge can fire on
+ * it, exactly as assistant_service.cpp's action_parse_and_verify does.
+ */
+[[nodiscard]] auto action_parse_and_verify(Ctx& ctx) -> ExecutionResult<> {
+    const auto outcome =
+        interpret_model_output(ctx->model_text, ctx->utterance, ctx->prior_clarification, ctx->response);
+    if (outcome == ModelOutputOutcome::Refused) {
+        return std::unexpected(sgee::ExecutionError::ActionFailed);
+    }
+    return {};
+}
 
 // ---------------------------------------------------------------------------
 // Service
 // ---------------------------------------------------------------------------
 
 class MortgageAssistantImpl final : public ::mortgage::assistant::MortgageAssistant::Service {
+  private:
+    std::shared_ptr<ActionRegistry> actions_;
+    std::shared_ptr<const sgee::GraphBlueprint> graph_;
+    std::uint16_t done_node_id_{0};
+    std::uint16_t refused_node_id_{0};
+
   public:
+    /** `bound_action_names` defaults to every action the graph defines -- see
+     * assistant_service.cpp's StrategyAssistantImpl constructor, studied
+     * before writing this, for the full rationale and the GetActionId trap
+     * it avoids. */
+    explicit MortgageAssistantImpl(
+        std::span<const std::string_view> bound_action_names = kAllActionNames)
+        : actions_{std::make_shared<ActionRegistry>()} {
+        auto& log = logger::Logger::getInstance();
+
+        auto graph_result = sgee::Builder<Ctx>("MortgageAssistantWorkflow")
+            .Node("Admission")
+                .Execute("Admission")
+                .Next("CheckModel")
+                .OnError("Refused")
+            .Node("CheckModel")
+                .Execute("CheckModel")
+                .Next("Generate")
+                .OnError("Refused")
+            .Node("Generate")
+                .Execute("Generate")
+                .Next("ParseAndVerify")
+                .OnError("Refused")
+            .Node("ParseAndVerify")
+                .Execute("ParseAndVerify")
+                .Next("Done")
+                .OnError("Refused")
+            .Node("Done")
+                .IsTerminal()
+            .Node("Refused")
+                .IsTerminal()
+            .Build();
+
+        if (!graph_result) {
+            log.error("Failed to build SGEE graph: {}", graph_result.error());
+            return;
+        }
+        graph_ = graph_result.value();
+        done_node_id_ = graph_->GetNodeId("Done");
+        refused_node_id_ = graph_->GetNodeId("Refused");
+
+        // Bind each action by the ID the builder assigned, NEVER by name --
+        // see this file's own import-block comment for the GetActionId trap.
+        const std::array<std::pair<std::string_view, ActionRegistry::ActionFunction>, 4> bindings{{
+            {"Admission", action_admission},
+            {"CheckModel", action_check_model},
+            {"Generate", action_generate},
+            {"ParseAndVerify", action_parse_and_verify},
+        }};
+
+        const auto is_bound = [&](std::string_view name) {
+            return std::ranges::find(bound_action_names, name) != bound_action_names.end();
+        };
+
+        for (const auto& [name, fn] : bindings) {
+            if (!is_bound(name)) {
+                log.warn("Action '{}' intentionally left unbound (test configuration); "
+                         "any entity reaching its node will halt without a status",
+                         name);
+                continue;
+            }
+            const auto id = graph_->GetActionId(name);
+            if (!id) {
+                log.error("Action '{}' is not present in the graph; refusing to start", name);
+                graph_.reset();
+                return;
+            }
+            actions_->RegisterById(*id, fn);
+        }
+
+        log.info("SGEE graph initialized: {} registered actions for the mortgage assistant",
+                 bindings.size());
+    }
+
+    ~MortgageAssistantImpl() override = default;
+
     auto ParseOperation(ServerContext* context,
                         const ::mortgage::assistant::ParseRequest* request,
                         ::mortgage::assistant::ParseResponse* response) -> Status override {
         if (context == nullptr || request == nullptr || response == nullptr) {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
-
-        // CHARGE at the top, before any inference work, per quota.cppm's own
-        // rationale: a refused call should cost a hash lookup, not a
-        // generation. `cost_llm_generate` prices this call from the same
-        // kMaxNewTokens bound the worker actually generates with, so the price
-        // and the real worst case never drift apart.
-        CHARGE("ParseOperation",
-               ::options_calculator::quota::cost_llm_generate(1, static_cast<int>(kMaxNewTokens)));
-
-        // Bound the two caller-controlled prompt inputs BEFORE they are
-        // concatenated into a prompt or reach the worker. This is
-        // request-shape validation -- the request itself is malformed,
-        // independent of whether the calculation it describes makes sense -- so
-        // it is INVALID_ARGUMENT, not a Refusal.
-        if (request->utterance().size() > kMaxUtteranceLength) {
-            return Status(grpc::StatusCode::INVALID_ARGUMENT,
-                          "utterance exceeds the " + std::to_string(kMaxUtteranceLength) +
-                              "-character limit for this RPC.");
-        }
-        if (request->prior_clarification().size() > kMaxPriorClarificationLength) {
-            return Status(grpc::StatusCode::INVALID_ARGUMENT,
-                          "prior_clarification exceeds the " +
-                              std::to_string(kMaxPriorClarificationLength) +
-                              "-character limit for this RPC.");
+        if (!graph_) {
+            return Status(grpc::StatusCode::INTERNAL, "Execution graph not initialized");
         }
 
-        // Two input-side guards, run BEFORE the model is ever asked to
-        // generate. No check on the model's OUTPUT can substitute: both shapes
-        // below can produce a structurally perfect `<params>` block that every
-        // rule in `validate_and_populate_params` accepts, because that
-        // validator only ever sees the final parameters, never the utterance
-        // that produced them. Checked on `utterance` AND `prior_clarification`,
-        // because `build_prompt` feeds both to the model verbatim and a
-        // second-turn reply carries either signal just as well as a first-turn
-        // request.
-        if (::options_calculator::assistant::verify::looks_like_prompt_injection(
-                request->utterance()) ||
-            ::options_calculator::assistant::verify::looks_like_prompt_injection(
-                request->prior_clarification())) {
-            populate_refusal(
-                *response, ::mortgage::assistant::Refusal::OUT_OF_SCOPE,
-                "This reads like an instruction to the assistant rather than a calculation. "
-                "Describe the numbers you want worked out (e.g. \"$420,000 at 6.25% over 30 "
-                "years\") without instructions aimed at the assistant itself.");
-            return Status::OK;
-        }
-        if (::options_calculator::assistant::verify::looks_like_advice_request(
-                request->utterance()) ||
-            looks_like_domain_advice_request(request->utterance())) {
-            populate_refusal(
-                *response, ::mortgage::assistant::Refusal::OUT_OF_SCOPE,
-                "I don't give financial, tax or legal advice -- describe a specific calculation "
-                "(e.g. \"what would a $420,000 loan at 6.25% over 30 years cost per month\") and "
-                "I will work it out.");
-            return Status::OK;
-        }
+        auto ctx = std::make_shared<MortgageCtx>();
+        ctx->utterance = request->utterance();
+        ctx->prior_clarification = request->prior_clarification();
+        ctx->context = context;
 
-        // The Pro gate, server-side and before any inference work. `_id` is the
-        // identity CHARGE already resolved, so authentication runs exactly once
-        // per call. `check_assistant_entitlement` is shared with the strategy
-        // assistant deliberately: its rationale is cost asymmetry -- one
-        // `cost_llm_generate` call against the shared anonymous budget -- which
-        // is a property of running a 0.6B model at all, not of which model it
-        // is, and this RPC has exactly the same profile.
-        if (auto s = ::options_calculator::auth::check_assistant_entitlement(
-                _id, ::options_calculator::auth::kMortgageSurface); !s.ok()) {
-            return s;
+        sgee::runtime::EngineContext<Ctx> engine;
+        std::vector<Ctx> entities{ctx};
+        engine.Load(entities);
+
+        sgee::runtime::Interpreter<Ctx> interpreter(
+            graph_, sgee::runtime::ParallelismLevel::Sequential, actions_.get());
+        interpreter.Run(engine);
+
+        // --- Postconditions -- see assistant_service.cpp's ParseStrategy
+        // for the identical shape and rationale. ---
+        const auto& state_ids = engine.GetStateIds();
+        const bool reached_terminal = !state_ids.empty() &&
+            (state_ids[0] == done_node_id_ || state_ids[0] == refused_node_id_);
+        if (!reached_terminal) {
+            const std::string stalled_at =
+                state_ids.empty() ? std::string{"<no entity>"}
+                                  : std::string{graph_->GetNodeName(state_ids[0])};
+            logger::Logger::getInstance().error(
+                "ParseOperation: graph halted at '{}' instead of reaching Done or Refused -- an "
+                "action failed without setting status, an action id was not registered, or the "
+                "action registry was never wired up",
+                stalled_at);
+            return Status(grpc::StatusCode::INTERNAL,
+                          "Mortgage-assistant parse halted before completion (stalled at '" +
+                              stalled_at +
+                              "'); this is a server-side defect, not a problem with the request");
         }
 
-        auto& worker = MortgageAssistantWorker::instance();
-        if (!worker.available()) {
-            // Degrade honestly: MORTGAGE_MODEL_PATH was never set, or the model
-            // failed to load at startup. Genuine infrastructure unavailability,
-            // but per the proto's own MODEL_UNAVAILABLE doc comment it is
-            // expressed as a successful RPC carrying that reason rather than a
-            // gRPC error -- the RPC to THIS service completed correctly.
-            populate_refusal(*response, ::mortgage::assistant::Refusal::MODEL_UNAVAILABLE,
-                             "The mortgage assistant is not available right now.");
-            return Status::OK;
+        // DID-COMPUTE -- see assistant_service.cpp's ParseStrategy for why
+        // this is necessary, not merely thorough: every node's OnError target
+        // is "Refused", the SAME edge an UNREGISTERED action id takes
+        // (action_registry.cppm's Execute() returns ActionFailed identically
+        // for a miss and a real failure), so an unbound action would
+        // otherwise land on a valid-looking terminal having never run.
+        const bool refused_is_real =
+            state_ids[0] != refused_node_id_ || !ctx->status.ok() || ctx->response.has_refusal();
+        const bool done_is_real = state_ids[0] != done_node_id_ ||
+            ctx->response.has_params() || ctx->response.has_clarification();
+        if (!refused_is_real || !done_is_real) {
+            logger::Logger::getInstance().error(
+                "ParseOperation: graph reached '{}' but produced no payload -- an action id "
+                "landed on this terminal via its OnError edge without ever running",
+                std::string{graph_->GetNodeName(state_ids[0])});
+            return Status(grpc::StatusCode::INTERNAL,
+                          "Mortgage-assistant parse reached completion without producing a "
+                          "params, clarification, or refusal payload; this is a server-side "
+                          "defect, not a problem with the request");
         }
 
-        const std::string prompt =
-            build_prompt(request->utterance(), request->prior_clarification());
-
-        auto outcome = worker.submit(prompt);
-        if (!outcome.has_value()) {
-            // The ONE case that is a genuine gRPC error rather than a Refusal:
-            // the bounded queue was already full. Immediate -- submit() never
-            // waited to make room.
-            return Status(grpc::StatusCode::RESOURCE_EXHAUSTED,
-                          "The mortgage assistant is at capacity; please retry shortly.");
-        }
-
-        if (!outcome->ok) {
-            // The backend accepted the job but failed to complete it. Same
-            // reasoning as the unavailable-at-startup case: the RPC to THIS
-            // service completed correctly, so this is a Refusal.
-            populate_refusal(*response, ::mortgage::assistant::Refusal::MODEL_UNAVAILABLE,
-                             "The mortgage assistant failed to produce a response: " +
-                                 outcome->error);
-            return Status::OK;
-        }
-
-        interpret_model_output(outcome->text, request->utterance(), request->prior_clarification(),
-                               *response);
+        if (!ctx->status.ok()) return ctx->status;
+        *response = ctx->response;
         return Status::OK;
     }
 };
@@ -2542,6 +2755,18 @@ auto RegisterMortgageAssistantService(grpc::ServerBuilder& builder) -> void {
                                               : "UNAVAILABLE (set MORTGAGE_MODEL_PATH to enable)");
 }
 
-#undef CHARGE
+auto RegisterMortgageAssistantServiceForTest(grpc::ServerBuilder& builder,
+                                             std::span<const std::string_view> bound_action_names)
+    -> void {
+    // Deliberately leaked, WITHOUT `static` -- see RegisterAssistantServiceForTest
+    // (assistant_service.cpp) and calculator_service.cpp's RegisterCalculatorServiceForTest
+    // for the exact trap this avoids: a function-local static here would fix
+    // the bound action set at the FIRST call for the rest of the process, so
+    // this test binary's own section 5 (control, full action set) would
+    // silently reuse section 4's broken (missing-action) instance instead of
+    // a fresh one -- which is exactly the failure this fix was caught by.
+    auto* service = new MortgageAssistantImpl(bound_action_names);  // NOLINT(cppcoreguidelines-owning-memory) -- see comment above: gRPC's RegisterService does NOT take ownership and the service must outlive the server, while a function-local static would freeze the bound action set at the first call and break the discriminating tests that register different action subsets in one binary.
+    builder.RegisterService(service);
+}
 
 }  // namespace options_calculator::mortgage_assistant

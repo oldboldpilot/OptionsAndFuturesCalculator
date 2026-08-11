@@ -10,6 +10,7 @@ module;
 #include <cstdio>
 #include <deque>
 #include <exception>
+#include <expected>
 #include <future>
 #include <limits>
 #include <memory>
@@ -59,6 +60,23 @@ import assistant_verification;
 import inference_admission;
 import inference_queue;
 import pg;
+
+// SGEE: ParseStrategy's admission/model-availability/generate/parse-and-verify
+// sequence is expressed as a real workflow graph rather than a chain of
+// hand-rolled `if (...) return ...;` checks -- see calculator_service.cpp's
+// OptionsWorkflow (studied before writing this) for the sibling shape and,
+// critically, for the GetActionId trap documented at its "Bind each action by
+// the ID the builder assigned, not by name" comment: ActionRegistry::Register
+// hashes the name while Builder::Execute assigns sequential IDs from its own
+// table, and the two schemes never agree, so an action bound by name compiles
+// and runs while silently never executing. This file's own binding below
+// follows the same GetActionId()-only discipline for exactly that reason.
+import sgee.builder.fluent;
+import sgee.runtime.context;
+import sgee.runtime.interpreter;
+import sgee.runtime.action_registry;
+import sgee.core.blueprint;
+import sgee.core.types;
 
 namespace options_calculator::assistant {
 
@@ -397,7 +415,7 @@ class SensenBackend final : public QueuedBackend {
         }
 
         return std::unique_ptr<SensenBackend>(
-            new SensenBackend(std::move(pipeline), max_concurrent, queue_depth, device));
+            new SensenBackend(std::move(pipeline), max_concurrent, queue_depth, device));  // NOLINT(cppcoreguidelines-owning-memory) -- the allocation is owned by the std::unique_ptr constructed on the previous line; the private constructor is why make_unique cannot be used here.
     }
 
     [[nodiscard]] auto name() const noexcept -> std::string_view override { return "sensen"; }
@@ -1061,7 +1079,7 @@ class LlamaCppBackend final : public QueuedBackend {
         }
 
         return std::unique_ptr<LlamaCppBackend>(
-            new LlamaCppBackend(model, ctx, max_concurrent, queue_depth, n_ctx_per_seq));
+            new LlamaCppBackend(model, ctx, max_concurrent, queue_depth, n_ctx_per_seq));  // NOLINT(cppcoreguidelines-owning-memory) -- the allocation is owned by the std::unique_ptr constructed on the previous line; the private constructor is why make_unique cannot be used here.
     }
 
     [[nodiscard]] auto name() const noexcept -> std::string_view override { return "llamacpp"; }
@@ -1844,6 +1862,25 @@ auto populate_clarification(calculator::assistant::ParseResponse& response, std:
     response.mutable_clarification()->set_question(std::move(question));
 }
 
+/**
+ * The graph-visible verdict of turning the model's raw text into a response:
+ * did the RPC end up with something other than a refusal (a `<params>` block
+ * that survived every check including the mandatory GP-ARA gate, OR a short
+ * clarifying question -- both are documented-OK outcomes per assistant.proto's
+ * own file banner), or a refusal (for any of the many reasons validate_and_
+ * populate_params/interpret_model_output can produce one, including but not
+ * limited to a bad ticker, an unsupported strategy, or a live-quote miss)?
+ *
+ * This is deliberately coarse -- two values, not one per Refusal::Reason --
+ * because the graph only needs to know WHICH EDGE to take out of the
+ * ParseAndVerify node (Next("Done") vs OnError("Refused")); the specific
+ * reason is still fully preserved in `response.refusal().reason()` either
+ * way, exactly as it always was. See StrategyAssistantImpl's constructor for
+ * where this drives real interpreter routing rather than staying a
+ * documentation-only distinction.
+ */
+enum class ModelOutputOutcome : std::uint8_t { Success, Refused };
+
 // ---------------------------------------------------------------------------
 // GP-ARA mandatory verification stage
 // ---------------------------------------------------------------------------
@@ -2126,43 +2163,44 @@ enum class SymbolProbeOutcome { Resolved, Unknown, AssetClassMismatch, ProviderU
  */
 auto validate_and_populate_params(std::string_view json_text, std::string_view utterance,
                                    std::string_view prior_clarification,
-                                   calculator::assistant::ParseResponse& response) -> void {
+                                   calculator::assistant::ParseResponse& response)
+    -> ModelOutputOutcome {
     auto parsed = fastjson::parse(json_text);
     if (!parsed.has_value() || !parsed->is_object()) {
         populate_refusal(response, calculator::assistant::Refusal::OUT_OF_SCOPE,
                          "The assistant's structured output could not be parsed as a JSON object.");
-        return;
+        return ModelOutputOutcome::Refused;
     }
     const auto& obj = parsed.value();
 
     if (!obj.contains("symbol") || !obj["symbol"].is_string()) {
         populate_refusal(response, calculator::assistant::Refusal::UNKNOWN_SYMBOL,
                          "The assistant did not name a symbol for this request.");
-        return;
+        return ModelOutputOutcome::Refused;
     }
     const std::string symbol{obj["symbol"].as_string()};
     if (!looks_like_a_ticker(symbol)) {
         populate_refusal(response, calculator::assistant::Refusal::UNKNOWN_SYMBOL,
                          "\"" + symbol + "\" does not look like a real ticker.");
-        return;
+        return ModelOutputOutcome::Refused;
     }
 
     if (!obj.contains("asset_class") || !obj["asset_class"].is_string()) {
         populate_refusal(response, calculator::assistant::Refusal::UNKNOWN_SYMBOL,
                          "The assistant did not resolve an asset class for \"" + symbol + "\".");
-        return;
+        return ModelOutputOutcome::Refused;
     }
     std::string asset_class{obj["asset_class"].as_string()};
     if (!is_known_asset_class(asset_class)) {
         populate_refusal(response, calculator::assistant::Refusal::UNKNOWN_SYMBOL,
                          "\"" + asset_class + "\" is not a supported asset class.");
-        return;
+        return ModelOutputOutcome::Refused;
     }
 
     if (!obj.contains("strategy") || !obj["strategy"].is_string()) {
         populate_refusal(response, calculator::assistant::Refusal::UNSUPPORTED_STRATEGY,
                          "The assistant did not name a strategy for this request.");
-        return;
+        return ModelOutputOutcome::Refused;
     }
     std::string strategy{obj["strategy"].as_string()};
     if (!::options_calculator::strategy::is_known(strategy)) {
@@ -2181,21 +2219,21 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
             populate_refusal(
                 response, calculator::assistant::Refusal::UNSUPPORTED_STRATEGY,
                 "\"" + strategy + "\" is not one of the strategies this calculator prices.");
-            return;
+            return ModelOutputOutcome::Refused;
         }
     }
 
     if (!obj.contains("expiration_days") || !obj["expiration_days"].is_number()) {
         populate_refusal(response, calculator::assistant::Refusal::OUT_OF_SCOPE,
                          "The assistant did not give an expiration for this request.");
-        return;
+        return ModelOutputOutcome::Refused;
     }
     const std::int64_t expiration_days = obj["expiration_days"].as_int64();
     if (expiration_days < kMinExpirationDays || expiration_days > kMaxExpirationDays) {
         populate_refusal(response, calculator::assistant::Refusal::OUT_OF_SCOPE,
                          "The assistant's expiration (" + std::to_string(expiration_days) +
                              " days) is out of a sane range.");
-        return;
+        return ModelOutputOutcome::Refused;
     }
 
     // Optional far leg, for the five two-expiry strategies. Absent is the common
@@ -2212,21 +2250,21 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
                              "The assistant's far expiration (" +
                                  std::to_string(far_expiration_days) +
                                  " days) is out of a sane range.");
-            return;
+            return ModelOutputOutcome::Refused;
         }
     }
 
     if (!obj.contains("quantity") || !obj["quantity"].is_number()) {
         populate_refusal(response, calculator::assistant::Refusal::OUT_OF_SCOPE,
                          "The assistant did not give a quantity for this request.");
-        return;
+        return ModelOutputOutcome::Refused;
     }
     const std::int64_t quantity = obj["quantity"].as_int64();
     if (quantity < kMinQuantity || quantity > kMaxQuantity) {
         populate_refusal(response, calculator::assistant::Refusal::OUT_OF_SCOPE,
                          "The assistant's quantity (" + std::to_string(quantity) +
                              ") is out of a sane range.");
-        return;
+        return ModelOutputOutcome::Refused;
     }
 
     // ------------------------------------------------------------------
@@ -2313,7 +2351,7 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
                                                       ? *question
                                                       : "\"" + symbol + "\" is ambiguous between more than one "
                                                             "asset class -- which did you mean?");
-                return;
+                return ModelOutputOutcome::Success;
             }
         } else {
             asset_class = (signal == ::options_calculator::assistant::verify::AssetClassSignal::Futures)
@@ -2359,7 +2397,7 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
                           "\", but nothing in your request mentions a \"" + std::string{distinguishing_word} +
                           "\" or any option at all -- could you say what you'd like to do (this calculator "
                           "prices options and futures, not buying the underlying outright)?");
-        return;
+        return ModelOutputOutcome::Success;
     }
 
     // ------------------------------------------------------------------
@@ -2415,7 +2453,7 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
                          verdict.message.empty()
                              ? "The assistant's answer could not be verified."
                              : verdict.message);
-        return;
+        return ModelOutputOutcome::Refused;
     }
 
     // Every check above this line is free (string comparisons, catalogue
@@ -2430,7 +2468,7 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
             populate_refusal(response, calculator::assistant::Refusal::UNKNOWN_SYMBOL,
                              "I could not find a tradeable instrument for '" + symbol +
                                  "'. Which symbol did you mean?");
-            return;
+            return ModelOutputOutcome::Refused;
         case SymbolProbeOutcome::AssetClassMismatch:
             // Never picked silently: see probe_symbol's own doc comment for
             // why a resolving quote under a FUTURES/CRYPTO claim is
@@ -2441,7 +2479,7 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
                               "for a " + std::string{asset_class_noun(asset_class)} +
                               " instrument -- I can't tell which you meant. Did you mean the "
                               "equity, or the " + std::string{asset_class_noun(asset_class)} + "?");
-            return;
+            return ModelOutputOutcome::Success;
         case SymbolProbeOutcome::ProviderUnavailable:
             // A Refusal, not a Clarification -- deliberately. The trader
             // said nothing ambiguous here; the market-data backend could
@@ -2467,7 +2505,7 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
             populate_refusal(response, calculator::assistant::Refusal::DATA_UNAVAILABLE,
                              "Live market data is temporarily unavailable, so \"" + symbol +
                                  "\" could not be verified. Please try again shortly.");
-            return;
+            return ModelOutputOutcome::Refused;
         case SymbolProbeOutcome::Resolved:
             break;
     }
@@ -2493,6 +2531,7 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
     params->set_far_expiration_days(static_cast<std::int32_t>(far_expiration_days));
     params->set_exercise_type(static_cast<sensen::finance::ExerciseType>(exercise_asian.exercise_type));
     params->set_asian_type(static_cast<sensen::finance::AsianType>(exercise_asian.asian_type));
+    return ModelOutputOutcome::Success;
 }
 
 /**
@@ -2506,7 +2545,7 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
  */
 auto interpret_model_output(const std::string& raw_text, std::string_view utterance,
                              std::string_view prior_clarification,
-                             calculator::assistant::ParseResponse& response) -> void {
+                             calculator::assistant::ParseResponse& response) -> ModelOutputOutcome {
     // Qwen3 emits a `<think>` block on EVERY response, including the ones that
     // are exactly right. Measured against this fine-tune, a correct answer looks
     // like:
@@ -2540,8 +2579,7 @@ auto interpret_model_output(const std::string& raw_text, std::string_view uttera
     const std::string visible = strip_think_block(raw_text);
 
     if (const auto block = extract_params_block(visible); block.has_value()) {
-        validate_and_populate_params(trim(*block), utterance, prior_clarification, response);
-        return;
+        return validate_and_populate_params(trim(*block), utterance, prior_clarification, response);
     }
 
     // The model emitted no params. Before treating its prose as a clarifying
@@ -2563,8 +2601,7 @@ auto interpret_model_output(const std::string& raw_text, std::string_view uttera
         recovered.has_value()) {
         std::fprintf(stderr, "[assistant] recovered bare futures directive: %s\n", recovered->c_str());
         std::fflush(stderr);
-        validate_and_populate_params(*recovered, utterance, prior_clarification, response);
-        return;
+        return validate_and_populate_params(*recovered, utterance, prior_clarification, response);
     }
 
     const std::string question = trim(visible);
@@ -2575,167 +2612,399 @@ auto interpret_model_output(const std::string& raw_text, std::string_view uttera
         populate_refusal(response, calculator::assistant::Refusal::OUT_OF_SCOPE,
                          "The assistant could not produce structured parameters or a short "
                          "clarifying question for this request.");
-        return;
+        return ModelOutputOutcome::Refused;
     }
     response.mutable_clarification()->set_question(question);
+    return ModelOutputOutcome::Success;
 }
 
 // ---------------------------------------------------------------------------
-// Admission: authenticate, then charge
+// SGEE execution context and graph actions
+//
+// ParseStrategy used to be a straight-line chain of `if (...) return ...;`
+// checks (charge, bound-check, injection/advice guards, Pro gate, model
+// availability, generate, interpret). It is now a real SGEE workflow graph --
+// see calculator_service.cpp's OptionsWorkflow, studied before writing this,
+// for the sibling shape. Two differences from that graph, both deliberate:
+//
+//   1. calculator_service.cpp's graph is purely linear (Next chains only,
+//      short-circuiting internally on ctx->status) because its actions never
+//      need to distinguish MORE than "did an earlier stage already fail" --
+//      every failure there is the same INVALID_ARGUMENT/INTERNAL shape. This
+//      graph uses real `.OnError(...)` routing instead: a refusal (populated
+//      response, or a hard grpc::Status) takes a DIFFERENT edge out of its
+//      node than success does, landing on a distinct "Refused" terminal
+//      rather than falling through the same Done path every other outcome
+//      does. That is what makes the routing provable from outside the
+//      function bodies (see ParseStrategy's postcondition and
+//      RegisterAssistantServiceForTest below), not merely asserted in a
+//      comment.
+//   2. Two kinds of failure exist and both take the OnError edge, but they
+//      are NOT the same thing: a hard gRPC error (quota exhausted, malformed
+//      request, Pro gate) is recorded in `status` and returned AS a
+//      grpc::Status; a Refusal/Clarification is a SUCCESSFUL RPC whose
+//      response already carries the reason. ParseStrategy's postcondition
+//      below disambiguates the two exactly the way CalculateStrategy's own
+//      postcondition reads ctx->status after Run() -- see that comment in
+//      calculator_service.cpp for the shared rationale.
 // ---------------------------------------------------------------------------
 
+struct AssistantCtx {
+    // Copied out of the request up front (never a raw ParseRequest*): every
+    // node action below runs on its own turn of the interpreter loop, well
+    // after ParseStrategy's own `request` parameter would have gone out of
+    // scope in a differently-shaped implementation, so the fields this graph
+    // actually needs travel by value -- mirroring ComputeContext's own
+    // `calculator::StrategyRequest request` member in calculator_service.cpp.
+    std::string utterance;
+    std::string prior_clarification;
+
+    // Non-owning, and the one deliberate exception to "no raw pointer
+    // travels" among this graph's context fields. grpc::ServerContext is
+    // move/copy-disabled by design (it is gRPC's own per-call state), so it
+    // cannot be captured by value the way `utterance` is above. The pointer
+    // is safe here specifically because AssistantEngineCtx is constructed,
+    // driven through Interpreter<>::Run() synchronously, and destroyed
+    // entirely within ParseStrategy's own stack frame -- it never escapes to
+    // another thread or another call, so it cannot outlive the `context` the
+    // RPC handler was given.
+    grpc::ServerContext* context = nullptr;
+
+    calculator::assistant::ParseResponse response;
+    // OK unless a node set it to a hard gRPC error (quota/auth/bound-check/
+    // Pro gate). A populated Refusal/Clarification is NOT represented here --
+    // it lives in `response` and is still a Status::OK outcome, exactly as
+    // it always was before this graph existed.
+    grpc::Status status{grpc::Status::OK};
+    ::options_calculator::auth::Identity identity;
+    std::string model_text;
+};
+using Ctx = std::shared_ptr<AssistantCtx>;
+using ActionRegistry = sgee::runtime::ActionRegistry<Ctx>;
+
+using sgee::ExecutionResult;
+
+/** The four action names the StrategyAssistantWorkflow graph defines, in
+ * graph order. Shared between the production constructor (binds all four)
+ * and the test-only constructor overload, exactly mirroring kAllActionNames
+ * in calculator_service.cpp and for the identical reason: one definition of
+ * "the full set" that cannot drift between the two callers. */
+inline constexpr std::array<std::string_view, 4> kAllActionNames{
+    "Admission", "CheckModel", "Generate", "ParseAndVerify"};
+
 /**
- * The same admission guard finance_service.cpp documents and uses, scoped to
- * "assistant" instead of "finance". Duplicated rather than shared from a
- * common header because CHARGE is not exposed anywhere shareable today (only
- * finance_service.cpp defines it) -- one visible macro per service file is
- * exactly the debuggable, greppable shape quota.cppm's own doc comment
- * argues for, and inventing a shared header for a four-line macro used by
- * two files is not warranted.
+ * Authenticate, charge, bound-check, and gate -- everything ParseStrategy did
+ * before ever touching the model, now as one node's action. Manually inlines
+ * what the removed CHARGE macro did (KeyRegistry::authenticate +
+ * QuotaEnforcer::admit_identity) because a macro built around `return`
+ * cannot early-exit an RPC from inside a graph action; the equivalent here
+ * sets `ctx.status` and signals the interpreter via ExecutionResult instead,
+ * exactly as action_initialize does in calculator_service.cpp.
  */
-#define CHARGE(method_name, cost)                                                \
-    ::options_calculator::auth::Identity _id;                                    \
-    do {                                                                         \
-        if (auto _a = ::options_calculator::auth::KeyRegistry::instance()         \
-                          .authenticate(*context, "assistant", (method_name), _id); \
-            !_a.ok()) {                                                          \
-            return _a;                                                           \
-        }                                                                        \
-        ::options_calculator::quota::TierLimits _lim{_id.requests_per_minute,     \
-                                                    _id.compute_units_per_hour}; \
-        if (auto _q = ::options_calculator::quota::QuotaEnforcer::instance()      \
-                          .admit_identity(_id.id, _id.tier, (method_name),        \
-                                          (cost),                                 \
-                                          _id.has_limits ? &_lim : nullptr);      \
-            !_q.ok()) {                                                          \
-            return _q;                                                           \
-        }                                                                        \
-    } while (false)
+[[nodiscard]] auto action_admission(Ctx& ctx) -> ExecutionResult<> {
+    if (auto s = ::options_calculator::auth::KeyRegistry::instance().authenticate(
+            *ctx->context, "assistant", "ParseStrategy", ctx->identity);
+        !s.ok()) {
+        ctx->status = s;
+        return std::unexpected(sgee::ExecutionError::ActionFailed);
+    }
+    ::options_calculator::quota::TierLimits lim{ctx->identity.requests_per_minute,
+                                                ctx->identity.compute_units_per_hour};
+    if (auto q = ::options_calculator::quota::QuotaEnforcer::instance().admit_identity(
+            ctx->identity.id, ctx->identity.tier, "ParseStrategy",
+            ::options_calculator::quota::cost_llm_generate(1, static_cast<int>(kMaxNewTokens)),
+            ctx->identity.has_limits ? &lim : nullptr);
+        !q.ok()) {
+        ctx->status = q;
+        return std::unexpected(sgee::ExecutionError::ActionFailed);
+    }
+
+    if (ctx->utterance.size() > kMaxUtteranceLength) {
+        ctx->status = grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                                   "utterance exceeds the " + std::to_string(kMaxUtteranceLength) +
+                                       "-character limit for this RPC.");
+        return std::unexpected(sgee::ExecutionError::ActionFailed);
+    }
+    if (ctx->prior_clarification.size() > kMaxPriorClarificationLength) {
+        ctx->status = grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                                   "prior_clarification exceeds the " +
+                                       std::to_string(kMaxPriorClarificationLength) +
+                                       "-character limit for this RPC.");
+        return std::unexpected(sgee::ExecutionError::ActionFailed);
+    }
+
+    if (::options_calculator::assistant::verify::looks_like_prompt_injection(ctx->utterance) ||
+        ::options_calculator::assistant::verify::looks_like_prompt_injection(
+            ctx->prior_clarification)) {
+        populate_refusal(
+            ctx->response, calculator::assistant::Refusal::OUT_OF_SCOPE,
+            "This reads like an instruction to the assistant rather than a trade description. "
+            "Describe the strategy you want priced (e.g. \"bull call spread on NVDA, 30 days, "
+            "2 contracts\") without instructions aimed at the assistant itself.");
+        return std::unexpected(sgee::ExecutionError::ActionFailed);
+    }
+    if (::options_calculator::assistant::verify::looks_like_advice_request(ctx->utterance)) {
+        populate_refusal(
+            ctx->response, calculator::assistant::Refusal::OUT_OF_SCOPE,
+            "I don't give trading advice, predictions, or recommendations -- describe a "
+            "specific strategy (e.g. \"bull call spread on NVDA, 30 days, 2 contracts\") and "
+            "I will price it.");
+        return std::unexpected(sgee::ExecutionError::ActionFailed);
+    }
+
+    // The Pro gate, server-side and before any inference work -- same
+    // placement rationale as CalculateStrategy's own gate in
+    // calculator_service.cpp. With PRO_GATE_MODE unset (Off) this is inert
+    // and ParseStrategy stays free, matching today's behaviour.
+    if (auto s = ::options_calculator::auth::check_assistant_entitlement(
+            ctx->identity, ::options_calculator::auth::kStrategySurface);
+        !s.ok()) {
+        ctx->status = s;
+        return std::unexpected(sgee::ExecutionError::ActionFailed);
+    }
+    return {};
+}
+
+/** Model-availability gate. Degrades honestly when MODEL_PATH was never set
+ * or the model failed to load -- see Refusal::MODEL_UNAVAILABLE's own proto
+ * doc comment for why this is a populated response (Status::OK), not a gRPC
+ * error, and therefore an OnError edge whose destination still carries
+ * ctx->status == OK. */
+[[nodiscard]] auto action_check_model(Ctx& ctx) -> ExecutionResult<> {
+    if (!AssistantWorker::instance().available()) {
+        populate_refusal(ctx->response, calculator::assistant::Refusal::MODEL_UNAVAILABLE,
+                         "The strategy assistant is not available right now.");
+        return std::unexpected(sgee::ExecutionError::ActionFailed);
+    }
+    return {};
+}
+
+/** Builds the prompt and submits it to the worker. A full queue is the ONE
+ * genuine gRPC error past admission (RESOURCE_EXHAUSTED, immediate -- see
+ * submit()'s own contract); a backend exception is a Refusal, matching
+ * MODEL_UNAVAILABLE's "the RPC to THIS service completed correctly"
+ * reasoning. */
+[[nodiscard]] auto action_generate(Ctx& ctx) -> ExecutionResult<> {
+    const std::string prompt = build_prompt(ctx->utterance, ctx->prior_clarification);
+
+    auto outcome = AssistantWorker::instance().submit(prompt);
+    if (!outcome.has_value()) {
+        ctx->status = grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED,
+                                   "The strategy assistant is at capacity; please retry shortly.");
+        return std::unexpected(sgee::ExecutionError::ActionFailed);
+    }
+    if (!outcome->ok) {
+        populate_refusal(ctx->response, calculator::assistant::Refusal::MODEL_UNAVAILABLE,
+                         "The strategy assistant failed to produce a response: " + outcome->error);
+        return std::unexpected(sgee::ExecutionError::ActionFailed);
+    }
+    ctx->model_text = std::move(outcome->text);
+    return {};
+}
+
+/**
+ * Parse the model's raw text, run symbol verification, and populate the
+ * final response -- interpret_model_output is untouched in substance (same
+ * messages, same GP-ARA-equivalent field checks, same live-quote probe); it
+ * now RETURNS the Success/Refused verdict instead of silently writing only
+ * into `response`, which is what lets this node's OnError edge actually fire
+ * on a refusal instead of the graph reaching Done regardless of outcome.
+ */
+[[nodiscard]] auto action_parse_and_verify(Ctx& ctx) -> ExecutionResult<> {
+    const auto outcome =
+        interpret_model_output(ctx->model_text, ctx->utterance, ctx->prior_clarification, ctx->response);
+    if (outcome == ModelOutputOutcome::Refused) {
+        return std::unexpected(sgee::ExecutionError::ActionFailed);
+    }
+    return {};
+}
 
 // ---------------------------------------------------------------------------
 // Service
 // ---------------------------------------------------------------------------
 
 class StrategyAssistantImpl final : public calculator::assistant::StrategyAssistant::Service {
+  private:
+    std::shared_ptr<ActionRegistry> actions_;
+    std::shared_ptr<const sgee::GraphBlueprint> graph_;
+    // Resolved once at construction, exactly like calculator_service.cpp's
+    // done_node_id_ -- ParseStrategy is on the hot path (well, the
+    // model-latency path) and must not look these up by name per call.
+    std::uint16_t done_node_id_{0};
+    std::uint16_t refused_node_id_{0};
+
   public:
+    /**
+     * `bound_action_names` defaults to every action the graph defines --
+     * see calculator_service.cpp's CalculatorServiceImpl constructor for why
+     * the parameter exists at all (RegisterAssistantServiceForTest below is
+     * its only other caller, and only from tests).
+     */
+    explicit StrategyAssistantImpl(
+        std::span<const std::string_view> bound_action_names = kAllActionNames)
+        : actions_{std::make_shared<ActionRegistry>()} {
+        auto& log = logger::Logger::getInstance();
+
+        auto graph_result = sgee::Builder<Ctx>("StrategyAssistantWorkflow")
+            .Node("Admission")
+                .Execute("Admission")
+                .Next("CheckModel")
+                .OnError("Refused")
+            .Node("CheckModel")
+                .Execute("CheckModel")
+                .Next("Generate")
+                .OnError("Refused")
+            .Node("Generate")
+                .Execute("Generate")
+                .Next("ParseAndVerify")
+                .OnError("Refused")
+            .Node("ParseAndVerify")
+                .Execute("ParseAndVerify")
+                .Next("Done")
+                .OnError("Refused")
+            .Node("Done")
+                .IsTerminal()
+            .Node("Refused")
+                .IsTerminal()
+            .Build();
+
+        if (!graph_result) {
+            log.error("Failed to build SGEE graph: {}", graph_result.error());
+            return;
+        }
+        graph_ = graph_result.value();
+        done_node_id_ = graph_->GetNodeId("Done");
+        refused_node_id_ = graph_->GetNodeId("Refused");
+
+        // Bind each action by the ID the builder assigned, NEVER by name --
+        // see this file's own import-block comment and calculator_service.cpp's
+        // constructor for the GetActionId trap this avoids.
+        const std::array<std::pair<std::string_view, ActionRegistry::ActionFunction>, 4> bindings{{
+            {"Admission", action_admission},
+            {"CheckModel", action_check_model},
+            {"Generate", action_generate},
+            {"ParseAndVerify", action_parse_and_verify},
+        }};
+
+        const auto is_bound = [&](std::string_view name) {
+            return std::ranges::find(bound_action_names, name) != bound_action_names.end();
+        };
+
+        for (const auto& [name, fn] : bindings) {
+            if (!is_bound(name)) {
+                // Test-only path -- see calculator_service.cpp's identical
+                // branch. Production always binds the full set.
+                log.warn("Action '{}' intentionally left unbound (test configuration); "
+                         "any entity reaching its node will halt without a status",
+                         name);
+                continue;
+            }
+            const auto id = graph_->GetActionId(name);
+            if (!id) {
+                log.error("Action '{}' is not present in the graph; refusing to start", name);
+                graph_.reset();
+                return;
+            }
+            actions_->RegisterById(*id, fn);
+        }
+
+        log.info("SGEE graph initialized: {} registered actions for the strategy assistant",
+                 bindings.size());
+    }
+
+    ~StrategyAssistantImpl() override = default;
+
     auto ParseStrategy(ServerContext* context, const calculator::assistant::ParseRequest* request,
                        calculator::assistant::ParseResponse* response) -> Status override {
         if (context == nullptr || request == nullptr || response == nullptr) {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
-
-        // CHARGE at the top, before any inference work, per quota.cppm's own
-        // rationale: a refused call should cost a hash lookup, not a
-        // generation. cost_llm_generate prices this call from the same
-        // kMaxNewTokens bound the worker actually generates with below, so
-        // the price and the real worst-case cost never drift apart.
-        CHARGE("ParseStrategy", ::options_calculator::quota::cost_llm_generate(
-                                     1, static_cast<int>(kMaxNewTokens)));
-
-        // Bound the two caller-controlled prompt inputs BEFORE they are
-        // concatenated into a prompt or reach the worker. Cheap string-length
-        // checks, charged the same as everything else per the CHARGE above --
-        // this is request-shape validation, the same class of failure
-        // finance_service.cpp reports as INVALID_ARGUMENT (e.g. "paths and
-        // steps must be positive"), not a Refusal: the request itself is
-        // malformed, independent of whether the trade it describes makes
-        // sense. See kMaxUtteranceLength's own doc comment for why this
-        // exists at all.
-        if (request->utterance().size() > kMaxUtteranceLength) {
-            return Status(grpc::StatusCode::INVALID_ARGUMENT,
-                          "utterance exceeds the " + std::to_string(kMaxUtteranceLength) +
-                              "-character limit for this RPC.");
-        }
-        if (request->prior_clarification().size() > kMaxPriorClarificationLength) {
-            return Status(grpc::StatusCode::INVALID_ARGUMENT,
-                          "prior_clarification exceeds the " +
-                              std::to_string(kMaxPriorClarificationLength) +
-                              "-character limit for this RPC.");
+        if (!graph_) {
+            return Status(grpc::StatusCode::INTERNAL, "Execution graph not initialized");
         }
 
-        // Two input-side guards, run BEFORE the model is ever asked to
-        // generate -- see assistant_verification.cppm's "Input-side guards"
-        // section banner for the two live probes that motivated each one and
-        // why no check on the model's OUTPUT can substitute for refusing
-        // before the model ever answers: both attacks below produce a
-        // structurally self-consistent `<params>` block that every
-        // cross-field rule in `AssistantParamsDomain::translate()` accepts,
-        // because that domain only ever sees the model's five final fields,
-        // never the utterance that produced them.
+        auto ctx = std::make_shared<AssistantCtx>();
+        ctx->utterance = request->utterance();
+        ctx->prior_clarification = request->prior_clarification();
+        ctx->context = context;
+
+        // Inline, on this RPC's own thread -- same rationale as
+        // CalculateStrategy's identical comment in calculator_service.cpp:
+        // this service is built with no callback API and no
+        // SetSyncServerOption, so gRPC already gives every in-flight RPC its
+        // own thread.
+        sgee::runtime::EngineContext<Ctx> engine;
+        std::vector<Ctx> entities{ctx};
+        engine.Load(entities);
+
+        sgee::runtime::Interpreter<Ctx> interpreter(
+            graph_, sgee::runtime::ParallelismLevel::Sequential, actions_.get());
+        interpreter.Run(engine);
+
+        // --- Postconditions --------------------------------------------
         //
-        // Checked on `utterance` AND `prior_clarification`: a second-turn
-        // reply is just as capable of carrying either signal as a first-turn
-        // request is, and `build_prompt` feeds both to the model verbatim.
-        if (::options_calculator::assistant::verify::looks_like_prompt_injection(request->utterance()) ||
-            ::options_calculator::assistant::verify::looks_like_prompt_injection(
-                request->prior_clarification())) {
-            populate_refusal(
-                *response, calculator::assistant::Refusal::OUT_OF_SCOPE,
-                "This reads like an instruction to the assistant rather than a trade description. "
-                "Describe the strategy you want priced (e.g. \"bull call spread on NVDA, 30 days, "
-                "2 contracts\") without instructions aimed at the assistant itself.");
-            return Status::OK;
-        }
-        if (::options_calculator::assistant::verify::looks_like_advice_request(request->utterance())) {
-            populate_refusal(
-                *response, calculator::assistant::Refusal::OUT_OF_SCOPE,
-                "I don't give trading advice, predictions, or recommendations -- describe a "
-                "specific strategy (e.g. \"bull call spread on NVDA, 30 days, 2 contracts\") and "
-                "I will price it.");
-            return Status::OK;
-        }
-
-        // The Pro gate, server-side and before any inference work -- same
-        // placement rationale as CalculateStrategy's own gate in
-        // calculator_service.cpp. `_id` is the identity CHARGE already
-        // resolved above; reusing it here means authentication runs exactly
-        // once per call. With PRO_GATE_MODE unset (Off) this is inert and
-        // ParseStrategy stays free, matching today's behaviour.
-        if (auto s = ::options_calculator::auth::check_assistant_entitlement(
-                _id, ::options_calculator::auth::kStrategySurface); !s.ok()) {
-            return s;
+        // TERMINAL-STATE: did the one entity in this run reach EITHER
+        // recognised terminal? If it stalled anywhere else, an action failed
+        // without setting ctx->status/returning unexpected, an action id was
+        // not registered, or the registry was never wired up -- the same
+        // three failure modes calculator_service.cpp's postcondition
+        // documents, reproduced here through RegisterAssistantServiceForTest
+        // below rather than merely asserted.
+        const auto& state_ids = engine.GetStateIds();
+        const bool reached_terminal = !state_ids.empty() &&
+            (state_ids[0] == done_node_id_ || state_ids[0] == refused_node_id_);
+        if (!reached_terminal) {
+            const std::string stalled_at =
+                state_ids.empty() ? std::string{"<no entity>"}
+                                  : std::string{graph_->GetNodeName(state_ids[0])};
+            logger::Logger::getInstance().error(
+                "ParseStrategy: graph halted at '{}' instead of reaching Done or Refused -- an "
+                "action failed without setting status, an action id was not registered, or the "
+                "action registry was never wired up",
+                stalled_at);
+            return Status(grpc::StatusCode::INTERNAL,
+                          "Strategy-assistant parse halted before completion (stalled at '" +
+                              stalled_at +
+                              "'); this is a server-side defect, not a problem with the request");
         }
 
-        auto& worker = AssistantWorker::instance();
-        if (!worker.available()) {
-            // Degrade honestly: MODEL_PATH was never set, or the model
-            // failed to load at startup. This is genuine infrastructure
-            // unavailability, but per the proto's own Refusal::MODEL_UNAVAILABLE
-            // doc comment -- "not a gRPC error because the RPC to THIS
-            // service still completed correctly" -- it is expressed as a
-            // successful RPC carrying that reason, not a gRPC error status.
-            // This also satisfies the design brief's own explicit allowance
-            // ("a Refusal, or an appropriate gRPC error") by choosing the
-            // richer, more branchable outcome the proto was written for.
-            populate_refusal(*response, calculator::assistant::Refusal::MODEL_UNAVAILABLE,
-                             "The strategy assistant is not available right now.");
-            return Status::OK;
+        // DID-COMPUTE: reaching a terminal proves every state was walked, not
+        // that the action which landed there actually ran. Every node's
+        // OnError target is "Refused" -- the SAME edge Execute() takes for a
+        // genuinely UNREGISTERED action id (action_registry.cppm's Execute()
+        // returns ExecutionError::ActionFailed for a miss, identically to a
+        // real failure) -- so an unbound CheckModel/Generate/ParseAndVerify
+        // action would otherwise land on "Refused" with ctx->status still OK
+        // and ctx->response still default-constructed (no oneof set at all),
+        // silently satisfying the TERMINAL-STATE check above while never
+        // having run at all. This assertion is what actually catches that:
+        // "Refused" must carry EITHER a hard status error OR a populated
+        // Refusal; "Done" must carry a Params or a Clarification. A terminal
+        // reached with neither is the silent-unbound-action bug wearing a
+        // valid-looking state id.
+        const bool refused_is_real =
+            state_ids[0] != refused_node_id_ || !ctx->status.ok() || ctx->response.has_refusal();
+        const bool done_is_real = state_ids[0] != done_node_id_ ||
+            ctx->response.has_params() || ctx->response.has_clarification();
+        if (!refused_is_real || !done_is_real) {
+            logger::Logger::getInstance().error(
+                "ParseStrategy: graph reached '{}' but produced no payload -- an action id "
+                "landed on this terminal via its OnError edge without ever running (the same "
+                "id-miss path a genuinely unregistered action takes)",
+                std::string{graph_->GetNodeName(state_ids[0])});
+            return Status(grpc::StatusCode::INTERNAL,
+                          "Strategy-assistant parse reached completion without producing a "
+                          "params, clarification, or refusal payload; this is a server-side "
+                          "defect, not a problem with the request");
         }
 
-        const std::string prompt =
-            build_prompt(request->utterance(), request->prior_clarification());
-
-        auto outcome = worker.submit(prompt);
-        if (!outcome.has_value()) {
-            // The ONE case that is a genuine gRPC error rather than a
-            // Refusal: the bounded queue was already full. Per the design
-            // brief, this must be immediate -- no blocking, no growing the
-            // queue -- and it is: submit() never waited to make room.
-            return Status(grpc::StatusCode::RESOURCE_EXHAUSTED,
-                          "The strategy assistant is at capacity; please retry shortly.");
-        }
-
-        if (!outcome->ok) {
-            // The inference backend accepted the job but failed to complete
-            // it (an exception inside generate()). Same reasoning as the
-            // unavailable-at-startup case above: the RPC to THIS service
-            // completed correctly, so this is a Refusal, not a gRPC error.
-            populate_refusal(*response, calculator::assistant::Refusal::MODEL_UNAVAILABLE,
-                             "The strategy assistant failed to produce a response: " + outcome->error);
-            return Status::OK;
-        }
-
-        interpret_model_output(outcome->text, request->utterance(), request->prior_clarification(), *response);
+        // Whichever terminal was reached, ctx->status is the single source of
+        // truth for "was this a hard gRPC error" -- a Refusal/Clarification
+        // leaves it OK and carries its reason in ctx->response instead,
+        // exactly as ParseStrategy always returned Status::OK alongside a
+        // populated Refusal before this graph existed.
+        if (!ctx->status.ok()) return ctx->status;
+        *response = ctx->response;
         return Status::OK;
     }
 };
@@ -2765,6 +3034,21 @@ auto RegisterAssistantService(grpc::ServerBuilder& builder) -> void {
         "Strategy assistant model is {}", loaded ? "LOADED" : "UNAVAILABLE (set MODEL_PATH to enable)");
 }
 
-#undef CHARGE
+auto RegisterAssistantServiceForTest(grpc::ServerBuilder& builder,
+                                     std::span<const std::string_view> bound_action_names) -> void {
+    // Deliberately leaked, WITHOUT `static` -- see calculator_service.cpp's
+    // RegisterCalculatorServiceForTest for the exact trap this avoids: a
+    // function-local static here would fix the bound action set at the
+    // FIRST call for the rest of the process, which is wrong for this hook.
+    // A discriminating test needs to register services with DIFFERENT
+    // subsets of actions in the same test binary (one missing an action, one
+    // with the full set as a control), and `static` would silently make the
+    // second registration reuse the first call's (possibly broken) instance.
+    // Each caller is a short-lived test process that builds one in-process
+    // grpc::Server per case and exits soon after, so the leak is bounded by
+    // the test's own lifetime.
+    auto* service = new StrategyAssistantImpl(bound_action_names);  // NOLINT(cppcoreguidelines-owning-memory) -- see comment above: gRPC's RegisterService does NOT take ownership and the service must outlive the server, while a function-local static would freeze the bound action set at the first call and break the discriminating tests that register different action subsets in one binary.
+    builder.RegisterService(service);
+}
 
 }  // namespace options_calculator::assistant

@@ -64,15 +64,49 @@ echo "🔍 Auditing ${#CXX_FILES[@]} C++ source(s) and ${#BUILD_FILES[@]} build 
 ERRORS=0
 
 # --------------------------------------------------------------------------
+# Drop `file:line:` matches whose ONLY occurrence of the pattern sits inside a
+# string literal. Reads `file:line:text` on stdin, strips "..." spans from the
+# text, and keeps the line only if the pattern still matches what remains.
+#
+# Prose is not code. This exists because user-facing copy here really does say
+# "upgrade for a new one", and a checker that reports that as a raw allocation
+# teaches the reader to ignore it.
+# --------------------------------------------------------------------------
+strip_string_literals_then_match() {
+    local pattern="$1"
+    while IFS= read -r line; do
+        local prefix="${line%%:*}"
+        local rest="${line#*:}"
+        local lineno="${rest%%:*}"
+        local text="${rest#*:}"
+        # Remove double-quoted spans (including escaped quotes) and raw strings.
+        local stripped
+        stripped=$(printf '%s' "$text" | sed -E 's/R"[^(]*\([^)]*\)[^"]*"//g; s/"([^"\\]|\\.)*"//g')
+        if printf '%s' "$stripped" | grep -qE "$pattern"; then
+            printf '%s:%s:%s\n' "$prefix" "$lineno" "$text"
+        fi
+    done
+}
+
+# --------------------------------------------------------------------------
 # Rule 3: no raw owning pointers.
 #
 # Comment bodies are skipped so prose about "a new value" is not a violation.
 # Placement new and NOLINT-annotated lines are permitted.
+#
+# STRING LITERALS are skipped for the same reason comment bodies are, and this
+# was a real defect rather than a refinement: user-facing copy in this codebase
+# genuinely contains the word -- api_key's "upgrade for a new one" and
+# assistant_verification's prompt-injection phrase list "new instructions:" were
+# both reported as raw allocations. A checker that cries wolf on prose trains
+# the reader to skim its output, which is worse than not running it. The rule
+# still fires on a real `new Widget` sitting outside quotes on the same line.
 # --------------------------------------------------------------------------
 RAW_NEW=$(grep -nE "\bnew\s+[A-Za-z_][A-Za-z0-9_]*" "${CXX_FILES[@]}" 2>/dev/null \
     | grep -vE "^[^:]+:[0-9]+:[[:space:]]*(//|\*|/\*)" \
     | grep -v "NOLINT" \
     | grep -vE "\bnew[[:space:]]*\(" \
+    | strip_string_literals_then_match "\bnew\s+[A-Za-z_]" \
     || true)
 if [[ -n "$RAW_NEW" ]]; then
     echo "❌ POLICY VIOLATION: Raw 'new' allocation found (Rule 3 - No Raw Pointers):"

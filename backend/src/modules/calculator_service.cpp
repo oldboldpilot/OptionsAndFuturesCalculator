@@ -1568,7 +1568,7 @@ auto RegisterCalculatorServiceForTest(grpc::ServerBuilder& builder,
     // file's test siblings (ServiceFixture in test_option_pricing_service.cpp
     // and test_finance_service_validation.cpp) make implicitly by never
     // tearing down what BuildAndStart() allocates.
-    auto* service = new CalculatorServiceImpl(bound_action_names);
+    auto* service = new CalculatorServiceImpl(bound_action_names);  // NOLINT(cppcoreguidelines-owning-memory) -- see comment above: gRPC's RegisterService does NOT take ownership and the service must outlive the server, while a function-local static would freeze the bound action set at the first call and break the discriminating tests that register different action subsets in one binary.
     builder.RegisterService(service);
 }
 

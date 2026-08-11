@@ -87,8 +87,11 @@ git -C "$SGEE" branch -D integration/validate 2>/dev/null || true
 git -C "$SGEE" worktree add -b integration/validate "$INT_WT" main >/dev/null
 
 MERGED=()
+# Order matters: the snapshot branch was cut FROM the driver branch, so merging
+# the driver first keeps that merge a fast-forward-ish no-op rather than a
+# spurious three-way conflict over the same runtime file.
 for br in test/guard-import-std feature/task-queue-grpc-service \
-          driver/replicated-queue-runtime-thread; do
+          driver/replicated-queue-runtime-thread feature/raft-snapshot-restore; do
     if git -C "$SGEE" rev-parse --verify "$br" >/dev/null 2>&1; then
         info "  merging $br"
         if git -C "$INT_WT" merge --no-edit "$br" >/dev/null 2>&1; then

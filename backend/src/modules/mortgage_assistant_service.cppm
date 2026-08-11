@@ -1,5 +1,7 @@
 module;
 #include <grpcpp/grpcpp.h>
+#include <span>
+#include <string_view>
 
 export module mortgage_assistant_service;
 
@@ -34,5 +36,20 @@ export namespace options_calculator::mortgage_assistant {
  * for a feature.
  */
 auto RegisterMortgageAssistantService(grpc::ServerBuilder& builder) -> void;
+
+/**
+ * TEST-ONLY registration hook, mirroring RegisterAssistantServiceForTest
+ * (assistant_service.cppm) and RegisterCalculatorServiceForTest
+ * (calculator_service.cppm) exactly: builds and registers the SAME
+ * MortgageAssistantWorkflow graph as RegisterMortgageAssistantService above,
+ * but binds only the action names listed in `bound_action_names` ("Admission",
+ * "CheckModel", "Generate", "ParseAndVerify") instead of always binding the
+ * full set. Exists so a test can reproduce, through the real ParseOperation
+ * RPC, the silent-halt failure mode a partial or renamed action registry
+ * produces. Production never constructs one of these with a partial set.
+ */
+auto RegisterMortgageAssistantServiceForTest(grpc::ServerBuilder& builder,
+                                             std::span<const std::string_view> bound_action_names)
+    -> void;
 
 }  // namespace options_calculator::mortgage_assistant

@@ -1,5 +1,7 @@
 module;
 #include <grpcpp/grpcpp.h>
+#include <span>
+#include <string_view>
 
 export module assistant_service;
 
@@ -23,5 +25,23 @@ export namespace options_calculator::assistant {
  * this codebase.
  */
 auto RegisterAssistantService(grpc::ServerBuilder& builder) -> void;
+
+/**
+ * TEST-ONLY registration hook. Builds and registers the SAME
+ * StrategyAssistantWorkflow graph as RegisterAssistantService above, but
+ * binds only the action names listed in `bound_action_names` instead of
+ * always binding the full set ("Admission", "CheckModel", "Generate",
+ * "ParseAndVerify").
+ *
+ * Mirrors RegisterCalculatorServiceForTest (calculator_service.cppm) exactly,
+ * and for the identical reason: it lets a test reproduce, through the real
+ * ParseStrategy RPC, the silent-halt failure mode a partial or renamed
+ * action registry produces, and prove that the postcondition after
+ * Interpreter::Run() actually catches it. Production never constructs one of
+ * these with a partial set.
+ */
+auto RegisterAssistantServiceForTest(grpc::ServerBuilder& builder,
+                                     std::span<const std::string_view> bound_action_names)
+    -> void;
 
 }  // namespace options_calculator::assistant
