@@ -434,6 +434,44 @@ break — every RPC is stateless per request and there is no durable local state
 to split-brain, because there is no volume. The admission-queue fragmentation is
 what the shared inference queue is being built to fix.
 
+## SGEE queue cluster (`sgee-queue-1/2/3`)
+
+The N-separate-services topology described just above is no longer hypothetical.
+Three services in the same project and environment — `sgee-queue-1`,
+`sgee-queue-2`, `sgee-queue-3` — each run **one** replica of
+`backend/Dockerfile.queue-node` with **its own `/data` volume**, and together
+they are one Raft cluster. Do not "simplify" this into one service with
+`numReplicas: 3`: Railway forbids volumes with replicas, and replicas share a
+hostname, so the peers could not address each other.
+
+**It is a non-authoritative mirror. Postgres remains the system of record**, and
+`docs/SGEE_QUEUE_CLUSTER.md` carries the evidence for why.
+
+Four things are easy to get wrong here:
+
+- **`SGEE_PEERS` means two different things.** The nodes read it and dial
+  **consensus, port 50052**; `backend/src/modules/sgee_queue_client.cpp` reads
+  the same variable name and dials the **client queue, port 50053**. Copying one
+  service's value onto the other yields a process that connects to a real port,
+  speaks the wrong protocol at it, and fails like a network problem.
+- **`SGEE_NODE_ID` and `SGEE_PEERS` have no image default, deliberately.** Three
+  nodes that all default to id 1 form three single-node clusters that each
+  accept writes, and nothing in the logs says so.
+- **The deploy stages its own upload** (`deploy/queue-node/deploy.sh`). Railway
+  reads `railway.json` from the root of the upload, and the one at the repo root
+  describes the *engine* — `backend/Dockerfile`, `numReplicas: 3`. Railway's
+  per-service escape hatches (`railwayConfigFile`, `rootDirectory`) are not
+  reachable from the CLI. The stage also mirrors `.dockerignore`'s `backend/`
+  exclusions to stay under the upload deadline, and retries: `railway up` timed
+  out every time at 144 MB and still roughly one attempt in three at 59 MB.
+- **`SGEE_QUEUE_TOKEN` authenticates CONSENSUS, not the queue port.**
+  `TaskQueueService`'s constructor takes no token at all, so anything that can
+  reach 50053 can enqueue. On Railway that port is inside the project's private
+  network, which is a boundary, not an authentication — **do not attach a public
+  domain to it.** Until it was fixed, the token was parsed and applied to
+  nothing; `tests/integration/queue_node_auth_test.sh` is what stops that
+  regressing, and it discriminates (mismatched tokens must fail to elect).
+
 `limits_for_tier()` silently falls back to the *anonymous* allowance for a tier
 it does not recognise while still labelling refusals with the requested tier.
 The live `QUOTA_POLICY` defines `pro`; the example in `docs/FINANCE_API.md` does
