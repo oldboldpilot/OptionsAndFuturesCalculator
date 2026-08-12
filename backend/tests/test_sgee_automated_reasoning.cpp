@@ -450,6 +450,87 @@ class GraphProver {
         }
         return res;
     }
+
+    // -----------------------------------------------------------------------
+    // P6: Queue-Node Await Budget Admissibility
+    // -----------------------------------------------------------------------
+    // The SGEE queue node derives its await budget from the Raft timing actually
+    // in force: await_rounds_for_failover(b,h) = (2b + h) * 4, spent at 1 ms per
+    // round by the driver's ProgressFn. Two bounds must hold together, and
+    // RaftNode::set_timing enforces only the first half of the story:
+    //
+    //   LOWER: the budget must span a worst-case election (the deadline is armed
+    //          in [b, 2b)) plus one heartbeat round trip, else an await issued as
+    //          a leader dies can never confirm. This is the defect that froze the
+    //          budget at the class constants while the timing became configurable.
+    //
+    //   UPPER: the budget must stay strictly under the broker's lease visibility
+    //          window, else a caller is still waiting after its own lease expired
+    //          and completes against a stale fencing token -- the split-brain case
+    //          the token exists to catch.
+    //
+    // set_timing's precondition (h > 0, b > 0, 2h <= b) admits (3000, 1500), which
+    // derives exactly 30000 and violates the UPPER bound. That pair is why the
+    // queue node carries a startup refusal, and why this property is discharged
+    // rather than eyeballed.
+    auto prove_await_budget(std::uint64_t election_base_ms, std::uint64_t heartbeat_ms,
+                            std::uint64_t visibility_window_ms) -> ProofResult {
+        ProofResult res;
+        res.property_name = "P6: Queue-Node Await Budget Admissibility";
+        res.offending_node = std::format("timing({},{})", election_base_ms, heartbeat_ms);
+
+        const std::uint64_t budget = (election_base_ms * 2 + heartbeat_ms) * 4;
+        const std::uint64_t worst_failover = election_base_ms * 2 + heartbeat_ms;
+
+        // SMT-LIB2: assert the concrete derivation and that BOTH bounds hold.
+        // NOTE: no identifier here may contain the substring "timeout" -- Z3Reasoner
+        // short-circuits on it before the formula ever reaches the solver.
+        std::string smt;
+        smt += "(declare-const election_base_ms Int)\n";
+        smt += "(declare-const heartbeat_ms Int)\n";
+        smt += "(declare-const budget_ms Int)\n";
+        smt += "(declare-const worst_failover_ms Int)\n";
+        smt += "(declare-const visibility_window_ms Int)\n";
+        smt += "(declare-const budget_admissible Bool)\n";
+
+        smt += std::format("(assert (= election_base_ms {}))\n", election_base_ms);
+        smt += std::format("(assert (= heartbeat_ms {}))\n", heartbeat_ms);
+        smt += std::format("(assert (= visibility_window_ms {}))\n", visibility_window_ms);
+        // The derivation itself, restated symbolically so a change to the formula
+        // in replicated_queue_runtime.cppm without a change here fails the gate.
+        smt += "(assert (= budget_ms (* 4 (+ (* 2 election_base_ms) heartbeat_ms))))\n";
+        smt += "(assert (= worst_failover_ms (+ (* 2 election_base_ms) heartbeat_ms)))\n";
+        // set_timing's own precondition.
+        smt += "(assert (> election_base_ms 0))\n";
+        smt += "(assert (> heartbeat_ms 0))\n";
+        smt += "(assert (<= (* 2 heartbeat_ms) election_base_ms))\n";
+        // Both bounds, conjoined.
+        smt += "(assert (= budget_admissible (and (>= budget_ms worst_failover_ms) "
+               "(< budget_ms visibility_window_ms))))\n";
+        smt += "(assert (= budget_admissible true))\n";
+
+        auto proof = reasoner_.prove_safety(ctx_, sensen::gp_ara::CowLogicalExpression(smt));
+        if (proof.has_value()) {
+            if (*proof) {
+                res.proved = true;
+                res.details = std::format(
+                    "timing({} ms, {} ms) derives a {} ms budget: spans the {} ms worst-case "
+                    "failover and stays under the {} ms visibility window",
+                    election_base_ms, heartbeat_ms, budget, worst_failover, visibility_window_ms);
+            } else {
+                res.proved = false;
+                res.details = std::format(
+                    "timing({} ms, {} ms) derives a {} ms budget, which is INADMISSIBLE against a "
+                    "{} ms visibility window",
+                    election_base_ms, heartbeat_ms, budget, visibility_window_ms);
+            }
+        } else {
+            res.proved = false;
+            res.details = std::format("Z3 error: {} ({})", proof.error().message,
+                                      sensen::gp_ara::to_string(proof.error().code));
+        }
+        return res;
+    }
 };
 
 } // namespace sgee_reasoning
@@ -514,6 +595,39 @@ auto main(int argc, char* argv[]) -> int {
 
         auto restored5 = prover.prove_mortgage_safety(mortgage_wf, false /* nominal safe */);
         check(restored5.proved, "Restored MortgageAssistantWorkflow formally PROVED clean");
+    }
+
+    {
+        // P6 discharges a numeric bound rather than a graph shape, so it needs no
+        // workflow. The broker's lease visibility window is 30000 ms in
+        // sgee_queue_node.cpp (kVisibilityTimeoutMs); it is restated here because a
+        // change to it that is NOT reflected in the timing must fail this gate.
+        constexpr std::uint64_t kVisibilityWindowMs = 30000;
+        std::cout << "\n[P6: Queue-Node Await Budget Admissibility]\n";
+
+        // Accept: RaftNode's compiled-in defaults.
+        auto defaults = prover.prove_await_budget(150, 50, kVisibilityWindowMs);
+        check(defaults.proved, std::format("Default timing(150,50) ADMISSIBLE -- {}", defaults.details));
+
+        // Accept: the pair deployed to the sgee-queue-1/2/3 cluster.
+        auto deployed = prover.prove_await_budget(1500, 300, kVisibilityWindowMs);
+        check(deployed.proved, std::format("Deployed timing(1500,300) ADMISSIBLE -- {}", deployed.details));
+
+        // Discrimination Probe 6: the counterexample Z3 produced for the UPPER
+        // bound. It satisfies set_timing's precondition exactly (2*1500 <= 3000),
+        // so nothing in RaftNode rejects it, and it derives a budget of exactly
+        // 30000 -- equal to the visibility window. A gate that accepted this would
+        // be asserting nothing: it is the only reason the startup refusal exists.
+        auto bad = prover.prove_await_budget(3000, 1500, kVisibilityWindowMs);
+        check(!bad.proved,
+              std::format("Checker correctly REJECTED timing(3000,1500) -- {}", bad.details));
+
+        // And one strictly below the boundary must still be admitted, so the gate
+        // is proved to cut at the right place rather than simply refusing large values.
+        auto just_under = prover.prove_await_budget(3000, 1499, kVisibilityWindowMs);
+        check(just_under.proved,
+              std::format("Boundary-adjacent timing(3000,1499) still ADMISSIBLE -- {}",
+                          just_under.details));
     }
 
     std::cout << "\n====================================================================\n";

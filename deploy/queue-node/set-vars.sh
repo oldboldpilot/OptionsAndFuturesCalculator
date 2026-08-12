@@ -31,6 +31,33 @@ ENV_FILE="${REPO_ROOT}/config/.env"
 # network problem.
 CONSENSUS_PEERS="1=sgee-queue-1.railway.internal:50052,2=sgee-queue-2.railway.internal:50052,3=sgee-queue-3.railway.internal:50052"
 
+# Raft timing. ALL-OR-NOTHING: sgee_queue_node refuses a half-set pair, because
+# raising the election base alone leaves a heartbeat that no longer refreshes the
+# deadline -- which is the churn this override exists to cure, not a milder form
+# of it.
+#
+# Why these values rather than RaftNode's compiled-in 150/50 defaults: the
+# deployed cluster was observed campaigning 20-23 times between consecutive
+# status lines, with one node's term running 125 ahead of its peers and
+# last_applied frozen. A 150 ms base randomised into [150, 300) cannot survive
+# the scheduling jitter of shared containers on Railway's IPv6 overlay -- every
+# follower times out before a heartbeat lands.
+#
+# 1500/300 randomises into [1500, 3000), a 5:1 heartbeat ratio, and a worst-case
+# failover of ~3 s. That is entirely acceptable for a NON-AUTHORITATIVE mirror,
+# where availability of the leader matters and latency of failover does not.
+#
+# The upper bound is not a matter of taste. The node derives its await budget as
+# (2*base + heartbeat) * 4 milliseconds, and that budget MUST stay strictly under
+# the broker's 30000 ms lease visibility window -- past it, a caller is still
+# waiting on a lease the broker has already reclaimed, and completes against a
+# stale fencing token. 1500/300 derives 13200 ms. The pair (3000, 1500) satisfies
+# RaftNode::set_timing's own precondition and derives exactly 30000, which is why
+# the node refuses it at startup and why P6 of tests/test_sgee_automated_reasoning
+# discharges the bound through Z3 rather than trusting the arithmetic by eye.
+ELECTION_TIMEOUT_MS="1500"
+HEARTBEAT_MS="300"
+
 ensure_token() {
     if grep -q '^SGEE_QUEUE_TOKEN=' "${ENV_FILE}" 2>/dev/null; then
         return 0
@@ -72,7 +99,9 @@ for n in 1 2 3; do
     railway variable set \
         --environment "${ENVIRONMENT}" --service "${svc}" \
         --skip-deploys \
-        "SGEE_NODE_ID=${n}" "SGEE_PEERS=${CONSENSUS_PEERS}" > /dev/null
+        "SGEE_NODE_ID=${n}" "SGEE_PEERS=${CONSENSUS_PEERS}" \
+        "SGEE_ELECTION_TIMEOUT_MS=${ELECTION_TIMEOUT_MS}" \
+        "SGEE_HEARTBEAT_MS=${HEARTBEAT_MS}" > /dev/null
 
     # Passed on stdin so the token never appears in an argv the process table
     # can be read for.

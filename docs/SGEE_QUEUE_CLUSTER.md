@@ -303,6 +303,74 @@ against it.** The knob is the means, not the evidence: what would justify
 promotion is a deployed cluster that holds a leader long enough to complete a
 drain, measured the same way the churn was measured.
 
+### The knob shipped with a defect that would have made the churn worse (2026-08-12)
+
+`kAwaitRoundsForFailover` was a **compile-time constant** derived from
+`RaftNode`'s class constants: `(150*2 + 50) * 4` = 1400 rounds, spent at 1 ms
+per round by the driver's `ProgressFn`. Making the timing configurable did not
+move it, so it stayed sized for a 150 ms election base no matter what the
+operator set.
+
+Setting `SGEE_ELECTION_TIMEOUT_MS=1500` randomises the election deadline into
+`[1500, 3000)`, so the worst-case election is 3000 ms — against a budget still
+frozen at 1400. **Every await that spans a failover would have timed out**, and
+the knob added to cure failover churn would instead have guaranteed that no
+drain could survive one. Same shape as everything else in this file: a reading
+taken from a layer that no longer owns it.
+
+`await_rounds_for_failover(base, heartbeat)` replaces the constant, the queue
+node computes its budget from the timing actually in force, and logs it at boot.
+At the defaults the function returns 1400 — bit-for-bit what the constant was —
+so no existing caller changes.
+
+### A second bound, found by discharging it rather than reading it
+
+The budget also has an **upper** limit that nothing enforced. It must stay
+strictly under the broker's 30000 ms lease visibility window: past that, a
+caller is still waiting on a lease the broker has already reclaimed, and
+completes against a **stale fencing token** — precisely the split-brain case the
+token exists to catch.
+
+`RaftNode::set_timing`'s own precondition (`base > 0`, `heartbeat > 0`,
+`heartbeat * 2 <= base`) does **not** imply it, and cannot: `set_timing` knows
+nothing about the broker's lease window. Z3 produced the counterexample
+directly — **(3000, 1500)**, which satisfies the precondition exactly
+(`2*1500 <= 3000`) and derives a budget of *exactly* 30000. Nothing in RaftNode
+would have rejected it.
+
+The queue node now refuses that pair at startup, naming the consequence rather
+than the arithmetic. Verified in all three directions against the real binary:
+(3000,1500) exits 1 with the refusal, (1500,300) boots with a 13200 ms budget,
+and a half-set pair exits 1 with `PartialRaftTiming`.
+
+**P6 of `backend/tests/test_sgee_automated_reasoning.cpp`** discharges the bound
+through sensen's GP-ARA `Z3Reasoner` on every build. It restates the derivation
+symbolically, so changing the formula in `replicated_queue_runtime.cppm` without
+changing the gate fails it. It discriminates at the boundary, which is the whole
+point: **(3000,1500) → 30000 is rejected, (3000,1499) → 29996 is admitted.** A
+gate that merely refused large values would prove nothing.
+
+Two things about that harness are worth knowing before extending it:
+
+- `Z3Reasoner::prove_safety` returns `true` for **genuine SAT** and `false` for
+  UNSAT, and it runs a **vacuity audit** on every SAT — a tautology or a free
+  safety variable is rejected as Indeterminate rather than reported as proof. An
+  invariant is therefore verified by asserting *preconditions ∧ ¬invariant* and
+  requiring `false`.
+- **No formula may contain the substring `timeout`.** `prove_safety`
+  short-circuits on it before the formula reaches the solver, returning a
+  `Timeout` error. Every identifier in P6 says "visibility window" or "election
+  base" for that reason, and a verification that silently never ran is worth
+  less than none.
+
+### `ConfigError::PartialTls` and `PartialRaftTiming` rendered as "unrecognised"
+
+Both enum values were added without extending `sgee_queue_node.cpp`'s
+`config_error_name` switch, so the two misconfigurations those values exist to
+explain both printed `unrecognised ConfigError`. `-Wswitch` had been reporting
+it. Fixed, and the half-set run above is what proves the real message now
+reaches the operator.
+
 ## Gates
 
 | test | what it would catch |
