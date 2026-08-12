@@ -273,9 +273,35 @@ to be a **blocking** one rather than a cosmetic one.
 
 **This is what the precondition was for.** Locally the same cluster elects once
 and holds; nothing short of running it on the deployed network could have shown
-this. Promotion to authoritative stays blocked, and the next piece of work is
-making those timings configurable so they can be matched to the network the
-cluster actually runs on.
+this.
+
+### The timings are configurable now (2026-08-12)
+
+`RaftNode::set_timing(election_base_ms, heartbeat_ms)` makes the pair
+per-instance; the class constants remain the defaults, so every existing caller,
+test and DST harness is bit-for-bit unchanged. Reached from the outside as
+`SGEE_ELECTION_TIMEOUT_MS` and `SGEE_HEARTBEAT_MS`, through
+`ReplicatedTaskBroker::Config`.
+
+**Both-or-neither, and the relationship is enforced rather than trusted.** The
+dangerous misconfiguration is not "no override" — it is raising the election
+base while leaving a heartbeat that no longer refreshes it in time, which
+*reproduces* the churn the knob exists to cure. A half-set pair, and any pair
+where `heartbeat * 2 > election_base`, are refused at both layers:
+`ConfigError::PartialRaftTiming` at parse time and a `false` return from
+`set_timing` that changes nothing. A node that runs different timing from what
+its operator configured is how a cluster becomes unexplainably unstable, so
+there is no silent half-application anywhere on the path. The override is logged
+at boot when it is in force.
+
+Two gates, both asserting the refusal direction as well as the admit:
+`Raft_SetTiming_AcceptsWorkablePair_RefusesChurnReproducingOne` and
+`NodeConfig_Raft_Timing_Is_Both_Or_Neither_And_Keeps_Its_Relationship`.
+
+**Promotion stays blocked until a tuned pair is deployed and the audit re-run
+against it.** The knob is the means, not the evidence: what would justify
+promotion is a deployed cluster that holds a leader long enough to complete a
+drain, measured the same way the churn was measured.
 
 ## Gates
 
