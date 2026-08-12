@@ -74,6 +74,18 @@ interface TreePricerState {
 
   loading: boolean;
   error: string | null;
+  /**
+   * A PRECONDITION the user has not met yet -- no strike picked, no expiry on
+   * the ticket -- as opposed to something that went wrong.
+   *
+   * Separate from `error` because the panel renders them differently and must:
+   * `error` is "Unavailable" in loss red, which tells a trader the calculator
+   * is broken. "You have not chosen a strike yet" is not a failure, it is the
+   * next thing to do, and saying it in red is the same defect this project
+   * already fixed once when PERMISSION_DENIED rendered under "Unavailable"
+   * instead of the upgrade prompt.
+   */
+  notReady: string | null;
   gateDenied: string | null;
   results: TreePriceResult[];
   /** Dropped Bermudan dates (out of range, or deduped against a neighbour
@@ -203,6 +215,7 @@ export const useTreePricerStore = create<TreePricerState>((set, get) => ({
 
   loading: false,
   error: null,
+  notReady: null,
   gateDenied: null,
   results: [],
   droppedDateCount: 0,
@@ -307,23 +320,23 @@ async function executePricing(get: Getter, set: Setter): Promise<void> {
 
   // Cleared above every early return, matching calculateStrategy: a denial
   // or error belongs to one attempt and must not outlive it.
-  set({ gateDenied: null });
+  set({ gateDenied: null, notReady: null });
 
   const calc = useCalculatorStore.getState();
   const { ticket, spotPrice, symbol } = calc;
 
   if (spotPrice <= 0) {
-    set({ results: [], error: `No spot price for ${symbol} -- cannot price the tree.` });
+    set({ results: [], notReady: `No spot price for ${symbol} yet -- pick a symbol with a live quote.` });
     return;
   }
   if (ticket.strike === null || ticket.strike <= 0) {
-    set({ results: [], error: 'Pick a strike on the ticket before pricing exercise styles.' });
+    set({ results: [], notReady: 'Pick a strike on the ticket to price exercise styles.' });
     return;
   }
   if (ticket.impliedVolatility === null || ticket.impliedVolatility <= 0) {
     set({
       results: [],
-      error:
+      notReady:
         'No implied volatility on the ticket. Pick a strike from the option chain so IV comes from a live quote.',
     });
     return;
@@ -332,7 +345,7 @@ async function executePricing(get: Getter, set: Setter): Promise<void> {
     calc.chainExpirations.find((e) => e.date === (ticket.expiration || calc.selectedExpiration))
       ?.dte ?? 0;
   if (dte <= 0) {
-    set({ results: [], error: 'No expiration on the ticket -- pick an expiry from the chain.' });
+    set({ results: [], notReady: 'No expiry on the ticket -- pick one from the chain.' });
     return;
   }
 
@@ -370,13 +383,13 @@ async function executePricing(get: Getter, set: Setter): Promise<void> {
     if (token !== requestSeq) return;
     set({
       results: [],
-      error: 'Add at least one Bermudan exercise date before pricing this style.',
+      notReady: 'Add at least one Bermudan exercise date to price this style.',
       droppedDateCount,
     });
     return;
   }
 
-  set({ loading: true, error: null, droppedDateCount });
+  set({ loading: true, error: null, notReady: null, droppedDateCount });
 
   try {
     // Dynamic import, inside the pricing action only: finance_pb.js is
@@ -469,7 +482,7 @@ async function executePricing(get: Getter, set: Setter): Promise<void> {
     }
 
     if (token !== requestSeq) return;
-    set({ loading: false, error: null, results });
+    set({ loading: false, error: null, notReady: null, results });
   } catch (err: unknown) {
     if (token !== requestSeq) return;
     const message = (err as Error).message || 'Tree pricing failed';

@@ -62,6 +62,7 @@ export function ExerciseStylePanel() {
     setAdvancedOpen,
     loading,
     error,
+    notReady,
     gateDenied,
     results,
     priceTree,
@@ -248,6 +249,16 @@ export function ExerciseStylePanel() {
           <div className="empty-state empty-state--error">
             <span className="empty-state-title">Unavailable</span>
             <span>{error}</span>
+          </div>
+        ) : notReady ? (
+          /* A precondition, in the NEUTRAL style -- deliberately not the
+             --error branch above. "You have not picked a strike yet" is the
+             next thing to do, not a failure, and rendering it as "Unavailable"
+             in loss red tells a trader the calculator is broken when nothing
+             is wrong. The title names the action for the same reason. */
+          <div className="empty-state">
+            <span className="empty-state-title">Not priced yet</span>
+            <span>{notReady}</span>
           </div>
         ) : results.length === 0 ? (
           <div className="empty-state">
