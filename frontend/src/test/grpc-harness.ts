@@ -47,7 +47,22 @@ export interface RpcScript {
   getMarketQuote?: (req: unknown) => RpcOutcome<FakeQuoteResponse>;
   getRiskFreeRate?: (req: unknown) => RpcOutcome<FakeRateResponse>;
   getMarketChain?: (req: unknown) => RpcOutcome<FakeChainResponse>;
-  calculateStrategy?: (req: unknown) => RpcOutcome<FakeStrategyResponse>;
+  /**
+   * May return the outcome, or a PROMISE of it.
+   *
+   * Every other RPC here answers synchronously, which is what keeps the
+   * ordinary tests readable. This one is widened because `calculateStrategy`
+   * is the only action a component fires twice before the first answer lands
+   * -- `PositionLegs` calls it from its own handler while `StrategyWorkspace`
+   * fires it again from a `useEffect` on `legs` -- and the defect that
+   * overlap causes is entirely about which response resolves LAST. A
+   * synchronous handler cannot express "the older request answers second", so
+   * a race test written against one would be testing sequential calls and
+   * passing for the wrong reason.
+   */
+  calculateStrategy?: (
+    req: unknown,
+  ) => RpcOutcome<FakeStrategyResponse> | Promise<RpcOutcome<FakeStrategyResponse>>;
   /** `calculator.assistant.StrategyAssistant/ParseStrategy`. Promise-style. */
   parseStrategy?: (req: unknown) => RpcOutcome<FakeParseResponse>;
 }
@@ -381,9 +396,17 @@ export function strategyResponse(
 export function createFakeClient(script: RpcScript) {
   const calls: RpcCallLog[] = [];
 
-  /** Callback-style RPCs: (req, metadata, cb) => cb(err, res). */
+  /**
+   * Callback-style RPCs: (req, metadata, cb) => cb(err, res).
+   *
+   * Named explicitly rather than taking any `keyof RpcScript`. The two
+   * promise-style entries are not callable this way, and once
+   * `calculateStrategy` was widened to allow a deferred outcome, a signature
+   * spanning every key made `handler(req)` a union including a Promise --
+   * which `'fail' in outcome` would have silently treated as an outcome.
+   */
   const callbackRpc =
-    (method: keyof RpcScript) =>
+    (method: 'getMarketQuote' | 'getRiskFreeRate' | 'getMarketChain') =>
     (req: unknown, _meta: unknown, cb: (err: FakeRpcError | null, res: unknown) => void) => {
       calls.push({ method, request: req });
       const handler = script[method];
@@ -411,8 +434,12 @@ export function createFakeClient(script: RpcScript) {
         if (!handler) {
           return Promise.reject({ code: GRPC_UNAVAILABLE, message: 'no calculateStrategy handler scripted in this test' });
         }
-        const outcome = handler(req);
-        return 'fail' in outcome ? Promise.reject(outcome.fail) : Promise.resolve(outcome.ok);
+        // `Promise.resolve` normalises both handler shapes, so a synchronous
+        // outcome still settles on the microtask queue exactly as it did
+        // before -- widening the type changed no existing test's timing.
+        return Promise.resolve(handler(req)).then((outcome) =>
+          'fail' in outcome ? Promise.reject(outcome.fail) : outcome.ok,
+        );
       },
       /** Promise-style, like calculateStrategy: the assistant store awaits it. */
       parseStrategy: (req: unknown) => {

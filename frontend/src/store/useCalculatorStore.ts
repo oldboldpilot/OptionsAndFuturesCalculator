@@ -1,5 +1,4 @@
 import { create } from 'zustand';
-import { createClient } from '../lib/supabase/client';
 import { authMetadata } from '../lib/licence';
 import { OptionsCalculatorClient } from '../grpc/CalculatorServiceClientPb';
 import { StrategyRequest, Leg as ProtoLeg, QuoteRequest, ChainRequest, RiskFreeRateRequest } from '../grpc/calculator_pb';
@@ -324,12 +323,8 @@ interface CalculatorState {
   setTicket: (patch: Partial<TicketDraft>) => void;
   commitTicket: () => void;
 
-  saveStrategy: (name: string, symbol: string) => Promise<void>;
-  loadStrategies: () => Promise<void>;
   calculateStrategy: () => Promise<void>;
 }
-
-const supabase = createClient();
 
 /**
  * Symbol -> asset class classification.
@@ -402,6 +397,29 @@ const RPC_PERMISSION_DENIED = 7;
 // from `error` for the same reason `gateDenied` is, and matched on the CODE
 // because the sentence is copy and copy gets reworded.
 const RPC_FAILED_PRECONDITION = 9;
+
+/**
+ * Staleness token for `calculateStrategy`, matching `requestSeq` in
+ * useTreePricerStore.
+ *
+ * Overlapping calls are the ordinary case here, not an edge one: `PositionLegs`
+ * calls `calculateStrategy()` from its own change handler right after
+ * `updateLeg`, and `StrategyWorkspace` fires it again from a `useEffect` on
+ * `legs`, so a single quantity keystroke starts two requests and a three-digit
+ * quantity starts six. Nothing orders the responses, and the LAST one to
+ * resolve used to win -- which is how numbers computed for a position the user
+ * had already edited got rendered as the answer for the one on screen.
+ *
+ * Every call bumps this at entry, including one that refuses at a precondition:
+ * deciding there is nothing to compute must also supersede whatever is in
+ * flight, or an older request lands a result for a position that has since been
+ * emptied.
+ *
+ * Module scope rather than store state because nothing renders it, and a field
+ * on `CalculatorState` would invite a component to subscribe to a counter that
+ * changes on every keystroke.
+ */
+let calculationSeq = 0;
 
 export const useCalculatorStore = create<CalculatorState>((set, get) => ({
   symbol: 'SPY',
@@ -775,6 +793,8 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
   },
 
   calculateStrategy: async () => {
+    const token = ++calculationSeq;
+
     // Cleared HERE, above every early return below, rather than alongside the
     // `error: null` in each of them. A denial belongs to one position; leaving
     // it set while the user empties their legs would show an upgrade prompt
@@ -789,8 +809,14 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
     // fetch below, so a snapshot taken now would be the pre-fetch null.
     const { legs, spotPrice, symbol } = get();
 
+    // `isLoading: false` on every precondition return below, and it is load
+    // bearing rather than tidy. A refusal here supersedes whatever is in
+    // flight (the token was bumped above), so that older request will now
+    // commit nothing -- including the `isLoading: false` it used to be the
+    // only one to write. Without this the spinner would run forever whenever a
+    // calculation was overtaken by a position that cannot be priced.
     if (legs.length === 0) {
-      set({ result: null, error: null, notReady: null });
+      set({ result: null, error: null, notReady: null, isLoading: false });
       return;
     }
 
@@ -798,7 +824,12 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
     // previously hardcoded into the request ('SPY', 0.20, 30 days), so the
     // engine returned a real answer to a fabricated question.
     if (spotPrice <= 0) {
-      set({ result: null, notReady: `No spot price for ${symbol} — cannot price the position.`, error: null });
+      set({
+        result: null,
+        notReady: `No spot price for ${symbol} — cannot price the position.`,
+        error: null,
+        isLoading: false,
+      });
       return;
     }
     const iv = positionIv(legs);
@@ -817,6 +848,7 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
             ? 'These contracts publish no implied volatility — common at a same-day expiry. Enter an IV in the ticket, or choose a later expiration.'
             : 'No implied volatility on any leg. Add legs from the option chain so IV and premium come from live quotes.',
         error: null,
+        isLoading: false,
       });
       return;
     }
@@ -834,6 +866,7 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
           ? 'Every leg expires today. The payoff model prices remaining time value, so it needs at least one day to expiry — pick a later expiration.'
           : 'No expiration on any leg — pick an expiry from the chain.',
         error: null,
+        isLoading: false,
       });
       return;
     }
@@ -852,6 +885,11 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
     // resolves into the store, not into the destructured snapshot.
     const rate = get().riskFreeRate;
     if (rate === null) {
+      // First guarded site: the rate fetch above is an await, so a newer
+      // calculation can have started and already answered while this one was
+      // parked here. Reporting a Treasury failure now would replace a live
+      // result with an error about a request nobody is waiting on.
+      if (token !== calculationSeq) return;
       // Distinguish the two cases: saying the feed is unavailable while the
       // request is still in flight asserts a failure that has not happened.
       set({
@@ -864,6 +902,7 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
         // calculateStrategy is not enough: a notReady set between the two
         // would survive into this failure.
         notReady: null,
+        isLoading: false,
       });
       return;
     }
@@ -931,6 +970,12 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
 
       const res = await client.calculateStrategy(req, authMetadata());
 
+      // The answer arrived, but it is only THIS position's answer if no newer
+      // calculation has started since. Checked before the response is even
+      // unpacked: a superseded call must commit nothing, and that includes
+      // `isLoading: false` -- the newer request is still running.
+      if (token !== calculationSeq) return;
+
       const expiryCurve: CurvePoint[] = res.getPnlMatrixList().map((p) => ({
         price: p.getUnderlyingPrice(),
         pnl: p.getPnl(),
@@ -969,6 +1014,16 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
         // otherwise survive onto a live result -- the two exits from that same
         // window were treated differently, failure clearing and success not.
         notReady: null,
+        // The other two refusal states clear here for the same reason, and are
+        // belt to the token's braces: with the staleness check above, the only
+        // writer of either is a call that then returns immediately, so neither
+        // can currently be standing when this line runs. They are written
+        // anyway so that this `set` is complete on its own terms -- a live
+        // result must never coexist with a refusal, and `StrategyMetrics`
+        // checks both of these BEFORE it renders `result`, so one left behind
+        // would not sit beside the answer, it would replace it.
+        gateDenied: null,
+        modelLimit: null,
         result: {
           expiryCurve,
           matrix,
@@ -1010,6 +1065,12 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
         },
       });
     } catch (err: unknown) {
+      // Guarded exactly like the success path above, and for a sharper reason:
+      // a superseded failure does not merely show the wrong message, it blanks
+      // `result`. An overtaken request answering PERMISSION_DENIED would raise
+      // an upgrade prompt over a position that had just been priced.
+      if (token !== calculationSeq) return;
+
       const message = (err as Error).message || 'Calculation failed';
 
       // PERMISSION_DENIED (7) is the entitlement refusal, and on THIS client it
@@ -1060,37 +1121,4 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
       });
     }
   },
-
-  saveStrategy: async (name: string, symbol: string) => {
-    set({ isLoading: true, error: null });
-    try {
-      const { legs } = get();
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) throw new Error('Must be logged in to save strategies');
-
-      const { error } = await supabase.from('saved_strategies').insert([{
-        name,
-        symbol,
-        legs,
-        user_id: user.id
-      }]);
-
-      if (error) throw error;
-      set({ isLoading: false });
-    } catch (err: unknown) {
-      set({ isLoading: false, error: (err as Error).message || 'Failed to save strategy', notReady: null });
-    }
-  },
-
-  loadStrategies: async () => {
-    set({ isLoading: true, error: null });
-    try {
-      const { data, error } = await supabase.from('saved_strategies').select('*');
-      if (error) throw error;
-      console.log('Loaded strategies:', data);
-      set({ isLoading: false });
-    } catch (err: unknown) {
-      set({ isLoading: false, error: (err as Error).message || 'Failed to load strategies', notReady: null });
-    }
-  }
 }));

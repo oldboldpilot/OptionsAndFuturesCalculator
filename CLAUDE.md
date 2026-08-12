@@ -736,3 +736,47 @@ Two invariants there are worth knowing before editing a test:
 level — there is deliberately no shared `mockAmbient()` helper, because
 wrapping the calls in a function would apply them to the harness rather than to
 the caller.
+
+### Overlapping `calculateStrategy` is the ordinary case, not an edge one
+
+`PositionLegs` calls `calculateStrategy()` from its own change handler right
+after `updateLeg`, and `StrategyWorkspace` fires it again from a `useEffect` on
+`legs`. **One quantity keystroke therefore starts two requests and a
+three-digit quantity starts six**, and nothing ordered the responses — the last
+to resolve won. That put numbers computed for a position the user had already
+edited on screen as the answer for the one in front of them, and it is the same
+defect class as everything else in this file: a reading that looks like the
+answer, taken from a layer that does not own it.
+
+`useCalculatorStore` now carries the staleness token `useTreePricerStore`
+already used (`calculationSeq`): every call bumps it at entry and commits
+nothing if it has moved on. Four things about it are load-bearing:
+
+1. **A precondition refusal bumps the token too.** Deciding there is nothing to
+   compute must supersede what is in flight, or an older request lands a result
+   for a position the user has since emptied.
+2. **Because of that, every precondition return must also clear `isLoading`.**
+   The superseded request used to be the only writer of `isLoading: false`; once
+   it commits nothing, a refusal that overtakes it would spin forever.
+3. **The catch is guarded as tightly as the success path.** A superseded failure
+   does not merely show a stale message — it blanks `result`, and
+   `StrategyMetrics` checks `gateDenied` and `modelLimit` *before* it renders
+   `result`, so an overtaken `PERMISSION_DENIED` raised an upgrade prompt over a
+   position that had just been priced successfully.
+4. **The rate branch needs its own check.** It sits after the Treasury `await`,
+   which is a window the post-RPC guard cannot cover.
+
+`src/store/calculator-race.test.ts` drives resolution ORDER by hand — the
+harness's `calculateStrategy` handler may return a promise precisely so a test
+can make the older request answer second. Each guard is mutation-pinned to a
+distinct named test. The `gateDenied` / `modelLimit` clear on the success path
+is the one exception and says so in its comment: with the token in place no test
+can fail without it, and it is written anyway so that `set` is complete on its
+own terms.
+
+`saveStrategy` and `loadStrategies` were deleted with it. They had no callers,
+`loadStrategies` `console.log`ed its rows and discarded them — and both set the
+same `isLoading` that five analytics panels read as "calculating", so saving a
+strategy would have blanked all five behind a spinner while a Postgres insert
+ran. `isLoading` now has exactly one writer, which is what those panels have
+always assumed.
