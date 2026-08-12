@@ -135,16 +135,69 @@ A `std::set_terminate` handler now prints the exception type, `what()` and a
 symbolised backtrace, so a recurrence names its own thread and frame instead of
 one line naming neither.
 
+### The `inbound_` fix, confirmed under ThreadSanitizer (2026-08-12)
+
+The fix itself was never in doubt as *code* — `inbound_mutex_` visibly guards
+both the push (the transport's drain thread) and the drain (the owner thread).
+What was never established is that no OTHER unsynchronised path existed, because
+the bug never reproduced locally and the durability test passes with the race
+present.
+
+Built the parent tree with `-DSGEE_SANITIZE=thread` and ran `GrpcClusterTests` —
+the real gRPC transport, whose own drain thread is the second thread the original
+argument overlooked. **Zero data races reported on `inbound_`**, or anywhere in
+the runtime's state.
+
+Read the rest of that run carefully, because the headline number is misleading:
+1396 warnings, of which **gRPC's own `channelz_registry.cc` accounts for 461**.
+`-fsanitize=thread` reaches SGEE's translation units and **not** gRPC's (confirmed
+in `build.ninja` per-TU, not from `flags.make`, which does not carry it). TSan is
+therefore blind to gRPC's internal synchronisation, so an object handed across
+that boundary under gRPC's own locks looks racy the moment SGEE touches it — and
+every SGEE-located report sits exactly there: `from_byte_buffer` reading a
+`grpc::ByteBuffer` (15), `ClientCallData::~ClientCallData` (3), the server drain
+lambda (3).
+
+Those are consistent with uninstrumented-dependency false positives and are
+**not proven benign**; proving it would mean building gRPC itself with TSan.
+What the run does establish is the thing that was asked: the member the crash was
+traced to is clean under the transport that used to race it.
+
 ## Before this is promoted to authoritative
 
 - Fix the post-failover lease stall (`WalError: TimedOut`).
 - Fix, or document a consumer contract for, the timed-out-lease-hides-a-task
   hazard.
-- TLS/mTLS on both ports. Today the consensus port is authenticated by a shared
-  token over **plaintext**, and the client queue port is **not authenticated at
-  all** — `TaskQueueService`'s constructor takes no token. Railway's private
-  network is a boundary, not an authentication: a co-tenant container is on the
-  other side of it.
+- ~~TLS/mTLS on both ports.~~ **Implemented 2026-08-12, and OFF until certificates
+  are provisioned.** `SGEE_TLS_CA_CERT` / `SGEE_TLS_CERT` / `SGEE_TLS_KEY` turn on
+  mutual TLS for **both** ports — consensus and the client queue — from one
+  credentials object, because protecting the vote while leaving the port that
+  ACCEPTS WORK open would secure the wrong half.
+
+  Four properties worth knowing before relying on it:
+
+  - **All-or-nothing.** Some-but-not-all of the three is
+    `ConfigError::PartialTls` and the node **refuses to boot**. The dangerous
+    direction is not "TLS fails to turn on" — that is loud — it is a node with a
+    certificate and no key quietly serving plaintext while whoever set
+    `SGEE_TLS_CERT` believes the port is protected. Unreadable or empty PEM files
+    are fatal for the same reason.
+  - **Mutual, not merely encrypted.** The server uses
+    `GRPC_SSL_REQUEST_AND_REQUIRE_CLIENT_CERTIFICATE_AND_VERIFY`, the only option
+    that both DEMANDS a client certificate and CHECKS it against the CA. The
+    similarly-named `REQUEST_CLIENT_CERTIFICATE_AND_VERIFY` verifies one if
+    offered and admits a caller that presents none — encryption with no
+    authentication, which reads as "TLS is on".
+  - **Unset is still supported**, and is what the in-process and local test
+    clusters run. The boot log now states which of the two states the node is in
+    rather than unconditionally warning that the queue port is open — that line
+    was true when written and would have become a lie the moment mTLS landed.
+  - **The shared token still guards consensus** and is unchanged. mTLS replaces
+    "knows a secret that travels in the clear" with "holds a key signed by our
+    CA"; the token remains as defence in depth.
+
+  Railway's private network was the standing mitigation and it is a boundary, not
+  an authentication: a co-tenant container is on the other side of it.
 - Run the audit against the deployed Railway cluster, not only locally. Every
   number above is from three local processes on loopback.
 
