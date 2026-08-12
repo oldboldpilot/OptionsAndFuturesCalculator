@@ -8,7 +8,9 @@ this repository keeps finding: **a reading that looks like the answer, taken
 from a layer that does not own it.**
 
 Commits: `9c76da6` (frontend `notReady`), `9f9f13e` (calculation race + dead
-code), `350cb49` (quota label, leg ids, docs), SGEE `290d9db8` (`/healthz`).
+code), `350cb49` (quota label, leg ids, docs), `b146372` (deploy destination
+guard, docs), SGEE `290d9db8` (`/healthz` comment) and `9f02fa55` (the gate
+behind it).
 
 ---
 
@@ -134,6 +136,33 @@ leader loss.
 outage presented as a bug fix.** "Is there a leader?" has a real answer —
 `is_leader` and `leader_hint` on `DriverStatus`, served as JSON by `/statusz`,
 where a 503 does not kill the node.
+
+### And then a gate, because a comment is not one
+
+The fix above was comment-only, which left the semantics resting on a sentence.
+`is_healthy()` had **no test at all** — the function Railway restarts a
+container and gates a cutover on. Two cases now pin it:
+
+- **running + ticking + NO LEADER is healthy.** Peers `{2, 3}` are named but
+  never constructed, so quorum 2 is unreachable and node 1 campaigns forever
+  without winning — a durable no-leader state a single-node harness cannot
+  produce, since quorum 1 elects itself in milliseconds. The test asserts the
+  **term moves** rather than reading `is_leader` once, so an idle node cannot
+  pass for a campaigning one.
+- **the negatives**, so "liveness only" cannot quietly become "always true":
+  false before start, false after stop, and false once the last tick falls
+  outside `tick_interval * kStaleTickMultiplier`. Staleness is injected through
+  `is_healthy()`'s own `now_ms` parameter rather than by sleeping, which would
+  race the thread under measurement.
+
+Adding `&& (s.is_leader || s.leader_hint.has_value())` — exactly what the old
+comment described — fails both health cases and nothing else: **7 passed, 2
+failed.** Unmutated, 9/9.
+
+The multi-peer harness stays inside the file header's `inbound_` argument: the
+hazard there is another node's *thread* delivering into an unsynchronized
+vector, and nodes 2 and 3 are never registered with the `InProcessRegistry`, so
+there is no second thread and nothing to deliver.
 
 ---
 
