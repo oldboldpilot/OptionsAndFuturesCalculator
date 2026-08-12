@@ -1369,6 +1369,27 @@ target_link_libraries(test_api_key_entitlement PRIVATE grpc++ fastjson logger Op
 add_test(NAME ApiKeyEntitlementTest COMMAND test_api_key_entitlement)
 
 # ---------------------------------------------------------------------------
+# Quota refusal labelling.
+#
+# quota.cppm + quota.cpp only, plus grpc++ for the grpc::Status the enforcer
+# returns and fastjson/logger for QUOTA_POLICY parsing and the one-shot
+# undefined-tier warning. No api_key.cpp: this gate is scoped to what the
+# enforcer does with a tier NAME it is handed, not to how an identity is
+# authenticated into one.
+add_executable(test_quota_tier_label
+    tests/test_quota_tier_label.cpp
+    src/modules/quota.cpp
+)
+target_sources(test_quota_tier_label
+    PRIVATE
+    FILE_SET CXX_MODULES FILES
+        src/modules/quota.cppm
+)
+target_link_libraries(test_quota_tier_label PRIVATE grpc++ fastjson logger)
+
+add_test(NAME QuotaTierLabelTest COMMAND test_quota_tier_label)
+
+# ---------------------------------------------------------------------------
 # Shared inference queue substrate (pg.cppm + inference_queue.cppm), and the
 # admission layer built on top of it (inference_admission.cppm) -- the
 # Postgres-backed queue that lets more than one engine replica share the two

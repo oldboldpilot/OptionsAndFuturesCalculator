@@ -575,6 +575,18 @@ Four things are easy to get wrong here:
   reachable from the CLI. The stage also mirrors `.dockerignore`'s `backend/`
   exclusions to stay under the upload deadline, and retries: `railway up` timed
   out every time at 144 MB and still roughly one attempt in three at 59 MB.
+- **`/healthz` is LIVENESS ONLY, and must stay that way.** `is_healthy()`
+  checks running + ticked + ticked recently. It says nothing about leadership,
+  and `ReplicatedQueueRuntimeDriver`'s comment claimed for months that it
+  required "EITHER leading OR a leader_hint" — it never did, and implementing
+  what that comment described would be a self-inflicted outage. Railway restarts
+  a container and gates a deploy cutover on `/healthz`, and its zero-downtime
+  release replaces the **whole set** of containers at once, so every node in the
+  new set starts with no leader until they find each other and elect. A health
+  check requiring a leader would 503 from all three during exactly that window:
+  the cutover would never complete, the nodes would be killed and restarted, and
+  the cluster could never form quorum. "Is there a leader?" is answered by
+  `is_leader` / `leader_hint` on `/statusz`, where a 503 does not kill the node.
 - **`SGEE_QUEUE_TOKEN` authenticates CONSENSUS, not the queue port.**
   `TaskQueueService`'s constructor takes no token at all, so anything that can
   reach 50053 can enqueue. On Railway that port is inside the project's private
@@ -583,10 +595,37 @@ Four things are easy to get wrong here:
   nothing; `tests/integration/queue_node_auth_test.sh` is what stops that
   regressing, and it discriminates (mismatched tokens must fail to elect).
 
-`limits_for_tier()` silently falls back to the *anonymous* allowance for a tier
-it does not recognise while still labelling refusals with the requested tier.
-The live `QUOTA_POLICY` defines `pro`; the example in `docs/FINANCE_API.md` does
-not. Do not "fix" the live policy by copying the doc.
+`limits_for_tier()` falls back to the *anonymous* allowance for a tier it does
+not recognise. The live `QUOTA_POLICY` defines `pro`; the example in
+`docs/FINANCE_API.md` does not. **Do not "fix" the live policy by copying the
+doc.**
+
+The fallback direction is deliberate — an entitlement naming a tier that was
+renamed must not become unlimited access — but it used to be **silent**, and the
+refusal still carried the *requested* tier name. "quota exceeded for tier `pro`"
+against the anonymous allowance reads as pro's own limit being hit, and sends an
+operator to raise a number that is not the one in force. Two changes, since
+2026-08-12:
+
+- the refusal is labelled `pro (undefined in QUOTA_POLICY; anonymous limits)`,
+  following the marker convention `(per-key)` already used for the same reason —
+  a label names where the NUMBER came from, not what the caller asked for;
+- the first occurrence of each unknown tier logs an error naming it. Once per
+  distinct name, not per request: the condition is a misconfiguration that
+  persists, so the hundredth line says nothing the first did not.
+
+`load_policy` already rejects a `QUOTA_API_KEYS` entry naming an unknown tier,
+so `admit` cannot reach this state. **`admit_identity` can**, and that is the
+whole point: it takes the tier from a *verified* identity — Supabase
+`app_metadata.tier` or a signed licence — and neither is checked against
+`QUOTA_POLICY`, because they are issued somewhere else entirely.
+
+`tests/test_quota_tier_label.cpp` (`QuotaTierLabelTest`) gates it, and asserts
+**where each caller is cut off**, not just the string: `pro` gets 5 req/min and
+`anonymous` 2, so an undefined tier being refused on its *third* request is what
+proves the anonymous number is the one actually applied. Mutation-checked both
+ways — dropping the marker fails one check, applying it unconditionally fails
+four.
 
 ## Option chain cache
 

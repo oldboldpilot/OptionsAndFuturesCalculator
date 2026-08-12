@@ -9,6 +9,7 @@ module;
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <grpcpp/grpcpp.h>
@@ -79,6 +80,10 @@ class QuotaEnforcer::Impl {
     std::string anonymous_tier_ = "anonymous";
 
     mutable std::mutex mu_;
+    /** Separate from mu_ on purpose: the tier lookup happens BEFORE mu_ is taken. */
+    mutable std::mutex warn_mu_;
+    mutable std::unordered_set<std::string> warned_tiers_;
+    static constexpr std::size_t kMaxWarnedTiers = 64;
     std::unordered_map<std::string, CallerState> callers_;
     Clock::time_point last_sweep_ = Clock::now();
 
@@ -92,11 +97,46 @@ class QuotaEnforcer::Impl {
         return (it == key_to_tier_.end()) ? anonymous_tier_ : it->second;
     }
 
+    [[nodiscard]] auto tier_is_defined(const std::string& tier) const -> bool {
+        return tiers_.find(tier) != tiers_.end();
+    }
+
     [[nodiscard]] auto limits_for_tier(const std::string& tier) const -> TierLimits {
         const auto it = tiers_.find(tier);
         if (it != tiers_.end()) return it->second;
         const auto anon = tiers_.find(anonymous_tier_);
         return (anon != tiers_.end()) ? anon->second : TierLimits{};
+    }
+
+    /**
+     * Says ONCE that a tier arrived which QUOTA_POLICY does not define.
+     *
+     * `load_policy` already rejects a QUOTA_API_KEYS entry naming an unknown
+     * tier, so the `admit` path cannot reach that state. `charge` can: it takes
+     * the tier from a VERIFIED identity -- Supabase `app_metadata.tier` or a
+     * signed licence -- and neither of those is checked against the policy,
+     * because they are issued somewhere else entirely. A tier that is renamed
+     * in one place and not the other lands here.
+     *
+     * Once per distinct name rather than per request: the condition is a
+     * misconfiguration that persists, so the hundredth line says nothing the
+     * first did not, and under load it would be the only thing in the log. The
+     * set is capped because it is keyed on a string this process did not
+     * choose; the cap is a bound on memory, not a security control, since both
+     * sources of the name are authenticated.
+     */
+    auto note_undefined_tier(const std::string& tier) const -> void {
+        {
+            const std::lock_guard<std::mutex> lock(warn_mu_);
+            if (warned_tiers_.find(tier) != warned_tiers_.end()) return;
+            if (warned_tiers_.size() >= kMaxWarnedTiers) return;
+            warned_tiers_.insert(tier);
+        }
+        logger::Logger::getInstance().error(
+            "QUOTA_POLICY does not define tier '{}'; callers presenting it are being metered "
+            "against the '{}' allowance. Refusals name it '{} (undefined in QUOTA_POLICY; "
+            "anonymous limits)' so this is not mistaken for that tier's own limit.",
+            tier, anonymous_tier_, tier);
     }
 
     /**
@@ -256,11 +296,23 @@ class QuotaEnforcer::Impl {
         const std::string tier =
             tier_name.empty() ? anonymous_tier_ : std::string{tier_name};
         const auto lim = (explicit_limits != nullptr) ? *explicit_limits : limits_for_tier(tier);
+        // Whether the NUMBERS above actually came from this tier. When they did
+        // not, the fallback is silent by design (see limits_for_tier) and only
+        // the label below can say so.
+        const bool from_own_tier = (explicit_limits != nullptr) || tier_is_defined(tier);
+        if (!from_own_tier) note_undefined_tier(tier);
         // Reported as the key's own tier name with a marker, so a refusal names
         // something the operator can actually go and look at. Saying "business"
         // when the number came from the key rather than from the business tier
         // would send them to the wrong file.
-        d.tier = (explicit_limits != nullptr) ? (tier + " (per-key)") : tier;
+        //
+        // The undefined-tier marker is there for the same reason and is the
+        // sharper case: "quota exceeded for tier 'pro'" against the anonymous
+        // allowance reads as pro's own limit being hit, and sends an operator
+        // to raise a number that is not the one in force.
+        d.tier = (explicit_limits != nullptr) ? (tier + " (per-key)")
+                 : from_own_tier              ? tier
+                                              : (tier + " (undefined in QUOTA_POLICY; anonymous limits)");
 
         const auto now = Clock::now();
         const std::string id = caller_id.empty() ? std::string{"~anonymous"} : std::string{caller_id};

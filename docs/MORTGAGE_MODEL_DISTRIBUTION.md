@@ -6,27 +6,50 @@ How the mortgage assistant's fine-tuned Qwen3-0.6B GGUF gets from the training
 host into the running container, and what must be true before it is called
 deployed.
 
-> **STATUS, 2026-08-05 — the hosting half of this document is being replaced.**
+> **STATUS, 2026-08-12 — the replacement transport EXISTS and both models are
+> deployed and loading. The "Publishing a model" section below is HISTORY.**
 >
-> The private HuggingFace repository this page's "Publishing a model" section
-> describes was **deleted** on 2026-08-05 at the owner's instruction: the weights
-> are proprietary trade secrets and do not belong on a third-party model
-> registry, private or not. Neither GGUF is in the deployed container today, and
-> **no model URL is pinned** — both assistants therefore report their model
-> unavailable at runtime while every other service in the image is unaffected,
-> which is the supported empty-URL build this page already describes.
+> Verified against the running engine, at every boot:
 >
-> A replacement hosting mechanism is being designed and is **not** settled here.
-> Do not treat the HF procedure below as current, and do not invent a substitute
-> from it. The `backend/models/` build-context staging path added to
-> `backend/Dockerfile` in this same commit is a **stopgap** that keeps a locally
-> held model reachable by a local `docker build`; it is not the answer for
-> Railway, where `railway up` cannot carry 639 MB (see "Why a build-time fetch").
+> ```
+> Loading GGUF model from /app/model/mortgage-assistant.gguf
+> Mortgage assistant ready: backend=sensen device=cpu
+> Mortgage assistant model is LOADED
+> ```
 >
-> What is NOT provisional, and survives whatever replaces the transport: a model
-> is verified against a checksum before anything is allowed to use it, staging is
-> not verification, and the checksum that counts is the one round-tripped from
-> wherever the bytes are actually served.
+> `MODEL_URL` / `MORTGAGE_MODEL_URL` on the Railway service point at a private
+> artifact host, with `MODEL_SHA256` / `MORTGAGE_MODEL_SHA256` set alongside
+> them, and the fetch still happens at IMAGE BUILD time with the checksum
+> pinned. The `sha256` in "What ships" below is the one that counts.
+>
+> **The previous banner, dated 2026-08-05, said the opposite** — "neither GGUF
+> is in the deployed container today", "no model URL is pinned", "both
+> assistants therefore report their model unavailable at runtime", and "a
+> replacement hosting mechanism is being designed". Every one of those was
+> overtaken by events and none was corrected here, so this page contradicted
+> `CLAUDE.md` for a week and `CLAUDE.md` had to carry a warning pointing readers
+> away from it. If you are changing how the model is served, update this banner
+> in the same commit.
+>
+> What has NOT changed, and is the part to hold on to:
+>
+> - The private HuggingFace repository the "Publishing a model" section
+>   describes was **deleted** on 2026-08-05 at the owner's instruction: the
+>   weights are proprietary trade secrets and do not belong on a third-party
+>   model registry, private or not. **Do not re-upload to any model registry to
+>   "restore" anything** — the current transport replaced that deliberately. Do
+>   not treat the HF procedure below as current, and do not invent a substitute
+>   from it.
+> - A model is verified against a checksum before anything is allowed to use it,
+>   staging is not verification, and the checksum that counts is the one
+>   round-tripped from wherever the bytes are actually served.
+> - An empty `MODEL_URL` remains a **supported** build, not a broken one: that
+>   assistant answers `MODEL_UNAVAILABLE` and every other service is unaffected.
+>   One model, both, or neither is a valid image.
+> - The `backend/models/` build-context staging path in `backend/Dockerfile`
+>   still lets a LOCAL `docker build` use a locally held GGUF. It is not the
+>   answer for Railway, where `railway up` cannot carry 639 MB (see "Why a
+>   build-time fetch").
 
 This is a **sibling** of `STRATEGY_ASSISTANT_PIPELINE.md`, not a section of it.
 That document is scoped end to end to one model —
