@@ -289,13 +289,50 @@ disproved, recorded so they are not re-checked:
   `0x5241465453544D31` ("RAFTSTM1"), not anything derived from the code, so a
   code change cannot invalidate an existing WAL.
 
-The error message itself was the obstacle: it discarded both halves of the
-`RuntimeError` it was handed, so WAL recovery failure, a disk that will not
-accept a write, and a bad config all produced one identical sentence — in the
-place where the container is about to exit and the log is the only surviving
-evidence. It now names `RuntimeErrorKind` and `ConsensusError` and the
-`data_dir`, which distinguishes `RaftError` (raft.wal) from `QueueError`
-(broker.wal). That distinction is what the next roll is for.
+### Four layers each widened the error until it meant nothing
+
+The obstacle was not the fault, it was the reporting. The same information was
+discarded four times on its way out:
+
+```
+persistence::WalError{OpenFailed|IoError|Corrupt|BadHeader|PayloadTooLarge|InvalidLsn}
+  -> QueueError::WalError            (TaskQueueLog::open — six values become one)
+  -> ConsensusError::QueueError      (ReplicatedTaskBroker::open — every broker fault becomes one)
+  -> "Failed to create ReplicatedQueueRuntimeDriver"   (the node — both halves dropped)
+```
+
+Every one of those types already had a `to_string`. The node exits immediately
+on this path, so each layer was the last place its own distinction existed, and
+each threw it away. A day of downtime produced the word `QueueError`.
+
+All three are fixed, and the chain now reads end to end. Verified by inducing a
+`BadHeader` locally (a foreign `broker.wal`):
+
+```
+[TaskQueueLog] Wal::open(.../broker.wal) failed: BadHeader. size=137
+    expected_header_hash=0x5451554555450002.
+[ReplicatedTaskBroker] TaskBroker::open(.../broker.wal) failed: WalError.
+    This is the BROKER wal, not the raft wal.
+[sgee_queue_node] Failed to create ReplicatedQueueRuntimeDriver: kind=Broker
+    broker_error=QueueError (data_dir=...)
+```
+
+**What production says so far:** `kind=Broker`, `broker_error=QueueError`,
+`TaskBroker::open(/data/broker.wal) failed: WalError`. So it is the **broker**
+WAL, not `raft.wal`, and it is **not** `Corrupt` at the queue layer — it is one
+of the six `persistence::WalError` values, which the next roll names. Note that
+a genuinely corrupt file still arrives here as `QueueError::WalError` rather
+than `QueueError::Corrupt`, because `scan()`'s error is propagated verbatim
+through `Wal::open`; do not read the queue-layer value as ruling corruption out.
+
+**A reset of `broker.wal` ALONE would be a correctness hazard, not a repair.**
+`ReplicatedTaskBroker::open` seeds `snapshot_applied_index_` from
+`raft_.snapshot_index()`, so a node with fresh broker state and an intact Raft
+snapshot never re-applies the entries below that boundary: it would start
+cleanly, pass `/healthz`, and be silently missing history. A safe rebuild
+discards **both** WALs and lets the node rejoin empty via AppendEntries /
+InstallSnapshot — which is only possible while a healthy leader exists, and all
+three nodes are currently down.
 
 ## The deployed cluster does not hold a leader (2026-08-12) — superseded in part
 
