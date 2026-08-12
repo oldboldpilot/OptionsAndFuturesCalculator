@@ -703,7 +703,33 @@ between the frontend and backend deploys, and is the correct direction to fail.
   Do not "fix" this by attaching the domains to the Pages project: while the Workers
   custom domain owns the hostname, the Pages attachment sits at `status=pending`
   forever and does nothing.
-- **Backend Deployment:** Railway CLI (`railway up --detach` linked to project `fearless-amazement` service `options-calculator-backend`).
+- **Backend Deployment:** `scripts/railway_deploy.sh` — project `fearless-amazement`,
+  service `options-calculator-backend`. It uploads with `curl` rather than
+  `railway up`, because `railway up` enforces a ~30 s client deadline that
+  Railway's own `/up` endpoint has been exceeding for any real payload; the
+  script's header carries the three disproved hypotheses.
+
+  **It checks the DESTINATION, and you should understand why before reaching
+  for `railway up` instead.** The service comes from `~/.railway/config.json` —
+  whatever `railway link` last pointed at — which is ambient state with no
+  relationship to what is being deployed. This project has four services in one
+  environment: the engine and three queue nodes. On 2026-08-12 the CLI was
+  linked to **`sgee-queue-3`**, so a bare `railway up` from the repo root would
+  have deployed the engine's `railway.json` (`backend/Dockerfile`,
+  `numReplicas: 3`) onto a queue node — and Railway forbids volumes on a service
+  with replicas, so it would not even have failed cleanly. The script now
+  resolves the linked service id to its NAME and refuses anything but the
+  engine's; `--service-name` overrides it deliberately. Both directions are
+  exercised: it refuses `sgee-queue-3` and admits a matching name.
+
+  **`railway logs --build` WITHOUT a deployment id shows the PREVIOUS
+  deployment's log.** While a new build runs it prints the one you are
+  replacing — `[3/3] Healthcheck succeeded!`, which reads exactly like success
+  and cost 25 minutes of believing a deploy had landed. Pass the id the script
+  prints. Then confirm the **cutover**, which no build log can tell you: a fresh
+  boot sequence with one `model is LOADED` line per replica per assistant
+  (3 replicas ⇒ 3 mortgage + 3 strategy), timestamped after the upload. A green
+  healthcheck is not evidence the new image is serving.
 - **Database Schema:** Applied `backend/migrations/01_init.sql` to Railway Postgres via `psql`.
 
 ### DNS (Cloudflare zone `optionsandfuturescalculator.com`)
@@ -819,3 +845,12 @@ same `isLoading` that five analytics panels read as "calculating", so saving a
 strategy would have blanked all five behind a spinner while a Postgres insert
 ran. `isLoading` now has exactly one writer, which is what those panels have
 always assumed.
+
+Leg ids were `Math.random().toString(36).substring(7)`, which keeps only what
+follows `"0."` plus five characters — so a short mantissa gives a very short id
+and an exactly-representable one gives the **empty string** (`(0.5).toString(36)`
+is `"0.i"`). Roughly one id in five thousand came out under four characters.
+`updateLeg` uses `map` and `removeLeg` uses `filter`, both on `l.id === id`, so
+two legs sharing an id is one edit applied to both and one delete removing both,
+silently. Now a counter — unique by construction for the life of the tab, which
+is the only scope a leg id has.

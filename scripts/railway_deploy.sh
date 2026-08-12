@@ -39,17 +39,49 @@
 # deadline. This is what `railway up` does minus the timeout, so it is not a
 # workaround of Railway's API — it is the same call, allowed to finish.
 #
-#     scripts/railway_deploy.sh [--dry-run]
+#     scripts/railway_deploy.sh [--dry-run] [--service-name NAME]
 #
 # --dry-run builds and validates the archive without uploading.
+# --service-name overrides the destination check below. Say it out loud.
+#
+# THE DESTINATION IS CHECKED, NOT ASSUMED
+#
+# Everything below verifies the ARCHIVE — railway.json, the Dockerfile, the
+# sensen closure — and until 2026-08-12 nothing verified WHERE it was going. The
+# service came from `~/.railway/config.json`, i.e. from whatever `railway link`
+# last pointed at, which is ambient state with no relationship to what is being
+# deployed. This project has four services in one environment: the engine and
+# three SGEE queue nodes. Running this while linked to `sgee-queue-3` — which is
+# what it was linked to during the 2026-08-12 session — would have uploaded a
+# verified, perfectly-formed ENGINE archive onto a queue node, and every check
+# in this file would have passed while doing it.
+#
+# The engine's railway.json at the repo root would then have replaced that
+# node's image and `numReplicas`, and Railway forbids volumes on a service with
+# replicas, so the failure would not even have been a clean one.
+#
+# So: resolve the linked service id to its NAME and require it to be the
+# engine's. `deploy/queue-node/deploy.sh` is the other direction of the same
+# rule — it stages its own tree and passes `--service` explicitly, precisely
+# because the root railway.json describes the engine.
 
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
+# The one service this script is allowed to deploy to. This archive is an engine
+# archive; sending it anywhere else is a mistake, not a configuration.
+EXPECTED_SERVICE_NAME="options-calculator-backend"
+
 DRY_RUN=0
-[[ "${1:-}" == "--dry-run" ]] && DRY_RUN=1
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --dry-run)      DRY_RUN=1; shift ;;
+        --service-name) EXPECTED_SERVICE_NAME="${2:?--service-name needs a value}"; shift 2 ;;
+        *) echo "usage: $0 [--dry-run] [--service-name NAME]" >&2; exit 2 ;;
+    esac
+done
 
 CONFIG="${HOME}/.railway/config.json"
 [[ -f "$CONFIG" ]] || { echo "ERROR: $CONFIG not found — run 'railway login'." >&2; exit 1; }
@@ -62,6 +94,45 @@ if not p:
     sys.exit('ERROR: this directory is not linked to a Railway project.')
 print(p['project'], p['environment'], p['service'])
 ")
+
+# --------------------------------------------------------------------------
+# Destination check. See the header: this runs BEFORE the archive is built, so
+# a wrong link costs a message rather than a 36 MB upload onto a queue node.
+# --------------------------------------------------------------------------
+LINKED_NAME="$(railway status --json 2>/dev/null | SERVICE_ID="$SERVICE" python3 -c "
+import json, os, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)          # print nothing; the check below reports it
+want = os.environ['SERVICE_ID']
+for e in d.get('services', {}).get('edges', []):
+    n = e.get('node', {})
+    if n.get('id') == want:
+        print(n.get('name', ''))
+        break
+")"
+
+if [[ -z "$LINKED_NAME" ]]; then
+    echo "ERROR: could not resolve the linked service id to a name." >&2
+    echo "       Refusing to upload an engine archive to an unidentified service." >&2
+    echo "       Check 'railway status', then 'railway link'." >&2
+    exit 1
+fi
+
+if [[ "$LINKED_NAME" != "$EXPECTED_SERVICE_NAME" ]]; then
+    echo "ERROR: linked service is '${LINKED_NAME}', expected '${EXPECTED_SERVICE_NAME}'." >&2
+    echo "" >&2
+    echo "       This builds an ENGINE archive: the repo-root railway.json names" >&2
+    echo "       backend/Dockerfile and numReplicas. Deploying it to any other" >&2
+    echo "       service replaces that service's image with the engine's." >&2
+    echo "" >&2
+    echo "       Queue nodes have their own path: deploy/queue-node/deploy.sh" >&2
+    echo "       Otherwise: railway link   (or pass --service-name to override)" >&2
+    exit 1
+fi
+
+echo "destination: ${LINKED_NAME} (environment ${ENVIRONMENT})"
 
 # The CLI refreshes this token lazily and only on demand, so poke it first: a
 # read command forces a refresh if the access token has expired, and the token
@@ -163,7 +234,29 @@ print(d['id'], d['status'], b)
 ")"
     [[ -n "$INFO" ]] && { echo "  $INFO"; }
     case "$INFO" in
-        *DOCKERFILE*) echo "upload landed intact — Railway is building."; exit 0 ;;
+        *DOCKERFILE*)
+            DEPLOY_ID="${INFO%% *}"
+            echo "upload landed intact — Railway is building."
+            echo ""
+            echo "Deployment id: ${DEPLOY_ID}"
+            echo ""
+            echo "  Follow THIS build (the id is not optional):"
+            echo "      railway logs --service ${LINKED_NAME} --build ${DEPLOY_ID}"
+            echo ""
+            # Said here because it has already cost 25 minutes of believing a
+            # deploy had landed. `railway logs --build` WITHOUT a deployment id
+            # shows the newest deployment Railway has a build log for, which
+            # while a new build is running is the PREVIOUS one -- so it prints
+            # "[3/3] Healthcheck succeeded!" describing the deploy you are
+            # replacing. It looks exactly like success.
+            echo "  Then confirm the CUTOVER, which the build log cannot tell you:"
+            echo "      railway logs --service ${LINKED_NAME} | grep -c 'model is LOADED'"
+            echo ""
+            echo "  A green healthcheck is not evidence the new image is serving."
+            echo "  A fresh boot sequence is. Expect one 'model is LOADED' line per"
+            echo "  replica per assistant (numReplicas 3 => 3 mortgage + 3 strategy),"
+            echo "  timestamped after this upload."
+            exit 0 ;;
     esac
     sleep 10
 done

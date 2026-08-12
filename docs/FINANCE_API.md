@@ -398,6 +398,7 @@ QUOTA_POLICY='{
   "tiers": {
     "anonymous": {"requests_per_minute": 60,   "compute_units_per_hour": 600},
     "free":      {"requests_per_minute": 600,  "compute_units_per_hour": 10000},
+    "pro":       {"requests_per_minute": 3000, "compute_units_per_hour": 200000},
     "partner":   {"requests_per_minute": 6000, "compute_units_per_hour": 500000}
   }
 }'
@@ -410,6 +411,23 @@ QUOTA_API_KEYS='{
 
 Zero on either axis means unlimited for that axis. Keys live in their own
 variable so the policy can be logged and reviewed without exposing them.
+
+> **The policy must name every tier your callers can present, and the numbers
+> above are illustrative — they are NOT the live ones.** Do not paste this
+> block over a running `QUOTA_POLICY`; read the current value first. This
+> example omitted `pro` until 2026-08-12, and copying it as-is would have
+> dropped every Pro caller to the anonymous allowance.
+>
+> A tier the policy does not define is metered against **anonymous** rather
+> than being let through unlimited — deliberately, so an entitlement naming a
+> renamed tier cannot become unlimited access. `QUOTA_API_KEYS` is checked
+> against the policy at boot and a key naming an unknown tier is rejected
+> loudly, but that check cannot cover the tier on a *verified identity*
+> (Supabase `app_metadata.tier`, or a signed licence), because those are issued
+> outside this service. When one of those names an undefined tier the engine
+> logs an error once per distinct name, and the refusal reads
+> `pro (undefined in QUOTA_POLICY; anonymous limits)` — the marker says the
+> number came from anonymous, not from the tier the caller presented.
 
 The startup log states what loaded, so "are quotas on?" is answerable without
 sending traffic:
