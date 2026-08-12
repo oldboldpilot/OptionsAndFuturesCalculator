@@ -156,16 +156,25 @@ require_volume() {
 
 # Wait until a node is genuinely back, and say what "back" means.
 #
-# The gate is the `Raft baseline:` line, which ONLY the new binary emits. That
-# is what makes this a proof rather than a guess: the boot banner has been
-# printed by every build this service has ever run, so finding one in the log
-# says nothing about WHICH binary printed it, and `railway status` reports
-# SUCCESS while a container crash-loops (the healthcheck passes before the
-# throw -- this cluster's first deployment did exactly that). A line no previous
-# binary could produce cannot be a leftover.
+# THE GATE IS THE DEPLOYMENT'S OWN STATUS, NOT THE LOG TEXT, and the previous
+# version of this function is why.
 #
-# It also carries the information worth having at a rollout boundary: the term
-# it rejoined at, whether it is leader, and how far it has applied.
+# It waited for a `Raft baseline:` line and its comment asserted that line was
+# "ONLY the new binary emits" -- true on the day it was written, and false ever
+# after, because that binary has since BEEN the deployed one. `railway logs`
+# returns the last session's output when nothing is running, so the gate matched
+# a leftover from the previous container and returned success for a node that
+# never booted. On 2026-08-12 it reported "all three nodes rolled, one at a time,
+# each proven up before the next" while every deployment was still BUILDING and
+# the two before them had FAILED their healthcheck. Nothing was proven; the
+# sentence was produced by a grep against a dead node's scrollback.
+#
+# That is the same trap this script's own header documents for
+# `railway logs --build`, arriving through the runtime log instead. A marker
+# chosen because "no previous binary could produce it" has a shelf life of
+# exactly one deploy, so it cannot be the gate. The deployment id can: it is
+# minted by THIS upload and its status is Railway's own answer about THIS
+# rollout.
 #
 # Deliberately NOT gated on the node becoming leader. Followers are healthy
 # participants; requiring leadership here would hang forever on two of three
@@ -175,39 +184,49 @@ await_healthy() {
     local waited=0
     local interval=20
     local deadline=2100   # 35 min: the image compiles gRPC from source
-    local logs
+    local status=""
 
-    echo "[deploy] waiting for ${svc} to report a Raft baseline (new binary only)"
+    echo "[deploy] waiting for ${svc}'s newest deployment to leave BUILDING"
     while [ "${waited}" -lt "${deadline}" ]; do
-        logs="$(railway logs --service "${svc}" 2>/dev/null || true)"
+        # First data row of `deployment list` is the newest deployment.
+        status="$(railway deployment list --service "${svc}" --environment "${ENVIRONMENT}" 2>/dev/null \
+                  | grep -oE '\| (BUILDING|DEPLOYING|INITIALIZING|SUCCESS|FAILED|CRASHED|REMOVED|SLEEPING) \|' \
+                  | head -1 | tr -d '| ' || true)"
 
-        if printf '%s' "${logs}" | grep -q 'Raft baseline:'; then
-            echo "[deploy] ${svc} is up:"
-            printf '%s' "${logs}" | grep 'Raft baseline:' | tail -1 | sed 's/^/    /'
-            # A node that booted more than once in this window is crash-looping,
-            # which the baseline line alone would not reveal.
-            local boots
-            boots="$(printf '%s' "${logs}" | grep -c 'Queue node initialized successfully' || true)"
-            if [ "${boots}" -gt 1 ]; then
-                echo "WARNING: ${svc} shows ${boots} boots in its recent log -- it may be restarting." >&2
-            fi
-            return 0
-        fi
-
-        if printf '%s' "${logs}" | grep -qiE 'terminate called|bad_variant_access|FATAL'; then
-            echo "FATAL: ${svc} logged a crash while starting:" >&2
-            printf '%s' "${logs}" | grep -iE 'terminate called|bad_variant_access|FATAL' | tail -3 | sed 's/^/    /' >&2
-            return 1
-        fi
+        case "${status}" in
+            SUCCESS)
+                echo "[deploy] ${svc}: deployment SUCCESS"
+                # Only NOW is the log worth reading, and only for the extra
+                # detail -- never as the proof itself.
+                local logs boots
+                logs="$(railway logs --service "${svc}" 2>/dev/null || true)"
+                printf '%s' "${logs}" | grep 'Raft baseline:' | tail -1 | sed 's/^/    /'
+                boots="$(printf '%s' "${logs}" | grep -c 'Queue node initialized successfully' || true)"
+                if [ "${boots}" -gt 1 ]; then
+                    echo "WARNING: ${svc} shows ${boots} boots in its recent log -- it may be restarting." >&2
+                fi
+                return 0
+                ;;
+            FAILED|CRASHED)
+                echo "FATAL: ${svc}'s newest deployment reported ${status}." >&2
+                echo "  A healthcheck failure here means the container started and did not stay up." >&2
+                echo "  Read the CONTAINER log, not the build log:" >&2
+                echo "    railway logs --service ${svc}" >&2
+                railway logs --service "${svc}" 2>/dev/null | grep -iE 'error|fatal|terminate called' \
+                    | tail -5 | sed 's/^/    /' >&2 || true
+                return 1
+                ;;
+            "")
+                echo "WARNING: could not read a deployment status for ${svc}; retrying" >&2
+                ;;
+        esac
 
         sleep "${interval}"
         waited=$((waited + interval))
-        [ $((waited % 120)) -eq 0 ] && echo "[deploy]   ...${waited}s"
+        [ $((waited % 120)) -eq 0 ] && echo "[deploy]   ...${waited}s (${status:-unknown})"
     done
 
-    echo "FATAL: ${svc} never printed a Raft baseline within ${deadline}s." >&2
-    echo "Either the build failed, or it is running the PREVIOUS binary (which does not" >&2
-    echo "emit that line). Check: railway logs --service ${svc}" >&2
+    echo "FATAL: ${svc}'s deployment did not reach SUCCESS within ${deadline}s (last: ${status:-unknown})." >&2
     return 1
 }
 
