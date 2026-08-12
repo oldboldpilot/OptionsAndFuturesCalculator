@@ -586,11 +586,19 @@ reaches the operator.
 | `QueueNodeSmokeTest` | node does not elect, does not exit on SIGTERM, or does not persist to `SGEE_DATA_DIR` |
 | `QueueNodeAuthTest` | `SGEE_QUEUE_TOKEN` not reaching the transport — mismatched tokens must fail to elect |
 | `QueueNodeDurabilityTest` | acknowledged tasks lost, duplicated or invented across a leader kill |
+| `QueueNodeBlockingIoTest` | a refused async-I/O backend bricking a node — the 2026-08-12 outage as a test. Forces the fallback with `SGEE_FORCE_BLOCKING_IO=1`, then kills a node mid-lease and restarts it so recovery must WRITE the expired-lease sweep |
 
-All three hold one `RESOURCE_LOCK`: they bind fixed ports and kill by process
+All four hold one `RESOURCE_LOCK`: they bind fixed ports and kill by process
 name, so running them concurrently under `ctest -j` would reproduce the
 `SO_REUSEPORT` trap they each warn about, arriving through the test runner
 instead of a stale developer process.
+
+`QueueNodeBlockingIoTest` exists because **no other test could reach the path it
+covers.** The async backend works on every developer and CI host, so the whole
+suite passed over the fallback by construction — which is precisely how a fatal
+`io_uring_queue_init` reached production. It drives the whole sequence rather
+than unit-checking `create()`: the bug was never that `create()` failed, it was
+that the failure was fatal at the one moment recovery needs a write.
 
 ## Volumes, and a disk asymmetry worth watching (2026-08-11)
 

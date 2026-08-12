@@ -558,6 +558,36 @@ transport was the in-process one. Fixed, but **not confirmed fixed in place** �
 it never reproduced locally, and the local three-node durability test passes
 with the race present.
 
+**The cluster was then down for a day on a different defect (2026-08-12), and
+that one is the sharper lesson.** `DurableAppender::create` treated a failed
+`io_uring_queue_init` as fatal, turning a COMPILE-time capability into a
+RUN-time requirement — and container runtimes block `io_uring_setup` by seccomp.
+`TaskBroker::open` ends by sweeping leases that expired while the process was
+dead, and that sweep is the **first** caller of `begin_batch`, so a node that
+died holding a lease could never reopen its own WAL. It ran for weeks because
+`sweep_expired` returns early when nothing has expired.
+
+Three things about it are worth carrying to any similar diagnosis:
+
+- **It presented as a corrupt WAL and was nothing of the kind.** The log read
+  cleanly every time; only the WRITE failed. Wiping the volumes would have
+  "fixed" it, destroyed the only evidence, and left a defect that would re-brick
+  the rebuilt cluster the first time a node died mid-lease.
+- **All three failed identically and simultaneously**, which rules out
+  independent disk corruption and points at replicated state — the expired-lease
+  set is the same on every node.
+- **Four layers each widened the error until it said nothing:**
+  `WalError` (six values) → `QueueError::WalError` → `ConsensusError::QueueError`
+  → "failed to create driver". Every one of those types already had a
+  `to_string`. A day of downtime produced the single word `QueueError`.
+
+Fixed by making the ring a runtime optimization (`create()` leaves the flag
+false, `commit()` dispatches on it), and gated by `QueueNodeBlockingIoTest`,
+which forces the fallback with `SGEE_FORCE_BLOCKING_IO=1` — no other test could
+reach that path, because the async backend works on every developer and CI host.
+The Win32 IoRing and IOCP branches carried the identical defect and are fixed
+the same way. See `docs/SGEE_QUEUE_CLUSTER.md`.
+
 Four things are easy to get wrong here:
 
 - **`SGEE_PEERS` means two different things.** The nodes read it and dial
@@ -730,6 +760,26 @@ between the frontend and backend deploys, and is the correct direction to fail.
   boot sequence with one `model is LOADED` line per replica per assistant
   (3 replicas ⇒ 3 mortgage + 3 strategy), timestamped after the upload. A green
   healthcheck is not evidence the new image is serving.
+
+  **`railway logs --service` has the SAME defect, and it is worse.** With
+  nothing running it replays the LAST session's output — it does not say so and
+  does not return empty — so any readiness check that greps its text passes
+  against a dead container's scrollback. On 2026-08-12 the queue deploy script
+  gated on a log line and reported *"all three nodes rolled, each proven up
+  before the next"* while every deployment was still BUILDING and the two before
+  them had FAILED their healthcheck. Nothing was proven.
+
+  **Gate on `railway deployment list --service <svc>`** — the first data row is
+  the newest deployment and its status (BUILDING / DEPLOYING / SUCCESS / FAILED /
+  CRASHED) is Railway's own answer about *this* rollout. Read logs only with an
+  explicit `railway logs --deployment <id>`. And note the corollary: **a marker
+  chosen because "no previous binary could emit it" has a shelf life of exactly
+  one deploy**, because that binary becomes the deployed one. It cannot be a
+  gate.
+
+  A build stuck at `scheduling build on Metal builder` with no further output is
+  a Railway-side scheduling stall, not a slow compile — it can sit there for
+  over an hour. Re-running the deploy gets it scheduled.
 - **Database Schema:** Applied `backend/migrations/01_init.sql` to Railway Postgres via `psql`.
 
 ### DNS (Cloudflare zone `optionsandfuturescalculator.com`)
