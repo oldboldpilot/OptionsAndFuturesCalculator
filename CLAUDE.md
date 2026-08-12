@@ -492,6 +492,42 @@ it does not recognise while still labelling refusals with the requested tier.
 The live `QUOTA_POLICY` defines `pro`; the example in `docs/FINANCE_API.md` does
 not. Do not "fix" the live policy by copying the doc.
 
+## Option chain cache
+
+`market_data.cppm` caches chains and quotes in a `TtlCache`. The chain TTL is
+**900 s (15 min)** and the quote TTL **60 s**, both overridable by
+`OPTION_CHAIN_TTL_SECONDS` / `OPTION_QUOTE_TTL_SECONDS`. On an upstream failure
+a stale chain is served up to `OPTION_CHAIN_MAX_STALE_SECONDS` (default 3600),
+after which the request is refused rather than answered with something older.
+
+**The cache is PER REPLICA, and `numReplicas: 3`.** `TtlCache` is an in-process
+`std::unordered_map`, exactly like `quota.cpp`'s `callers_` — so there are three
+independent caches, up to three upstream fetches per TTL window instead of one,
+and which `fetched_at` a caller sees depends on which replica they land on.
+Measured on production 2026-08-12: two page loads 17 s apart returned the same
+print (warm replica), a third 52 s later returned a NEW print while no TTL had
+expired and no override was set (cold replica), and a fourth reused that second
+print. The win is still real — roughly a 60x cut in Alpaca calls against the
+old 15 s TTL — it is just 3x smaller than the naive reading.
+
+**Every chain carries `fetched_at` (RFC3339, `ChainResponse` field 8), and the
+UI's LIVE badge is derived from it, not from status.** Under a 15-minute TTL a
+status-driven badge would pulse LIVE over quarter-hour-old quotes, which is
+fabrication by labeling. `frontend/src/lib/chainFreshness.ts` owns the rule:
+LIVE under 60 s, DELAYED with an as-of time otherwise. Two failure modes it
+handles deliberately, because both render stale data as fresh:
+
+- **Age is computed against the VIEWER's clock**, so a browser running behind
+  the server yields a negative age that a naive `age < 60` reads as very fresh.
+  Beyond a 5 s skew tolerance the age is treated as unknowable and the chip
+  falls back to DELAYED, keeping the server's timestamp but dropping the claim.
+- **Age computed once at render freezes at render**, so the component ticks a
+  clock every 15 s; otherwise a chain fetched fresh would still say LIVE fifteen
+  minutes later with nothing else on the page changing.
+
+A missing `fetched_at` renders DELAYED, never LIVE — which is what the site did
+between the frontend and backend deploys, and is the correct direction to fail.
+
 ## Features & Capabilities
 
 1. **Futures & Options Strategy Modeler:**

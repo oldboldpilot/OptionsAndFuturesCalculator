@@ -60,7 +60,14 @@ export function OptionChain() {
     ? ''
     : chainAgeSeconds === null
       ? `Backend print: ${chainFetchedAt} (age unknown — this device's clock disagrees with the server)`
-      : `Backend print: ${chainFetchedAt} (${Math.round(chainAgeSeconds)}s ago)`;
+        // Clamped at 0. A print fetched moments ago routinely computes a small
+        // NEGATIVE age -- the timestamp is the server's and the clock is the
+        // viewer's, and sub-second skew between them is normal. Rendering that
+        // as "-1s ago" reads as a bug in the very tooltip whose job is to make
+        // the freshness claim checkable. Anything beyond the skew tolerance is
+        // still not shown as a number at all: chainFreshness returns a null age
+        // there, which takes the branch above.
+      : `Backend print: ${chainFetchedAt} (${Math.max(0, Math.round(chainAgeSeconds))}s ago)`;
 
   useEffect(() => {
     if (chainStatus === 'idle') loadChain();
