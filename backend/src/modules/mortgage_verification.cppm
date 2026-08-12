@@ -1087,7 +1087,7 @@ struct ConventionValue {
     std::string_view field;
     std::string_view value;
 };
-constexpr std::array<ConventionValue, 15> kConventionValues{{
+constexpr std::array<ConventionValue, 16> kConventionValues{{
     // The monthly cadence, when the user said nothing about frequency.
     {.field = "payments_per_year", .value = "12"},
     {.field = "periods_per_year", .value = "12"},
@@ -1095,6 +1095,14 @@ constexpr std::array<ConventionValue, 15> kConventionValues{{
     // A fully-amortizing loan has no balloon; the training set states this
     // convention rather than sampling it.
     {.field = "future_value", .value = "0"},
+    // The mirror of that on the other side of the annuity: a LUMP-SUM present
+    // or future value question states no periodic contribution, and the model
+    // fills the slot with 0. Without this, "the future value of 1000 at 5% for
+    // 10 years" -- the most ordinary TVM question there is -- is refused on
+    // `payment` even once `periods` grounds correctly. Same trade the zeros
+    // above already accept: an unconditional exemption cannot also catch a user
+    // who DID state a payment the model then dropped to zero.
+    {.field = "payment", .value = "0"},
     // "not stated -> base case" zeros.
     {.field = "monthly_overpayment", .value = "0"},
     {.field = "extra_monthly_payment", .value = "0"},
@@ -1381,7 +1389,8 @@ namespace detail {
 /** The candidate set for one literal against one slot -- the complete
  * expansion of maps M1..M8, and nothing outside them. */
 [[nodiscard]] inline auto expand_candidates(const NumericLiteral& lit, SlotKind kind,
-                                            std::string_view field_name)
+                                            std::string_view field_name,
+                                            std::int64_t periods_per_year = 12)
     -> std::vector<Decimal> {
     std::vector<Decimal> out;
     if (!tag_admissible(kind, lit.tag)) return out;
@@ -1436,9 +1445,31 @@ namespace detail {
         }
 
         case SlotKind::MonthCount:
+            // M5 -- a duration in years becomes a COUNT OF PERIODS, and the
+            // period is whatever the rate's period is. `periods_per_year` is
+            // inferred from the emitted rate (see infer_periods_per_year); it
+            // is 12 when the rate was divided by 12, and 1 when the rate is
+            // annual, so one rule covers both.
+            //
+            // This used to be a hardcoded x12. That is right for a mortgage
+            // and wrong for the rest of the TVM surface, which shares the same
+            // generic `rate` + `periods` pair: "future value of 1000 at 5% for
+            // 10 years" with an ANNUAL rate has ten periods, and the fixed x12
+            // admitted only 120, so a correct parse was refused with the
+            // self-contradicting "10 does not correspond to anything in the
+            // request (the nearest figure you gave is 10)".
+            //
+            // Note what did NOT change: the identity candidate is still
+            // suppressed for a Years-tagged literal. With a monthly rate,
+            // "30 years" still grounds ONLY to 360, so `periods = 30` against
+            // a monthly rate -- a thirty-MONTH loan answered as thirty years --
+            // is still refused. Inferring the cadence tightens the gate as
+            // well as loosening it: an ANNUAL rate paired with `periods = 360`
+            // now grounds against 30 and is refused too, which the fixed x12
+            // accepted.
             if (lit.tag != LiteralTag::Years) push(lit.value);  // M1
             if (lit.tag == LiteralTag::Years || lit.tag == LiteralTag::Untagged) {
-                push(lit.value.scaled_by(12));  // M5
+                push(lit.value.scaled_by(periods_per_year));  // M5
             }
             break;
 
@@ -1470,6 +1501,73 @@ namespace detail {
         for (std::size_t i = 0; i < n; ++i) out.push_back(out[i].negated());
     }
     return out;
+}
+
+/**
+ * Which cadence the model actually used, read off the rate it emitted.
+ *
+ * `finance.proto` documents `rate` as a PER-PERIOD rate, and `periods` as a
+ * count of those same periods. Nothing in the field names says which period --
+ * the pair is only meaningful together, and until this existed the two were
+ * grounded independently: the rate grounded against any cadence in M3, and
+ * `periods` grounded against months by convention. A pair that disagreed
+ * therefore passed, and a pair that agreed annually was refused.
+ *
+ * Returns the number of periods per year (1 annual, 12 monthly, ...) when the
+ * emitted rate matches exactly ONE cadence of some percentage in the user's
+ * text, and `nullopt` otherwise -- ambiguous or unrecognised, in which case the
+ * caller keeps the conservative monthly default and refuses rather than guesses.
+ *
+ * Deliberately reuses M3's cadence list, so the set of period lengths this can
+ * infer is exactly the set the rate is allowed to be divided by. Adding one in
+ * a single place would let the two disagree again.
+ */
+[[nodiscard]] inline auto infer_periods_per_year(const std::vector<EmittedField>& fields,
+                                                 const std::vector<NumericLiteral>& literals)
+    -> std::optional<std::int64_t> {
+    constexpr std::array<std::int64_t, 6> kCadences{1, 2, 4, 12, 26, 52};
+    const __int128 tolerance = slot_tolerance_units(SlotKind::Rate);
+
+    for (const auto& f : fields) {
+        if (!is_one_of(kPerPeriodRateFields, f.name)) continue;
+        if (f.values.size() != 1) continue;
+        const auto emitted_rate = parse_strict_decimal(f.values.front());
+        if (!emitted_rate.has_value()) continue;
+
+        std::optional<std::int64_t> found;
+        for (const auto& lit : literals) {
+            // The annual figure the user actually said, as a fraction. A
+            // percent-tagged literal is always /100; an untagged one is only
+            // treated as a percentage inside the same band M2 uses, so "0.06"
+            // and "6%" both reach 0.06 and "300000" reaches nothing.
+            std::vector<Decimal> annuals;
+            const bool percent_signature =
+                lit.tag == LiteralTag::Percent ||
+                (lit.tag == LiteralTag::Untagged && lit.value.units() >= Decimal::kScale &&
+                 lit.value.units() < static_cast<__int128>(30) * Decimal::kScale);
+            if (percent_signature) {
+                if (auto as_fraction = lit.value.divided_by(100); as_fraction.has_value()) {
+                    annuals.push_back(*as_fraction);
+                }
+            }
+            if (lit.tag != LiteralTag::Percent) annuals.push_back(lit.value);
+
+            for (const auto& annual : annuals) {
+                for (const auto n : kCadences) {
+                    const auto per_period = annual.divided_by(n);
+                    if (!per_period.has_value()) continue;
+                    if (!emitted_rate->within(*per_period, tolerance)) continue;
+                    // Ambiguous: a zero rate matches every cadence, and so
+                    // would two literals that happen to line up. Refuse to
+                    // infer rather than pick one.
+                    if (found.has_value() && *found != n) return std::nullopt;
+                    found = n;
+                }
+            }
+        }
+        if (found.has_value()) return found;
+    }
+    return std::nullopt;
 }
 
 [[nodiscard]] inline auto is_convention_value(std::string_view field, const Decimal& value) -> bool {
@@ -1913,6 +2011,13 @@ auto ground_emitted_values(const MortgageParamsInput& input, std::string_view us
 
     const auto literals = lex_numeric_literals(user_text);
 
+    // Read the rate's cadence ONCE, before grounding any field: `periods` is a
+    // count of the RATE's periods, so the two must be grounded together or not
+    // at all. Falls back to 12 -- the mortgage convention, and the behaviour
+    // this gate had before -- when the rate does not identify a cadence.
+    const std::int64_t periods_per_year =
+        detail::infer_periods_per_year(input.fields, literals).value_or(12);
+
     for (const auto& emitted : input.fields) {
         const SlotKind kind = classify_slot(emitted.name);
         if (!detail::is_numeric_kind(kind)) {
@@ -1943,7 +2048,7 @@ auto ground_emitted_values(const MortgageParamsInput& input, std::string_view us
             bool grounded = false;
             for (const auto& lit : literals) {
                 for (const auto& candidate :
-                     detail::expand_candidates(lit, kind, emitted.name)) {
+                     detail::expand_candidates(lit, kind, emitted.name, periods_per_year)) {
                     if (parsed->within(candidate, tolerance)) {
                         grounded = true;
                         break;

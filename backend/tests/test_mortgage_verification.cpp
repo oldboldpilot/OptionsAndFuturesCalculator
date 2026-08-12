@@ -751,6 +751,69 @@ auto main() -> int {
     }
 
     // ===================================================================
+    section("DIRECTION 1c -- `periods` is grounded against the RATE's period");
+    // ===================================================================
+
+    // `finance.proto` documents `rate` as PER-PERIOD and `periods` as a count
+    // of those same periods, and the pair is only meaningful together. The
+    // grounding gate used to check them independently: the rate grounded
+    // against any cadence, `periods` grounded against months by convention.
+    // That refused correct annual parses AND accepted mismatched pairs.
+    //
+    // All four combinations are asserted here, because the fix has to loosen
+    // one direction without loosening the other.
+    {
+        // (1) ANNUAL rate, annual periods -- was REFUSED before the cadence is
+        // inferred, with the self-contradicting "10 does not correspond to
+        // anything in the request (the nearest figure you gave is 10)".
+        // Observed on production 2026-08-12.
+        auto annual = params("ComputeFutureValue", {{"rate", "0.0500"},
+                                                    {"periods", "10"},
+                                                    {"present_value", "1000.00"},
+                                                    {"payment", "0.00"},
+                                                    {"timing", "END_OF_PERIOD"}});
+        expect_pass(annual, "Compute the future value of 1000 at 5% for 10 years",
+                    "annual rate with annual periods is grounded");
+
+        // (2) MONTHLY rate, monthly periods -- the mortgage case, which must
+        // keep working.
+        auto monthly = params("ComputePayment", {{"rate", "0.0050"},
+                                                 {"periods", "360"},
+                                                 {"present_value", "300000.00"},
+                                                 {"future_value", "0.00"},
+                                                 {"timing", "END_OF_PERIOD"}});
+        expect_pass(monthly,
+                    "What is the monthly payment on a 300000 loan at 6 percent for 30 years?",
+                    "monthly rate with monthly periods is grounded");
+
+        // (3) MONTHLY rate, YEAR count in `periods` -- a thirty-MONTH loan
+        // answered as thirty years. This is the slip the old hardcoded x12
+        // existed to catch, and it must STILL be caught.
+        auto short_loan = params("ComputePayment", {{"rate", "0.0050"},
+                                                    {"periods", "30"},
+                                                    {"present_value", "300000.00"},
+                                                    {"future_value", "0.00"},
+                                                    {"timing", "END_OF_PERIOD"}});
+        expect(short_loan,
+               "What is the monthly payment on a 300000 loan at 6 percent for 30 years?",
+               mv::Outcome::Unsafe, mv::ReasonCode::UngroundedValue,
+               "a monthly rate with periods=30 is still refused");
+
+        // (4) ANNUAL rate, MONTH count in `periods` -- the mirror slip, and the
+        // one the old rule ACCEPTED: months grounded by convention while the
+        // rate was never checked against them. Now refused.
+        auto mismatched = params("ComputePayment", {{"rate", "0.0600"},
+                                                    {"periods", "360"},
+                                                    {"present_value", "300000.00"},
+                                                    {"future_value", "0.00"},
+                                                    {"timing", "END_OF_PERIOD"}});
+        expect(mismatched,
+               "What is the monthly payment on a 300000 loan at 6 percent for 30 years?",
+               mv::Outcome::Unsafe, mv::ReasonCode::UngroundedValue,
+               "an annual rate with periods=360 is now refused too");
+    }
+
+    // ===================================================================
     section("DIRECTION 1b -- the misuse classes the grounding gate adds");
     // ===================================================================
 

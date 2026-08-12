@@ -66,6 +66,7 @@ smoke client.
 
 ## Session logs
 
+- [2026-08-11/12 — option-chain cache and freshness contract, SGEE Windows CI, queue-cluster incident, sensen merge, mortgagefvcalculator.com verified end to end](session_logs/session_2026-08-11_cache_cluster_windows_and_mortgage_verification.md)
 - [2026-08-03 — frontend served by Workers not Pages, Pro gate verified, assistant eval corrected](session_logs/session_2026-08-03_frontend_workers_pro_gate_and_assistant_eval.md)
 - [2026-08-01 — assistant, sensen performance, Pro tier](session_logs/session_2026-08-01_assistant_sensen_perf_and_pro.md)
 - [2026-07-30 — libc++ std module investigation](session_logs/2026-07-30_libcxx_std_module_investigation.md)

@@ -77,30 +77,45 @@ on CPU, fetched at image build time with the checksum pinned — it cannot trave
 through `railway up`, which enforces an upload deadline that 62 MB already
 failed.
 
-**Where it is fetched FROM is currently unsettled, and no model is in the
-deployed container.** The private HuggingFace repository that `MODEL_URL` pointed
-at was **deleted on 2026-08-05** at the owner's instruction: the weights are
-proprietary trade secrets and do not belong on a third-party registry, private or
-not. This applies to both assistants' models. Consequences to hold on to:
+**The replacement hosting mechanism EXISTS and both models are deployed and
+loaded.** This section said the opposite until 2026-08-12 — "no model is in the
+deployed container", "each assistant answers `MODEL_UNAVAILABLE`" — and that was
+stale, not merely imprecise. Verified against the running engine:
 
-- Nothing in this repo hosts a model, and `**/*.gguf` is gitignored, so a
-  container built today has **no weights**. Each assistant answers
-  `MODEL_UNAVAILABLE` and every other service is unaffected — that is the
-  supported empty-`MODEL_URL` build, not a broken one.
-- A replacement hosting mechanism **is being designed** and is deliberately not
-  described here. Do not infer one from the old procedure, and do not re-upload
-  to any model registry to "restore" the fetch.
-- `backend/Dockerfile` gained a `backend/models/` build-context staging path so a
-  LOCAL `docker build` can use a locally held GGUF. It is a stopgap. It does not
-  help Railway, and the `!backend/models/*.gguf` exceptions in the root
-  `.dockerignore` / `.railwayignore` should be expected to come out.
-- The invariant that survives whatever replaces the transport: a model is
-  checksum-verified before anything uses it, staging is not verification, and the
-  checksum that counts is round-tripped from wherever the bytes are actually
-  served.
+```
+Loading GGUF model from /app/model/mortgage-assistant.gguf
+Loading weights: layers=28, hidden=1024, vocab=151936, threads=48
+Mortgage assistant ready: backend=sensen device=cpu
+Mortgage assistant model is LOADED
+```
 
-`docs/MORTGAGE_MODEL_DISTRIBUTION.md` carries the same status banner and the
-checksums; its HF publishing steps are marked superseded.
+Both assistants load the same way, from `/app/model/`, `backend=sensen
+device=cpu`, at every boot. `MODEL_URL` / `MORTGAGE_MODEL_URL` on the Railway
+service point at a private artifact host, with `MODEL_SHA256` /
+`MORTGAGE_MODEL_SHA256` set alongside them.
+
+The history, which still matters: the private HuggingFace repository the fetch
+originally used was **deleted on 2026-08-05** at the owner's instruction — the
+weights are proprietary trade secrets and do not belong on a third-party
+registry, private or not. Do not re-upload to any model registry to "restore"
+anything; the current transport replaced that deliberately.
+
+What did NOT change, and is the part to hold on to:
+
+- The model is fetched at IMAGE BUILD time with the checksum pinned. It cannot
+  travel through `railway up`, which enforces an upload deadline that 62 MB
+  already failed.
+- A model is checksum-verified before anything uses it, staging is not
+  verification, and the checksum that counts is round-tripped from wherever the
+  bytes are actually served.
+- An empty `MODEL_URL` is still a SUPPORTED build, not a broken one: that
+  assistant answers `MODEL_UNAVAILABLE` and every other service is unaffected.
+  One model, both, or neither is a valid image.
+- `backend/Dockerfile`'s `backend/models/` build-context staging path still lets
+  a LOCAL `docker build` use a locally held GGUF.
+
+`docs/MORTGAGE_MODEL_DISTRIBUTION.md` carries the checksums. Its status banner
+predates this correction — read this section first.
 
 The full training-to-serving chain — dataset generation, the QLoRA-vs-full
 comparison that decided the recipe, merge/export/quantize, the Dockerfile's
@@ -296,6 +311,78 @@ Two things to hold on to before trusting its output:
   `test_mortgage_verification`, and `ParseOperation`'s own structural checks —
   which the test proves return Proven on `5379.00` — were all that guarded the
   RPC.
+
+### Verified end to end against production, 2026-08-12
+
+The whole mortgagefvcalculator.com backend path was exercised through the live
+ingress. Envoy's `grpc_json_transcoder` covers all four services with
+`auto_mapping: true`, so every RPC is reachable as
+`POST /<package>.<Service>/<Method>` with a JSON body — which is how this was
+checked without a browser, and how to check it again.
+
+| check | result |
+| --- | --- |
+| `Finance/ComputePayment` (495000, 0.005625, 360) | `3210.560578012665289866` |
+| `ParseOperation`, anonymous | HTTP 403, code 7, the `kMortgageSurface` refusal |
+| `ParseOperation`, partner key | HTTP 200 — the gate ADMITS |
+| Both assistant models | LOADED at boot (see the model section above) |
+
+The `ComputePayment` figure is the point of that first row: it is an exact
+18-place `BigDecimal`, it matches the closed-form annuity payment computed
+independently, and it matches the P&I the live site displays for its default
+scenario. Three independent derivations of one number.
+
+**The admit direction was tested with the issued partner key**
+(`config/keys/`, gitignored, `tier partner`, `scopes finance, assistant`,
+origin-locked). Testing only the refuse direction proves nothing — a gate that
+refuses everyone passes it.
+
+**The verification layer earned its place on the very first admitted call.** The
+model answered a 495000 utterance with `present_value = 304000.00`, and
+`mortgage_verification.cppm` refused it:
+
+> `"present_value" = 304000.00 does not correspond to anything in the request
+> (the nearest figure you gave is 495000)`
+
+That is the documented dangerous failure — a corrupted value that parses,
+satisfies every bound, names a real field, and prices a different loan —
+caught in production rather than in a test.
+
+Two of three canonical utterances then parsed correctly:
+`ComputePayment{rate 0.005000, periods 360, present_value 300000.00}` and
+`ComputeAmortization{annual_rate 0.0450, term_months 180, loan_amount
+200000.00}`. That is consistent with the documented 27.8% params exact-match:
+expect refusals, and expect them to be honest.
+
+### A FALSE refusal, and why it is deliberately not "fixed"
+
+"Compute the future value of 1000 at 5% for 10 years" is refused with a message
+that contradicts itself:
+
+> `"periods" = 10 does not correspond to anything in the request (the nearest
+> figure you gave is 10)`
+
+Root cause, in `expand_candidates`: `periods` classifies as `SlotKind::MonthCount`,
+and for a **Years**-tagged literal the identity candidate is deliberately
+suppressed — only `10 x 12 = 120` is admitted. The model emitted 10, which is
+right for annual compounding, and G3 grounded it against months only.
+
+It is tempting to admit the identity candidate and close this. **Do not**, at
+least not this way. `ComputePayment` and `ComputeFutureValue` share the same
+generic `periods` field, and the verified mortgage parse above emits
+`periods 360` against a MONTHLY `rate 0.005`. Admitting identity for a
+Years-tagged literal would equally admit `periods 30` against that same monthly
+rate — a thirty-MONTH loan answered as if it were thirty years, which is exactly
+the slip the suppression exists to catch, and nothing downstream cross-checks
+the rate's period against the period count.
+
+So the current behaviour is the safe side of a deliberate trade: it refuses some
+correct annual-period TVM parses rather than ever admit a 30-vs-360 slip. The
+principled fix is a cross-field consistency rule — does the emitted `rate` look
+annual or monthly, and does `periods` agree — which is a design change to a
+safety-critical gate, not a one-line relaxation. Until that exists, annual-period
+`ComputeFutureValue` / `ComputePresentValue` questions are expected to refuse,
+and the refusal is honest even though the message reads absurdly.
 
 ## Pro tier and quota
 
