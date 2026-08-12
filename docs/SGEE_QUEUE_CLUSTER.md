@@ -283,6 +283,47 @@ the precondition the promotion note below asks for. `sweep_successes` climbing i
 the direct confirmation of the fix — that is the exact operation that could not
 complete.
 
+### All three nodes, after node 3 rejoined
+
+| node | is_leader | term | last_applied | tick_errors |
+| --- | --- | --- | --- | --- |
+| sgee-queue-1 | false | 2940 | 15450 | 75 |
+| sgee-queue-2 | **true** | 2940 | 15450 | 1 |
+| sgee-queue-3 | false | 2940 | 15451 | 11 |
+
+A second audit with the full cluster up drained clean: `DRAIN_DONE n=25`, no
+`NotLeader` interruption, term unchanged throughout.
+
+**Node 3's first deploy stalled at `scheduling build on Metal builder` for over
+an hour and never started building.** That is a Railway-side scheduling stall,
+not a build failure — the build log contains that one line, twice, and nothing
+else. Re-running `deploy.sh 3` got it scheduled and it succeeded. Worth knowing
+because the symptom (BUILDING forever) is indistinguishable from a slow compile
+until you read the build log.
+
+### `dlq_depth` is NOT comparable across replicas
+
+Node 1 reported `dlq_depth: 17` while nodes 2 and 3 reported 0, **at the same
+`last_applied` and the same term**. That reads exactly like a state-machine
+divergence, and it is not one.
+
+`InMemoryIndex::serialize_snapshot` keeps a completed-or-dead task only while
+`retained(id, now_ms, retention_ms)` holds, and **compaction is local**: each node
+compacts on its own schedule, at its own wall clock, so dead tasks age out of
+each node's retained view at different moments. Node 2 had compacted further
+(`snapshot_index` 15158 vs node 1's 15105) and its retention window had already
+evicted those 17; node 1's had not.
+
+The replicated log is identical — `current_term`, `last_applied` and the applied
+commands all agree. What differs is a locally-retained *view*. An operator
+alerting on a cross-replica `dlq_depth` mismatch would be chasing a phantom;
+compare `last_applied` and `current_term` instead, which ARE invariants.
+
+`tick_errors` accumulating on FOLLOWERS (75 and 11 above, against the leader's 1)
+is the same shape: `sweep_expired` runs on every node's tick but can only succeed
+on the leader, so a follower's `sweep_successes` stays 0 and its failed attempts
+are counted. It is not an error rate worth alerting on per-node either.
+
 ## How the outage presented, and why the deploy gate hid it
 
 Read this before the churn analysis below it. **No queue node has been running
