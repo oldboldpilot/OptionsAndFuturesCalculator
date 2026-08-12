@@ -154,6 +154,63 @@ require_volume() {
     exit 1
 }
 
+# Wait until a node is genuinely back, and say what "back" means.
+#
+# The gate is the `Raft baseline:` line, which ONLY the new binary emits. That
+# is what makes this a proof rather than a guess: the boot banner has been
+# printed by every build this service has ever run, so finding one in the log
+# says nothing about WHICH binary printed it, and `railway status` reports
+# SUCCESS while a container crash-loops (the healthcheck passes before the
+# throw -- this cluster's first deployment did exactly that). A line no previous
+# binary could produce cannot be a leftover.
+#
+# It also carries the information worth having at a rollout boundary: the term
+# it rejoined at, whether it is leader, and how far it has applied.
+#
+# Deliberately NOT gated on the node becoming leader. Followers are healthy
+# participants; requiring leadership here would hang forever on two of three
+# nodes and is the same mistake as putting leadership behind /healthz.
+await_healthy() {
+    local svc="$1"
+    local waited=0
+    local interval=20
+    local deadline=2100   # 35 min: the image compiles gRPC from source
+    local logs
+
+    echo "[deploy] waiting for ${svc} to report a Raft baseline (new binary only)"
+    while [ "${waited}" -lt "${deadline}" ]; do
+        logs="$(railway logs --service "${svc}" 2>/dev/null || true)"
+
+        if printf '%s' "${logs}" | grep -q 'Raft baseline:'; then
+            echo "[deploy] ${svc} is up:"
+            printf '%s' "${logs}" | grep 'Raft baseline:' | tail -1 | sed 's/^/    /'
+            # A node that booted more than once in this window is crash-looping,
+            # which the baseline line alone would not reveal.
+            local boots
+            boots="$(printf '%s' "${logs}" | grep -c 'Queue node initialized successfully' || true)"
+            if [ "${boots}" -gt 1 ]; then
+                echo "WARNING: ${svc} shows ${boots} boots in its recent log -- it may be restarting." >&2
+            fi
+            return 0
+        fi
+
+        if printf '%s' "${logs}" | grep -qiE 'terminate called|bad_variant_access|FATAL'; then
+            echo "FATAL: ${svc} logged a crash while starting:" >&2
+            printf '%s' "${logs}" | grep -iE 'terminate called|bad_variant_access|FATAL' | tail -3 | sed 's/^/    /' >&2
+            return 1
+        fi
+
+        sleep "${interval}"
+        waited=$((waited + interval))
+        [ $((waited % 120)) -eq 0 ] && echo "[deploy]   ...${waited}s"
+    done
+
+    echo "FATAL: ${svc} never printed a Raft baseline within ${deadline}s." >&2
+    echo "Either the build failed, or it is running the PREVIOUS binary (which does not" >&2
+    echo "emit that line). Check: railway logs --service ${svc}" >&2
+    return 1
+}
+
 deploy_one() {
     local n="$1"
     local svc="sgee-queue-${n}"
@@ -203,10 +260,32 @@ case "${1:?usage: $0 <1|2|3|all|stage DIR>}" in
     stage) stage "${2:?usage: $0 stage <dir>}" ;;
     1|2|3) deploy_one "$1" ;;
     all)
+        # ROLLING, and actually serialized. This branch used to fire three
+        # uploads back to back and print "Confirm it is healthy before the
+        # next" -- advice to a human, in a script nobody was reading while it
+        # ran. `railway up --detach` returns when the UPLOAD is accepted, not
+        # when the container is up, so all three builds started together and
+        # all three containers restarted at roughly the same moment.
+        #
+        # For a stateless service that is a brief blip. For a three-node Raft
+        # cluster it is the loss of quorum: two nodes down at once means no
+        # leader can be elected and every write is refused until they come
+        # back. The whole reason this is three separate services rather than
+        # numReplicas: 3 is to be able to lose one at a time.
+        #
+        # await_healthy() below is the gate. One node is replaced, proven up,
+        # and only then is the next touched -- so at most one node is ever
+        # missing and the other two keep the quorum.
         for n in 1 2 3; do
             deploy_one "${n}"
-            echo "[deploy] node ${n} uploaded. Confirm it is healthy before the next."
+            await_healthy "sgee-queue-${n}" || {
+                echo "FATAL: sgee-queue-${n} did not come back. STOPPING the rollout here." >&2
+                echo "The remaining nodes still run the previous binary, which is the safe" >&2
+                echo "state -- do not continue until this node is understood." >&2
+                exit 1
+            }
         done
+        echo "[deploy] all three nodes rolled, one at a time, each proven up before the next."
         ;;
     *) echo "usage: $0 <1|2|3|all>" >&2; exit 1 ;;
 esac
