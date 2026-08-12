@@ -892,8 +892,13 @@ endif()
 #         -DENABLE_CUDA=ON -DCMAKE_BUILD_TYPE=Release
 #     cmake --build backend/build-cuda --target calculator_engine
 #
-# (SKIP_CLANG_TIDY must be an environment variable -- sensen's own
-# CMakeLists checks $ENV{SKIP_CLANG_TIDY}, not a CMake cache variable;
+# (SKIP_CLANG_TIDY works as EITHER form now. It used to have to be an
+# environment variable, because sensen checked only $ENV{SKIP_CLANG_TIDY} --
+# which also meant the `set(SKIP_CLANG_TIDY ON CACHE BOOL ... FORCE)` this file
+# does at line 458 was accepted and then ignored, so the disable this project
+# thought it had was never in force. Fixed in sensen (`SENSEN_SKIP_TIDY` folds
+# both forms into one predicate), so the cache variable above now does what it
+# says and the env var below remains valid;
 # compilers must be named explicitly, since auto-detection has been observed
 # to fall through to GCC on this class of machine; submodules need
 # `git submodule update --init --recursive` first if this is a fresh clone.)
