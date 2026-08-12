@@ -225,7 +225,79 @@ traced to is clean under the transport that used to race it.
 - Run the audit against the deployed Railway cluster, not only locally. Every
   number above is from three local processes on loopback.
 
-## The deployed cluster does not hold a leader (2026-08-12) — BLOCKING
+## The cluster is DOWN, and the deploy gate said otherwise (2026-08-12) — BLOCKING
+
+Read this before the churn analysis below it. **No queue node has been running
+since 04:39 PDT on 2026-08-12.** All three crash-loop on
+
+```
+[ERROR] [sgee_queue_node] Failed to create ReplicatedQueueRuntimeDriver
+```
+
+seconds after boot, so every deployment since then has FAILED its `/healthz`
+check — correctly, this time. The engine and both live sites are on a different
+service and are unaffected.
+
+**The rollout reported the opposite, and that is the more important defect.**
+`deploy.sh`'s `await_healthy` waited for a `Raft baseline:` line, and its comment
+asserted that line was one "ONLY the new binary emits". That was true the day it
+was written and false ever after, because that binary has since *been* the
+deployed one. `railway logs` returns the LAST session's output when nothing is
+running, so the gate matched a leftover from a dead container and returned
+success for a node that never booted. It printed
+
+> `[deploy] all three nodes rolled, one at a time, each proven up before the next.`
+
+while every deployment was still BUILDING and the two before them had already
+FAILED. Nothing was proven; the sentence was produced by a grep against a dead
+node's scrollback. This is the same trap this repository documents for
+`railway logs --build`, arriving through the runtime log instead.
+
+**A marker chosen because "no previous binary could emit it" has a shelf life of
+exactly one deploy.** It cannot be a gate. `await_healthy` now polls the
+deployment's own status — Railway's answer about *this* rollout — and reads the
+CONTAINER log on FAILED, which is where a healthcheck failure is explained. The
+build log says `Healthcheck failed!` and nothing about why.
+
+`railway deployment list --service <svc>` is the ground truth, and it was never
+consulted:
+
+| deployment | status | note |
+| --- | --- | --- |
+| `e567f4cb` | SUCCESS | 04:39 — the last time a node ran |
+| `1aaba7a5` | FAILED | 04:47 |
+| `37f89aca` | FAILED | 05:16 |
+| `f98b1a05` / `f0cfce5f` / `5beeef6b` | FAILED | 06:07, all three |
+
+### Diagnosis, and four hypotheses that were wrong
+
+The failure is state-dependent: a **fresh** `SGEE_DATA_DIR` boots fine locally,
+and so does a **restart onto a WAL the same binary just wrote**. It is the
+production volumes specifically. Four plausible causes were checked and each is
+disproved, recorded so they are not re-checked:
+
+- **Not disk pressure.** `railway volume list`: ~1000 MB of 50000 MB on each.
+- **Not the timing knob.** `ReplicatedTaskBroker::create` guards it —
+  `if (election_base != 0 || heartbeat != 0)` — so the unset 0/0 case never
+  reaches `set_timing`. The override is confirmed applied in the logs
+  (`election base 1500 ms, heartbeat 300 ms`) *before* the failure.
+- **Not a torn compaction snapshot.** `persistence::save_snapshot` writes to
+  `path + ".tmp"`, `fullsync`s it, then `durable_rename`s. A crash mid-write
+  cannot leave the "snapshot file present but unreadable" state that
+  `TaskBroker::open` reports as `Corrupt`.
+- **Not a WAL identity mismatch.** `kRaftWalHash` is the fixed literal
+  `0x5241465453544D31` ("RAFTSTM1"), not anything derived from the code, so a
+  code change cannot invalidate an existing WAL.
+
+The error message itself was the obstacle: it discarded both halves of the
+`RuntimeError` it was handed, so WAL recovery failure, a disk that will not
+accept a write, and a bad config all produced one identical sentence — in the
+place where the container is about to exit and the log is the only surviving
+evidence. It now names `RuntimeErrorKind` and `ConsensusError` and the
+`data_dir`, which distinguishes `RaftError` (raft.wal) from `QueueError`
+(broker.wal). That distinction is what the next roll is for.
+
+## The deployed cluster does not hold a leader (2026-08-12) — superseded in part
 
 The fourth precondition existed because every number in this document came from
 three local processes on loopback. Running it against the deployed cluster
