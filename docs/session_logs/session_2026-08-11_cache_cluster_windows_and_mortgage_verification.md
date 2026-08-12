@@ -247,11 +247,13 @@ hallucinated `present_value = 304000.00` against a stated 495000.
 model ships and each assistant answers `MODEL_UNAVAILABLE`. Both models load at
 every boot from a private artifact host with checksums pinned. Corrected.
 
-One FALSE refusal found and deliberately left: annual-period
-`ComputeFutureValue` questions are refused because `periods` grounds against
-months only. Relaxing it would admit `periods 30` against a monthly rate — a
-thirty-month loan answered as thirty years. The safe side of a deliberate trade;
-the real fix is a rate-period consistency rule.
+One FALSE refusal found and FIXED: annual-period `ComputeFutureValue`
+questions were refused because `periods` grounded against months only. The naive
+relaxation was rejected — it would admit `periods 30` against a monthly rate, a
+thirty-month loan answered as thirty years — in favour of the real fix: infer
+the cadence from the emitted rate and ground `periods` against THAT. It closes a
+hole in the other direction too (an annual rate with `periods 360` used to be
+Proven). See CLAUDE.md's "A false refusal, found in production and fixed".
 
 ---
 

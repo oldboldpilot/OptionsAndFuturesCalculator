@@ -354,35 +354,44 @@ Two of three canonical utterances then parsed correctly:
 200000.00}`. That is consistent with the documented 27.8% params exact-match:
 expect refusals, and expect them to be honest.
 
-### A FALSE refusal, and why it is deliberately not "fixed"
+### A false refusal, found in production and fixed
 
-"Compute the future value of 1000 at 5% for 10 years" is refused with a message
+"Compute the future value of 1000 at 5% for 10 years" was refused with a message
 that contradicts itself:
 
 > `"periods" = 10 does not correspond to anything in the request (the nearest
 > figure you gave is 10)`
 
-Root cause, in `expand_candidates`: `periods` classifies as `SlotKind::MonthCount`,
-and for a **Years**-tagged literal the identity candidate is deliberately
-suppressed — only `10 x 12 = 120` is admitted. The model emitted 10, which is
-right for annual compounding, and G3 grounded it against months only.
+`finance.proto` documents `rate` as PER-PERIOD and `periods` as a count of those
+same periods — the pair is only meaningful together. The grounding gate checked
+them **independently**: the rate grounded against any cadence in M3
+`{1,2,4,12,26,52}`, while `periods` grounded against months by convention (a
+hardcoded x12, with the identity candidate suppressed for a Years-tagged
+literal). Right for a mortgage, wrong for the rest of the TVM surface, which
+shares that same generic pair — so an annual rate with ten annual periods had no
+admissible interpretation and a correct parse was refused.
 
-It is tempting to admit the identity candidate and close this. **Do not**, at
-least not this way. `ComputePayment` and `ComputeFutureValue` share the same
-generic `periods` field, and the verified mortgage parse above emits
-`periods 360` against a MONTHLY `rate 0.005`. Admitting identity for a
-Years-tagged literal would equally admit `periods 30` against that same monthly
-rate — a thirty-MONTH loan answered as if it were thirty years, which is exactly
-the slip the suppression exists to catch, and nothing downstream cross-checks
-the rate's period against the period count.
+**The naive fix is wrong and was not taken.** Admitting the identity candidate
+would equally admit `periods = 30` against a MONTHLY rate — a thirty-month loan
+answered as thirty years, which is the slip the suppression exists to catch.
+Instead the cadence is INFERRED from the emitted rate
+(`infer_periods_per_year`), and `periods` is grounded against that: x12 when the
+rate was divided by 12, x1 when it is annual. One rule, both cases.
 
-So the current behaviour is the safe side of a deliberate trade: it refuses some
-correct annual-period TVM parses rather than ever admit a 30-vs-360 slip. The
-principled fix is a cross-field consistency rule — does the emitted `rate` look
-annual or monthly, and does `periods` agree — which is a design change to a
-safety-critical gate, not a one-line relaxation. Until that exists, annual-period
-`ComputeFutureValue` / `ComputePresentValue` questions are expected to refuse,
-and the refusal is honest even though the message reads absurdly.
+It **tightens** the gate as well as loosening it. An annual rate paired with
+`periods = 360` used to be `Proven` — months grounded by convention while
+nothing checked the rate against them — and is now refused. That hole was open
+the whole time and nothing covered it.
+
+`payment = 0` also joined the convention values, mirroring `future_value = 0`.
+Without it a LUMP-SUM present/future-value question is refused on `payment` even
+once `periods` grounds correctly.
+
+All four combinations are asserted, because the fix had to loosen one direction
+without loosening the other: annual/annual passes, monthly/monthly passes,
+monthly-rate-with-`periods=30` refused, annual-rate-with-`periods=360` refused.
+Mutation-checked — restoring the hardcoded x12 reproduces the production message
+verbatim AND flips the mismatched pair back to `Proven`.
 
 ## Pro tier and quota
 
