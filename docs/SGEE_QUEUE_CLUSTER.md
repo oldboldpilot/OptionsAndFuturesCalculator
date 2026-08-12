@@ -165,9 +165,33 @@ traced to is clean under the transport that used to race it.
 
 ## Before this is promoted to authoritative
 
-- Fix the post-failover lease stall (`WalError: TimedOut`).
-- Fix, or document a consumer contract for, the timed-out-lease-hides-a-task
-  hazard.
+- ~~Fix the post-failover lease stall (`WalError: TimedOut`).~~ **Fixed
+  2026-08-12, and it was never a stall.** `lease/submit_and_await_commit` spun
+  `max_rounds = 200` against a `ProgressFn` that sleeps 1 ms per round — a
+  ~200 ms budget. `RaftNode` arms its election deadline at
+  `kElectionTimeoutBaseMs + rand % kElectionTimeoutBaseMs`, i.e. **150–300 ms**.
+  The wait budget was shorter than the upper half of a single election timeout,
+  before adding the winner's first `AppendEntries` round trip and the local
+  apply, so a lease issued as a leader died *could not* confirm inside it.
+  Retrying "worked" because by then the election was over.
+  `kAwaitRoundsForFailover` is now derived from Raft's own constants
+  (`(2*election + heartbeat) * 4`) so it cannot drift when those change.
+
+- ~~Fix, or document a consumer contract for, the timed-out-lease-hides-a-task
+  hazard.~~ **Fixed 2026-08-12.** On timeout the predicted task id was
+  discarded, so a lease that committed on the leader a millisecond later left
+  the task `Leased` to a worker that never learned its id — invisible until the
+  30 s visibility window expired. `RuntimeError` now carries `pending_task_id`
+  and the **leader-minted** `pending_token` (re-deriving the token locally would
+  be wrong exactly when it matters: a timeout means this replica has not applied
+  the entry). `TaskQueueService::Lease` hands the lease straight back with
+  `fail()`, returning the task to Pending immediately — the same path a crashed
+  worker's expired lease takes, without the wait. Best-effort by design: a
+  rejected token means the lease never committed, and nothing happens.
+
+- **Run the audit against the deployed Railway cluster.** Done 2026-08-12, and
+  **it found a blocker that loopback testing cannot produce.** See the section
+  below.
 - ~~TLS/mTLS on both ports.~~ **Implemented 2026-08-12, and OFF until certificates
   are provisioned.** `SGEE_TLS_CA_CERT` / `SGEE_TLS_CERT` / `SGEE_TLS_KEY` turn on
   mutual TLS for **both** ports — consensus and the client queue — from one
@@ -200,6 +224,58 @@ traced to is clean under the transport that used to race it.
   an authentication: a co-tenant container is on the other side of it.
 - Run the audit against the deployed Railway cluster, not only locally. Every
   number above is from three local processes on loopback.
+
+## The deployed cluster does not hold a leader (2026-08-12) — BLOCKING
+
+The fourth precondition existed because every number in this document came from
+three local processes on loopback. Running it against the deployed cluster
+produced a hard negative, and it is the reason this cluster is **still a
+mirror** even though the other three preconditions are now met.
+
+What works, verified against the live Railway cluster from inside the private
+network (`railway ssh`, `/app/sgee_queue_node_client`):
+
+| check | result |
+| --- | --- |
+| leader accepts writes, followers refuse | `ENQUEUE_SUCCESS` on the leader; `NotLeader` on both others |
+| enqueue 50, drain | `acked=50 of=50`, `DRAIN_DONE n=51` — the extra is a prior single probe. Nothing lost, nothing invented |
+| leader crash (`kill -9 1`) | container restarted, `Raft baseline: term=2646 last_applied=13077` — the log survived |
+| post-failover enqueue | succeeded, ids continuing (91 → 92) |
+
+What does not work:
+
+**The cluster elects continuously.** Consecutive `Raft change` lines on
+`sgee-queue-2`:
+
+```
+term 2576 -> 2598 (22 elections)
+term 2598 -> 2619 (21 elections)
+term 2619 -> 2640 (21 elections)
+term 2640 -> 2664 (24 elections)
+term 2664 -> 2685 (21 elections)
+```
+
+Twenty-plus elections between log samples is not a cluster with a leader that
+occasionally changes; it is a cluster that never settles. Three consecutive
+drains were each interrupted mid-flight — one recovered 16 of the enqueued tasks
+and then hit `COMPLETE_FAILED: NotLeader`. **No task was lost or duplicated in
+any of it**, which is the reassuring half: the failure is availability, not
+correctness.
+
+The likely cause is that `RaftNode`'s timing is fixed at
+`kElectionTimeoutBaseMs = 150` (jittered to 300) with `kHeartbeatIntervalMs = 50`,
+and Railway's internal IPv6 overlay between separate services does not reliably
+deliver a heartbeat inside 150 ms. A follower that misses one starts an
+election; with three nodes doing that independently, terms climb without anyone
+holding leadership long enough to serve a drain. These constants are
+`static constexpr` — noted elsewhere as a known limitation, and now demonstrated
+to be a **blocking** one rather than a cosmetic one.
+
+**This is what the precondition was for.** Locally the same cluster elects once
+and holds; nothing short of running it on the deployed network could have shown
+this. Promotion to authoritative stays blocked, and the next piece of work is
+making those timings configurable so they can be matched to the network the
+cluster actually runs on.
 
 ## Gates
 
