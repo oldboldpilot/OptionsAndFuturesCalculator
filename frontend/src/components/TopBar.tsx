@@ -14,7 +14,7 @@ import ThemeToggle from './ThemeToggle';
 export function TopBar() {
   const {
     symbol, spotPrice, assetClass, setSymbol, calculateStrategy,
-    isLoading, error, legs, riskFreeRate, setRiskFreeRate, dividendYield, setDividendYield,
+    isLoading, error, notReady, legs, riskFreeRate, setRiskFreeRate, dividendYield, setDividendYield,
     rateSource, rateMeta, loadRiskFreeRate,
   } = useCalculatorStore();
 
@@ -337,6 +337,12 @@ export function TopBar() {
       {error && (
         <span className="chip" style={{ color: 'var(--color-loss)', borderColor: 'var(--color-loss-dim)' }} title={error}>
           {error.length > 46 ? `${error.slice(0, 46)}…` : error}
+        </span>
+      )}
+
+      {notReady && (
+        <span className="chip" title={notReady}>
+          {notReady.length > 46 ? `${notReady.slice(0, 46)}…` : notReady}
         </span>
       )}
 

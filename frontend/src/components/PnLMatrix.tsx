@@ -27,7 +27,7 @@ type ValueMode = 'dollars' | 'percent';
  * calendar spread's peak is mid-life, not at expiry).
  */
 export function PnLMatrix() {
-  const { result, spotPrice, isLoading, error, modelLimit } = useCalculatorStore();
+  const { result, spotPrice, isLoading, error, modelLimit, gateDenied, notReady } = useCalculatorStore();
   const [mode, setMode] = useState<ValueMode>('percent');
 
   const grid = useMemo(() => {
@@ -160,12 +160,7 @@ export function PnLMatrix() {
               <div key={i} className="skeleton" style={{ height: 15 }} />
             ))}
           </div>
-        ) : !grid ? (
-          <div className="empty-state">
-            <span className="empty-state-title">No grid yet</span>
-            <span>Add priced legs to compute P&amp;L across price and date.</span>
-          </div>
-        ) : (
+        ) : grid ? (
           <table className="grid-table" style={{ fontVariantNumeric: 'tabular-nums' }}>
             <thead>
               <tr>
@@ -222,6 +217,28 @@ export function PnLMatrix() {
               })}
             </tbody>
           </table>
+        ) : gateDenied ? (
+          <div className="empty-state">
+            <span className="empty-state-title">Needs Pro</span>
+            <span>{gateDenied}</span>
+          </div>
+        ) : notReady ? (
+          /* Replaces the empty state when set, sitting below the panel's
+             rendered-output branch so it cannot replace a drawn chart. */
+          /* A precondition, in the NEUTRAL style -- deliberately not the
+             --error branch above. "You have not picked a strike yet" is the
+             next thing to do, not a failure, and rendering it as "Unavailable"
+             in loss red tells a trader the calculator is broken when nothing
+             is wrong. The title names the action for the same reason. */
+          <div className="empty-state">
+            <span className="empty-state-title">Not priced yet</span>
+            <span>{notReady}</span>
+          </div>
+        ) : (
+          <div className="empty-state">
+            <span className="empty-state-title">No grid yet</span>
+            <span>Add priced legs to compute P&amp;L across price and date.</span>
+          </div>
         )}
       </div>
     </div>

@@ -78,7 +78,7 @@ const money = (v: number) =>
  * drawn at all until those real inputs exist.
  */
 export function ProbabilityCurve() {
-  const { result, error, isLoading, symbol, modelLimit } = useCalculatorStore();
+  const { result, error, isLoading, symbol, modelLimit, gateDenied, notReady } = useCalculatorStore();
   const [hoverX, setHoverX] = useState<number | null>(null);
 
   const model = useMemo(() => {
@@ -253,6 +253,31 @@ export function ProbabilityCurve() {
   }
 
   if (!model) {
+    if (gateDenied) {
+      return shell(
+        <div className="empty-state">
+          <span className="empty-state-title">Needs Pro</span>
+          <span>{gateDenied}</span>
+        </div>,
+      );
+    }
+
+    /* Replaces the empty state when set, sitting below the panel's
+       rendered-output branch so it cannot replace a drawn chart. */
+    if (notReady) {
+      return shell(
+        /* A precondition, in the NEUTRAL style -- deliberately not the
+           --error branch above. "You have not picked a strike yet" is the
+           next thing to do, not a failure, and rendering it as "Unavailable"
+           in loss red tells a trader the calculator is broken when nothing
+           is wrong. The title names the action for the same reason. */
+        <div className="empty-state">
+          <span className="empty-state-title">Not priced yet</span>
+          <span>{notReady}</span>
+        </div>,
+      );
+    }
+
     return shell(
       <div className="empty-state">
         <span className="empty-state-title">No distribution yet</span>

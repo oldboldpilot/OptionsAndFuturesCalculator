@@ -69,7 +69,7 @@ function Surface({ rows, cols, heights, maxAbs }: {
 }
 
 export function PnLSurface() {
-  const { result, isLoading, error, modelLimit } = useCalculatorStore();
+  const { result, isLoading, error, modelLimit, gateDenied, notReady } = useCalculatorStore();
   const [enabled, setEnabled] = useState(false);
 
   const field = useMemo(() => {
@@ -135,18 +135,35 @@ export function PnLSurface() {
           </div>
         ) : isLoading ? (
           <div className="empty-state"><span className="empty-state-title">Computing…</span></div>
-        ) : !field ? (
-          <div className="empty-state">
-            <span className="empty-state-title">No surface yet</span>
-            <span>Add priced legs to compute P&amp;L across price and date.</span>
-          </div>
-        ) : (
+        ) : field ? (
           <Canvas camera={{ position: [0, 0, 5.4], fov: 42 }} dpr={[1, 1.75]} style={{ background: 'transparent' }}>
             <ambientLight intensity={0.85} />
             <directionalLight position={[3, 5, 4]} intensity={1.1} />
             <directionalLight position={[-4, -2, 2]} intensity={0.35} />
             <Surface {...field} />
           </Canvas>
+        ) : gateDenied ? (
+          <div className="empty-state">
+            <span className="empty-state-title">Needs Pro</span>
+            <span>{gateDenied}</span>
+          </div>
+        ) : notReady ? (
+          /* Replaces the empty state when set, sitting below the panel's
+             rendered-output branch so it cannot replace a drawn chart. */
+          /* A precondition, in the NEUTRAL style -- deliberately not the
+             --error branch above. "You have not picked a strike yet" is the
+             next thing to do, not a failure, and rendering it as "Unavailable"
+             in loss red tells a trader the calculator is broken when nothing
+             is wrong. The title names the action for the same reason. */
+          <div className="empty-state">
+            <span className="empty-state-title">Not priced yet</span>
+            <span>{notReady}</span>
+          </div>
+        ) : (
+          <div className="empty-state">
+            <span className="empty-state-title">No surface yet</span>
+            <span>Add priced legs to compute P&amp;L across price and date.</span>
+          </div>
         )}
       </div>
     </div>

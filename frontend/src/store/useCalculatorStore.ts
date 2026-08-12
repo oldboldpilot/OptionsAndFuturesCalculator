@@ -260,6 +260,19 @@ interface CalculatorState {
   error: string | null;
 
   /**
+   * A PRECONDITION the user has not met yet -- no strike picked, no expiry on
+   * the ticket -- as opposed to something that went wrong.
+   *
+   * Separate from `error` because the panel renders them differently and must:
+   * `error` is "Unavailable" in loss red, which tells a trader the calculator
+   * is broken. "You have not chosen a strike yet" is not a failure, it is the
+   * next thing to do, and saying it in red is the same defect this project
+   * already fixed once when PERMISSION_DENIED rendered under "Unavailable"
+   * instead of the upgrade prompt.
+   */
+  notReady: string | null;
+
+  /**
    * The engine's own words when it refused this position for ENTITLEMENT
    * reasons, rather than for anything wrong with the inputs.
    *
@@ -406,6 +419,7 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
   result: null,
   isLoading: false,
   error: null,
+  notReady: null,
   gateDenied: null,
   modelLimit: null,
 
@@ -442,6 +456,7 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
       spotPrice: customPrice !== undefined ? customPrice : 0,
       assetClass: customAssetClass || classify(sym),
       error: null,
+      notReady: null,
       // The old chain belongs to the old symbol. Showing it against the new one
       // would be the most convincing kind of wrong data.
       chainStrikes: [],
@@ -486,6 +501,18 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
         set({
           spotPrice: 0,
           error: `No quote available for ${sym}${err?.message ? `: ${err.message}` : ''}`,
+          // Cleared with it. The invariant is that `error` and `notReady`
+          // are never both truthy -- scoped to that PAIR, not to refusals in
+          // general: `gateDenied` and `modelLimit` can legitimately stand
+          // beside a notReady, and all five panels name the gate first when
+          // they do. It has to hold in BOTH directions: every notReady write
+          // clears `error`, so every `error` write must clear `notReady`.
+          // Without this the two render side by side -- switch symbol, press
+          // Add before the quote lands (strike and premium survive the switch,
+          // so the expiry guard fires), then let the quote fail. With no legs
+          // the Recalculate button is disabled and StrategyWorkspace only
+          // recalculates above zero legs, so the stale prompt has no way out.
+          notReady: null,
         });
         return;
       }
@@ -512,11 +539,11 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
   removeLeg: (id) => set((state) => {
     const legs = state.legs.filter(l => l.id !== id);
     return legs.length === 0
-      ? { legs, result: null, gateDenied: null, modelLimit: null }
+      ? { legs, result: null, gateDenied: null, modelLimit: null, notReady: null }
       : { legs };
   }),
 
-  clearLegs: () => set({ legs: [], result: null, gateDenied: null, modelLimit: null }),
+  clearLegs: () => set({ legs: [], result: null, gateDenied: null, modelLimit: null, notReady: null }),
 
   updateLeg: (id, updates) => set((state) => ({
     legs: state.legs.map(l => l.id === id ? { ...l, ...updates } : l)
@@ -610,11 +637,11 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
   commitTicket: () => {
     const t = get().ticket;
     if (t.strike === null || t.strike <= 0) {
-      set({ error: 'Pick a strike before adding the leg.' });
+      set({ notReady: 'Pick a strike before adding the leg.', error: null });
       return;
     }
     if (t.premium === null || t.premium <= 0) {
-      set({ error: 'This contract has no quoted price. Enter the price you would pay or receive.' });
+      set({ notReady: 'This contract has no quoted price. Enter the price you would pay or receive.', error: null });
       return;
     }
     // Resolve the expiration exactly as OptionTicket displays it. Reading only
@@ -631,7 +658,7 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
       // Refuse rather than substitute, the same rule the strike and premium
       // guards above follow. A fabricated 0 is not a safer default than an
       // error: it is an error that has been made to look like an answer.
-      set({ error: 'Pick an expiry before adding the leg.' });
+      set({ notReady: 'Pick an expiry before adding the leg.', error: null });
       return;
     }
     const dte = match.dte;
@@ -651,7 +678,7 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
       // fabricated `expiration_days: 0` this guard block exists to prevent.
       asian_type: t.asianType,
     });
-    set({ error: null });
+    set({ error: null, notReady: null });
   },
 
   setSelectedExpiration: (date) => {
@@ -756,14 +783,14 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
     // modelLimit clears with it, and for the same reason: it describes the
     // position that provoked it, so leaving it set would explain a limitation
     // of a position the user has since changed.
-    set({ gateDenied: null, modelLimit: null });
+    set({ gateDenied: null, modelLimit: null, notReady: null });
 
     // The rate is deliberately not destructured here: it is read after the
     // fetch below, so a snapshot taken now would be the pre-fetch null.
     const { legs, spotPrice, symbol } = get();
 
     if (legs.length === 0) {
-      set({ result: null, error: null });
+      set({ result: null, error: null, notReady: null });
       return;
     }
 
@@ -771,7 +798,7 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
     // previously hardcoded into the request ('SPY', 0.20, 30 days), so the
     // engine returned a real answer to a fabricated question.
     if (spotPrice <= 0) {
-      set({ result: null, error: `No spot price for ${symbol} — cannot price the position.` });
+      set({ result: null, notReady: `No spot price for ${symbol} — cannot price the position.`, error: null });
       return;
     }
     const iv = positionIv(legs);
@@ -785,10 +812,11 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
       // the ticket's own IV field, not the chain.
       set({
         result: null,
-        error:
+        notReady:
           legs.length > 0
             ? 'These contracts publish no implied volatility — common at a same-day expiry. Enter an IV in the ticket, or choose a later expiration.'
             : 'No implied volatility on any leg. Add legs from the option chain so IV and premium come from live quotes.',
+        error: null,
       });
       return;
     }
@@ -802,9 +830,10 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
       const anyExpiry = legs.some((l) => l.expiration_days !== undefined);
       set({
         result: null,
-        error: anyExpiry
+        notReady: anyExpiry
           ? 'Every leg expires today. The payoff model prices remaining time value, so it needs at least one day to expiry — pick a later expiration.'
           : 'No expiration on any leg — pick an expiry from the chain.',
+        error: null,
       });
       return;
     }
@@ -831,6 +860,10 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
           get().rateSource === 'pending'
             ? 'Still fetching the Treasury rate — retry in a moment.'
             : 'No risk-free rate — the Treasury feed is unavailable. Enter a rate to proceed; it will be labelled an assumption.',
+        // This guard sits AFTER an await, so the clear at the top of
+        // calculateStrategy is not enough: a notReady set between the two
+        // would survive into this failure.
+        notReady: null,
       });
       return;
     }
@@ -931,6 +964,11 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
       set({
         isLoading: false,
         error: null,
+        // Cleared on SUCCESS too. The entry clear at the top of this action
+        // happens before two awaits, so a prompt raised in either window would
+        // otherwise survive onto a live result -- the two exits from that same
+        // window were treated differently, failure clearing and success not.
+        notReady: null,
         result: {
           expiryCurve,
           matrix,
@@ -995,6 +1033,7 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
           error: null,
           gateDenied: message,
           modelLimit: null,
+          notReady: null,
         });
         return;
       }
@@ -1006,6 +1045,7 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
           error: null,
           gateDenied: null,
           modelLimit: message,
+          notReady: null,
         });
         return;
       }
@@ -1014,6 +1054,7 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
         isLoading: false,
         result: null,
         error: message,
+        notReady: null,
         gateDenied: null,
         modelLimit: null,
       });
@@ -1037,7 +1078,7 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
       if (error) throw error;
       set({ isLoading: false });
     } catch (err: unknown) {
-      set({ isLoading: false, error: (err as Error).message || 'Failed to save strategy' });
+      set({ isLoading: false, error: (err as Error).message || 'Failed to save strategy', notReady: null });
     }
   },
 
@@ -1049,7 +1090,7 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
       console.log('Loaded strategies:', data);
       set({ isLoading: false });
     } catch (err: unknown) {
-      set({ isLoading: false, error: (err as Error).message || 'Failed to load strategies' });
+      set({ isLoading: false, error: (err as Error).message || 'Failed to load strategies', notReady: null });
     }
   }
 }));

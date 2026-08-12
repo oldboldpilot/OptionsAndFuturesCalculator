@@ -20,17 +20,10 @@
  * These tests pin the ROUTING, not the wording. A message may be reworded; a
  * precondition arriving in `error` is a regression.
  *
- * KNOWN, SAME SHAPE, NOT FIXED HERE: `commitTicket` in useCalculatorStore has
- * three guards of exactly this kind -- "Pick a strike before adding the leg",
- * "Pick an expiry before adding the leg", and the no-quoted-price one -- which
- * also write to `error` and therefore render as "Unavailable" in loss red
- * across StrategyMetrics, PayoffLadder, PnLMatrix, PnLSurface and
- * ProbabilityCurve. They are transient (the next successful calculation clears
- * them) and fire on an explicit Add press rather than passively, so they are
- * less misleading than the tree pricer's were -- but they are the same defect.
- * Fixing them means introducing this same `notReady` split into the calculator
- * store and threading it through five panels, which is a larger change than
- * the one that surfaced it. Left deliberately, recorded so it is not lost.
+ * The calculator store had the SAME defect in `commitTicket` and in
+ * `calculateStrategy`'s guards, rendering preconditions red across five
+ * analytics panels. That is fixed too, by the same split -- see
+ * `calculator-not-ready.test.ts`, which pins the routing on that side.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 

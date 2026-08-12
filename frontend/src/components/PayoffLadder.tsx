@@ -18,7 +18,7 @@ type ValueMode = 'dollars' | 'percent';
  * which the engine now fills correctly; wiring it up here is separate work.
  */
 export function PayoffLadder() {
-  const { result, spotPrice, isLoading, error, modelLimit } = useCalculatorStore();
+  const { result, spotPrice, isLoading, error, modelLimit, gateDenied, notReady } = useCalculatorStore();
   const [mode, setMode] = useState<ValueMode>('dollars');
 
   /**
@@ -123,12 +123,7 @@ export function PayoffLadder() {
               <div key={i} className="skeleton" style={{ height: 15 }} />
             ))}
           </div>
-        ) : !rows ? (
-          <div className="empty-state">
-            <span className="empty-state-title">No payoff yet</span>
-            <span>Add priced legs to compute the expiry curve.</span>
-          </div>
-        ) : (
+        ) : rows ? (
           <table className="grid-table">
             <thead>
               <tr>
@@ -197,6 +192,28 @@ export function PayoffLadder() {
               })}
             </tbody>
           </table>
+        ) : gateDenied ? (
+          <div className="empty-state">
+            <span className="empty-state-title">Needs Pro</span>
+            <span>{gateDenied}</span>
+          </div>
+        ) : notReady ? (
+          /* Replaces the empty state when set, sitting below the panel's
+             rendered-output branch so it cannot replace a drawn chart. */
+          /* A precondition, in the NEUTRAL style -- deliberately not the
+             --error branch above. "You have not picked a strike yet" is the
+             next thing to do, not a failure, and rendering it as "Unavailable"
+             in loss red tells a trader the calculator is broken when nothing
+             is wrong. The title names the action for the same reason. */
+          <div className="empty-state">
+            <span className="empty-state-title">Not priced yet</span>
+            <span>{notReady}</span>
+          </div>
+        ) : (
+          <div className="empty-state">
+            <span className="empty-state-title">No payoff yet</span>
+            <span>Add priced legs to compute the expiry curve.</span>
+          </div>
         )}
       </div>
     </div>

@@ -79,6 +79,11 @@ function resetStore() {
   useCalculatorStore.setState({
     legs: [],
     error: null,
+    // Cleared here or the migrated assertions below are VACUOUS: vitest's
+    // isolate is per FILE, so this module-level store carries notReady from
+    // one it() into the next, and a case would pass on the PREVIOUS case's
+    // message.
+    notReady: null,
     chainStrikes: [],
     chainExpirations: [],
     selectedExpiration: '',
@@ -230,7 +235,8 @@ describe('commitTicket', () => {
 
     const st = useCalculatorStore.getState();
     expect(st.legs).toHaveLength(0);
-    expect(st.error).toBe('Pick a strike before adding the leg.');
+    expect(st.notReady).toBe('Pick a strike before adding the leg.');
+    expect(st.error).toBeNull();
   });
 
   it('refuses a strike of 0', async () => {
@@ -241,7 +247,8 @@ describe('commitTicket', () => {
 
     const st = useCalculatorStore.getState();
     expect(st.legs).toHaveLength(0);
-    expect(st.error).toBe('Pick a strike before adding the leg.');
+    expect(st.notReady).toBe('Pick a strike before adding the leg.');
+    expect(st.error).toBeNull();
   });
 
   it('refuses a negative strike', async () => {
@@ -252,7 +259,8 @@ describe('commitTicket', () => {
 
     const st = useCalculatorStore.getState();
     expect(st.legs).toHaveLength(0);
-    expect(st.error).toBe('Pick a strike before adding the leg.');
+    expect(st.notReady).toBe('Pick a strike before adding the leg.');
+    expect(st.error).toBeNull();
   });
 
   it('refuses with no premium quoted', async () => {
@@ -263,7 +271,8 @@ describe('commitTicket', () => {
 
     const st = useCalculatorStore.getState();
     expect(st.legs).toHaveLength(0);
-    expect(st.error).toBe('This contract has no quoted price. Enter the price you would pay or receive.');
+    expect(st.notReady).toBe('This contract has no quoted price. Enter the price you would pay or receive.');
+    expect(st.error).toBeNull();
   });
 
   it('refuses a premium of 0', async () => {
@@ -274,7 +283,8 @@ describe('commitTicket', () => {
 
     const st = useCalculatorStore.getState();
     expect(st.legs).toHaveLength(0);
-    expect(st.error).toBe('This contract has no quoted price. Enter the price you would pay or receive.');
+    expect(st.notReady).toBe('This contract has no quoted price. Enter the price you would pay or receive.');
+    expect(st.error).toBeNull();
   });
 
   it('refuses a negative premium', async () => {
@@ -285,7 +295,8 @@ describe('commitTicket', () => {
 
     const st = useCalculatorStore.getState();
     expect(st.legs).toHaveLength(0);
-    expect(st.error).toBe('This contract has no quoted price. Enter the price you would pay or receive.');
+    expect(st.notReady).toBe('This contract has no quoted price. Enter the price you would pay or receive.');
+    expect(st.error).toBeNull();
   });
 
   it('refuses an expiration that matches nothing in chainExpirations', async () => {
@@ -298,7 +309,8 @@ describe('commitTicket', () => {
 
     const st = useCalculatorStore.getState();
     expect(st.legs).toHaveLength(0);
-    expect(st.error).toBe('Pick an expiry before adding the leg.');
+    expect(st.notReady).toBe('Pick an expiry before adding the leg.');
+    expect(st.error).toBeNull();
   });
 
   // --- Field mapping onto the committed Leg. ---

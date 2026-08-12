@@ -108,6 +108,9 @@ function reset(over: Record<string, unknown> = {}) {
     rateSource: 'measured',
     result: null,
     error: null,
+    // See ticket.test.ts: without this the notReady assertions pass on the
+    // previous test's leftover message rather than on this one's.
+    notReady: null,
     gateDenied: null,
     isLoading: false,
     ...over,
@@ -131,7 +134,8 @@ describe('calculate() refusal ladder', () => {
     reset({ legs: [goodLeg()], spotPrice: 0, symbol: 'QQQ' });
     await useCalculatorStore.getState().calculateStrategy();
     const st = useCalculatorStore.getState();
-    expect(st.error).toBe('No spot price for QQQ — cannot price the position.');
+    expect(st.notReady).toBe('No spot price for QQQ — cannot price the position.');
+    expect(st.error).toBeNull();
     expect(st.result).toBeNull();
     // The engine must not be asked a question built on a missing input.
     expect(fake.calls.some((c) => c.method === 'calculateStrategy')).toBe(false);
@@ -142,7 +146,9 @@ describe('calculate() refusal ladder', () => {
     await useCalculatorStore.getState().calculateStrategy();
     // Both are missing. Naming IV here would send the user to the chain when
     // the actual blocker is the quote feed.
-    expect(useCalculatorStore.getState().error).toContain('No spot price');
+    const st = useCalculatorStore.getState();
+    expect(st.notReady).toContain('No spot price');
+    expect(st.error).toBeNull();
   });
 
   describe('implied volatility', () => {
@@ -164,7 +170,8 @@ describe('calculate() refusal ladder', () => {
     it('does NOT tell a populated position to add legs it already has', async () => {
       reset({ legs: [goodLeg({ implied_volatility: undefined })] });
       await useCalculatorStore.getState().calculateStrategy();
-      const err = useCalculatorStore.getState().error ?? '';
+      const st = useCalculatorStore.getState();
+      const err = st.notReady ?? '';
 
       // The regression this pins: the message used to be "Add legs from the
       // option chain so IV and premium come from live quotes" for BOTH cases.
@@ -174,7 +181,8 @@ describe('calculate() refusal ladder', () => {
       expect(err).not.toContain('Add legs from the option chain');
       expect(err).toContain('publish no implied volatility');
       expect(err).toContain('Enter an IV in the ticket');
-      expect(useCalculatorStore.getState().result).toBeNull();
+      expect(st.error).toBeNull();
+      expect(st.result).toBeNull();
     });
   });
 
@@ -184,17 +192,21 @@ describe('calculate() refusal ladder', () => {
       // is legitimate. Saying "no expiration on any leg" denies that choice.
       reset({ legs: [goodLeg({ expiration_days: 0 })] });
       await useCalculatorStore.getState().calculateStrategy();
-      const err = useCalculatorStore.getState().error ?? '';
+      const st = useCalculatorStore.getState();
+      const err = st.notReady ?? '';
       expect(err).toContain('Every leg expires today');
       expect(err).not.toContain('No expiration on any leg');
+      expect(st.error).toBeNull();
     });
 
     it('still says "no expiration" when the field is genuinely absent', async () => {
       reset({ legs: [goodLeg({ expiration_days: undefined })] });
       await useCalculatorStore.getState().calculateStrategy();
-      expect(useCalculatorStore.getState().error).toBe(
+      const st = useCalculatorStore.getState();
+      expect(st.notReady).toBe(
         'No expiration on any leg — pick an expiry from the chain.'
       );
+      expect(st.error).toBeNull();
     });
 
     it('takes the LONGEST expiry across legs, not the shortest', async () => {
