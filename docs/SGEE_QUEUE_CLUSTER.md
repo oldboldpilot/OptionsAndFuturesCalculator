@@ -259,3 +259,36 @@ mutation redeploy($id: String!) { deploymentRedeploy(id: $id) { id status } }
 Node 1 came back on its ORIGINAL volume (`vol_287p0apufudehqvc`, same id as
 before the stop) with `self=1` and all four subsystems started, so no Raft state
 was lost.
+
+## Election churn: measured, and it is restart-induced (2026-08-12)
+
+The open question from the previous section — was the term moving 1926 -> 2112
+in twenty-five minutes a burst around a node restart, or sustained churn — is
+answered, and the answer is the benign one.
+
+The queue nodes now log leadership and term changes, so the cluster says this
+itself instead of requiring an SSH probe. Rolling all three onto that binary
+produced bursts of **16-24 elections per five-second sample** (~4/s) — exactly
+the rate a node campaigns at when it cannot reach its peers, and its peers were
+precisely that, one at a time, while each rebuilt.
+
+With all three up, the term **froze at 2538 and did not move for thirteen
+minutes** (04:47:42Z -> 05:00:53Z), with `last_applied` steady at 8886 on all
+three and node 2 leading throughout.
+
+Two things worth carrying forward:
+
+- **The tell is `is_leader true -> true` while the term climbs.** That is a
+  leader re-winning elections its own followers keep starting — i.e. peers that
+  are ABSENT. A genuinely marginal network shows leadership actually moving
+  between nodes. The two look identical if you only watch the term.
+- **Never conclude from a single term delta.** Every interval measured before
+  this one happened to contain a restart, which is why the question stayed open
+  for a day. Two readings across a window known to be quiet settled it in
+  thirteen minutes.
+
+`RaftNode`'s `kElectionTimeoutBaseMs = 150` / `kHeartbeatIntervalMs = 50` remain
+`static constexpr` and untunable, and they are still LAN/in-process numbers
+(etcd defaults to 1000 ms). That is a known limitation, **not** an observed
+defect on this deployment — do not re-tune consensus timing against a term
+delta that brackets a restart.
