@@ -225,7 +225,65 @@ traced to is clean under the transport that used to race it.
 - Run the audit against the deployed Railway cluster, not only locally. Every
   number above is from three local processes on loopback.
 
-## The cluster is DOWN, and the deploy gate said otherwise (2026-08-12) — BLOCKING
+## RESOLVED: a refused io_uring ring bricked all three nodes (2026-08-12)
+
+**Root cause.** `DurableAppender::create` returned `OpenFailed` when
+`io_uring_queue_init` failed, turning a COMPILE-time capability into a RUN-time
+requirement. A binary built on a host with io_uring had no degradation path on a
+host whose kernel refuses it, and container runtimes routinely block
+`io_uring_setup` by seccomp after its CVE history.
+
+The cost is not slower writes — it is **a process that cannot start**.
+`TaskBroker::open` ends by sweeping leases that expired while it was dead, and
+that sweep is the FIRST caller of `begin_batch`. So a node that died holding a
+lease could never open its own WAL again. `sweep_expired` returns early when
+nothing has expired, which is why the nodes ran for weeks and then bricked
+*permanently* the moment one died mid-lease — and why all three failed
+identically rather than independently: the expired-lease state is **replicated**,
+so every node runs the same sweep and hits the same wall. Simultaneity was the
+clue that ruled out disk corruption.
+
+`create()` now leaves `ring_active_` false on a refused ring and `commit()`
+dispatches on that RUNTIME flag instead of the compile-time macro.
+`write_staged_blocking` is the same fallback batches above `UIO_MAXIOV` already
+take, so a null ring is a supported state, not a degraded-mode special case.
+
+Discriminated three ways before deploying:
+
+| scenario | result |
+| --- | --- |
+| pre-fix + refused ring + expired lease | exits 1, reproducing production's log lines **verbatim** |
+| post-fix + refused ring + expired lease | starts and stays up |
+| post-fix + refused ring, `QueueNodeDurabilityTest` | passes — the fallback is DURABLE across a leader SIGKILL, not merely present |
+
+**No volume was wiped, and that restraint was correct twice over.** The "corrupt
+WAL" reading was wrong — the log read cleanly every time and only the WRITE
+failed — and wiping would have destroyed the only evidence while leaving a defect
+that would re-brick the rebuilt cluster the first time a node died mid-lease.
+
+### Verified in production after the fix
+
+Nodes 1 and 2 (node 3 still rolling at the time of writing):
+
+| check | result |
+| --- | --- |
+| deployment status | SUCCESS — first since 04:39 |
+| leader | node 2 `is_leader: true`; node 1 `leader_hint: 2` |
+| term agreement | both `current_term: 2920` |
+| replication | both `last_applied: 14578`, advancing together |
+| the operation that bricked them | leader `sweep_successes: 359 → 376` |
+| election churn | 20–23 per interval → **2** → none since term 2920 |
+| **full drain** | `DRAIN_DONE n=66` — uninterrupted, no `NotLeader` |
+| after the drain | still term 2920, `last_applied` 14767, `dlq_depth: 0` |
+
+The 66 drained tasks are the 40 enqueued for the audit plus 26 stranded since
+before the outage: nothing was lost while the cluster was down. **The leader held
+through the entire enqueue-and-drain cycle without a single election**, which is
+the precondition the promotion note below asks for. `sweep_successes` climbing is
+the direct confirmation of the fix — that is the exact operation that could not
+complete.
+
+## How the outage presented, and why the deploy gate hid it
 
 Read this before the churn analysis below it. **No queue node has been running
 since 04:39 PDT on 2026-08-12.** All three crash-loop on
