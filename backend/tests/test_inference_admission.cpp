@@ -22,6 +22,7 @@
 #include <vector>
 
 import inference_admission;
+import sgee_queue_client;
 
 using namespace std::chrono_literals;
 using options_calculator::inference_admission::Device;
@@ -313,6 +314,45 @@ auto main() -> int {
                   "\"cuda\" on a CUDA build with a ready device resolves to {Cuda, "
                   "refuse=false}");
         }
+    }
+
+    section("SgeeAdmission degrades to the local backend when the cluster is unreachable");
+    {
+        // The degrade-never-hang property, which is the ONE thing about this
+        // path that must hold whether or not a cluster exists. It is asserted
+        // against a client that has no peers at all -- the honest stand-in for
+        // "the cluster is unreachable", and the only failure mode reproducible
+        // without standing three nodes up.
+        //
+        // Two distinct claims, and the second is the one that bites: that the
+        // caller gets the LOCAL answer (not an error, not nullopt), and that it
+        // gets it PROMPTLY. A path that eventually degrades after holding a gRPC
+        // handler thread for ninety seconds has satisfied the letter of
+        // "degrade" and none of the point.
+        GatedEchoBackend local{/*max_concurrent=*/1, /*queue_depth=*/4};
+        local.open_gate();
+
+        options_calculator::inference_admission::SgeeAdmission admission(
+            SgeeQueueClient{}, local, std::chrono::milliseconds(90000));
+
+        const auto started = std::chrono::steady_clock::now();
+        const auto out = admission.submit("hello");
+        const auto elapsed = std::chrono::steady_clock::now() - started;
+
+        check(out.has_value(), "an unreachable SGEE cluster still yields an answer");
+        check(out.has_value() && out->ok, "and that answer is the local backend's success");
+        check(out.has_value() && out->text == "hello",
+              "and it is the LOCAL backend's own text, not a fabricated one");
+        check(elapsed < std::chrono::seconds(5),
+              "and it arrives promptly rather than after the 90s remote deadline -- a submit "
+              "that cannot even be sent must not spend the caller's whole budget discovering it");
+
+        check(std::string_view(admission.name()) == "sgee",
+              "SgeeAdmission reports its own name, so a log line naming the admission path is "
+              "not silently the postgres one");
+        check(std::string_view(admission.device()) == std::string_view(local.device()),
+              "and it forwards device() to the wrapped backend rather than hardcoding \"cpu\" -- "
+              "a leased job still decodes wherever that backend runs");
     }
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);

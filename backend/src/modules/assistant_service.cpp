@@ -64,6 +64,7 @@ import market_data;
 import assistant_verification;
 import inference_admission;
 import inference_queue;
+import sgee_queue_client;
 import pg;
 
 // SGEE: ParseStrategy's admission/model-availability/generate/parse-and-verify
@@ -1655,8 +1656,65 @@ class AssistantWorker {
      * use, or surfaces as a bounded submit_remote()/await_result() failure
      * that PostgresAdmission already treats as "fall back to local".
      */
+    /**
+     * `INFERENCE_QUEUE=sgee`: the same admission shape against the SGEE Raft
+     * cluster instead of Postgres.
+     *
+     * Ordering matters and is the same as the Postgres path's: the lease source
+     * is installed BEFORE anything can submit, because `QueuedBackend::start()`
+     * documents `set_lease_source()` as part of construction -- a worker that
+     * starts its decode loop first can sit leasing nothing while jobs pile up on
+     * a queue it is not yet reading.
+     *
+     * Every failure here returns quietly and leaves the assistant on local-only
+     * inference. That is the whole degrade-never-hang contract restated at
+     * configuration time: a cluster that cannot be reached must cost nothing more
+     * than the shared queue it would have provided.
+     */
+    auto configure_sgee_queue() -> void {
+        auto client = SgeeQueueClient::create_for_admission();
+        if (!client.has_value()) {
+            // create_for_admission() has already logged which variable was
+            // missing or unusable.
+            logger::Logger::getInstance().warn(
+                "INFERENCE_QUEUE=sgee was requested but no SGEE client could be built -- the "
+                "strategy assistant degrades to local-only inference.");
+            return;
+        }
+
+        // The worker id only has to be unique among live leaseholders; the pid
+        // is what the Postgres path uses for the same reason. Hashed into the
+        // uint64 the SGEE queue wants, with the surface folded in so the two
+        // assistants in ONE process never collide on it.
+        const auto worker_id = static_cast<std::uint64_t>(::getpid()) * 2ULL + 0ULL;
+
+        // 90s visibility, matching the admission deadline below. A shorter
+        // window would let the cluster reclaim a task this worker is still
+        // decoding and hand it to someone else -- paying for the same inference
+        // twice and, worse, fencing out the answer that arrives first.
+        auto lease_source = std::make_shared<inference_admission::SgeeLeaseSource>(
+            *client, worker_id, /*visibility_ms=*/90000);
+        backend_->set_lease_source(lease_source);
+        lease_source_ = std::move(lease_source);
+
+        // The same 90s ceiling the Postgres path uses, for the same reason: it
+        // is a bound on a genuinely stuck request, not a target latency. The
+        // poll returns the instant the task turns terminal.
+        admission_ = std::make_unique<inference_admission::SgeeAdmission>(
+            *client, *backend_, std::chrono::milliseconds(90000));
+
+        logger::Logger::getInstance().info(
+            "Strategy assistant: INFERENCE_QUEUE=sgee -- submitting through the SGEE queue cluster "
+            "(worker_id={}), with the local backend as fallback and lease source",
+            worker_id);
+    }
+
     auto configure_inference_queue() -> void {
         const std::string mode = env_string("INFERENCE_QUEUE").value_or("local");
+        if (mode == "sgee") {
+            configure_sgee_queue();
+            return;
+        }
         if (mode != "postgres") {
             if (mode != "local") {
                 logger::Logger::getInstance().warn(

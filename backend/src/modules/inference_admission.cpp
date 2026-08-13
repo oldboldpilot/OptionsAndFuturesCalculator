@@ -275,4 +275,182 @@ auto PostgresAdmission::submit(std::string prompt) -> std::optional<InferenceOut
     }
 }
 
+// ---------------------------------------------------------------------------
+// SgeeLeaseSource
+// ---------------------------------------------------------------------------
+
+SgeeLeaseSource::SgeeLeaseSource(SgeeQueueClient client, std::uint64_t worker_id,
+                                   std::uint64_t visibility_ms)
+    : client_(std::move(client)), worker_id_(worker_id), visibility_ms_(visibility_ms) {}
+
+SgeeLeaseSource::~SgeeLeaseSource() {
+    // Same contract as PostgresLeaseSource's destructor: every helper is joined
+    // before any member is torn down, so no thread can still be holding a
+    // reference to this object's client while it is being destroyed.
+    const std::lock_guard lock{helpers_mu_};
+    for (auto& h : helpers_) {
+        if (h.joinable()) h.join();
+    }
+}
+
+auto SgeeLeaseSource::fill(std::size_t want) -> std::vector<PendingJob> {
+    std::vector<PendingJob> out;
+    if (want == 0) return out;
+
+    {
+        const std::lock_guard lock{helpers_mu_};
+        reap_finished_locked();
+    }
+
+    for (std::size_t i = 0; i < want; ++i) {
+        auto leased = client_.lease_blocking(worker_id_, visibility_ms_);
+        if (!leased.has_value()) {
+            // Nothing eligible, OR the cluster did not answer. Both stop this
+            // fill pass and both are correct to treat identically here -- the
+            // owner thread's next move is the same either way. The client has
+            // already logged whichever it was.
+            break;
+        }
+
+        PendingJob pending;
+        pending.prompt = decode_prompt(leased->payload);
+        auto future = pending.promise.get_future();
+        out.push_back(std::move(pending));
+
+        spawn_writeback(std::move(*leased), std::move(future));
+    }
+    return out;
+}
+
+auto SgeeLeaseSource::spawn_writeback(SgeeLeasedJob job, std::future<InferenceOutcome> future)
+    -> void {
+    auto done = std::make_shared<std::atomic<bool>>(false);
+    // The helper takes its OWN copy of the client rather than capturing `this`,
+    // for the same reason PostgresLeaseSource's helper copies the queue
+    // shared_ptr: once spawned, its work has nothing to do with this object's
+    // state, and the copy keeps the channel pool alive for exactly as long as
+    // the thread needs it.
+    std::jthread worker{[client = client_, job = std::move(job), future = std::move(future),
+                          done]() mutable {
+        InferenceOutcome outcome;
+        try {
+            outcome = future.get();
+        } catch (const std::exception& e) {
+            outcome = InferenceOutcome{.ok = false, .text = {}, .error = e.what()};
+        } catch (...) {
+            outcome = InferenceOutcome{
+                .ok = false, .text = {}, .error = "unknown failure awaiting the local decode result"};
+        }
+
+        bool written = false;
+        if (outcome.ok) {
+            written = client.complete_blocking(job, encode_result(outcome.text));
+        } else {
+            // The SGEE queue replicates RESULTS, not error strings -- see
+            // task_queue.proto's comment on Task.result for why widening
+            // BrokerFail was not taken. A failure is signalled by the task
+            // reaching its terminal Dead state, which the submitter reads from
+            // `state`; the text is logged here, where it is still available.
+            logger::Logger::getInstance().info(
+                "inference_admission: SGEE task {} failed locally ({}) -- reporting the failure to "
+                "the cluster; the reason is logged here because the queue carries results, not "
+                "error text",
+                job.task_id, outcome.error);
+            written = client.fail_blocking(job);
+        }
+
+        if (!written) {
+            logger::Logger::getInstance().warn(
+                "inference_admission: writing back SGEE task {} failed -- the submitting side's "
+                "own poll will time out and fall back to its local backend",
+                job.task_id);
+        }
+        done->store(true, std::memory_order_release);
+    }};
+
+    const std::lock_guard lock{helpers_mu_};
+    helpers_.push_back(std::move(worker));
+    helper_done_.push_back(std::move(done));
+}
+
+auto SgeeLeaseSource::reap_finished_locked() -> void {
+    std::size_t i = 0;
+    while (i < helpers_.size()) {
+        if (helper_done_[i]->load(std::memory_order_acquire)) {
+            if (helpers_[i].joinable()) helpers_[i].join();
+            helpers_.erase(helpers_.begin() + static_cast<std::ptrdiff_t>(i));
+            helper_done_.erase(helper_done_.begin() + static_cast<std::ptrdiff_t>(i));
+        } else {
+            ++i;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SgeeAdmission
+// ---------------------------------------------------------------------------
+
+SgeeAdmission::SgeeAdmission(SgeeQueueClient client, InferenceBackend& local,
+                               std::chrono::milliseconds remote_deadline)
+    : client_(std::move(client)), local_(local), remote_deadline_(remote_deadline) {}
+
+auto SgeeAdmission::submit(std::string prompt) -> std::optional<InferenceOutcome> {
+    const auto deadline = std::chrono::steady_clock::now() + remote_deadline_;
+    const std::string payload_json = encode_prompt(prompt);
+
+    auto task_id = client_.submit_blocking(payload_json);
+    if (!task_id.has_value()) {
+        logger::Logger::getInstance().warn(
+            "inference_admission: SGEE submit failed -- falling back to the local backend");
+        return local_.submit(std::move(prompt));
+    }
+
+    // Poll rather than await. The interval is a compromise with one real cost on
+    // each side: too long adds latency to every request that finishes early, too
+    // short multiplies GetTask RPCs against a three-node cluster for no benefit.
+    // 25 ms is well under the smallest plausible decode and cheap at this
+    // concurrency.
+    constexpr auto kPollInterval = std::chrono::milliseconds(25);
+    while (std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(kPollInterval);
+
+        auto outcome = client_.poll_task(*task_id);
+        if (!outcome.has_value()) {
+            // The poll itself did not complete. Keep trying until the deadline
+            // rather than degrading immediately: a single lost RPC against a
+            // cluster that is mid-election is expected, and the work may well
+            // already be running. Degrading here would run the whole inference
+            // twice.
+            continue;
+        }
+        if (!outcome->found) {
+            // Answered, and the task is gone. Retention reclaimed it, or it never
+            // landed. Either way the answer is not coming.
+            logger::Logger::getInstance().warn(
+                "inference_admission: SGEE task {} is no longer present -- falling back to the "
+                "local backend",
+                *task_id);
+            return local_.submit(std::move(prompt));
+        }
+        if (!outcome->terminal) continue;
+
+        if (outcome->ok) {
+            InferenceOutcome result;
+            result.ok = true;
+            result.text = decode_result(outcome->result);
+            return result;
+        }
+        InferenceOutcome result;
+        result.ok = false;
+        result.error = "the SGEE inference queue reported failure";
+        return result;
+    }
+
+    logger::Logger::getInstance().warn(
+        "inference_admission: SGEE task {} did not reach a terminal state before the deadline -- "
+        "falling back to the local backend",
+        *task_id);
+    return local_.submit(std::move(prompt));
+}
+
 }  // namespace options_calculator::inference_admission

@@ -796,4 +796,84 @@ export class PostgresAdmission final : public InferenceBackend {
     std::optional<SgeeQueueClient> sgee_client_;
 };
 
+// ---------------------------------------------------------------------------
+// The SGEE-cluster-backed shared queue extension (INFERENCE_QUEUE=sgee)
+// ---------------------------------------------------------------------------
+
+/**
+ * `PostgresLeaseSource`'s counterpart against the SGEE Raft cluster.
+ *
+ * Structurally identical on purpose -- lease on the owner thread, never block
+ * there, hand the write-back to a short-lived helper -- because the constraint
+ * that shaped it is a property of the DECODE LOOP, not of Postgres. Only the
+ * substrate underneath differs.
+ *
+ * The one real difference is what a fencing token is. Postgres mints a bare
+ * int64; SGEE mints a (raft_term, raft_index, local_token) triple whose
+ * raft_term is what fences a deposed leader. It is carried whole and forwarded
+ * unchanged -- never collapsed to its local_token, which would drop precisely
+ * the field that makes it safe across a leader change.
+ */
+export class SgeeLeaseSource final : public LeaseSource {
+  public:
+    SgeeLeaseSource(SgeeQueueClient client, std::uint64_t worker_id,
+                     std::uint64_t visibility_ms);
+    ~SgeeLeaseSource() override;
+
+    [[nodiscard]] auto fill(std::size_t want) -> std::vector<PendingJob> override;
+
+  private:
+    auto spawn_writeback(SgeeLeasedJob job, std::future<InferenceOutcome> future) -> void;
+    /** Caller must hold `helpers_mu_`. */
+    auto reap_finished_locked() -> void;
+
+    SgeeQueueClient client_;
+    std::uint64_t worker_id_;
+    std::uint64_t visibility_ms_;
+
+    std::mutex helpers_mu_;
+    std::vector<std::jthread> helpers_;
+    std::vector<std::shared_ptr<std::atomic<bool>>> helper_done_;
+};
+
+/**
+ * `PostgresAdmission`'s counterpart: prefer routing a request through the SGEE
+ * cluster, and fall back to calling the wrapped local backend DIRECTLY on any
+ * failure of that path. Same mandatory degrade-never-hang property, same
+ * reasoning -- a cluster outage must not become an unbounded RPC hang or an
+ * error the caller cannot get a real answer behind.
+ *
+ * WHAT DIFFERS FROM THE POSTGRES PATH, and it is not cosmetic: Postgres offers
+ * `await_result()`, a single blocking call with a `pg_notify` wakeup hint. SGEE
+ * offers no await, so this POLLS `GetTask` on a fixed interval until the task is
+ * terminal or the deadline passes. That is the same shape the Postgres path
+ * degrades to whenever its notify hint does not arrive -- which that module's
+ * banner is explicit is never load-bearing for correctness -- so the two have
+ * the same failure modes rather than a new set.
+ *
+ * A task that has DISAPPEARED between submit and poll is treated as a lost
+ * answer and falls back, not as a failure. Retention reclaims terminal tasks,
+ * so a reclaimed task and one that never existed are the same reply.
+ */
+export class SgeeAdmission final : public InferenceBackend {
+  public:
+    SgeeAdmission(SgeeQueueClient client, InferenceBackend& local,
+                   std::chrono::milliseconds remote_deadline);
+
+    [[nodiscard]] auto submit(std::string prompt) -> std::optional<InferenceOutcome> override;
+    [[nodiscard]] auto name() const noexcept -> std::string_view override { return "sgee"; }
+
+    /** Forwards to the wrapped local backend, for the same reason
+     *  PostgresAdmission does: a leased-out job still decodes on whatever device
+     *  that backend's owner thread runs on. */
+    [[nodiscard]] auto device() const noexcept -> std::string_view override {
+        return local_.device();
+    }
+
+  private:
+    SgeeQueueClient client_;
+    InferenceBackend& local_;
+    std::chrono::milliseconds remote_deadline_;
+};
+
 }  // namespace options_calculator::inference_admission
