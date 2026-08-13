@@ -1,0 +1,32 @@
+SGEE queue cluster — state-machine divergence, decoded from each node's broker.wal.snap
+captured 2026-08-13 ~01:55Z, all three nodes on the post-fix binary, compactions=0
+
+node1: next_task_id=219 tasks=121 {'Completed': 121}
+node2: next_task_id=178 tasks=20 {'Pending': 2, 'Completed': 18}
+node3: next_task_id=178 tasks=165 {'Pending': 4, 'Completed': 143, 'Dead': 18}
+
+tasks present on all three: 20; DISAGREEING: 17
+
+task  node1       node2       node3
+161   Completed   Completed   Dead
+162   Completed   Completed   Dead
+163   Completed   Completed   Dead
+164   Completed   Completed   Dead
+165   Completed   Completed   Dead
+166   Completed   Completed   Dead
+167   Completed   Pending     Dead
+168   Completed   Completed   Dead
+169   Completed   Completed   Dead
+170   Completed   Completed   Dead
+171   Completed   Completed   Dead
+172   Completed   Completed   Dead
+173   Completed   Completed   Dead
+174   Completed   Pending     Pending
+175   Completed   Completed   Pending
+176   Completed   Completed   Pending
+177   Completed   Completed   Pending
+
+Completed and Dead are BOTH TERMINAL states. A task cannot be Completed on one
+replica and Dead on another because one is 'further ahead' -- terminal state never
+changes. This is a State Machine Safety violation, produced by apply_committed
+dropping the tail of a batch after a failure (fixed in SGEE fbcd2d63).

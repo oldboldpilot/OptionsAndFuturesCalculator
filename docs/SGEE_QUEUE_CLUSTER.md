@@ -16,12 +16,20 @@ a count of anything the broker applied. Fixed in SGEE `fbcd2d63`, **deployed to
 all three nodes and re-audited clean**: term agreed, `last_applied ==
 commit_index` on every node, `tick_errors: 0` everywhere.
 
-**What still blocks promotion is the residual state, not the code.** The fix
-prevents new divergence; it does not repair what was already dropped, and node 3
-still carries a `dlq_depth` of 18 against 0 on both peers — baked into its
-persisted snapshot, and NOT explained by the retention account this document
-previously gave (see the section on it). Repair means rebuilding that node's
-volume while a healthy leader exists.
+**The state that defect corrupted has since been REPAIRED, and the divergence it
+caused was proven first rather than assumed.** Decoding all three
+`broker.wal.snap` files showed 17 of the 20 shared tasks disagreeing across
+replicas — some `Completed` on one node and `Dead` on another, both terminal
+states — with `next_task_id` at 219/178/178. Nodes 2 and 3 were rebuilt from the
+leader; all three now decode to an identical state payload (md5
+`b5fdb7abc47171586ae3494aee0035d3`, `next_task_id` 219, zero disagreements). See
+"The divergence was real, was proven, and was repaired" at the end of this file.
+
+**The correctness blocker is therefore gone. What remains is unfinished work, not
+a defect:** mTLS is implemented but OFF pending certificates, and nothing routes
+to the cluster yet — `SgeeQueueClient` is mirror-mode only, so promotion means
+building an SGEE-backed admission path rather than flipping a flag. Postgres
+remains the system of record until both are done.
 
 ## Topology
 
@@ -894,3 +902,99 @@ Both cost time and are not otherwise written down:
   script run from anywhere but the repo root answers `No linked project found`
   instantly, on stderr — which reads exactly like an empty result rather than an
   error.
+
+## The divergence was real, was proven, and was repaired (2026-08-12)
+
+The section above left `dlq_depth: 18` on node 3 unexplained. It is now settled,
+and the answer was worse than "a retained view": **all three replicas held
+different state machines.**
+
+### How it was proven without guessing
+
+`/statusz` exposes only a depth, and the queue client has no DLQ command — so
+the evidence is the state-machine snapshot itself. `broker.wal.snap` is small
+(1.5–12 KB), so all three were pulled off with `base64 -w0` over `railway ssh`
+and decoded locally. The framing is
+`[magic "SNAP" u32][version u32][lsn u64][entity_id u64][state_len u32][state…][crc32]`,
+wrapping `InMemoryIndex::serialize_snapshot`'s own
+`[version u32][next_task_id u64][last_token u64][count u32][entries…]`, each
+entry 62 fixed bytes plus payload, all little-endian.
+
+The first read failed because the outer `SNAP` header was mistaken for the index
+header — worth knowing before decoding one of these by hand.
+
+Decoded, at essentially the same log position and the same wall-clock minute:
+
+| node | next_task_id | tasks | states |
+| --- | --- | --- | --- |
+| sgee-queue-1 | **219** | 121 | 121 Completed |
+| sgee-queue-2 | 178 | 20 | 2 Pending, 18 Completed |
+| sgee-queue-3 | 178 | 165 | 4 Pending, 143 Completed, **18 Dead** |
+
+Of the 20 tasks present on all three, **17 disagreed on state**. Tasks 161–173
+were `Completed` on nodes 1 and 2 and `Dead` on node 3. Task 167 was `Completed`
+on node 1, `Pending` on node 2 and `Dead` on node 3 — three replicas, three
+answers.
+
+**`Completed` and `Dead` are both TERMINAL.** No amount of "one node is further
+ahead" reconciles them, because a terminal state never changes again. This is a
+State Machine Safety violation — precisely what `apply_committed` dropping the
+tail of a batch produces.
+
+`next_task_id` is the tell for which node was right: it is monotonic in enqueues
+applied, and node 1 — the only node that never logged a tick error — had applied
+41 more than the other two. **Nodes 2 and 3 were both diverged; node 1 was
+correct.**
+
+### The repair
+
+Rebuild each bad replica from the leader, one at a time, keeping quorum: delete
+`raft.wal`, `raft.wal.snap`, `broker.wal`, `broker.wal.snap` (keep `node.id`),
+restart the container, let it rejoin empty via AppendEntries / InstallSnapshot.
+Node 3 first — worst diverged — then node 2, with node 1 leading throughout so
+the snapshot that propagates is the correct one.
+
+A rebuilt node comes back at `current_term: 8`, `last_applied: 0` and no
+`leader_hint`, then jumps straight to the leader's `snapshot_index`. It cannot
+disrupt the cluster on the way: its term is far *below* the cluster's, so its
+RequestVote is refused and the refusal carries it up to the current term, and
+Raft's log-completeness check makes it unelectable until it has caught up.
+
+Verified by re-pulling all three snapshots and diffing the decoded state:
+identical md5 `b5fdb7abc47171586ae3494aee0035d3`, identical `next_task_id` 219,
+identical task-id sets, **zero disagreements**. Only the outer frame's `lsn`
+differs (768 on node 1, 0 on the two rebuilt), which is local WAL bookkeeping and
+not state.
+
+### `kill -9 1` inside a container does nothing
+
+The first rebuild attempt deleted the WALs and ran `kill -9 1`. The files went
+away and **the process kept running** — `dlq_depth` still 18, `sweep_attempts`
+still climbing — holding open descriptors to the now-unlinked inodes.
+
+PID 1 of a PID namespace is immune to signals sent *from inside that namespace*
+for which it has installed no handler, and that immunity **covers SIGKILL**.
+Killing a container's init has to come from outside: `railway redeploy --service
+<name> -y`, which is what actually restarts it.
+
+That middle state is worse than doing nothing — the files are gone but the
+divergent state is still in memory and would be re-persisted on the next
+compaction. Delete and restart must be one action, and the restart must come from
+the runtime.
+
+### What this changes for promotion
+
+The correctness blocker is gone: the code defect is fixed and gated, and the
+state it corrupted has been rebuilt and proven identical across all three
+replicas. What remains before this can be the system of record is not a defect
+but unfinished work:
+
+- **mTLS is implemented and OFF** pending certificates. Anything that can reach
+  port 50053 can enqueue, which is tolerable for a mirror behind a private
+  network and is not tolerable for the authority.
+- **Nothing routes to it yet.** `SgeeQueueClient` is mirror-mode only —
+  `enqueue_mirror`, best-effort, dropped on a full ring or open breaker. Making
+  the cluster authoritative means an SGEE-backed admission path replacing
+  `PostgresAdmission`/`PostgresLeaseSource`, not a configuration flip.
+
+Postgres remains the system of record until both are done.
