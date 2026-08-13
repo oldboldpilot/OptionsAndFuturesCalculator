@@ -825,6 +825,84 @@ Attaching a custom domain needs an account-scoped Railway credential. If
 `~/.railway/config.json` holds only a read-scoped `accessToken`; run
 `railway login` or use the dashboard.
 
+## `import std;` and the one std.pcm
+
+Every module interface unit in this tree — this project's `src/modules/*.cppm`,
+sensen's 263, and SGEE's — says `import std;`. This is what
+`docs/PRD_OPTIONS_AND_FUTURES_CALCULATOR.md` §2 has always specified and what
+C++23 standard modules means here. `SENSEN_NO_IMPORT_STD` and
+`SGEE_NO_IMPORT_STD` were both FORCEd ON until 2026-08-12; they are now OFF, and
+turning either back on is a decision, not a tidy-up.
+
+**There is exactly ONE `std.pcm`, and that is the whole design.** sensen's
+`std_module_precompile` builds it from `${CMAKE_CXX_FLAGS}` — which at that point
+is `CANONICAL_FLAGS`, set before every `add_subdirectory` and therefore the
+**union** of what every subproject compiles with. SGEE imports that same file via
+`SGEE_EXTERNAL_STD_PCM` instead of building its own. A BMI mismatch needs two std
+modules built from two flag sets; there is one, so it cannot arise. The old
+justification for the shim — avoiding that mismatch — was answering the right
+question with the wrong answer: build one from the union rather than none at all.
+
+Clang enforces this strictly and the diagnostic is clear when you hit it —
+`stack protector mode differs`, `compiled with the target feature '+avx2' but the
+current translation unit is not`. Those name the flag. The failures below do not.
+
+**Placement of `-fmodule-file=std=` in `backend/CMakeLists.txt` is load-bearing.**
+`add_compile_options` applies only to targets created *after* it, so the block
+sits between `add_subdirectory(sensen)` (which declares `std_module_precompile`)
+and `add_library(sensen_slim)` (the first target here to compile a sensen
+module), and still below `FetchContent_MakeAvailable(grpc)` so it never reaches
+gRPC's ~3000 translation units. It was once ~500 lines lower and `sensen_slim`
+missed it: seven TUs died on `fatal error: module 'std' not found` while
+everything else built clean.
+
+The flag says where the BMI is; it does not tell ninja to build it first.
+`std_module_precompile` is `ALL`, which puts it in the default build but
+establishes **no edge**, so under `-j` a module compile can be scheduled before
+the BMI is written. Every target in the directory, and SGEE through its
+`sgee_std_module` stub, depends on it explicitly.
+
+**Four things a module does not give you, each of which cost a build cycle:**
+
+1. **A module exports no MACROS.** `<cerrno>` (`errno`, `EINTR`) and `<cstdio>`
+   (`stderr`, `stdout`, `stdin`) must stay textual. `import std;` supplies
+   `std::fprintf` but not the stream you hand it.
+2. **`import std;` declares `std::int32_t`, never `::int32_t`.** Unqualified C
+   type names fail with `missing '#include <bits/stdint-intn.h>'`, which names a
+   glibc internal header that is not the answer.
+3. **`<new>` is an ODR ANCHOR and must be UNCONDITIONAL.** A `<new>` reached
+   *transitively* — TBB headers are the live case — lands in the **global**
+   module and is never merged with the std-module copy. Every allocation in a
+   consumer then fails with `call to 'operator new' is ambiguous`, reported
+   inside libc++, naming neither TBB nor the module that leaked it. Including
+   `<new>` textually anchors the canonical declaration so the two merge.
+   `sensen/src/tokenizer.cppm` carried a comment saying this above the include
+   that proved it, and moving that include inside the guard removed the anchor
+   from the one configuration that needs it.
+   **Importing a module that anchors it does NOT inherit the anchor** — the line
+   is repeated per translation unit (`options.cppm`, `pricing_engine.cppm`,
+   `testing_framework.cppm`) rather than fixed once.
+4. **A standard header in a global module fragment leaks into the BMI.** That is
+   why sensen's guard exists and why 148 of its files had to be corrected: an
+   include left *outside* `#if defined(SENSEN_NO_IMPORT_STD)` is textual on both
+   paths, which is how (3) happens in the first place.
+
+A header-std BMI and an `import std;` consumer **do interoperate** — `std::string`
+from a textual header and from the std module are the same entity — so conversion
+was incremental and a mixed tree is not broken. That is also why SGEE's
+`replicated_queue_formal_verification_tests`, which sets `SENSEN_NO_IMPORT_STD`
+on itself deliberately, still builds and passes.
+
+Known residue: the vendored cpp23-logger still precompiles its own `std.pcm` and
+`std.compat.pcm` from a smaller flag set. **Nothing consumes them** — every
+compile binds `-fmodule-file=std=` to the shared BMI, which takes precedence over
+`-fprebuilt-module-path` — so it is wasted build time, not a second BMI in use.
+
+The 2026-07-30 investigation abandoned this because sensen's working tree had no
+`std_module_precompile` target. It has one now, and libc++ is the standard
+library here, so all three terms of its gate hold. See
+`docs/session_logs/2026-07-30_libcxx_std_module_investigation.md`.
+
 ## Build Commands
 - **Frontend Production Build:** `cd frontend && npm run build`
 - **Frontend Dev Server:** `cd frontend && npm run dev`

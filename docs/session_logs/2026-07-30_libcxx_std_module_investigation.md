@@ -1,6 +1,34 @@
-# Session Log: 2026-07-30 — `import std` / libc++ Investigation (Not Adopted)
+# Session Log: 2026-07-30 — `import std` / libc++ Investigation (Not Adopted *then*)
 
 @author Olumuyiwa Oluwasanmi
+
+> **SUPERSEDED 2026-08-12: `import std;` IS adopted, tree-wide.** Everything
+> below is still an accurate record of why it could not be adopted *on that day*,
+> and the four faults it disposes of are all real. What changed is the section
+> titled "The Actual Blocker": sensen's working tree had no
+> `std_module_precompile` target, and it has one now. libc++ also became this
+> binary's standard library in the interim, which satisfies the second term of
+> that target's gate (`SENSEN_USE_LIBCXX`), and `/usr/local/share/libc++/v1/std.cppm`
+> satisfies the third.
+>
+> Two conclusions below were reversed by the adoption, and are worth naming
+> because they read as settled:
+>
+> * **"A shared, parent-built std.pcm is not obviously safer than per-subproject
+>   ones."** The opposite turned out to be true, and for the reason the sentence
+>   itself gestures at: BMI compatibility depends on flags, so the fix is to
+>   build ONE std.pcm from the UNION of them. `CANONICAL_FLAGS` is already that
+>   union — it enters `CMAKE_CXX_FLAGS` before every `add_subdirectory` — so a
+>   single BMI is compatible with every consumer by construction. Two modules
+>   built from two flag sets is the only way to get a mismatch, and there is now
+>   one module.
+> * **"Forcing CMake's std module on is the one thing a parent must not do here."**
+>   Still true, and still observed: `CMAKE_CXX_MODULE_STD` is left alone, and the
+>   std.pcm is built by sensen's own `add_custom_command`, not by CMake. Fault 4
+>   below (CMake's synthesized std module is `gnu++23`-only) is exactly why.
+>
+> See `CLAUDE.md` §"`import std;` and the one std.pcm" for the adopted design and
+> the four traps that cost a build cycle each.
 
 An attempt to move the backend off header-std (`sensen_std.h` / `sgee_std.hpp`)
 onto libc++ with a real std module, so both submodules would compile as written.

@@ -303,7 +303,7 @@ gap so the deferral is explicit rather than silent:
 
 | Rule | Mandate | Current state |
 |---|---|---|
-| 12, 41 | `import std;` / precompiled std module | `SENSEN_NO_IMPORT_STD` is defined; zero `import std;` in `backend/src` |
+| 12, 41 | `import std;` / precompiled std module | **SATISFIED 2026-08-12.** `SENSEN_NO_IMPORT_STD` and `SGEE_NO_IMPORT_STD` are both OFF; every `.cppm` in `backend/src`, sensen and SGEE says `import std;` against one `std.pcm` built from `CANONICAL_FLAGS`. See `CLAUDE.md` §"`import std;` and the one std.pcm" |
 | 50 | `clang++-22` only, `-nostdinc++ -isystem external/libcxx-v1/include` | Dockerfile installs whatever clang `llvm.sh` provides; flags absent |
 | 51 | Vendored `modules/std.cppm` + `external/libcxx-v1/include` | Both missing from this repo |
 | 50–54 | Build scripts source `scripts/build_common.sh` | Absent at repo root (exists only inside SGEE) |
