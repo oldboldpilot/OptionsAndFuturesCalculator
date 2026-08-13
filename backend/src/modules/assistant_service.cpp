@@ -1748,7 +1748,7 @@ class AssistantWorker {
     std::unique_ptr<QueuedBackend> backend_;
     std::shared_ptr<pg::Pool> pool_;
     std::shared_ptr<inference_queue::Queue> queue_;
-    std::shared_ptr<inference_admission::PostgresLeaseSource> lease_source_;
+    std::shared_ptr<inference_admission::LeaseSource> lease_source_;
     std::unique_ptr<InferenceBackend> admission_;
 };
 

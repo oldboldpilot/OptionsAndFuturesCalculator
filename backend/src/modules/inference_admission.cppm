@@ -232,7 +232,42 @@ export class InferenceBackend {
     [[nodiscard]] virtual auto device() const noexcept -> std::string_view { return "cpu"; }
 };
 
-export class PostgresLeaseSource;  // defined below; QueuedBackend only needs a pointer to it.
+/**
+ * Where a `QueuedBackend`'s owner thread draws SHARED work from, in addition to
+ * its own local queue.
+ *
+ * This is an abstract base rather than a concrete class because there are now
+ * two shared queues -- Postgres (`PostgresLeaseSource`) and the SGEE cluster
+ * (`SgeeLeaseSource`) -- and `QueuedBackend` must be able to hold either without
+ * knowing which. It previously named `PostgresLeaseSource` directly, which made
+ * the substrate part of the decode loop's type rather than a deployment choice.
+ *
+ * The interface is deliberately one method. Everything else a shared queue needs
+ * -- leader discovery, fencing tokens, retries, writing a result back -- happens
+ * on the far side of `fill()` and is none of the decode loop's business. In
+ * particular `fill()` MUST NOT block on a decode result: it is called ON the
+ * owner thread, whose job is to keep feeding the fused decode step. Both
+ * implementations spawn a short-lived helper thread to do the waiting.
+ */
+export class LeaseSource {
+  public:
+    LeaseSource() = default;
+    virtual ~LeaseSource() = default;
+    LeaseSource(const LeaseSource&) = delete;
+    auto operator=(const LeaseSource&) -> LeaseSource& = delete;
+    LeaseSource(LeaseSource&&) = delete;
+    auto operator=(LeaseSource&&) -> LeaseSource& = delete;
+
+    /**
+     * Leases up to `want` jobs. Fewer, or none, is the ORDINARY case -- an
+     * empty result means the shared queue had nothing eligible, never that
+     * something failed. A genuine failure is also reported as an empty result,
+     * after logging: the owner thread's correct response to both is identical
+     * (serve local work and try again next tick), and giving it an error to
+     * handle would only invite it to handle them differently.
+     */
+    [[nodiscard]] virtual auto fill(std::size_t want) -> std::vector<PendingJob> = 0;
+};
 
 /**
  * The admission queue and back-pressure policy both local backends share.
@@ -358,13 +393,13 @@ export class QueuedBackend : public InferenceBackend {
     virtual auto start() -> void = 0;
 
     /**
-     * Installs (or, with `nullptr`, removes) the Postgres lease source this
+     * Installs (or, with `nullptr`, removes) the shared lease source this
      * backend's owner thread will additionally draw from. Thread-safe: may be
      * called once at Worker construction (the only case this codebase
      * exercises) or, in principle, at any time -- `take_jobs()` snapshots the
      * pointer under `mutex_` on every call rather than caching it.
      */
-    auto set_lease_source(std::shared_ptr<PostgresLeaseSource> source) -> void {
+    auto set_lease_source(std::shared_ptr<LeaseSource> source) -> void {
         const std::lock_guard lock{mutex_};
         lease_source_ = std::move(source);
     }
@@ -467,7 +502,7 @@ export class QueuedBackend : public InferenceBackend {
     std::size_t max_queue_depth_ = 1;
 
   private:
-    [[nodiscard]] auto lease_source_snapshot() -> std::shared_ptr<PostgresLeaseSource> {
+    [[nodiscard]] auto lease_source_snapshot() -> std::shared_ptr<LeaseSource> {
         const std::lock_guard lock{mutex_};
         return lease_source_;
     }
@@ -590,7 +625,7 @@ export class QueuedBackend : public InferenceBackend {
     std::deque<PendingJob> queue_;
     bool shutting_down_ = false;
     std::string shutting_down_message_;
-    std::shared_ptr<PostgresLeaseSource> lease_source_;
+    std::shared_ptr<LeaseSource> lease_source_;
 };
 
 // ---------------------------------------------------------------------------
@@ -619,7 +654,7 @@ export class QueuedBackend : public InferenceBackend {
  * outlive every helper thread it spawns: the destructor blocks until each one
  * has been joined before any member is torn down.
  */
-export class PostgresLeaseSource {
+export class PostgresLeaseSource final : public LeaseSource {
   public:
     PostgresLeaseSource(std::shared_ptr<options_calculator::inference_queue::Queue> queue,
                          options_calculator::inference_queue::Surface surface,
@@ -638,7 +673,7 @@ export class PostgresLeaseSource {
      * job's write-back is delegated to a freshly-spawned helper thread; this
      * call itself never blocks on a decode result.
      */
-    [[nodiscard]] auto fill(std::size_t want) -> std::vector<PendingJob>;
+    [[nodiscard]] auto fill(std::size_t want) -> std::vector<PendingJob> override;
 
   private:
     auto spawn_writeback(std::int64_t job_id, std::int64_t fencing_token,
