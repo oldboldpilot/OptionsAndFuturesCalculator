@@ -399,10 +399,16 @@ auto SgeeLeaseSource::spawn_writeback(SgeeLeasedJob job, std::future<InferenceOu
             }
 
             if (!written) {
+                // Name the REASON. This warning used to carry only the task id, because the
+                // call reports success as a bool -- so a production writeback failing on every
+                // request could not say whether the cluster had refused the task, the leader
+                // had moved, or the deadline had blown. Those are three different faults with
+                // three different fixes, and to_string(ClientOutcome) was available the whole
+                // time.
                 logger::Logger::getInstance().warn(
-                    "inference_admission: writing back SGEE task {} failed -- the submitting side's "
-                    "own poll will time out and fall back to its local backend",
-                    job.task_id);
+                    "inference_admission: writing back SGEE task {} failed ({}) -- the submitting "
+                    "side's own poll will time out and fall back to its local backend",
+                    job.task_id, client.last_failure());
             }
         } catch (const std::exception& e) {
             try {

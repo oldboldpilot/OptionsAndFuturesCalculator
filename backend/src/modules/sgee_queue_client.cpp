@@ -501,11 +501,55 @@ class SgeeQueueClient::Impl {
                 // StaleFencingToken, PayloadTooLarge. Retrying a different peer
                 // cannot change a decision the replicated state machine already
                 // made, so stop here rather than spending the budget proving it.
+                note_failure(target_id, status.outcome, status.detail);
                 return std::optional<Value>{};
             }
         }
+        // Every attempt used, or the budget ran out. The last recorded reason (if any)
+        // stands; if nothing was recorded, say so rather than leaving a stale one to be
+        // read as this call's answer.
+        note_exhausted(budget);
         return std::optional<Value>{};
     }
+
+    // Record WHY the last call gave up.
+    //
+    // with_leader returns std::optional, so the outcome and message were discarded at every
+    // failure exit and the caller could only report "it failed". That is the same widening
+    // this project has lost a day to twice: an error narrowed to a bool tells an operator
+    // nothing, and there is a to_string(ClientOutcome) sitting right there. On 2026-08-13 a
+    // production writeback failed on every request and the log could not say whether the
+    // cluster had refused it, the leader had moved, or the deadline had blown -- three
+    // different faults with three different fixes.
+    //
+    // Kept as a recorded LAST failure rather than threaded through the return type, mirroring
+    // ReplicatedTaskBroker::last_apply_rejection, which is what made that diagnosis possible.
+    auto note_failure(std::string_view peer, sgee::task_queue::grpc_client::ClientOutcome o,
+                      std::string_view msg) -> void {
+        std::lock_guard lock(mutex_);
+        last_failure_ = std::string(sgee::task_queue::grpc_client::to_string(o));
+        last_failure_ += " from peer ";
+        last_failure_ += peer;
+        if (!msg.empty()) {
+            last_failure_ += " (";
+            last_failure_ += msg;
+            last_failure_ += ")";
+        }
+    }
+
+    auto note_exhausted(std::chrono::milliseconds budget) -> void {
+        std::lock_guard lock(mutex_);
+        if (last_failure_.empty()) {
+            last_failure_ = "no peer answered within the " + std::to_string(budget.count()) +
+                            "ms budget (no outcome recorded)";
+        }
+    }
+
+    [[nodiscard]] auto last_failure() const -> std::string {
+        std::lock_guard lock(mutex_);
+        return last_failure_.empty() ? std::string("none recorded") : last_failure_;
+    }
+
 
     [[nodiscard]] auto submit_blocking(std::string_view payload, std::chrono::milliseconds budget)
         -> std::optional<std::uint64_t> {
@@ -589,6 +633,8 @@ class SgeeQueueClient::Impl {
 
   private:
     mutable std::mutex mutex_;
+    // Why the last with_leader() call gave up -- see note_failure.
+    std::string last_failure_;
     std::condition_variable cv_;
     std::deque<std::string> ring_buffer_;
     std::size_t max_ring_capacity_{1024};
@@ -698,6 +744,11 @@ auto SgeeQueueClient::lease_blocking(std::uint64_t worker_id, std::uint64_t visi
     -> std::optional<SgeeLeasedJob> {
     if (!impl_) return std::nullopt;
     return impl_->lease_blocking(worker_id, visibility_ms, std::chrono::milliseconds(1000));
+}
+
+auto SgeeQueueClient::last_failure() const -> std::string {
+    if (!impl_) return "no client";
+    return impl_->last_failure();
 }
 
 auto SgeeQueueClient::complete_blocking(SgeeLeasedJob const& job, std::string_view result) -> bool {

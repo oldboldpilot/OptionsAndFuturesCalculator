@@ -92,6 +92,13 @@ export class SgeeQueueClient {
     auto complete_blocking(SgeeLeasedJob const& job, std::string_view result) -> bool;
     auto fail_blocking(SgeeLeasedJob const& job) -> bool;
 
+    // Why the last call that returned false/nullopt gave up: a ClientOutcome name, the peer
+    // that answered, and the server's message. These calls report success as a bool, and a
+    // bool cannot distinguish "the cluster refused this task" from "the leader moved" from
+    // "the deadline blew" -- three faults with three different fixes. Log it alongside any
+    // failure rather than making an operator guess, which on 2026-08-13 they could not.
+    [[nodiscard]] auto last_failure() const -> std::string;
+
   private:
     std::shared_ptr<Impl> impl_;
 };
