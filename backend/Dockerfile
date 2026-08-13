@@ -525,10 +525,25 @@ COPY backend/ /src/backend/
 # statically into calculator_engine and pull in no libomp -- verified with
 # ldd on the locally built binary. The ldd-driven library-copy step in the
 # runtime stage below therefore needs no change.
+# The compilers are named by their FULL versioned path, not the /usr/bin/clang++
+# symlink, and that is what makes `import std;` resolve in this image.
+#
+# sensen locates libc++'s std.cppm by walking up from the C++ compiler:
+# dirname(dirname(CMAKE_CXX_COMPILER))/share/libc++/v1/std.cppm. apt.llvm.org
+# installs it per-version at /usr/lib/llvm-22/share/libc++/v1/std.cppm, which
+# that walk finds ONLY if the compiler is /usr/lib/llvm-22/bin/clang++. Given
+# /usr/bin/clang++ the walk lands on /usr/share/libc++/v1, which this image does
+# not have, sensen never declares std_module_precompile, and backend/CMakeLists
+# aborts configure -- correctly, but for a reason that reads as a missing
+# toolchain rather than a symlink losing one path component.
+#
+# The -DLIBCXX_MODULES_PATH lines below already point the LOGGER at the same
+# directory; this is the same fact, for sensen, expressed the way sensen looks
+# it up.
 RUN cmake -S /src/backend -B /src/build -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_C_COMPILER=clang \
-        -DCMAKE_CXX_COMPILER=clang++ \
+        -DCMAKE_C_COMPILER=/usr/lib/llvm-${LLVM_VERSION}/bin/clang \
+        -DCMAKE_CXX_COMPILER=/usr/lib/llvm-${LLVM_VERSION}/bin/clang++ \
         -DCMAKE_CXX_FLAGS="${GCC_TOOLCHAIN_FLAGS}" \
         -DLIBCXX_MODULES_PATH=/usr/lib/llvm-${LLVM_VERSION}/share/libc++/v1 \
         -DCPP23_LOGGER_LIBCXX_MODULES_PATH=/usr/lib/llvm-${LLVM_VERSION}/share/libc++/v1 \
