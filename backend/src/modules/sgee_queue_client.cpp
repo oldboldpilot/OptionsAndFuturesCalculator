@@ -413,6 +413,163 @@ class SgeeQueueClient::Impl {
         }
     }
 
+  public:
+    // --- Synchronous surface -------------------------------------------------
+    //
+    // Shared leader-aware call path. Same discipline as process_item's mirror
+    // loop above -- follow a NotLeader hint, round-robin off a peer that will not
+    // answer, bound the whole attempt in time -- but factored into one place
+    // rather than copied, because that loop is the one already debugged against
+    // a real three-node cluster and two copies of it would drift apart exactly
+    // where a cluster is least forgiving.
+    //
+    // `fn` returns std::expected<T, ClientStatus>; this returns
+    // std::optional<T>, empty for every failure. The narrowing is intentional:
+    // every caller here answers all of them identically, by degrading.
+    template <typename Fn>
+    auto with_leader(Fn&& fn, std::chrono::milliseconds budget) {
+        using Ret = std::invoke_result_t<Fn, sgee::task_queue::grpc_client::TaskQueueClient&>;
+        using Value = typename Ret::value_type;
+        using CO = sgee::task_queue::grpc_client::ClientOutcome;
+
+        auto const start = std::chrono::steady_clock::now();
+        constexpr std::size_t kMaxAttempts = 3;
+
+        for (std::size_t attempt = 0; attempt < kMaxAttempts; ++attempt) {
+            if (std::chrono::steady_clock::now() - start >= budget) break;
+
+            std::string target_id;
+            std::string target_addr;
+            {
+                std::lock_guard lock(mutex_);
+                if (!cached_leader_id_.empty() && peer_map_.contains(cached_leader_id_)) {
+                    target_id = cached_leader_id_;
+                } else {
+                    if (peer_ids_.empty()) return std::optional<Value>{};
+                    target_id = peer_ids_[round_robin_idx_ % peer_ids_.size()];
+                }
+                target_addr = peer_map_[target_id];
+            }
+
+            auto channel = get_channel(target_addr);
+            sgee::task_queue::grpc_client::TaskQueueClient client(channel);
+            auto res = fn(client);
+            if (res.has_value()) {
+                // Deliberately does NOT cache target_id as the leader. Reads are
+                // answered by any replica, so a successful GetTask says nothing
+                // about who leads -- recording it would send the next WRITE to a
+                // follower and spend a redirect learning what it already knew.
+                return std::optional<Value>{std::move(*res)};
+            }
+
+            auto const& status = res.error();
+            if (status.outcome == CO::NotLeader) {
+                redirects_.fetch_add(1, std::memory_order_relaxed);
+                std::lock_guard lock(mutex_);
+                if (!status.leader_hint.empty() && peer_map_.contains(status.leader_hint)) {
+                    cached_leader_id_ = status.leader_hint;
+                } else {
+                    // No usable hint -- an election is probably in flight. Move
+                    // on rather than asking the same node again.
+                    cached_leader_id_.clear();
+                    round_robin_idx_++;
+                }
+            } else if (status.outcome == CO::TransportError) {
+                std::lock_guard lock(mutex_);
+                if (cached_leader_id_ == target_id) cached_leader_id_.clear();
+                round_robin_idx_++;
+            } else {
+                // The cluster ANSWERED and refused: UnknownTask, NotLeased,
+                // StaleFencingToken, PayloadTooLarge. Retrying a different peer
+                // cannot change a decision the replicated state machine already
+                // made, so stop here rather than spending the budget proving it.
+                return std::optional<Value>{};
+            }
+        }
+        return std::optional<Value>{};
+    }
+
+    [[nodiscard]] auto submit_blocking(std::string_view payload, std::chrono::milliseconds budget)
+        -> std::optional<std::uint64_t> {
+        auto bytes = std::as_bytes(std::span(payload.data(), payload.size()));
+        return with_leader(
+            [bytes](sgee::task_queue::grpc_client::TaskQueueClient& c) {
+                return c.enqueue(bytes, sgee::task_queue::PlacementTarget::Cpu);
+            },
+            budget);
+    }
+
+    [[nodiscard]] auto poll_task(std::uint64_t task_id, std::chrono::milliseconds budget)
+        -> std::optional<SgeeTaskOutcome> {
+        auto got = with_leader(
+            [task_id](sgee::task_queue::grpc_client::TaskQueueClient& c) {
+                return c.get_task(task_id);
+            },
+            budget);
+        if (!got.has_value()) return std::nullopt;   // the call did not complete
+
+        SgeeTaskOutcome out;
+        if (!got->has_value()) {
+            out.found = false;                        // answered: no such task
+            return out;
+        }
+        auto const& t = **got;
+        out.found = true;
+        using TS = sgee::task_queue::TaskState;
+        out.terminal = (t.state == TS::Completed || t.state == TS::Dead);
+        out.ok = (t.state == TS::Completed);
+        out.result.assign(reinterpret_cast<char const*>(t.result.data()), t.result.size());
+        return out;
+    }
+
+    [[nodiscard]] auto lease_blocking(std::uint64_t worker_id, std::uint64_t visibility_ms,
+                                       std::chrono::milliseconds budget)
+        -> std::optional<SgeeLeasedJob> {
+        auto leased = with_leader(
+            [worker_id, visibility_ms](sgee::task_queue::grpc_client::TaskQueueClient& c) {
+                return c.lease(worker_id, visibility_ms);
+            },
+            budget);
+        if (!leased.has_value() || !leased->available) return std::nullopt;
+
+        SgeeLeasedJob job;
+        job.task_id = leased->task.id;
+        job.local_token = leased->token.local_token;
+        job.raft_term = leased->token.raft_term;
+        job.raft_index = leased->token.raft_index;
+        job.payload.assign(reinterpret_cast<char const*>(leased->task.payload.data()),
+                           leased->task.payload.size());
+        return job;
+    }
+
+    auto complete_blocking(SgeeLeasedJob const& job, std::string_view result,
+                           std::chrono::milliseconds budget) -> bool {
+        sgee::task_queue::grpc_client::ClientFencingToken token{.local_token = job.local_token,
+                                                                .raft_term = job.raft_term,
+                                                                .raft_index = job.raft_index};
+        auto bytes = std::as_bytes(std::span(result.data(), result.size()));
+        auto done = with_leader(
+            [&job, token, bytes](sgee::task_queue::grpc_client::TaskQueueClient& c) {
+                return c.complete(job.task_id, token, bytes)
+                    .transform([] { return std::monostate{}; });
+            },
+            budget);
+        return done.has_value();
+    }
+
+    auto fail_blocking(SgeeLeasedJob const& job, std::chrono::milliseconds budget) -> bool {
+        sgee::task_queue::grpc_client::ClientFencingToken token{.local_token = job.local_token,
+                                                                .raft_term = job.raft_term,
+                                                                .raft_index = job.raft_index};
+        auto done = with_leader(
+            [&job, token](sgee::task_queue::grpc_client::TaskQueueClient& c) {
+                return c.fail(job.task_id, token).transform([] { return std::monostate{}; });
+            },
+            budget);
+        return done.has_value();
+    }
+
+  private:
     mutable std::mutex mutex_;
     std::condition_variable cv_;
     std::deque<std::string> ring_buffer_;
@@ -465,6 +622,78 @@ auto SgeeQueueClient::create_from_env() -> std::optional<SgeeQueueClient> {
 
     auto impl = std::make_shared<Impl>(std::move(peer_map), std::move(peer_ids), 1024, cb_config);
     return SgeeQueueClient(std::move(impl));
+}
+
+auto SgeeQueueClient::create_for_admission() -> std::optional<SgeeQueueClient> {
+    // Gated on SGEE_PEERS alone. Deliberately NOT on SGEE_QUEUE=mirror: the
+    // caller (INFERENCE_QUEUE=sgee) has already decided to route real inference
+    // here, and requiring a second, unrelated variable would mean a deployment
+    // that set only the one that names this feature silently got the old path.
+    //
+    // NOTE ON SGEE_PEERS: this reads the CLIENT queue port (50053). The queue
+    // NODES read a variable of the same name and dial CONSENSUS (50052). Copying
+    // one service's value onto the other produces a process that connects to a
+    // real port, speaks the wrong protocol at it, and fails like a network
+    // problem. See CLAUDE.md.
+    auto env_peers = env_string_local("SGEE_PEERS");
+    if (!env_peers.has_value()) {
+        logger::Logger::getInstance().warn(
+            "sgee_queue_client: INFERENCE_QUEUE=sgee was requested but SGEE_PEERS is unset -- "
+            "the admission path cannot be built and the caller will serve locally");
+        return std::nullopt;
+    }
+
+    auto peer_map = parse_peers_str(*env_peers);
+    if (peer_map.empty()) {
+        logger::Logger::getInstance().warn(
+            "sgee_queue_client: SGEE_PEERS parsed to no usable peers -- the admission path cannot "
+            "be built and the caller will serve locally");
+        return std::nullopt;
+    }
+
+    std::vector<std::string> peer_ids;
+    for (auto const& [id, _] : peer_map) {
+        peer_ids.push_back(id);
+    }
+
+    sgee::resilience::CircuitBreakerConfig cb_config{
+        .failure_threshold = 3, .open_cooldown_ms = 1000, .half_open_max_trials = 1};
+
+    // The mirror ring and its drain thread come along unused on this path. That
+    // is one idle thread, against splitting Impl in two to avoid it -- and the
+    // same process may well want both surfaces anyway.
+    auto impl = std::make_shared<Impl>(std::move(peer_map), std::move(peer_ids), 1024, cb_config);
+    return SgeeQueueClient(std::move(impl));
+}
+
+auto SgeeQueueClient::submit_blocking(std::string_view payload) -> std::optional<std::uint64_t> {
+    if (!impl_) return std::nullopt;
+    return impl_->submit_blocking(payload, std::chrono::milliseconds(1000));
+}
+
+auto SgeeQueueClient::poll_task(std::uint64_t task_id) -> std::optional<SgeeTaskOutcome> {
+    if (!impl_) return std::nullopt;
+    return impl_->poll_task(task_id, std::chrono::milliseconds(1000));
+}
+
+auto SgeeQueueClient::lease_blocking(std::uint64_t worker_id, std::uint64_t visibility_ms)
+    -> std::optional<SgeeLeasedJob> {
+    if (!impl_) return std::nullopt;
+    return impl_->lease_blocking(worker_id, visibility_ms, std::chrono::milliseconds(1000));
+}
+
+auto SgeeQueueClient::complete_blocking(SgeeLeasedJob const& job, std::string_view result) -> bool {
+    if (!impl_) return false;
+    // A longer budget than the others on purpose. This is the one call whose
+    // failure LOSES WORK that has already been paid for: the decode is done, and
+    // if the result never lands the submitter waits out its deadline and runs the
+    // whole inference again locally.
+    return impl_->complete_blocking(job, result, std::chrono::milliseconds(3000));
+}
+
+auto SgeeQueueClient::fail_blocking(SgeeLeasedJob const& job) -> bool {
+    if (!impl_) return false;
+    return impl_->fail_blocking(job, std::chrono::milliseconds(1000));
 }
 
 auto SgeeQueueClient::enqueue_mirror(std::string_view payload_json) noexcept -> void {
