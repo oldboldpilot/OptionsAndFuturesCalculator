@@ -1423,3 +1423,111 @@ contains `x-envoy-degraded` as a header NAME. Count the log LEVEL, not words.
 Postgres remains the system of record and the degrade target. The `dlq_depth`
 residue described above is unchanged (3 / 0 / 3) and unaffected by the load,
 which is consistent with it being inert terminal state.
+
+**That 3 / 0 / 3 reading is superseded — see the next section.** It was measured
+from `dlq_depth` alone, which was the only instrument available at the time, and
+it is wrong: the real spread is 3 / 0 / **20**, and all three nodes differ rather
+than two agreeing. The conclusion that the residue is inert survives; the numbers
+do not.
+
+## The divergence is CONFIRMED, and `dlq_depth` understated it (2026-08-13)
+
+The line above records the residue as "3 / 0 / 3". That was the best reading
+available from `dlq_depth` alone, and it was **wrong in both directions**: the
+nodes do not agree two-to-one, and the odd node out is not off by three.
+
+`/statusz` now publishes two digests, and their first live use settled it. All
+three nodes on the post-sweep binary, **term 3449 held stable across a five
+minute window**, `last_applied == commit_index == 31395` on every node, `gap 0`,
+`tick_errors 0`, `apply_id_mismatches 0`:
+
+| node | `state_digest` | `dlq_depth` | `apply_rejections` | `sweep_successes` |
+| --- | --- | --- | --- | --- |
+| 1 (leader) | `af5223191117d220` | 3 | 0 | 116 |
+| 2 | `66983fc9fa91eed6` | 0 | 47 | 0 |
+| 3 | `0ca1841cfd64a890` | **20** | 21 | 0 |
+
+**Three nodes, three different state machines, in perfect Raft agreement.**
+That combination is the entire reason the digest exists. `last_applied` is
+Raft's cursor — a count of log entries consumed — not a statement about what the
+broker did with them, so three nodes agreeing on it rules out nothing. The
+cluster is not stalled, not lagging, and not erroring; it is simply not the same
+cluster on all three nodes.
+
+Four properties make this a finding rather than a measurement artifact:
+
+- **The digests are STABLE.** Each node reported the same `state_digest` across
+  four probes spanning indices 31321 → 31395. A digest racing the
+  `stats_interval` refresh would wander; these do not.
+- **`state_digest` excludes every per-replica field** — `fencing_token` (a
+  locally minted WAL LSN), `visibility_deadline_ms` (a local clock), and
+  `lease_owner`. It hashes replicated task CONTENT in sorted-id order. A
+  difference is therefore divergence, not a locality artifact. This exclusion is
+  load-bearing: a digest that included those fields would fire constantly, be
+  disbelieved, and get switched off.
+- **It is NOT growing.** `apply_rejections` held at 47 and 21 across separate
+  samples minutes apart. No new divergence is being created; the sweep's fixes
+  hold. What remains is historical residue from the defective period.
+- **Only the leader sweeps** (116 / 0 / 0), which confirms lease expiry is
+  leader-proposed and replicated rather than independently computed per node —
+  so clock skew is not the explanation.
+
+The followers' `last_apply_rejection` is `BrokerLease:NotLeased` on both: the
+leader proposes a lease for a task those nodes cannot lease, they reject it
+deterministically, and they CONSUME it. That is this session's apply-totality
+fix behaving exactly as designed — and it is the only reason the cluster still
+makes progress while divergent. Before that fix these entries retried forever
+and froze `last_applied`.
+
+**Raft cannot heal this and will not try.** `InstallSnapshot` is sent only to a
+follower whose `nextIndex <= lastIncludedIndex_` (`raft.cppm:1042-1051`). These
+followers are fully caught up, so they will never be sent one, and every future
+entry applies identically on top of three different base states. Divergence in a
+replicated state machine is permanent unless something outside Raft replaces the
+state.
+
+### Evidence was preserved BEFORE any repair was considered
+
+Each node's `broker.wal.snap` and `broker.wal` were copied off and checksummed:
+
+| node | snapshot | WAL | sha256(snapshot), first 16 |
+| --- | --- | --- | --- |
+| 1 | 26531 B | 3121 B | `4825c1f05f973fcd` |
+| 2 | 28355 B | 24 B | `b87b1476b2dd3aa5` |
+| 3 | 32323 B | 7310 B | `076fd1d74b876c2b` |
+
+Three distinct snapshots, three distinct hashes — independent corroboration of
+the digests, from the bytes on disk rather than from the process reporting on
+itself. This repo has twice recorded wiping a volume as the move that "fixes"
+the symptom and destroys the only evidence (the io_uring outage, and the
+stalled-apply outage). The snapshots are also subject to compaction, so this
+evidence self-erases; it was captured while it existed.
+
+### The repair is destructive, feasible, and NOT urgent
+
+Rebuilding a follower means deleting its **whole `/data` volume** — the whole
+volume or nothing, since removing only the broker WAL leaves a Raft log that
+claims state the broker no longer has. On reboot the node re-stamps `node.id`
+from `SGEE_NODE_ID` (`node_config.cppm:331` verifies-or-stamps; identity comes
+from the environment, so a wipe does NOT mint a fourth member), finds no log,
+and the leader ships it an `InstallSnapshot`.
+
+Two preconditions, both checked:
+
+- **Snapshot size against gRPC's ~4 MiB default max message.** At 26–32 KB there
+  are three orders of magnitude of headroom. A snapshot over that ceiling would
+  fail the transfer and leave the node unable to rejoin at all — strictly worse
+  than the divergence.
+- **A stable leader for the duration.** Term 3449 held across the window. Wiping
+  one follower at a time keeps two nodes up, so quorum survives; wiping two at
+  once loses it.
+
+It converges on the LEADER's state, which is a choice, not a truth — node 1's
+broker state is one of three, and it is canonical only because it is the one
+Raft will propagate. Postgres remains the system of record, so nothing
+user-visible depends on which of the three is preserved.
+
+**It is not urgent.** The divergent entries are terminal dead tasks, the
+rejection counters are static, and new work applies identically on all three.
+Leaving it is a defensible choice; it is recorded here so the next reader does
+not rediscover it as a fresh alarm.

@@ -704,6 +704,38 @@ totals are the healthy state and unequal totals mean the state machines
 diverged, which agreement on `last_applied` cannot rule out — that number is
 Raft's cursor, not a count of anything the broker did.
 
+**Two digests now answer that properly, and they answer DIFFERENT questions.**
+`apply_digest` folds `(index, command tag, outcome, assigned id)` into a
+running splitmix64 hash — O(1) per entry, so it can run on every apply. It is
+**only comparable between nodes at equal `last_applied`**, and it resets at
+every boot, so it compares a node against its peers within one process lifetime,
+never across a restart. `state_digest` hashes replicated task CONTENT in sorted
+id order — O(tasks), refreshed on the `stats_interval` cadence — and detects
+divergence that has ALREADY happened, which is the question `apply_digest`
+cannot answer because a node that booted at a different index folded a different
+range.
+
+**Both are published as hex STRINGS, deliberately.** A 64-bit digest exceeds
+JavaScript's exact integer range, so a JSON number would be rounded by `jq` and
+by every browser — two different digests would compare EQUAL. A divergence probe
+that reports agreement because its transport lost precision is worse than no
+probe.
+
+**`state_digest` excludes every per-replica field** — `fencing_token` (a locally
+minted WAL LSN), `visibility_deadline_ms` (a local clock), `lease_owner`. This
+is load-bearing rather than fastidious: a digest that included them would differ
+on healthy nodes, fire constantly, be disbelieved, and get switched off.
+
+Their first live use, on 2026-08-13, found **three nodes with three different
+`state_digest` values in perfect Raft agreement** — same term, `last_applied ==
+commit_index` on all three, `gap 0`, `tick_errors 0`. `dlq_depth` had reported
+that residue as 3 / 0 / 3; it is really 3 / 0 / **20**, and no two nodes agree.
+It is stable and no longer growing, the entries are terminal, Postgres remains
+the system of record, and Raft will never repair it — `InstallSnapshot` goes
+only to a follower whose `nextIndex <= lastIncludedIndex_`, and these are caught
+up. `docs/SGEE_QUEUE_CLUSTER.md` carries the evidence, the preserved snapshots
+and the repair procedure.
+
 **Stage 1 (readers) and Stage 2 (writers) are a two-phase deploy and the order
 is not negotiable.** The `BrokerComplete` frame carries no version byte and no
 length prefix — it is `[tag u8][fields]`, so the per-tag exact-size check IS the
