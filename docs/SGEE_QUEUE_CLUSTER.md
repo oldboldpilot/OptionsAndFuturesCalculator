@@ -1632,3 +1632,58 @@ it implies.** `last_applied` is Raft's cursor, not the state machine's. Railway'
 SUCCESS is the healthcheck, not the process. The LIVE badge is a timestamp, not a
 status. And `state_digest`, as first written, was local retention timing wearing
 the costume of replicated state.
+
+## Re-measured with the corrected digest: node 3 alone diverges (2026-08-13)
+
+With the live-set digest deployed to all three nodes, five concurrent samples at
+an identical `last_applied` (32485/32486), term 3492:
+
+| node | `state_digest` | live set | `dlq_depth` | leader |
+| --- | --- | --- | --- | --- |
+| 1 | `0000000000000000` | **empty** | 3 | no |
+| 2 (rebuilt) | `0000000000000000` | **empty** | 3 | **yes** |
+| 3 | `3e769fc2ac4b1a9c` | **non-empty** | 20 | no |
+
+**Nodes 1 and 2 agree exactly, and that is the control passing.** Node 2 had been
+rebuilt from an empty volume, so its state came entirely from the leader's
+snapshot plus the replicated suffix. It agreeing bit-for-bit with node 1 is what
+says the instrument is now sound — the same comparison that produced an
+impossible answer before the fix.
+
+**Node 3 holds live (Pending or Leased) tasks that neither other node has.** That
+is genuine divergence: local retention cannot explain the live set, because
+`evict()` never touches Pending or Leased tasks. It is also the thing the
+followers' `BrokerLease:NotLeased` rejections were pointing at all along — the
+one signal that survived the retraction.
+
+Note the digest of all zeros is not a missing value; it is the fold over an empty
+live set, which is the correct steady state for a queue with no work in flight.
+`dlq_depth` still reads 3 / 3 / 20 and still means nothing about agreement.
+
+Leadership moved to node 2 during the rollout (term 3481 -> 3492), which is
+normal for a rolling restart and is why the leader column is worth recording
+beside a digest: "converges on the leader's state" names a different node than it
+did an hour earlier.
+
+### A rolling queue-node deploy produces a burst of degraded requests
+
+Twenty `[WARN]` lines in the engine, all in a **five-second window**
+(15:04:12–15:04:16 UTC) during a node replacement, all identical:
+
+> `inference_admission: writing back SGEE task N failed -- the submitting side's
+> own poll will time out and fall back to its local backend`
+
+None before, none in the eight minutes after. This is the degrade path working as
+designed: a node disappears mid-lease, the writeback cannot land, and the
+submitter falls back to Postgres. Requests are still answered.
+
+It also exercised this session's exception-safety fix. That writeback runs on a
+`jthread` whose body previously wrapped only `future.get()`, so a throw from
+`complete()`, `fail()` or the logger escaped the thread and called
+`std::terminate` — killing the whole replica. Here it logged, degraded and
+survived, under precisely the condition the fix was written for.
+
+**So "0 WARN" is the steady-state gate, not a during-deploy gate.** Measure it
+after the rollout settles; a burst confined to the replacement window is the
+system degrading correctly, and treating it as a failure would train the check to
+be ignored.
