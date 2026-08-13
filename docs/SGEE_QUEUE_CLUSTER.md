@@ -1531,3 +1531,49 @@ user-visible depends on which of the three is preserved.
 rejection counters are static, and new work applies identically on all three.
 Leaving it is a defensible choice; it is recorded here so the next reader does
 not rediscover it as a fresh alarm.
+
+### Re-verified after the sweep fixes, under load (2026-08-13)
+
+Both the queue nodes and the engine were redeployed with the multi-agent sweep's
+fixes, then gated on the 24-concurrent shape rather than a single call.
+
+Engine cutover confirmed the way a cutover has to be — not by Railway's SUCCESS,
+which is not evidence the new image is serving: **6 `model is LOADED` lines**
+(3 replicas x 2 assistants) timestamped after the upload, and 6 replicas logging
+`INFERENCE_QUEUE=sgee`.
+
+| check | result |
+| --- | --- |
+| 24 concurrent `ParseOperation` (8 then 16) | **24 / 24 HTTP 200** |
+| engine `[WARN]` / `[ERROR]` | **0 / 0** |
+| `last_applied == commit_index` | all three, gap 0 |
+| `tick_errors` | 0 on all three |
+| `apply_id_mismatches` | 0 on all three |
+| `apply_rejections` before / after | 0 / 47 / 21, **unchanged** |
+| term across the window | 3449, stable — no election churn |
+
+**`apply_rejections` being unchanged is the load-bearing row.** Equal is not the
+claim — these three are unequal, and that is the known residue. The claim is
+that 24 concurrent requests added NONE, which is a direct test of the
+propose-vs-apply skew: two concurrent `lease()` calls picking the same task
+produced exactly these rejections before `proposed_leases_unapplied_` existed.
+
+**Zero `[WARN]` is the negative proof and cannot be replaced by reading the
+responses.** A degraded request returns the same answer as a cluster-served one.
+Every fallback branch in `SgeeAdmission` warns, so the count of that log LEVEL is
+the statement — not a grep for chosen phrases, which has already matched nine
+benign lines once.
+
+Two production behaviours were confirmed incidentally, both previously fixed
+here and neither verified live until now:
+
+- *"Compute the future value of 1000 at 5% for 10 years"* parsed correctly
+  (`ComputeFutureValue`, rate 0.05, periods 10). That is the annual-rate /
+  annual-periods pair the grounding gate used to refuse with a message that
+  contradicted itself.
+- `payment` came back as `0` on lump-sum questions rather than being refused —
+  the convention value added alongside `future_value = 0`.
+
+The refusals and clarifications in the remainder are expected: the mortgage
+model measures 27.8% params exact-match through the real RPC, and honest
+refusals are the designed behaviour, not a failure of the queue.
