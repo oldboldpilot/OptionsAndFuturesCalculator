@@ -1577,3 +1577,58 @@ here and neither verified live until now:
 The refusals and clarifications in the remainder are expected: the mortgage
 model measures 27.8% params exact-match through the real RPC, and honest
 refusals are the designed behaviour, not a failure of the queue.
+
+## RETRACTION: the "confirmed divergence" above was the INSTRUMENT (2026-08-13)
+
+**The two sections above are wrong and are kept for the reasoning trail.** The
+divergence they report as confirmed is not established, and the digest that
+"confirmed" it was measuring per-replica state.
+
+What broke the conclusion open was a result that could not be true. Node 2 was
+rebuilt from **empty** — `/data` wiped, container restarted, rejoined via
+`InstallSnapshot` from the leader — and its `dlq_depth` moved 0 -> 3, matching
+the leader exactly. Yet at an **identical `last_applied` (32032, 32033, sampled
+concurrently rather than sequentially)** its `state_digest` still differed from
+node 1's. A replica whose entire state came from the leader's own snapshot cannot
+genuinely disagree with the leader. Something in the digest was not a function of
+replicated state.
+
+It was the terminal tasks. `serialize_snapshot` keeps a Completed or Dead task
+only while `retained(id, now_ms, retention_ms)` holds, `evict()` reclaims the
+rest, and `replicated_queue_runtime_driver.cppm:77` states plainly that
+**`compact_log()` is LOCAL and runs on every node regardless of leadership**.
+Each replica therefore drops terminal tasks against its own clock at its own
+compaction moment. Two healthy replicas hold different terminal sets **by
+design**, and the digest folded all of them.
+
+Three consequences, and the middle one invalidates a lot of earlier reasoning:
+
+- **`state_digest` now hashes only the LIVE set (Pending + Leased).** Fixed and
+  gated by `StateDigest_IsInsensitiveToLocalRetention`, mutation-checked:
+  restoring the fold over every task reproduces the production symptom exactly.
+  `StateDigest_TracksLiveTaskContent` sits beside it, because insensitivity
+  alone is satisfied by a function returning a constant.
+- **`dlq_depth` is not a divergence signal and never was.** It counts a locally
+  evicted set. Every reading of it in this document — 3 / 0 / 3, 3 / 0 / 20 —
+  says nothing about whether the state machines agree. The original incident's
+  `dlq_depth` difference, called out earlier as the one number that exposed a
+  real divergence "by luck", may well have been retention timing too.
+- **`apply_rejections` survives as a real signal.** The followers'
+  `BrokerLease:NotLeased` concerns LIVE tasks — the leader proposing a lease for
+  a task a follower cannot lease — which local retention cannot explain.
+
+The node 2 rebuild was NOT wasted: it is what produced the impossible reading,
+and it is the reason the instrument was caught rather than trusted. Node 3 was
+not rebuilt, and should not be until the corrected digest has been deployed and
+read.
+
+**The preserved snapshots keep their value.** Three distinct hashes remain the
+on-disk record of what each node held on 2026-08-13, and they can now be
+re-examined against a digest that means something.
+
+The general lesson is the one this file keeps relearning, arriving from a new
+direction each time: **check which layer computes a number before believing what
+it implies.** `last_applied` is Raft's cursor, not the state machine's. Railway's
+SUCCESS is the healthcheck, not the process. The LIVE badge is a timestamp, not a
+status. And `state_digest`, as first written, was local retention timing wearing
+the costume of replicated state.

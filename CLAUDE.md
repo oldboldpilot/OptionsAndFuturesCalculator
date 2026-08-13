@@ -722,19 +722,42 @@ that reports agreement because its transport lost precision is worse than no
 probe.
 
 **`state_digest` excludes every per-replica field** — `fencing_token` (a locally
-minted WAL LSN), `visibility_deadline_ms` (a local clock), `lease_owner`. This
-is load-bearing rather than fastidious: a digest that included them would differ
-on healthy nodes, fire constantly, be disbelieved, and get switched off.
+minted WAL LSN), `visibility_deadline_ms` (a local clock), `lease_owner` — **and
+every TERMINAL task**. This is load-bearing rather than fastidious: a digest that
+included them would differ on healthy nodes, fire constantly, be disbelieved, and
+get switched off.
 
-Their first live use, on 2026-08-13, found **three nodes with three different
-`state_digest` values in perfect Raft agreement** — same term, `last_applied ==
-commit_index` on all three, `gap 0`, `tick_errors 0`. `dlq_depth` had reported
-that residue as 3 / 0 / 3; it is really 3 / 0 / **20**, and no two nodes agree.
-It is stable and no longer growing, the entries are terminal, Postgres remains
-the system of record, and Raft will never repair it — `InstallSnapshot` goes
-only to a follower whose `nextIndex <= lastIncludedIndex_`, and these are caught
-up. `docs/SGEE_QUEUE_CLUSTER.md` carries the evidence, the preserved snapshots
-and the repair procedure.
+**The terminal-task exclusion was learned the hard way, and it is the most
+important line here.** `state_digest` originally hashed every task in the index.
+Completed and Dead tasks are reclaimed by `evict()`, which keeps a task only
+while `now_ms - terminal_ms < retention_ms` — and **compaction is LOCAL, running
+on every node regardless of leadership**
+(`replicated_queue_runtime_driver.cppm`). Each replica therefore drops terminal
+tasks against its OWN clock at its OWN compaction moment, and two perfectly
+healthy replicas hold different terminal sets by design. The digest was measuring
+local retention timing and calling it divergence.
+
+**So `dlq_depth` is NOT a divergence signal either, and never was.** It counts a
+locally-evicted set. The 3 / 0 / 3 and 3 / 0 / 20 readings say nothing about
+whether the state machines agree.
+
+Their first live use, on 2026-08-13, is what exposed this — by producing a result
+that could not be true. Three nodes disagreed; a follower **rebuilt from scratch
+out of the leader's own snapshot still disagreed at an identical
+`last_applied`**, which is impossible for genuine divergence. The instrument was
+wrong, not the cluster. `state_digest` now hashes only the LIVE set (Pending +
+Leased), gated by `StateDigest_IsInsensitiveToLocalRetention` and
+mutation-checked against the production symptom.
+
+Known limit, accepted: a divergent RESULT on an already-completed task is
+invisible to it. It has to be — a completed task may be evicted on one replica
+and not the other, so no hash over completed tasks is comparable across replicas
+at all, and an incomparable number is worse than a missing one.
+
+What survived as a real signal is `apply_rejections` on the followers
+(`BrokerLease:NotLeased`), which is about LIVE tasks and cannot be explained by
+retention. `docs/SGEE_QUEUE_CLUSTER.md` carries the full account, the preserved
+snapshots and the rebuild procedure.
 
 **Stage 1 (readers) and Stage 2 (writers) are a two-phase deploy and the order
 is not negotiable.** The `BrokerComplete` frame carries no version byte and no
