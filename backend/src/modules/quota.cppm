@@ -1,12 +1,8 @@
 module;
-#include <cstdint>
-#include <memory>
-#include <string>
-#include <string_view>
-
 #include <grpcpp/grpcpp.h>
 
 export module quota;
+import std;
 
 export namespace options_calculator::quota {
 

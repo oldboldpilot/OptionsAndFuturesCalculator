@@ -38,14 +38,8 @@
 // crack_321 to agent/dataset/strategies.json (then regenerating this file)
 // or removing it from StrategySelector.tsx; this generator deliberately does
 // not guess which.
-module;
-#include <algorithm>
-#include <array>
-#include <cstddef>
-#include <span>
-#include <string_view>
-
 export module strategy_catalogue;
+import std;
 
 /*
  * The authoritative set of strategy identifiers the pricing engine and any

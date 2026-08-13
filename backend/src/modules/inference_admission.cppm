@@ -1,20 +1,5 @@
-module;
-#include <atomic>
-#include <chrono>
-#include <condition_variable>
-#include <cstdint>
-#include <deque>
-#include <future>
-#include <memory>
-#include <mutex>
-#include <optional>
-#include <stop_token>
-#include <string>
-#include <string_view>
-#include <thread>
-#include <vector>
-
 export module inference_admission;
+import std;
 
 import inference_queue;
 import sgee_queue_client;

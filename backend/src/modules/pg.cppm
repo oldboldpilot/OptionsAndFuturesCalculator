@@ -1,27 +1,11 @@
 module;
 #include <cerrno>
-#include <chrono>
-#include <condition_variable>
-#include <cstdint>
-#include <cstdlib>
-#include <cstring>
-#include <deque>
-#include <expected>
-#include <functional>
-#include <memory>
-#include <mutex>
-#include <optional>
-#include <span>
-#include <stop_token>
-#include <string>
-#include <string_view>
-#include <thread>
-#include <vector>
 
 #include <poll.h>
 #include <libpq-fe.h>
 
 export module pg;
+import std;
 
 import logger;
 import sgee.runtime.resilience;

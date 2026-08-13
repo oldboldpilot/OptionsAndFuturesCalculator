@@ -79,19 +79,8 @@
 // reasoner's own file banner promises to be. This module proving an
 // ambiguous-root input Proven says only "nothing here contradicts itself on
 // paper" -- it does not skip either check that runs around it.
-module;
-#include <array>
-#include <cctype>
-#include <cstdint>
-#include <expected>
-#include <optional>
-#include <span>
-#include <string>
-#include <string_view>
-#include <utility>
-#include <vector>
-
 export module assistant_verification;
+import std;
 
 import sensen.gp_ara_interfaces;
 import strategy_catalogue;

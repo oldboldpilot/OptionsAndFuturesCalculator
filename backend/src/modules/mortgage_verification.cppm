@@ -138,18 +138,8 @@
 // as a named refusal rather than a gRPC error surfaced mid-render. Where a
 // bound is tighter here than there (money at 1e10 versus the RPC's 1e15) that
 // is a deliberate narrowing, not a second copy of the same rule.
-module;
-#include <array>
-#include <cctype>
-#include <cstddef>
-#include <cstdint>
-#include <expected>
-#include <optional>
-#include <string>
-#include <string_view>
-#include <vector>
-
 export module mortgage_verification;
+import std;
 
 import sensen.gp_ara_interfaces;
 

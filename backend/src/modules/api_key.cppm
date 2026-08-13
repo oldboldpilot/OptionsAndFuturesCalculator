@@ -1,13 +1,8 @@
 module;
-#include <cstdint>
-#include <memory>
-#include <string>
-#include <string_view>
-#include <vector>
-
 #include <grpcpp/grpcpp.h>
 
 export module api_key;
+import std;
 
 export namespace options_calculator::auth {
 

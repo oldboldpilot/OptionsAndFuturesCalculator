@@ -189,18 +189,8 @@
  * Either way `feed_text()` lets the already-emitted prefix be replayed into a
  * fresh automaton, so arming late is not a desync.
  */
-module;
-#include <array>
-#include <cstddef>
-#include <cstdint>
-#include <expected>
-#include <optional>
-#include <span>
-#include <string>
-#include <string_view>
-#include <vector>
-
 export module mortgage_grammar;
+import std;
 
 import mortgage_verification;
 import sensen.grammar;

@@ -1,33 +1,11 @@
 module;
-#include <algorithm>
-#include <concepts>
-#include <functional>
-#include <array>
-#include <charconv>
-#include <chrono>
-#include <cmath>
-#include <cstdlib>
-#include <expected>
-#include <format>
-#include <map>
-#include <memory>
-#include <mutex>
-#include <optional>
-#include <random>
-#include <shared_mutex>
-#include <string>
-#include <string_view>
-#include <system_error>
-#include <thread>
-#include <unordered_map>
-#include <vector>
-
 #ifndef CPPHTTPLIB_OPENSSL_SUPPORT
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 #endif
 #include <httplib.h>
 
 export module market_data;
+import std;
 
 import fastjson;
 import logger;

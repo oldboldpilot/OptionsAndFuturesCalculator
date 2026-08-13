@@ -1,18 +1,5 @@
-module;
-#include <chrono>
-#include <condition_variable>
-#include <cstdint>
-#include <expected>
-#include <memory>
-#include <mutex>
-#include <optional>
-#include <string>
-#include <string_view>
-#include <thread>
-#include <unordered_set>
-#include <vector>
-
 export module inference_queue;
+import std;
 
 import pg;
 

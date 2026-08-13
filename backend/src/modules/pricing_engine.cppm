@@ -1,19 +1,5 @@
-module;
-#include <string>
-#include <vector>
-#include <memory>
-#include <iostream>
-#include <cmath>
-#include <chrono>
-#include <thread>
-#include <variant>
-#include <map>
-#include <unordered_map>
-#include <functional>
-#include <exception>
-#include <expected>
-
 export module calculator.engine;
+import std;
 
 import sensen.options;
 import sensen.portfolio;
@@ -28,7 +14,7 @@ export namespace calculator {
         Type type;
         double strike;
         double expiration_days;
-        int32_t quantity;
+        std::int32_t quantity;
     };
 
     struct StrategyRequest {

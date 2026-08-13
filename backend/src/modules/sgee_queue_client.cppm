@@ -1,11 +1,5 @@
-module;
-#include <cstdint>
-#include <memory>
-#include <optional>
-#include <string>
-#include <string_view>
-
 export module sgee_queue_client;
+import std;
 
 import sgee.runtime.resilience;
 

@@ -1,7 +1,5 @@
 module;
 #include <grpcpp/grpcpp.h>
-#include <span>
-#include <string_view>
 
 // Both contracts, because the averaging handoff below spans them: the
 // assistant parses into sensen.finance.AsianType and the calculator accepts
@@ -13,6 +11,7 @@ module;
 #include "calculator.pb.h"
 
 export module assistant_service;
+import std;
 
 export namespace options_calculator::assistant {
 

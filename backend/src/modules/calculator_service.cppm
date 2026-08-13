@@ -1,9 +1,8 @@
 module;
 #include <grpcpp/grpcpp.h>
-#include <span>
-#include <string_view>
 
 export module calculator_service;
+import std;
 
 export namespace options_calculator::service {
 
