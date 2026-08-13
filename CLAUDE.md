@@ -602,6 +602,56 @@ peek/mark pair, plus `commit_index` published beside `last_applied` on `/statusz
 because the gap is the only way to tell caught-up from stalled. Promotion needs
 the fix deployed and the audit re-run. See `docs/SGEE_QUEUE_CLUSTER.md`.
 
+**Promotion is being carried out in five staged deploys**
+(`docs/superpowers/plans/2026-08-12-sgee-queue-promotion.md`), because the queue
+had no way to return an ANSWER: `CompleteRequest` carried no result, `Task` had
+no result field, and there was no RPC to read a task back at all. A submitter on
+one replica could not learn the outcome of a job executed on another, which is
+the whole reason `PostgresAdmission` exists.
+
+**Stage 1 (readers) and Stage 2 (writers) are a two-phase deploy and the order
+is not negotiable.** The `BrokerComplete` frame carries no version byte and no
+length prefix — it is `[tag u8][fields]`, so the per-tag exact-size check IS the
+versioning — and since `fbcd2d63` a frame a node cannot decode is no longer
+silently dropped: `apply_committed` stops without marking it, `last_applied`
+freezes, and the node retries the same entry forever. Writers before readers is
+therefore **a stalled node per un-upgraded replica**, not a degraded window.
+Stage 1 shipped readers for all three formats (index snapshot, WAL
+`TaskCompleted`, replicated `BrokerComplete`) and wrote nothing new.
+
+Two shapes are told apart by SIZE alone, which forces a **refused dead zone** —
+9..11 bytes for the WAL record, 17..19 for the command body. Reading one as a
+short v2 would build a length out of whatever bytes happened to follow, which is
+indistinguishable from a real one. An empty result is deliberately encoded as
+the v1 shape, so an empty result and a v1 record are the same bytes: the same
+fact, written the same way, still readable by a binary that predates v2. The
+consequence worth knowing is that the Stage-2 writer flip is **inert** on a
+cluster that is not yet recording results.
+
+**The queue replicates results, not error text, and that is a decision.** A
+failure is signalled by the task reaching terminal state `Dead`. Carrying an
+error string would mean widening `BrokerFail` — a fixed 16-byte command with no
+second shape any deployed node can read — plus two more WAL payloads and another
+snapshot version, a second full readers-first cycle for a diagnostic the worker
+already logs. A proto field the replicated log silently dropped would read as an
+answer.
+
+`INFERENCE_QUEUE=sgee` selects `SgeeAdmission`/`SgeeLeaseSource`, mirroring the
+Postgres pair with the same degrade-never-hang contract. It POLLS `GetTask`
+because SGEE has no await — the same shape the Postgres path already degrades to
+whenever its `pg_notify` hint does not arrive, so the two share failure modes
+rather than adding a set. **Postgres remains the system of record and the
+fallback target** for a full deploy cycle after the flip.
+
+**`SGEE_PEERS` on the ENGINE means the client queue port, 50053.** The nodes'
+variable of the same name means consensus, 50052. Copying one onto the other
+yields a process that connects to a real port, speaks the wrong protocol at it,
+and fails like a network problem. Both ports carry the same mTLS credentials —
+"both ports or neither", since protecting consensus while leaving the port that
+ACCEPTS WORK open would secure the vote and not the queue — so the engine needs
+`SGEE_TLS_CA_CERT_B64` / `SGEE_TLS_CERT_B64` / `SGEE_TLS_KEY_B64`, which are
+all-or-nothing and log loudly rather than downgrading to plaintext.
+
 Four things are easy to get wrong here:
 
 - **`SGEE_PEERS` means two different things.** The nodes read it and dial
@@ -619,6 +669,37 @@ Four things are easy to get wrong here:
   reachable from the CLI. The stage also mirrors `.dockerignore`'s `backend/`
   exclusions to stay under the upload deadline, and retries: `railway up` timed
   out every time at 144 MB and still roughly one attempt in three at 59 MB.
+
+  **Its failure diagnostic lied twice on 2026-08-12 and now discriminates.** It
+  printed `railway logs --service`, which replays a dead session's scrollback —
+  the SSL handshake errors it showed were timestamped three hours *before* the
+  deployment it was blaming — and it called every failure a healthcheck failure,
+  pointing a reader at a container that had never started. The discriminator is
+  the newest deployment's **`imageDigest`**: absent means no image was produced,
+  so no container ran and it is a BUILD failure (`railway logs --build <id>`);
+  present means the container started and did not stay up
+  (`railway logs --deployment <id>`). Nothing else available there tells the two
+  apart, and guessing sent a whole diagnosis in the wrong direction.
+- **The queue image has its OWN toolchain trip-wires, and neither names its
+  cause.** Both were latent from the `import std;` conversion and both surfaced
+  on the first Stage-1 deploy:
+  - `Dockerfile.queue-node` must name clang by its **versioned** path.
+    sensen resolves the libc++ std module as
+    `dirname(dirname(CMAKE_CXX_COMPILER))/share/libc++/v1/std.cppm`, so
+    `/usr/bin/clang++` — a symlink to exactly the right compiler — resolves it to
+    a `/usr/share` path that does not exist, `std_module_precompile` is never
+    declared, and every `import std;` in the tree dies with "module 'std' not
+    found". `backend/Dockerfile` was fixed for this in `bd11d00`; the queue image
+    was missed and cost a deploy.
+  - It must also pass **`-lc++abi` explicitly**, which is NOT redundant with
+    `-stdlib=libc++`. A from-source libc++ installs `libc++.so` as a linker
+    script — `INPUT(libc++.so.1 -lc++abi -lunwind)` — so the ABI library arrives
+    unasked; apt.llvm.org ships a plain symlink and nothing pulls it in. It stays
+    invisible until an object references a C++ ABI symbol directly (sgee's
+    `grpc_transport` does, via `__cxxabiv1::__vmi_class_type_info`'s vtable), and
+    then `ld` reports the failure against **`libstdc++.so.6`** — the only C++
+    runtime that *was* reachable — which reads as a standard-library mix-up and
+    is not one.
 - **`/healthz` is LIVENESS ONLY, and must stay that way.** `is_healthy()`
   checks running + ticked + ticked recently. It says nothing about leadership,
   and `ReplicatedQueueRuntimeDriver`'s comment claimed for months that it
@@ -910,6 +991,26 @@ library here, so all three terms of its gate hold. See
   Needs Node `^20.19.0 || >=22.12.0` — a floor introduced by vite 8, which
   vitest 4 pulls in. The build itself does not require it; the test suite does.
 - **Backend Docker Build:** `docker build -t options-backend backend/`
+- **Backend Tests:** `ninja -C backend/build build_tests && ctest --test-dir backend/build`
+
+  **`ninja && ctest` is WRONG here and fails silently in the dangerous
+  direction.** SGEE is embedded with `add_subdirectory(... EXCLUDE_FROM_ALL)`,
+  which is correct — nobody wants 90 test binaries relinked on every engine
+  build — but `ninja` therefore builds none of them while `ctest` happily RUNS
+  whatever copy is on disk. An edit to a module under `backend/external/SGEE/src`
+  leaves ctest executing yesterday's binary and reporting a pass.
+
+  Measured on 2026-08-12: after touching one `.cppm`, plain `ninja` scheduled
+  **0** SGEE test steps and `build_tests` scheduled **235**. It cost two full
+  runs of chasing a failure whose source had already been fixed — `ninja` said
+  "no work to do" while the binaries were older than the sources they came from.
+  The reverse, a stale PASS over a real break, is the same mechanism with the
+  outcome that does not announce itself.
+
+  `build_tests` collects its dependencies from `BUILDSYSTEM_TARGETS` rather than
+  a written list, because a list edited alongside every new `add_executable` is
+  one that will silently omit the newest test — the one most likely to be
+  failing.
 
 ### Frontend test suite
 
