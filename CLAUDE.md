@@ -322,7 +322,7 @@ checked without a browser, and how to check it again.
 
 | check | result |
 | --- | --- |
-| `Finance/ComputePayment` (495000, 0.005625, 360) | `3210.560578012665289866` |
+| `Finance/ComputePayment` (495000, 0.005625, 360) | `-3210.560578012665289866` |
 | `ParseOperation`, anonymous | HTTP 403, code 7, the `kMortgageSurface` refusal |
 | `ParseOperation`, partner key | HTTP 200 — the gate ADMITS |
 | Both assistant models | LOADED at boot (see the model section above) |
@@ -331,6 +331,16 @@ The `ComputePayment` figure is the point of that first row: it is an exact
 18-place `BigDecimal`, it matches the closed-form annuity payment computed
 independently, and it matches the P&I the live site displays for its default
 scenario. Three independent derivations of one number.
+
+**The sign is NEGATIVE and the row is meant to be compared literally.** This
+line recorded the magnitude until 2026-08-13, which reads as a mismatch the next
+time anyone diffs it against a live call. `-3210.560578012665289866` is the
+standard time-value-of-money convention — a payment against a positive present
+value is a cash OUTFLOW, exactly as Excel's `PMT` returns it — and the site
+displays the magnitude because a P&I figure is quoted unsigned. Re-checked
+2026-08-13: the digits are identical to the recorded value and
+`finance_service.cpp` has not changed since 2026-08-10, so the sign was dropped
+in transcription rather than flipped in code.
 
 **The admit direction was tested with the issued partner key**
 (`config/keys/`, gitignored, `tier partner`, `scopes finance, assistant`,
