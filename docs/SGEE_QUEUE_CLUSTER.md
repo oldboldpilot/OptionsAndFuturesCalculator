@@ -2,10 +2,18 @@
 
 @author Olumuyiwa Oluwasanmi
 
-Status as of 2026-08-11: **deployed as a non-authoritative mirror. Postgres
+Status as of 2026-08-12: **deployed as a non-authoritative mirror. Postgres
 remains the system of record.** The evidence for that decision is below, and it
 is not "we have not got round to it" — it is a measured, reproducible defect in
 the read path.
+
+**The leader-stability precondition is now MET, and promotion is blocked on a
+different defect found while checking it.** See "The promotion audit, 2026-08-12"
+below. In short: the tuned Raft timing cured the churn, and the audit then found
+that a failed apply consumed the committed entries behind it on two of three
+nodes — invisibly, because `/statusz`'s `last_applied` is Raft's cursor and not
+a count of anything the broker applied. Fixed in SGEE `fbcd2d63`; the fix must
+be deployed and this audit re-run before promotion is on the table again.
 
 ## Topology
 
@@ -731,3 +739,105 @@ Two things worth carrying forward:
 (etcd defaults to 1000 ms). That is a known limitation, **not** an observed
 defect on this deployment — do not re-tune consensus timing against a term
 delta that brackets a restart.
+
+## The promotion audit, 2026-08-12
+
+Run because the promotion note above asks for exactly one thing: *a deployed
+cluster that holds a leader long enough to complete a drain, measured the same
+way the churn was measured.* The tuned pair (`1500/300`) had been deployed the
+previous day and never audited against.
+
+### The precondition passes
+
+Three `/statusz` samples over four minutes, all three nodes:
+
+| node | leader | term | last_applied | sweep_successes |
+| --- | --- | --- | --- | --- |
+| sgee-queue-1 | false | 2981 | 21463 → 21481 → 21507 | 3461 (frozen — follower) |
+| sgee-queue-2 | false | 2981 | same | 0 (never led) |
+| sgee-queue-3 | **true** | 2981 | same | 37 → 54 → **80** |
+
+Term 2981 held throughout, `last_applied` advanced in lockstep, and the leader's
+`sweep_successes` climbed — the io_uring fix confirmed live, because the
+expired-lease sweep is the exact operation that used to brick a node. Against
+20–23 elections per interval before the tuning, the churn is cured.
+
+`sweep_successes: 0` on node 2 is **not** a fault: `maybe_sweep` documents
+`NotLeader` as the permanent, expected outcome on every follower, and node 2 has
+never led.
+
+### What it found instead — and why promotion is still blocked
+
+Nodes 2 and 3 carried `tick_errors` of 108 and 121; node 1 carried zero. Decoded
+against `ConsensusError` (**not** `QueueError` — both are reachable here and
+their values 5 and 6 mean different things) those are `QueueError` "the local
+TaskBroker rejected an applied command" and `Corrupt`, which `apply_one` returns
+from exactly one place: the check that a replica leased the SAME task the leader
+logged, whose own comment says *"a mismatch means replica state diverged —
+fail-stop"*.
+
+**Those are divergence detectors, firing on two of three replicas — and the
+fail-stop did not stop.** `apply_committed` called `RaftNode::committed_entries()`,
+which advances Raft's `lastApplied` across the whole batch *before* the state
+machine applies any of it, then returned on the first failing entry. Every entry
+behind the failure was already recorded as applied and was never offered again.
+
+It was invisible because **`/statusz`'s `last_applied` resolves to
+`broker_.raft().last_applied()`** — Raft's cursor, not a count of what the broker
+applied. A replica that dropped a batch tail reports itself perfectly caught up.
+Three nodes agreeing on `21507` is not evidence their state machines agree. Same
+shape as the io_uring outage the day before, and as the frontend's LIVE badge: a
+reading that looks like the answer, taken from a layer that does not own it.
+
+All 121 errors on node 3 fall in one 25-second window at `19:33:11–19:33:36Z`,
+ten minutes after boot, with nothing in the 11.75 hours since — so this is not
+ongoing damage. It does mean both nodes discarded committed entries, with no
+repair path short of a follower falling far enough behind to take an
+InstallSnapshot.
+
+**It also reopens the `dlq_depth` explanation below.** Node 3 reports
+`dlq_depth: 18` against 0 on the other two. The local-wall-clock-retention
+account was reasonable and may still be right, but it can no longer carry the
+weight on its own: there is now an independent reason those replicas could
+genuinely differ, and the two must be told apart before anything is promoted.
+
+### The fix
+
+SGEE `fbcd2d63`. `RaftNode` gains a peek/mark pair —
+`pending_committed_entries()` returns committed entries without advancing
+`lastApplied_`, and `mark_applied()` advances by exactly one index, refusing
+anything else. `apply_committed` marks each entry only after applying it, so a
+failure leaves `lastApplied_` pointing AT the failing entry: the next tick
+retries it, a transient fault recovers itself, and an unapplicable entry stalls
+the node **visibly** instead of being skipped. `committed_entries()` is untouched;
+`consensus_node` and the Raft/DST tests depend on its consuming semantics.
+
+Observability changed with it, because the defect was undetectable from outside:
+
+- **`/statusz` publishes `commit_index` beside `last_applied`.** The gap is the
+  only thing separating "applied everything" from "stalled on an entry it cannot
+  apply" — watch `last_applied` alone and both are a number that stopped moving.
+- **`/statusz` publishes `last_tick_error`** as a name, and the driver logs
+  `to_string(...)` rather than `static_cast<int>(...)`. A bare enumerator here
+  invites a confident wrong diagnosis against the wrong enum — which happened
+  during this very audit before it was caught, and is the same error-widening
+  that turned the io_uring outage into a full day of downtime.
+
+Gated by `ReplicatedBroker_FailedApply_LeavesTheRestOfTheBatchPending`
+(mutation-checked: the pre-fix body fails it with `Expected 1, got 3`, the tail
+being consumed) and `Raft_PeekMark_ConsumesOnlyWhatWasMarked`. 97/97 ctest.
+
+### Two things this audit established about probing the nodes
+
+Both cost time and are not otherwise written down:
+
+- **`railway ssh` swallows the first line of remote output.** A probe whose
+  first line is its own `CONNECT_FAIL` message therefore looks like a silent
+  hang. Emit a throwaway line first.
+- **The health server binds `::` only**, so `/dev/tcp/localhost/8080` resolves to
+  `127.0.0.1` and is refused. Dial `::1` explicitly. The documented probe command
+  earlier in this file predates that and hangs.
+- **The Railway CLI resolves its project from the CURRENT DIRECTORY.** A probe
+  script run from anywhere but the repo root answers `No linked project found`
+  instantly, on stderr — which reads exactly like an empty result rather than an
+  error.

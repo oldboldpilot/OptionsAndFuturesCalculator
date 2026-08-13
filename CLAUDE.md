@@ -588,6 +588,20 @@ reach that path, because the async backend works on every developer and CI host.
 The Win32 IoRing and IOCP branches carried the identical defect and are fixed
 the same way. See `docs/SGEE_QUEUE_CLUSTER.md`.
 
+**The promotion audit ran on 2026-08-12. The precondition it was waiting on now
+passes, and it found a different blocker.** The tuned Raft timing cured the
+churn — term 2981 held across the sampling window, `last_applied` in lockstep,
+the leader's `sweep_successes` climbing. But two of three nodes carried
+`tick_errors` (108 and 121) that turned out to be *divergence detectors firing*,
+and `apply_committed` was consuming the whole committed batch before applying any
+of it — so a failure abandoned every entry behind it, permanently, while
+`last_applied` still reported the node caught up. That number is Raft's cursor,
+not a count of anything the broker applied, so **three nodes agreeing on it is
+not evidence their state machines agree.** Fixed in SGEE `fbcd2d63` with a
+peek/mark pair, plus `commit_index` published beside `last_applied` on `/statusz`
+because the gap is the only way to tell caught-up from stalled. Promotion needs
+the fix deployed and the audit re-run. See `docs/SGEE_QUEUE_CLUSTER.md`.
+
 Four things are easy to get wrong here:
 
 - **`SGEE_PEERS` means two different things.** The nodes read it and dial
