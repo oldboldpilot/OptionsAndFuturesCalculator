@@ -232,9 +232,61 @@ LOCAL backend's own answer AND yields it promptly — a path that degrades only
 after holding a gRPC handler for ninety seconds satisfies the letter of
 "degrade" and none of the point.
 
-**Stage 5 — promotion.** Flip `INFERENCE_QUEUE` to `sgee` in production, watch
-`last_applied`/`commit_index`, and keep Postgres writable as a fallback for one
-full deploy cycle before removing it.
+**Stage 5 — promotion. COMPLETE, 2026-08-13.** `INFERENCE_QUEUE=sgee` is live on
+the engine. Postgres stays writable as the degrade target.
+
+Order, and each step's evidence:
+
+| step | evidence |
+| --- | --- |
+| Stage 2/3 rolled to all three nodes | three SUCCESS deployments, one at a time |
+| cluster uniform on the writer binary | `last_applied == commit_index == 28981`, one leader, `tick_errors: 0` |
+| engine deployed with Stage 3/4 | 6 `model is LOADED`, timestamped after the upload |
+| `SGEE_PEERS` + `INFERENCE_QUEUE` set | one `--skip-deploys` call, then one `railway redeploy` |
+| flip took effect | 3 mortgage + 3 strategy logging `INFERENCE_QUEUE=sgee`, no fallback warning |
+| a real request served through it | `ParseOperation` via the live ingress, partner key, HTTP 200 in 2.18 s |
+
+**Both variables were set with `--skip-deploys` and applied with a single
+redeploy.** Setting them one at a time would restart the engine into a
+half-configured window — `INFERENCE_QUEUE=sgee` with no `SGEE_PEERS` degrades
+every request to local, which is safe but is a silent outage of the thing being
+promoted.
+
+**The end-to-end check is a NEGATIVE one, and that is the point.** A request that
+degraded to the local backend returns the same answer as one served by the
+cluster; the response cannot distinguish them. Every fallback branch in
+`SgeeAdmission` logs — submit failed, task not found, deadline passed — so the
+proof is **zero** of those lines in the window, not the 200. Nor is a rising
+`last_applied` proof: the sweep ticker advances it continuously whether or not
+anything was enqueued.
+
+The request itself was refused by the mortgage verification layer —
+`"rate" = 0.004167 does not correspond to anything in the request (the nearest
+figure you gave is 0.5)` — because the model divided a stated PER-MONTH rate by
+twelve. That is the grounding gate working, and it is a good outcome for this
+check: the assistant ran, produced `raw model output`, and the verification layer
+adjudicated it. Nothing about the queue path was involved in the refusal.
+
+**Reverting is a variable change, not a rollback.** `INFERENCE_QUEUE=postgres`
+restores the previous path exactly, and the queue-node binaries stay compatible
+in both directions because the writer flip is inert once nothing supplies a
+result — an empty result is encoded as the v1 shape.
+
+### Still open
+
+- **Remove Postgres.** Explicitly out of scope here and still is: it remains the
+  fallback target of the degrade path. Removing it needs its own decision after
+  a full deploy cycle of observation.
+- **Nothing yet exercises a non-empty result end to end in production.** The
+  admission path writes one on every completion, so the first real inference
+  served by a REMOTE replica will be the first v2 `BrokerComplete` the cluster
+  has ever replicated. The formats are gated by tests and the readers have been
+  deployed since Stage 1, but the production first-write is unobserved. Watch
+  `tick_errors` on all three after the first cross-replica completion.
+- **`QueueNodeDurabilityTest` does not yet assert a result across a leader
+  SIGKILL.** It asserts tasks are neither lost nor duplicated; the result field
+  rides along untested at that level. The unit gates cover encode/decode/replay,
+  which is why this was not treated as blocking, but it is the honest gap.
 
 ## Explicitly not in scope
 
