@@ -207,7 +207,25 @@ class SgeeQueueClient::Impl {
     }
 
   private:
+    // `channels_` is a plain std::map, not thread-safe, and this client is called
+    // from gRPC handler threads, worker owner threads, writeback helper threads
+    // and this class's own background mirror thread -- all concurrently. The
+    // callers below intentionally release `mutex_` before reaching here so the
+    // lock is never held across a network call, which means the lock has to be
+    // taken IN HERE instead: the map itself must never be touched without it.
+    // This is the same defect class as the `inbound_` data race that
+    // crash-looped the first queue-cluster deployment -- a transport/worker
+    // thread mutating shared state that a header comment assumed was only ever
+    // touched by one thread. Holding the lock for the whole function (rather
+    // than double-checked, create-outside-then-insert) is deliberately simple:
+    // `grpc::CreateChannel` does not dial anything, it only builds a lazily-
+    // connecting channel object, so the cost of doing that once under the lock
+    // is not comparable to holding a lock across an RPC. Two callers racing to
+    // create the same missing entry would otherwise both build a channel and
+    // one would be thrown away -- harmless (shared_ptr, both valid) -- but that
+    // is not a reason to let the map itself be mutated unlocked.
     auto get_channel(std::string const& addr) -> std::shared_ptr<grpc::Channel> {
+        std::lock_guard lock(mutex_);
         auto it = channels_.find(addr);
         if (it != channels_.end()) {
             return it->second;

@@ -159,28 +159,55 @@ auto PostgresLeaseSource::spawn_writeback(std::int64_t job_id, std::int64_t fenc
                 .ok = false, .text = {}, .error = "unknown failure awaiting the local decode result"};
         }
 
-        std::expected<bool, options_calculator::inference_queue::SubmitError> written;
-        if (outcome.ok) {
-            written = queue->complete(job_id, fencing_token, encode_result(outcome.text));
-        } else {
-            written = queue->fail(job_id, fencing_token, outcome.error);
-        }
+        // Everything below can throw -- queue->complete()/fail() reach a
+        // database, and encode_result() allocates -- and none of it may be
+        // allowed to escape this lambda: it is a std::jthread entry function,
+        // and an escaping exception calls std::terminate() and kills the
+        // whole process, not just this job. The catch clauses themselves must
+        // not be able to throw either, so each one wraps its own logging in a
+        // further try/catch that swallows anything the logger itself raises.
+        try {
+            std::expected<bool, options_calculator::inference_queue::SubmitError> written;
+            if (outcome.ok) {
+                written = queue->complete(job_id, fencing_token, encode_result(outcome.text));
+            } else {
+                written = queue->fail(job_id, fencing_token, outcome.error);
+            }
 
-        if (!written.has_value()) {
-            logger::Logger::getInstance().warn(
-                "inference_admission: writing back job {} failed ({}) -- the submitting side's "
-                "own await_result() will time out and fall back to its local backend",
-                job_id, options_calculator::inference_queue::to_string(written.error()));
-        } else if (!written.value()) {
-            // Fenced out: a fresher lease already owns this job (the sweeper
-            // reclaimed it as abandoned, or something else re-leased it).
-            // Per inference_queue.cppm's own contract this result MUST be
-            // discarded, not retried -- retrying would overwrite whatever the
-            // fresher lease-holder is doing with a stale answer.
-            logger::Logger::getInstance().info(
-                "inference_admission: job {} was fenced out before this worker's result could be "
-                "written back -- discarding (a fresher lease already owns it)",
-                job_id);
+            if (!written.has_value()) {
+                logger::Logger::getInstance().warn(
+                    "inference_admission: writing back job {} failed ({}) -- the submitting side's "
+                    "own await_result() will time out and fall back to its local backend",
+                    job_id, options_calculator::inference_queue::to_string(written.error()));
+            } else if (!written.value()) {
+                // Fenced out: a fresher lease already owns this job (the sweeper
+                // reclaimed it as abandoned, or something else re-leased it).
+                // Per inference_queue.cppm's own contract this result MUST be
+                // discarded, not retried -- retrying would overwrite whatever the
+                // fresher lease-holder is doing with a stale answer.
+                logger::Logger::getInstance().info(
+                    "inference_admission: job {} was fenced out before this worker's result could be "
+                    "written back -- discarding (a fresher lease already owns it)",
+                    job_id);
+            }
+        } catch (const std::exception& e) {
+            try {
+                logger::Logger::getInstance().warn(
+                    "inference_admission: writing back job {} threw ({}) -- the submitting side's "
+                    "own await_result() will time out and fall back to its local backend",
+                    job_id, e.what());
+            } catch (...) {
+                // The logger must not be able to bring this thread down either.
+            }
+        } catch (...) {
+            try {
+                logger::Logger::getInstance().warn(
+                    "inference_admission: writing back job {} threw an unknown exception -- the "
+                    "submitting side's own await_result() will time out and fall back to its local "
+                    "backend",
+                    job_id);
+            } catch (...) {
+            }
         }
         done->store(true, std::memory_order_release);
     }};
@@ -271,6 +298,10 @@ auto PostgresAdmission::submit(std::string prompt) -> std::optional<InferenceOut
             // practice. A non-terminal state is not something to treat as
             // success either way, so it fails closed to the local backend
             // rather than fabricating an outcome.
+            logger::Logger::getInstance().warn(
+                "inference_admission: await_result returned non-terminal state {} for job {} -- "
+                "falling back to the local backend",
+                options_calculator::inference_queue::to_string(job->state), submitted->job_id);
             return local_.submit(std::move(prompt));
     }
 }
@@ -342,28 +373,55 @@ auto SgeeLeaseSource::spawn_writeback(SgeeLeasedJob job, std::future<InferenceOu
                 .ok = false, .text = {}, .error = "unknown failure awaiting the local decode result"};
         }
 
-        bool written = false;
-        if (outcome.ok) {
-            written = client.complete_blocking(job, encode_result(outcome.text));
-        } else {
-            // The SGEE queue replicates RESULTS, not error strings -- see
-            // task_queue.proto's comment on Task.result for why widening
-            // BrokerFail was not taken. A failure is signalled by the task
-            // reaching its terminal Dead state, which the submitter reads from
-            // `state`; the text is logged here, where it is still available.
-            logger::Logger::getInstance().info(
-                "inference_admission: SGEE task {} failed locally ({}) -- reporting the failure to "
-                "the cluster; the reason is logged here because the queue carries results, not "
-                "error text",
-                job.task_id, outcome.error);
-            written = client.fail_blocking(job);
-        }
+        // Everything below can throw -- complete_blocking()/fail_blocking() are
+        // gRPC calls, and encode_result() allocates -- and none of it may be
+        // allowed to escape this lambda: it is a std::jthread entry function,
+        // and an escaping exception calls std::terminate() and kills the whole
+        // process, not just this task. The catch clauses themselves must not be
+        // able to throw either, so each one wraps its own logging in a further
+        // try/catch that swallows anything the logger itself raises.
+        try {
+            bool written = false;
+            if (outcome.ok) {
+                written = client.complete_blocking(job, encode_result(outcome.text));
+            } else {
+                // The SGEE queue replicates RESULTS, not error strings -- see
+                // task_queue.proto's comment on Task.result for why widening
+                // BrokerFail was not taken. A failure is signalled by the task
+                // reaching its terminal Dead state, which the submitter reads from
+                // `state`; the text is logged here, where it is still available.
+                logger::Logger::getInstance().info(
+                    "inference_admission: SGEE task {} failed locally ({}) -- reporting the failure to "
+                    "the cluster; the reason is logged here because the queue carries results, not "
+                    "error text",
+                    job.task_id, outcome.error);
+                written = client.fail_blocking(job);
+            }
 
-        if (!written) {
-            logger::Logger::getInstance().warn(
-                "inference_admission: writing back SGEE task {} failed -- the submitting side's "
-                "own poll will time out and fall back to its local backend",
-                job.task_id);
+            if (!written) {
+                logger::Logger::getInstance().warn(
+                    "inference_admission: writing back SGEE task {} failed -- the submitting side's "
+                    "own poll will time out and fall back to its local backend",
+                    job.task_id);
+            }
+        } catch (const std::exception& e) {
+            try {
+                logger::Logger::getInstance().warn(
+                    "inference_admission: writing back SGEE task {} threw ({}) -- the submitting "
+                    "side's own poll will time out and fall back to its local backend",
+                    job.task_id, e.what());
+            } catch (...) {
+                // The logger must not be able to bring this thread down either.
+            }
+        } catch (...) {
+            try {
+                logger::Logger::getInstance().warn(
+                    "inference_admission: writing back SGEE task {} threw an unknown exception -- "
+                    "the submitting side's own poll will time out and fall back to its local "
+                    "backend",
+                    job.task_id);
+            } catch (...) {
+            }
         }
         done->store(true, std::memory_order_release);
     }};
