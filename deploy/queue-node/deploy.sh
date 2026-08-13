@@ -180,27 +180,50 @@ require_volume() {
 # Deliberately NOT gated on the node becoming leader. Followers are healthy
 # participants; requiring leadership here would hang forever on two of three
 # nodes and is the same mistake as putting leadership behind /healthz.
+# Read the newest deployment as "<id> <status> <imageDigest-or-none>".
+#
+# imageDigest is the discriminator that tells a BUILD failure from a RUNTIME
+# one, and nothing else available here does. A deployment that never produced
+# an image has none; one whose container started and died has one. Guessing
+# instead of reading it sent a reader after "why did the healthcheck fail" for
+# a build that had died in `cmake -S` and never started a container at all.
+newest_deployment() {
+    railway deployment list --service "$1" --environment "${ENVIRONMENT}" --json 2>/dev/null \
+        | python3 -c '
+import json, sys
+try:
+    rows = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+if not rows:
+    sys.exit(0)
+d = rows[0]
+print(d.get("id", ""), d.get("status", ""), d.get("meta", {}).get("imageDigest") or "none")
+' 2>/dev/null || true
+}
+
 await_healthy() {
     local svc="$1"
     local waited=0
     local interval=20
     local deadline=2100   # 35 min: the image compiles gRPC from source
-    local status=""
+    local status="" dep_id="" digest=""
 
     echo "[deploy] waiting for ${svc}'s newest deployment to leave BUILDING"
     while [ "${waited}" -lt "${deadline}" ]; do
         # First data row of `deployment list` is the newest deployment.
-        status="$(railway deployment list --service "${svc}" --environment "${ENVIRONMENT}" 2>/dev/null \
-                  | grep -oE '\| (BUILDING|DEPLOYING|INITIALIZING|SUCCESS|FAILED|CRASHED|REMOVED|SLEEPING) \|' \
-                  | head -1 | tr -d '| ' || true)"
+        read -r dep_id status digest <<<"$(newest_deployment "${svc}")"
 
         case "${status}" in
             SUCCESS)
-                echo "[deploy] ${svc}: deployment SUCCESS"
+                echo "[deploy] ${svc}: deployment SUCCESS (${dep_id})"
                 # Only NOW is the log worth reading, and only for the extra
-                # detail -- never as the proof itself.
+                # detail -- never as the proof itself. It is read BY DEPLOYMENT
+                # ID: `railway logs --service` replays the last session's output
+                # when nothing is running, so against a service it would print a
+                # dead container's scrollback and label it this rollout's.
                 local logs boots
-                logs="$(railway logs --service "${svc}" 2>/dev/null || true)"
+                logs="$(railway logs --deployment "${dep_id}" 2>/dev/null || true)"
                 printf '%s' "${logs}" | grep 'Raft baseline:' | tail -1 | sed 's/^/    /'
                 boots="$(printf '%s' "${logs}" | grep -c 'Queue node initialized successfully' || true)"
                 if [ "${boots}" -gt 1 ]; then
@@ -209,12 +232,24 @@ await_healthy() {
                 return 0
                 ;;
             FAILED|CRASHED)
-                echo "FATAL: ${svc}'s newest deployment reported ${status}." >&2
-                echo "  A healthcheck failure here means the container started and did not stay up." >&2
-                echo "  Read the CONTAINER log, not the build log:" >&2
-                echo "    railway logs --service ${svc}" >&2
-                railway logs --service "${svc}" 2>/dev/null | grep -iE 'error|fatal|terminate called' \
-                    | tail -5 | sed 's/^/    /' >&2 || true
+                echo "FATAL: ${svc}'s newest deployment reported ${status} (${dep_id})." >&2
+                if [ "${digest}" = "none" ]; then
+                    # No image was ever produced, so no container ever ran and
+                    # there is no container log to read. Saying "healthcheck"
+                    # here -- as this script used to, unconditionally -- points
+                    # at a container that does not exist.
+                    echo "  It produced NO IMAGE, so this is a BUILD failure and no container ran." >&2
+                    echo "    railway logs --build ${dep_id}" >&2
+                    railway logs --build "${dep_id}" 2>/dev/null \
+                        | grep -iE 'error|fatal|did not complete successfully' \
+                        | tail -8 | sed 's/^/    /' >&2 || true
+                else
+                    echo "  It produced an image, so the container started and did not stay up." >&2
+                    echo "    railway logs --deployment ${dep_id}" >&2
+                    railway logs --deployment "${dep_id}" 2>/dev/null \
+                        | grep -iE 'error|fatal|terminate called' \
+                        | tail -8 | sed 's/^/    /' >&2 || true
+                fi
                 return 1
                 ;;
             "")
