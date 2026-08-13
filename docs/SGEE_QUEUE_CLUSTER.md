@@ -12,8 +12,16 @@ different defect found while checking it.** See "The promotion audit, 2026-08-12
 below. In short: the tuned Raft timing cured the churn, and the audit then found
 that a failed apply consumed the committed entries behind it on two of three
 nodes — invisibly, because `/statusz`'s `last_applied` is Raft's cursor and not
-a count of anything the broker applied. Fixed in SGEE `fbcd2d63`; the fix must
-be deployed and this audit re-run before promotion is on the table again.
+a count of anything the broker applied. Fixed in SGEE `fbcd2d63`, **deployed to
+all three nodes and re-audited clean**: term agreed, `last_applied ==
+commit_index` on every node, `tick_errors: 0` everywhere.
+
+**What still blocks promotion is the residual state, not the code.** The fix
+prevents new divergence; it does not repair what was already dropped, and node 3
+still carries a `dlq_depth` of 18 against 0 on both peers — baked into its
+persisted snapshot, and NOT explained by the retention account this document
+previously gave (see the section on it). Repair means rebuilding that node's
+volume while a healthy leader exists.
 
 ## Topology
 
@@ -327,10 +335,55 @@ commands all agree. What differs is a locally-retained *view*. An operator
 alerting on a cross-replica `dlq_depth` mismatch would be chasing a phantom;
 compare `last_applied` and `current_term` instead, which ARE invariants.
 
-`tick_errors` accumulating on FOLLOWERS (75 and 11 above, against the leader's 1)
-is the same shape: `sweep_expired` runs on every node's tick but can only succeed
-on the leader, so a follower's `sweep_successes` stays 0 and its failed attempts
-are counted. It is not an error rate worth alerting on per-node either.
+**The paragraph that used to follow here was wrong, and it was the dangerous
+kind of wrong.** It said `tick_errors` accumulating on followers was "the same
+shape" — that `sweep_expired` runs on every tick, can only succeed on the leader,
+and its failed attempts are counted as tick errors, so the number was not worth
+alerting on.
+
+`maybe_sweep` does not touch `tick_errors` at all. It counts a failed sweep in
+`sweep_attempts` versus `sweep_successes` and deliberately does not even log it,
+precisely so that a follower's permanent `NotLeader` stays distinguishable from a
+leader that is genuinely failing. `tick_errors` is incremented in exactly one
+place — `refresh_status_after_tick`, when `runtime_->tick()` itself failed, which
+means `apply_committed` rejected a committed entry.
+
+So `tick_errors` on a follower is **not** benign bookkeeping. It is the state
+machine refusing a replicated command, and every one of them was a dropped entry
+until 2026-08-12. This paragraph is the reason to check a claim like that against
+the code before repeating it: the explanation was plausible, self-consistent, and
+would have waved someone straight past the 108 and 121 that exposed the
+dropped-batch defect.
+
+### The `dlq_depth` asymmetry does NOT fit the account above (2026-08-12)
+
+Measured on the fixed binary, all three nodes freshly restarted, `compactions: 0`
+everywhere (so each node's `dlq_depth` comes from the snapshot it restored, not
+from anything it has compacted since):
+
+| node | snapshot_index | dlq_depth |
+| --- | --- | --- |
+| sgee-queue-1 | 22151 | 0 |
+| sgee-queue-2 | 22208 | 0 |
+| sgee-queue-3 | **22209** | **18** |
+
+The retention account is an ORDERING argument — the node that compacted further
+had already evicted the dead tasks. **Here the ordering runs backwards:** node 3
+is the furthest along and is the one retaining 18, while node 1 is the furthest
+behind and retains none. Retention cannot be ruled out (whether a task is
+retained depends on when it died relative to a node's compaction clock, not
+monotonically on `snapshot_index`), but the specific argument this document made
+does not explain this observation, and **the asymmetry survived a full restart**,
+so it is baked into node 3's persisted snapshot rather than living in a
+transient in-memory view.
+
+It is consistent with residual divergence from the entries node 3 dropped before
+the peek/mark fix. **That matters for promotion: the fix prevents NEW divergence,
+it does not repair EXISTING divergence.** The safe repair is the one described
+under the rebuild note above — discard BOTH WALs on that node and let it rejoin
+empty via AppendEntries / InstallSnapshot, which is only possible while a healthy
+leader exists. One exists now. Until that is done and the three snapshots agree,
+this cluster stays a mirror.
 
 ## How the outage presented, and why the deploy gate hid it
 
