@@ -134,19 +134,103 @@ longer silently dropped — `apply_committed` stops without marking it, so
 writer-first rollout is a stalled node per un-upgraded replica, not a degraded
 window.
 
-**Stage 2 — writers.** `TaskBroker::complete(id, token, result)` persists it;
-`BrokerComplete` carries it; `apply_one` applies it. Gate:
-`QueueNodeDurabilityTest` with results asserted across a leader SIGKILL, plus a
-mixed-version run against a stage-1 node.
+**Stage 1 was deployed to all three nodes on 2026-08-12**, and the deploy is
+what found two defects in the queue-node image, both of which had been latent
+since the `import std;` conversion and neither of which named its own cause:
 
-**Stage 3 — RPC surface.** `result`/`error` on `CompleteRequest`/`FailRequest`
-and `Task`; `GetTask`. Gate: an end-to-end enqueue → lease → complete-with-result
-→ GetTask through the real service.
+- `Dockerfile.queue-node` passed `-DCMAKE_CXX_COMPILER=clang++`. sensen locates
+  the libc++ std module at
+  `dirname(dirname(CMAKE_CXX_COMPILER))/share/libc++/v1/std.cppm`, so the
+  `/usr/bin/clang++` symlink — which points at exactly the right compiler —
+  resolved it to a `/usr/share` path that does not exist. `std_module_precompile`
+  was never declared and every `import std;` failed. `backend/Dockerfile` had
+  been fixed for this in `bd11d00`; this file was missed.
+- With that fixed the build reached the LINK and failed on
+  `__cxxabiv1::__vmi_class_type_info`'s vtable, reported against
+  `libstdc++.so.6` — which reads as a standard-library mix-up and is not one. A
+  from-source libc++ installs `libc++.so` as a linker script,
+  `INPUT(libc++.so.1 -lc++abi -lunwind)`; apt.llvm.org ships a plain symlink, so
+  libc++abi never reached the link and `ld` reported the only C++ runtime that
+  was reachable. Fixed with an explicit `-lc++abi`.
 
-**Stage 4 — engine admission path.** `SgeeAdmission` / `SgeeLeaseSource`,
-`INFERENCE_QUEUE=sgee`, degrade-never-hang on every failure, with the ordering
-contract `set_lease_source()`-before-`start()` that `QueuedBackend` documents.
-Gate: the `inference_admission` tests, extended, plus a real assistant round trip.
+The deploy script's own diagnostic was wrong in both directions and was fixed
+alongside: it printed `railway logs --service` output, which replays a dead
+session's scrollback (the SSL errors it showed were timestamped three hours
+before the deployment), and it called every failure a healthcheck failure. It
+now reads the newest deployment's `imageDigest` — absent means no image was
+produced, so no container ran and it is a BUILD failure — and reads logs by
+deployment id.
+
+Cluster verified after the roll: one leader, all three at
+`last_applied == commit_index == 25734`, `tick_errors: 0`, `dlq_depth: 0`.
+
+**Stage 2 — writers. COMPLETE.** `TaskBroker::complete(id, token, result)`
+persists it; `BrokerComplete` carries it; `apply_one` applies it;
+`kIndexSnapshotVersion` 1 → 2.
+
+The version bump and `encode_entry`'s result append are ONE commit, and the
+mutation check shows why: reverting the bump alone fails three tests, two of
+them pre-existing round-trips, because a v1 header over v2 entries mis-parses
+from the second entry onward — the reader stops after the payload and reads the
+result's length prefix as the next entry's task id.
+
+**The size bound was wrong and this stage's own test caught it.** Both
+`task_queue::kMaxPayloadBytes` and `persistence::kMaxPayloadBytes` are 64 MiB,
+but that names the size of the ENCODED RECORD, and the record prefixes 12 bytes
+(WAL) or 21 (replicated command). A result at exactly the old bound was accepted
+at the write and refused at the append — the precise hazard the bound exists to
+prevent. The comment on `kMaxPayloadBytes` had claimed enqueue "can never
+produce a frame the codec would reject", which was false for the same reason
+(`encode_enqueued` prefixes 17 bytes), so the latent defect predates results
+entirely. Now `kMaxUserBytes = kMaxPayloadBytes - 32`, one rule for both fields.
+
+**Stage 3 — RPC surface. COMPLETE.** `bytes result` on `Task` and
+`CompleteRequest`; `GetTask`. The client gained `get_task` returning
+`expected<optional<Task>, ClientStatus>` — "the server says no such task" and
+"the call did not complete" are deliberately distinct, because a submitter must
+retry the second and stop on the first.
+
+**There is no `error` field, and that is a decision, not an omission.** The plan
+above called for one. Carrying an error string would mean widening `BrokerFail`
+— a fixed 16-byte replicated command with no second shape any deployed node can
+read — plus the WAL's `Failed` and `MovedToDlq` payloads and a snapshot v3: a
+second full readers-first deploy cycle, for a diagnostic the worker already
+logs. A failure is instead signalled by the task reaching terminal state `Dead`,
+which a reader already sees in `state`. A proto field the replicated log
+silently dropped would be worse than no field — it would read as an answer.
+
+One shared-code note: `detail::task_from_proto` now exists because the
+proto→native conversion was open-coded inside `lease()`. A hand-copied field
+list is how a field gets added to the wire and quietly dropped coming back —
+nothing fails, it just returns a default. `result` was the first field to make
+that concrete.
+
+**Stage 4 — engine admission path. COMPLETE.** `SgeeAdmission` /
+`SgeeLeaseSource`, selected by `INFERENCE_QUEUE=sgee`, degrade-never-hang on
+every failure, with the `set_lease_source()`-before-`start()` ordering
+`QueuedBackend` documents.
+
+`set_lease_source()` and `lease_source_` were typed on the CONCRETE
+`PostgresLeaseSource`, which made the storage substrate part of the decode
+loop's type rather than a deployment choice; an abstract `LeaseSource` with one
+virtual `fill()` is what made a second source possible at all. The two
+implementations are structurally identical because the constraint that shaped
+the first — lease on the owner thread, never block there, hand the write-back to
+a helper — belongs to the decode loop, not to Postgres.
+
+`SgeeAdmission` POLLS `GetTask` on a 25 ms interval rather than awaiting,
+because SGEE has no await. That is the same shape the Postgres path degrades to
+whenever its `pg_notify` hint does not arrive — and `inference_queue.cppm` is
+explicit that the hint is never load-bearing for correctness — so the two share
+failure modes rather than introducing a second set. A poll that does not
+complete retries until the deadline; a poll answering "not found" degrades
+immediately, because retention makes a reclaimed task and one that never existed
+the same reply.
+
+Gate: `test_inference_admission` asserts an unreachable cluster still yields the
+LOCAL backend's own answer AND yields it promptly — a path that degrades only
+after holding a gRPC handler for ninety seconds satisfies the letter of
+"degrade" and none of the point.
 
 **Stage 5 — promotion.** Flip `INFERENCE_QUEUE` to `sgee` in production, watch
 `last_applied`/`commit_index`, and keep Postgres writable as a fallback for one
