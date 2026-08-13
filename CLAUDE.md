@@ -602,8 +602,19 @@ peek/mark pair, plus `commit_index` published beside `last_applied` on `/statusz
 because the gap is the only way to tell caught-up from stalled. Promotion needs
 the fix deployed and the audit re-run. See `docs/SGEE_QUEUE_CLUSTER.md`.
 
-**`INFERENCE_QUEUE=sgee` IS LIVE on the engine as of 2026-08-13**, carried out
-in five staged deploys
+**`INFERENCE_QUEUE=sgee` is LIVE on the engine as of 2026-08-13** — promoted,
+rolled back to `postgres` the same day on three defects, and re-promoted once
+all three were fixed, deployed and verified **under concurrent load**. Postgres
+remains the system of record and the degrade target.
+
+**The rollback is the part worth remembering.** The original flip was verified
+with ONE request, and a single request cannot put two leases in flight — it was
+structurally incapable of reaching the defect that broke this, so reading its
+logs more carefully would never have helped. Six real requests found the first
+defect in minutes; the re-promotion was gated on 24 concurrent ones. When a
+check passes, ask what its shape excluded.
+
+The promotion itself was carried out in five staged deploys
 (`docs/superpowers/plans/2026-08-12-sgee-queue-promotion.md`). It needed five
 because the queue had no way to return an ANSWER: `CompleteRequest` carried no
 result, `Task` had no result field, and there was no RPC to read a task back at
@@ -619,6 +630,69 @@ through the live ingress with the partner key answered in **2.18 s** with
 a degraded request returns the same answer. Every fallback branch in
 `SgeeAdmission` logs; silence is what distinguishes "served by the cluster" from
 "served locally after the cluster failed".
+
+**That verification was still not enough, and the gap was in what it measured.**
+It was ONE request. A single call cannot put two leases in flight, so it could
+not reach the concurrency defect below no matter how carefully it was read. Six
+real requests found it in minutes.
+
+**Re-promotion gate, 2026-08-13 — use this shape, not the single call.** 24
+concurrent `ParseOperation`s through the live ingress (8 then 16), all HTTP 200,
+against: `last_applied == commit_index` on all three, `tick_errors: 0`,
+`apply_rejections` **equal across replicas and unchanged**, term stable (no
+election churn), and **0 `[WARN]` / 0 `[ERROR]` in the engine**. That last one is
+the negative proof, and it is checked on the right predicate: every degrade
+branch in `SgeeAdmission` calls `logger::...warn()`, so zero warns is the
+statement. Do not grep for hand-picked phrases — an earlier pass matched nine
+lines that were all benign, six being the boot INFO announcing that a fallback
+*exists* and three being Envoy's header-map dump containing `x-envoy-degraded`
+as a header NAME.
+
+**Defect 1 — propose-vs-apply skew on `lease()`.** `earliest_leasable()` reads
+APPLIED state, so two concurrent `lease()` calls on the leader picked the SAME
+task and proposed it twice. Followers logged `tick_errors` 5 and `dlq_depth` 2
+while the leader showed 0/0 — divergence, presenting as `broker_error=Corrupt`.
+`enqueue()` twenty lines above had always compensated for exactly this with a
+proposed-but-unapplied counter; `lease()` never did. Fixed with
+`proposed_leases_unapplied_`.
+
+**Defect 2 — mutate-then-validate bricked all three nodes.** `apply_one` called
+the *choosing* `broker_.lease()` and checked the resulting id against the
+command's afterwards, so every retry of an unapplicable entry consumed one more
+pending task until the queue was empty forever. Fixed with
+`TaskBroker::lease_specific`, which leases the task it was NAMED and is
+idempotent on an already-leased one.
+
+**Defect 3 — a rejection is an answer, and retrying it froze the cluster.** With
+defect 2 fixed, all three nodes were STILL stuck at `last_applied` 29285 with
+`commit_index` past 29700 and `tick_errors` in the tens of thousands. `fbcd2d63`
+had correctly stopped a failed apply from consuming the batch behind it — and
+thereby made *every* apply failure stall, including ones that can never resolve.
+A `BrokerLease` naming a task the local broker cannot lease (swept to the DLQ,
+already terminal, never seen) was retried forever.
+
+The distinction the fix rests on: **a committed entry is a FACT every replica
+must CONSUME at its index, but whether it has an EFFECT is the state machine's
+business. The transition must be TOTAL — a rejection is an answer, not a refusal
+to answer.** `is_deterministic_rejection` splits them: `UnknownTask`,
+`NotLeased`, `QueueEmpty`, `StaleFencingToken`, `PayloadTooLarge` and
+`InvalidArgument` are computed from replicated state, so every replica reaches
+the same answer from the same bytes and recording "no effect" converges exactly
+as recording an effect does. `WalError` and a decode failure are statements
+about THIS replica's local storage, say nothing about the command, and still
+stall — writing a local disk fault into replicated history would be the worse
+error. Both directions are gated
+(`ReplicatedBroker_DeterministicRejection_IsConsumedNotRetriedForever` and the
+existing `0xEE` decode test), and the first is mutation-checked: making
+`UnknownTask` retryable reproduces the production stall.
+
+**The only exit from that stalled state is wiping the volumes**, which destroys
+the evidence and re-bricks the rebuilt cluster the next time it happens — the
+same trap as the io_uring outage. `/statusz` now publishes `apply_rejections`
+beside `commit_index`; **compare it ACROSS replicas, not against zero.** Equal
+totals are the healthy state and unequal totals mean the state machines
+diverged, which agreement on `last_applied` cannot rule out — that number is
+Raft's cursor, not a count of anything the broker did.
 
 **Stage 1 (readers) and Stage 2 (writers) are a two-phase deploy and the order
 is not negotiable.** The `BrokerComplete` frame carries no version byte and no

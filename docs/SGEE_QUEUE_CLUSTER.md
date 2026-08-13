@@ -1229,3 +1229,197 @@ a full deploy cycle. Reverting the promotion is a variable change, not a
 rollback: `INFERENCE_QUEUE=postgres` restores the previous path exactly, and the
 queue-node binaries are compatible in both directions because the writer flip is
 inert once nothing supplies a result.
+
+## The promotion was ROLLED BACK the same day, on three defects (2026-08-13)
+
+**Live value: `INFERENCE_QUEUE=postgres`.** Read from Railway, not assumed. The
+user-facing path was never affected — Postgres is the configuration that had
+been serving all along, which is the whole reason it is the degrade target.
+Reverting really was a variable change, exactly as the section above predicted.
+
+**What the flip verification could not have caught.** It was ONE request. A
+single call cannot put two leases in flight, so it was *structurally incapable*
+of exercising the concurrency path, no matter how carefully its logs were read.
+Six real requests found the first defect within minutes. The lesson is not
+"verify harder" — it is that a passing check has a shape, and the question to
+ask of it is what that shape excludes.
+
+### Defect 1 — propose-vs-apply skew on `lease()`
+
+`earliest_leasable()` reads APPLIED state. Two concurrent `lease()` calls on the
+leader therefore chose the SAME task and proposed it twice: the second call ran
+before the first's `BrokerLease` had committed and applied, so the task was
+still Pending as far as the chooser could see.
+
+It showed as followers carrying `tick_errors: 5` and `dlq_depth: 2` while the
+leader reported 0/0, with `broker_error=Corrupt` — the id-mismatch check firing
+on replicas whose applied state no longer matched the leader's.
+
+`enqueue()`, twenty lines above in the same file, had always compensated for
+precisely this with a proposed-but-unapplied counter. `lease()` never did. Fixed
+with `proposed_leases_unapplied_` and `earliest_leasable_excluding`, gated by
+`ReplicatedBroker_ConcurrentLeases_DoNotProposeTheSameTask`.
+
+### Defect 2 — mutate-then-validate, which bricked all three nodes
+
+Underneath defect 1 sat a worse one. `apply_one` called the *choosing*
+`broker_.lease()` and only then compared the returned id against the command's.
+The mutation happened before the validation could reject it — so every retry of
+an unapplicable entry consumed one more pending task, until the queue was empty
+and the entry could never apply at all.
+
+Fixed with `TaskBroker::lease_specific`, which leases the task it was NAMED and
+is idempotent on an already-Leased one, gated by
+`Broker_LeaseSpecific_IsIdempotent_AndConsumesNothingElse`.
+
+### Defect 3 — a rejection is an answer, not a reason to retry forever
+
+With defect 2 fixed and deployed to node 1, that node was **still** stuck:
+`last_applied` 29285, `commit_index` past 29700, `tick_errors` climbing from
+zero since its own restart. The fix was correct and insufficient, and the
+difference is what matters here.
+
+`fbcd2d63` had correctly stopped a failed apply from consuming the batch behind
+it. But it made *every* apply failure stall — including failures that can never
+resolve. A `BrokerLease` naming a task the local broker cannot lease (swept to
+the DLQ, already terminal, never seen) is not a fault. It is the state machine's
+ANSWER, computed from replicated state, identical on every replica, and
+unchanged however many times it is retried.
+
+**A committed entry is a FACT every replica must CONSUME at its index, but
+whether it has an EFFECT is the state machine's business. The transition must be
+TOTAL — it always advances; the answer may be "no".**
+
+`is_deterministic_rejection` splits the two:
+
+| class | errors | apply behaviour |
+| --- | --- | --- |
+| statement about the COMMAND, from replicated state | `UnknownTask`, `NotLeased`, `QueueEmpty`, `StaleFencingToken`, `PayloadTooLarge`, `InvalidArgument` | consumed, no effect, counted |
+| statement about THIS REPLICA'S LOCAL STORAGE | `WalError`, decode failure / `Corrupt` | retried, stalls visibly |
+
+The safety argument for the first row is that the rejection is a deterministic
+function of (applied state, command): every replica computes the same answer
+from the same bytes, so recording "no effect" converges exactly as recording an
+effect does. The second row must NOT be recorded as a decision — writing a local
+disk fault into replicated history is the worse error, and an operator has to
+intervene either way.
+
+Both directions are gated, and they are separate tests on purpose:
+`ReplicatedBroker_DeterministicRejection_IsConsumedNotRetriedForever` asserts the
+node advances past a well-formed but unapplicable `BrokerLease`, while the
+existing `ReplicatedBroker_FailedApply_LeavesTheRestOfTheBatchPending` still
+asserts a `0xEE` decode failure stalls. Mutation-checked: making `UnknownTask`
+retryable fails the first at its `apply_committed` succeeds assertion —
+reproducing the production stall — while the second keeps passing.
+
+### Why this one was nearly unrecoverable
+
+**The only exit from a permanently stalled node is wiping its volume.** That
+destroys the evidence and leaves the defect in place to re-brick the rebuilt
+cluster the first time it recurs — the identical trap as the io_uring outage,
+arriving through the apply loop instead of the WAL.
+
+And the diagnostic said one word. `broker_error=QueueError` covers eight
+distinct `QueueError` values with completely different meanings; the log could
+not distinguish "this command is invalid" from "my disk refused the write". That
+is the four-layer error widening this document already records from 2026-08-12,
+recurring in a different place, which is why `rejected_or_fault` now names the
+specific error and the command tag.
+
+### `apply_rejections` is a cross-replica probe, not a health number
+
+`/statusz` now publishes `apply_rejections` and `last_apply_rejection` beside
+`commit_index`. **Compare the count ACROSS replicas, not against zero.** A
+declined entry is declined identically everywhere, so equal totals are the
+expected steady state and a non-zero value is not a problem by itself. Unequal
+totals mean the state machines disagree — the one thing agreement on
+`last_applied` cannot rule out, because that number is Raft's cursor rather than
+a count of anything the broker applied.
+
+### Verified unstuck, and one residue that did NOT clear (2026-08-13)
+
+All three nodes on the fix:
+
+| check | node 1 | node 2 (leader) | node 3 |
+| --- | --- | --- | --- |
+| `last_applied` vs `commit_index` | 30111 / 30111 | 30111 / 30111 | 30111 / 30111 |
+| `tick_errors` | 0 | 0 | 0 |
+| `apply_rejections` | 6 | 6 | 6 |
+| `last_apply_rejection` | `BrokerLease:NotLeased` | same | same |
+| `dlq_depth` | **3** | **0** | **3** |
+
+The gap closed from 29285-vs-29700 to zero, `tick_errors` went from tens of
+thousands to none, and `last_apply_rejection` names exactly the predicted case: a
+`BrokerLease` for a task that was neither Pending nor Leased. **`apply_rejections`
+being equal at 6 on all three is the convergence evidence** — the counter exists
+for that comparison and this is the first time it has been read.
+
+**`dlq_depth` does NOT agree, and that is residual divergence from the incident
+window rather than a new fault.** It is stable across repeated samples, so it is
+not the `stats_interval` refresh cadence; no node has compacted this process
+lifetime (`compactions: 0` on all three), so retention pruning does not explain
+it; and the boot snapshot indices differ (29206 / 29197 / 29197).
+
+The mechanism is the brick itself. Each node retried its unapplicable entry at
+its own rate — `tick_errors` reached 118228, 88094 and 11821 — and each retry
+consumed one more pending task through the mutate-then-validate path. Different
+retry counts mean different numbers of tasks consumed, so the three local broker
+WALs genuinely diverged while replaying the same Raft log. The residue persists
+because **Raft repairs logs, not state machines**: two nodes that applied the
+same log and reached different states only reconcile through an InstallSnapshot,
+which a caught-up follower never receives.
+
+Scope, stated precisely rather than waved away:
+
+- It is confined to TERMINAL tasks. Dead tasks are not leasable and take no part
+  in scheduling, so new work applies identically on all three — which is what
+  the equal `apply_rejections` and zero `tick_errors` demonstrate.
+- What it does affect is diagnostics: `dlq_depth` and `dlq_tasks()` answer
+  differently depending on which node is asked, and a failover to node 1 or 3
+  would make the reported depth jump 0 → 3.
+- Postgres remains the system of record and this cluster remains a
+  non-authoritative mirror, which is the reason the blast radius is this small.
+
+**The repair is destructive and has not been performed.** Wiping one follower's
+`/data` and letting it rejoin via InstallSnapshot is the designed mechanism for
+a diverged node, and doing it one node at a time preserves quorum — but it
+destroys that node's incident forensics, and nothing about the residue is
+urgent. It needs an explicit decision, not a reflex.
+
+### Re-promoted and verified under concurrent load (2026-08-13)
+
+`INFERENCE_QUEUE=sgee` was set again with `--skip-deploys` and applied with one
+`railway redeploy`. Cutover confirmed before anything downstream was trusted: 6
+`model is LOADED` (3 replicas × 2 assistants) and 6 `INFERENCE_QUEUE=sgee`
+(3 mortgage + 3 strategy), all timestamped after the upload.
+
+Then **24 concurrent `ParseOperation` calls** through the live ingress with the
+partner key — 8, then 16 — because concurrency is the one thing the original
+verification could not reach.
+
+| gate | result |
+| --- | --- |
+| HTTP | 24 / 24 → 200 (8 in 8.5 s, 16 in 17.7 s) |
+| `last_applied` vs `commit_index` | equal on all three, gap 0 throughout |
+| `tick_errors` | 0 / 0 / 0 |
+| `apply_rejections` | 6 / 6 / 6 — equal AND unchanged under load |
+| `current_term` | 3409, stable — no election churn |
+| engine `[WARN]` / `[ERROR]` | **0 / 0** |
+
+**`apply_rejections` staying equal and unchanged is the check that would have
+caught defect 1.** Concurrent leases proposing the same task produced id
+mismatches and rejections; 24 concurrent requests producing none is a direct
+test of that path, not an inference from the absence of a crash.
+
+**Zero `[WARN]` is the negative proof, and it must be checked on that
+predicate.** A degraded request returns the same answer as a cluster-served one,
+so the response cannot distinguish them — but every fallback branch in
+`SgeeAdmission` calls `logger::Logger::getInstance().warn()`, so a zero warn
+count is the statement. Do NOT grep for hand-picked phrases: a first pass
+matched nine lines that were all benign — six were the boot INFO announcing that
+a fallback *exists*, and three were Envoy's startup header-map dump, which
+contains `x-envoy-degraded` as a header NAME. Count the log LEVEL, not words.
+
+Postgres remains the system of record and the degrade target. The `dlq_depth`
+residue described above is unchanged (3 / 0 / 3) and unaffected by the load,
+which is consistent with it being inert terminal state.

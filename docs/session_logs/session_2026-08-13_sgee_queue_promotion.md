@@ -1,11 +1,16 @@
-# SGEE queue promotion — stages 1–5, and five defects found on the way
+# SGEE queue promotion — stages 1–5, the five defects found on the way, and the three that rolled it back
 
 @author Olumuyiwa Oluwasanmi
 
 **Date:** 2026-08-12 / 2026-08-13
-**Outcome:** `INFERENCE_QUEUE=sgee` is live on the engine. The SGEE Raft cluster
-serves inference admission for both assistants; Postgres remains writable as the
-degrade target.
+**Outcome:** `INFERENCE_QUEUE=sgee` was promoted, **ROLLED BACK the same day**
+on three defects found by driving real traffic, and **RE-PROMOTED** once all
+three were fixed, deployed and verified under concurrent load. The live value is
+`sgee`. During the rollback it was `postgres` — the configuration that had been
+serving all along, so the user-facing path was never affected. See "The
+promotion was ROLLED BACK the same day" and "Re-promoted and verified under
+concurrent load" in `docs/SGEE_QUEUE_CLUSTER.md` for the full account. Postgres
+remains the system of record and the degrade target.
 
 ---
 
@@ -236,3 +241,46 @@ adjudicated. Nothing about the queue path was involved in the refusal.
   (50053). Copying one service's value onto the other yields a process that
   connects to a real port, speaks the wrong protocol at it, and fails like a
   network problem.
+
+---
+
+## Three more defects, found after the flip (2026-08-13)
+
+Full technical account: `docs/SGEE_QUEUE_CLUSTER.md`, "The promotion was ROLLED
+BACK the same day". The short version, and the one thing worth carrying:
+
+**The flip verification was a single request, and a single request cannot put
+two leases in flight.** It was structurally incapable of reaching the defect
+that broke this, so reading its logs more carefully would never have helped. Six
+real requests found the first defect in minutes.
+
+That is the same failure this document already records twice in other clothes —
+scoring a model on the wrong harness, gating a deploy on a log line that replays
+a dead session. The check passed and measured the wrong thing. When a check
+passes, ask what its shape excluded.
+
+1. **Propose-vs-apply skew on `lease()`** — `earliest_leasable()` reads APPLIED
+   state, so concurrent leases proposed the same task. `enqueue()` had always
+   compensated for exactly this; `lease()` never did.
+2. **Mutate-then-validate in `apply_one`** — it leased before checking the id,
+   so each retry of an unapplicable entry ate another pending task. This bricked
+   all three nodes.
+3. **A deterministic rejection retried forever** — with (2) fixed and deployed,
+   the node was *still* frozen. Making a failed apply stop consuming the batch
+   behind it had made every failure stall, including ones that can never
+   resolve. The transition must be TOTAL: a committed entry is consumed at its
+   index whether or not it has an effect.
+
+Defect 3 is the one to remember, because the fix for defect 2 was correct and
+did not help. A correct fix that does not move the symptom means there is a
+second defect underneath it — not that the first fix was wrong.
+
+With all three deployed, the cluster was observed unstuck — the gap closed to
+zero, `tick_errors` fell from tens of thousands to none, and
+`last_apply_rejection` named `BrokerLease:NotLeased`, exactly the predicted case.
+`INFERENCE_QUEUE=sgee` was then re-promoted and gated on **24 concurrent
+`ParseOperation` calls** rather than one: 24/24 HTTP 200, gap 0, `tick_errors` 0,
+`apply_rejections` equal at 6 across all three and unchanged under load, term
+3409 stable, and 0 `[WARN]` / 0 `[ERROR]` in the engine. One residue did not
+clear: `dlq_depth` reads 3 / 0 / 3, state-machine divergence left by the brick
+window, confined to terminal tasks and deliberately not repaired.
