@@ -1,15 +1,36 @@
 cmake_minimum_required(VERSION 3.28)
 project(OptionsCalculatorEngine CXX)
 
-# SENSEN_NO_IMPORT_STD stays, and is orthogonal to the standard library this
-# binary uses. It selects sensen's HEADER path (utils/sensen_std.h) over
-# `import std;`, which is a question about the module system, not about libc++
-# versus libstdc++. Keeping it means no target in this tree needs a std.pcm, so
-# the whole BMI-compatibility class of failure -- a std module compiled with one
-# set of flags being rejected by a consumer compiled with another -- simply does
-# not arise. Moving to libc++ does not make `import std;` any more attractive;
-# it only removes the reason sensen could not use libc++ at all.
-add_compile_definitions(SENSEN_NO_IMPORT_STD)
+# SENSEN_NO_IMPORT_STD is deliberately NOT defined here any more, which is why
+# this comment survives the line it used to explain.
+#
+# It selected sensen's HEADER path (utils/sensen_std.h) over `import std;` -- a
+# question about the module system, not about libc++ versus libstdc++. The
+# argument for keeping it was that no target in this tree would then need a
+# std.pcm, so the BMI-compatibility class of failure (a std module compiled with
+# one set of flags being rejected by a consumer compiled with another) could not
+# arise. That is true, and it is not worth what it cost: it also meant nothing in
+# a C++23 codebase could say `import std;`, which is what this project's own code
+# policy specifies.
+#
+# The failure it avoided needs TWO std modules built from two flag sets. This
+# tree now builds exactly one -- sensen's std_module_precompile, from
+# ${CMAKE_CXX_FLAGS}, which is CANONICAL_FLAGS below and therefore the union of
+# what every subdirectory compiles with. SGEE imports that same file rather than
+# building its own (SGEE_EXTERNAL_STD_PCM), and so does this directory. One BMI
+# cannot disagree with itself.
+#
+# Nothing needs to be defined here to get the header path back: sensen re-adds
+# SENSEN_NO_IMPORT_STD itself on Windows/MSVC, on Windows/Clang, and under
+# -DSENSEN_DISABLE_IMPORT_STD=ON. On Linux + Clang none of those apply, which is
+# why this one line was the whole switch.
+#
+# 262 of sensen's 263 module interface units already carry the
+# `#if defined(SENSEN_NO_IMPORT_STD)` guard, so this flips them onto the import
+# they were written for. The one that does not (src/gemm_fusion_tree_dp.cppm)
+# keeps its textual headers and is unaffected -- a header-std BMI and an
+# `import std;` consumer interoperate, because std::string from a textual header
+# and from the std module are the same entity.
 
 # libc++ tags most of its inline, header-only functions with
 # __attribute__((__abi_tag__(<odr-signature>))) so that two objects built
@@ -487,6 +508,56 @@ set(SKIP_CLANG_TIDY ON CACHE BOOL "Disable clang-tidy due to c++23 module scanni
 # and nothing here includes pqxx. `ldd` on the built engine confirms both: no
 # libpq, no libz3.
 add_subdirectory(sensen EXCLUDE_FROM_ALL)
+
+# ============================================================================
+# The one std module, for every target this directory declares
+# ============================================================================
+# src/modules/*.cppm say `import std;` rather than listing standard headers in a
+# global module fragment, which is what a C++23 module is supposed to look like
+# and what docs/PRD_OPTIONS_AND_FUTURES_CALCULATOR.md has always specified. The
+# sensen sources compiled into sensen_slim just below say it too, now that
+# SENSEN_NO_IMPORT_STD is gone from the top of this file.
+#
+# The BMI they import is the ONE sensen precompiles at
+# ${CMAKE_BINARY_DIR}/std_modules/std.pcm. There is deliberately no second
+# std.pcm for this directory: sensen builds that file from ${CMAKE_CXX_FLAGS},
+# which at that point IS this file's CANONICAL_FLAGS, so a single BMI is
+# compatible with every consumer here by construction. Two std modules built
+# from two flag sets is the BMI-mismatch failure this project has hit before,
+# and it is entirely self-inflicted -- the union is available, so use it.
+#
+# PLACEMENT IS THE WHOLE TRICK, and getting it wrong is not a warning.
+# `add_compile_options` applies only to targets created AFTER it in this
+# directory, so this block has to sit:
+#
+#   * AFTER add_subdirectory(sensen), because std_module_precompile is declared
+#     in there and the guard below tests for it; and
+#   * BEFORE add_library(sensen_slim), which is the first target here to compile
+#     a sensen module. This block was originally ~500 lines further down, after
+#     SGEE, and sensen_slim therefore missed it -- seven translation units died
+#     on `fatal error: module 'std' not found` while every other target built
+#     clean. The error names the module, never the missing flag.
+#
+# It stays above sensen_slim and below sensen for those two reasons, and it is
+# still below FetchContent_MakeAvailable(grpc), which keeps the flag off gRPC's
+# ~3000 translation units -- they neither import this BMI nor should rebuild for
+# a flag they never use.
+#
+# COMPILE_LANGUAGE:CXX guards it because `-fmodule-file=` is not a C option and
+# the llama.cpp and c-ares subtrees below compile C. The flag is lazy: clang
+# loads the BMI only when a translation unit actually says `import std;`, so
+# carrying it on one that does not is inert.
+set(ENGINE_STD_PCM "${CMAKE_BINARY_DIR}/std_modules/std.pcm")
+if(NOT TARGET std_module_precompile)
+    message(FATAL_ERROR
+        "std_module_precompile does not exist, so ${ENGINE_STD_PCM} will never be "
+        "built and every `import std;` in this tree fails with "
+        "\"module 'std' not found\". sensen declares that target only when "
+        "SENSEN_USE_LIBCXX is ON and <libc++ prefix>/share/libc++/v1/std.cppm "
+        "exists; its configure output prints both, and LIBCXX_MODULE_DIR is not "
+        "readable from here because add_subdirectory gave sensen its own scope.")
+endif()
+add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-fmodule-file=std=${ENGINE_STD_PCM}>)
 
 # --------------------------------------------------------------------------
 # sensen_slim — the part of sensen this engine actually uses.
@@ -1007,51 +1078,15 @@ set(SGEE_LOGGER_MODULE_DIR
 
 add_subdirectory(external/SGEE sgee EXCLUDE_FROM_ALL)
 
-# ============================================================================
-# `import std;` for THIS project's own module interface units
-# ============================================================================
-# src/modules/*.cppm say `import std;` rather than listing standard headers in a
-# global module fragment, which is what a C++23 module is supposed to look like
-# and what docs/PRD_OPTIONS_AND_FUTURES_CALCULATOR.md has always specified.
-#
-# The BMI they import is the ONE sensen precompiles at
-# ${CMAKE_BINARY_DIR}/std_modules/std.pcm. There is deliberately no second
-# std.pcm for this directory: sensen builds that file from ${CMAKE_CXX_FLAGS},
-# which at that point IS this file's CANONICAL_FLAGS, so a single BMI is already
-# compatible with every consumer here by construction. Two std modules built
-# from two flag sets is the BMI-mismatch failure this project has hit before,
-# and it is entirely self-inflicted -- the union is available, so use it.
-#
-# Placement is load-bearing, and it is why this block sits HERE rather than at
-# the top of the file. `add_compile_options` applies to targets created after
-# it, so putting it below FetchContent_MakeAvailable(grpc) and both
-# add_subdirectory() calls keeps the flag off gRPC's ~3000 translation units,
-# off sensen and off SGEE -- none of which import this BMI, and all of which
-# would otherwise rebuild for a flag they never use.
-#
-# COMPILE_LANGUAGE:CXX guards it because `-fmodule-file=` is not a C option and
-# the llama.cpp and c-ares subtrees below compile C. The flag is lazy: clang
-# loads the BMI only when a TU actually says `import std;`, so carrying it on a
-# translation unit that does not is inert.
-set(ENGINE_STD_PCM "${CMAKE_BINARY_DIR}/std_modules/std.pcm")
-# SGEE imports the same BMI (SGEE_EXTERNAL_STD_PCM above), so it needs the same
-# ordering edge. SGEE already routes every one of its targets through
+# SGEE imports the same BMI as everything else here (SGEE_EXTERNAL_STD_PCM
+# above), so it needs the same ordering edge, and this is the first point at
+# which its targets exist. SGEE already routes every one of its targets through
 # sgee_std_module -- that is the whole purpose of the stub target it declares
 # when it is not building a std module of its own -- so one edge here covers all
 # of them without this file naming any SGEE target individually.
 if(TARGET sgee_std_module AND TARGET std_module_precompile)
     add_dependencies(sgee_std_module std_module_precompile)
 endif()
-if(NOT TARGET std_module_precompile)
-    message(FATAL_ERROR
-        "std_module_precompile does not exist, so ${ENGINE_STD_PCM} will never be "
-        "built and every `import std;` in src/modules/*.cppm fails with "
-        "\"module 'std' not found\". sensen declares that target only when "
-        "SENSEN_USE_LIBCXX is ON and <libc++ prefix>/share/libc++/v1/std.cppm "
-        "exists; its configure output prints both, and LIBCXX_MODULE_DIR is not "
-        "readable from here because add_subdirectory gave sensen its own scope.")
-endif()
-add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-fmodule-file=std=${ENGINE_STD_PCM}>)
 
 # Include logging and bindings submodules
 # add_subdirectory(cpp23-logger EXCLUDE_FROM_ALL)

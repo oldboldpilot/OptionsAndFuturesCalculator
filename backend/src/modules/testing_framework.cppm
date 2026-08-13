@@ -1,3 +1,12 @@
+module;
+// The operator-new anchor, for the same reason calculator.engine carries one:
+// the <new> that sensen.options drags in through TBB is a global-module
+// declaration, and it has to be anchored in every translation unit that both
+// reaches it and allocates. Importing a module that anchors it does NOT inherit
+// the anchor -- that is why this line is repeated here rather than being fixed
+// once in sensen/src/options.cppm.
+#include <new>
+
 export module calculator.testing;
 import std;
 

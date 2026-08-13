@@ -1,3 +1,16 @@
+module;
+// Anchor the canonical global operator new, and nothing else. sensen.options
+// reaches <new> transitively through its TBB headers; that declaration lands in
+// the global module rather than the std module, and without an anchor here it
+// is never merged with the std-module copy -- so EVERY allocation in this file
+// fails with "call to 'operator new' is ambiguous", reported inside libc++ and
+// naming neither TBB, sensen.options, nor this file.
+//
+// Anchoring it in sensen/src/options.cppm as well is not redundant: that fixes
+// consumers of options, this fixes consumers of THIS module. sensen's
+// tokenizer.cppm carries the same anchor for the same reason.
+#include <new>
+
 export module calculator.engine;
 import std;
 
