@@ -97,11 +97,43 @@ COPY backend/ /src/backend/
 # ENABLE_LLAMACPP_BACKEND=OFF for the same reason as the engine image: it is a
 # cross-checking tool, not a serving path, and OFF removes a ~167 MB clone and
 # one more host this build has to reach.
+# The compiler is named by its VERSIONED path, not through the /usr/bin/clang++
+# symlink installed above, and that is load-bearing rather than tidiness.
+# sensen locates the libc++ std module at
+# dirname(dirname(CMAKE_CXX_COMPILER))/share/libc++/v1/std.cppm, so
+# /usr/bin/clang++ resolves it to /usr/share/libc++/v1 -- which does not exist,
+# even though that symlink points at exactly the right compiler. The symlink
+# satisfies the compile and destroys the path arithmetic.
+#
+# The failure is remote from its cause and names neither: std_module_precompile
+# is never declared, so every `import std;` in the tree dies with "module 'std'
+# not found". backend/Dockerfile carries the identical line for the identical
+# reason (bd11d00); this one was missed and cost a queue-node deploy.
+#
+# -lc++abi is explicit for a second toolchain-layout reason, and it is NOT
+# redundant with -stdlib=libc++. A libc++ built from source installs
+# libc++.so as a LINKER SCRIPT -- literally `INPUT(libc++.so.1 -lc++abi
+# -lunwind)` -- so the ABI library arrives without anyone asking. apt.llvm.org
+# ships a plain symlink to libc++.so.1 instead, and nothing then pulls
+# libc++abi in.
+#
+# It stays hidden until some object references a C++ ABI symbol directly.
+# sgee's grpc_transport does -- `__cxxabiv1::__vmi_class_type_info`'s vtable,
+# the RTTI record for a multiply-inherited class -- and the link then fails as
+#
+#   undefined reference to symbol '_ZTVN10__cxxabiv121__vmi_class_type_infoE'
+#   /lib/.../libstdc++.so.6: error adding symbols: DSO missing from command line
+#
+# which names libstdc++ and reads as a standard-library mix-up. It is not one:
+# ld merely found the symbol in the only C++ runtime that WAS reachable, having
+# been dragged in transitively. The engine image compiles no such object today,
+# which is the only reason it has not hit this.
 RUN cmake -S /src/backend -B /src/build -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_C_COMPILER=clang \
-        -DCMAKE_CXX_COMPILER=clang++ \
+        -DCMAKE_C_COMPILER=/usr/lib/llvm-${LLVM_VERSION}/bin/clang \
+        -DCMAKE_CXX_COMPILER=/usr/lib/llvm-${LLVM_VERSION}/bin/clang++ \
         -DCMAKE_CXX_FLAGS="${GCC_TOOLCHAIN_FLAGS}" \
+        -DCMAKE_EXE_LINKER_FLAGS="-lc++abi" \
         -DLIBCXX_MODULES_PATH=/usr/lib/llvm-${LLVM_VERSION}/share/libc++/v1 \
         -DCPP23_LOGGER_LIBCXX_MODULES_PATH=/usr/lib/llvm-${LLVM_VERSION}/share/libc++/v1 \
         -DENABLE_LLAMACPP_BACKEND=OFF \
