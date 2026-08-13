@@ -1065,6 +1065,23 @@ between the frontend and backend deploys, and is the correct direction to fail.
   A build stuck at `scheduling build on Metal builder` with no further output is
   a Railway-side scheduling stall, not a slow compile — it can sit there for
   over an hour. Re-running the deploy gets it scheduled.
+
+  **The stall's sharper tell is a deployment stuck at `INITIALIZING` with NO
+  BUILD AT ALL**, which `railway logs --build <id>` reports as *"Deployment does
+  not have an associated build"*. That one sentence separates "the compile is
+  slow" from "nothing was ever scheduled", and only the second is fixed by
+  re-uploading. It hit two of three queue nodes in one session on 2026-08-13,
+  so treat it as common rather than exotic: if a deployment has sat at
+  INITIALIZING for more than ~10 minutes, ask for its build log before waiting
+  any longer.
+
+  **A `railway up` timeout is a statement about the CLIENT.** The deadline is on
+  this end of the transfer, so Railway can accept the upload and create a
+  deployment while the CLI reports failure — and `deploy/queue-node/deploy.sh`
+  used to call that FATAL, which STOPPED A ROLLING DEPLOY HALFWAY and left the
+  cluster on mixed binaries with nobody told. It now checks whether a new
+  deployment id appeared before retrying or giving up. Same lesson as the
+  `imageDigest` discriminator: ask Railway about Railway.
 - **Database Schema:** Applied `backend/migrations/01_init.sql` to Railway Postgres via `psql`.
 
 ### DNS (Cloudflare zone `optionsandfuturescalculator.com`)
