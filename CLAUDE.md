@@ -744,6 +744,47 @@ totals are the healthy state and unequal totals mean the state machines
 diverged, which agreement on `last_applied` cannot rule out — that number is
 Raft's cursor, not a count of anything the broker did.
 
+**Defect 5 — the id skew's ROOT CAUSE: the leader predicted a TaskId from a
+local counter instead of from the log.** `enqueue()` computed
+`broker_.next_task_id() + proposed_enqueues_unapplied_`. The first term reflects
+only **applied** state; the second counted only proposals **this** leader had
+made since the last term change. An enqueue entry that is already in the log,
+will certainly apply, and was proposed by somebody else is in neither — which is
+precisely what a new leader inherits, and nothing gates `enqueue()` on
+`last_applied == commit_index`.
+
+Found by reading production, not code. Node 1's log shows nine elections with
+`last_applied` frozen at 34298, then:
+
+```
+DIVERGENCE: applied BrokerEnqueue as id 538 but the leader logged id 426 (total 1)
+```
+
+**+112 on the FIRST mismatch and on all 128 that followed** — 112 being the size
+of the leader's unapplied enqueue backlog at the moment it predicted. Both
+counters then advance in step, so the offset never closes. At an identical
+`last_applied` of 36753 the three nodes' live sets were 0 / 16 / 93.
+
+**The comment on that detector blamed the wrong thing, and the detector was
+still right.** It cited a rolling deploy of mismatched payload bounds — a real
+path, since fixed — but that cannot be this: `TaskBroker::enqueue`'s only
+pre-reserve bound is `payload.size() > kMaxUserBytes`, a constant applied to
+bytes carried in the command, so every replica computes it identically. When an
+instrument fires, its stated cause is a hypothesis, not a finding.
+
+`pending_enqueues_in_log()` replaces the counter, reading **one byte** per tail
+entry (the command tag is the first byte of the body) over the
+`last_applied..last_log_index` window. It also removes the term-change reset:
+a truncated proposal leaves the log, so a **derived** quantity is right by
+construction where a **cached** one had to be invalidated by hand — and that
+hand-invalidation was wrong in both directions, forgetting committed proposals
+that would certainly apply while `apply_one` decremented for enqueues this
+leader never proposed. Same lesson as defect 4: a replicated decision must be
+derived from replicated state, not from a local counter shadowing it.
+
+It stops NEW skew and reconciles nothing. An already-diverged replica still
+needs its volume wiped and rebuilt.
+
 **Two digests now answer that properly, and they answer DIFFERENT questions.**
 `apply_digest` folds `(index, command tag, outcome, assigned id)` into a
 running splitmix64 hash — O(1) per entry, so it can run on every apply. It is
