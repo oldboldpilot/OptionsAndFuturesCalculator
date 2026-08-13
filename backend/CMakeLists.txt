@@ -2094,3 +2094,28 @@ foreach(_t IN LISTS _engine_targets)
         add_dependencies(${_t} std_module_precompile)
     endif()
 endforeach()
+
+# ============================================================================
+# build_tests: the target that must precede ctest
+# ============================================================================
+# `ninja && ctest` does NOT build every binary ctest runs, and the gap is silent
+# in the dangerous direction. SGEE is embedded with EXCLUDE_FROM_ALL, so its ~90
+# test executables are absent from the default build while `ctest` still runs
+# whatever copy is on disk -- a stale PASS looks exactly like a real one.
+#
+# `ninja build_tests && ctest` is the command. This target covers this
+# directory's own test executables (which ARE in `all`, listed here anyway so
+# the target means what its name says rather than being true by accident) plus
+# SGEE's, via the aggregate that directory defines for the same reason.
+get_property(_bt_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+add_custom_target(build_tests
+    COMMENT "Building every binary ctest will run, including SGEE's EXCLUDE_FROM_ALL tests")
+foreach(_t IN LISTS _bt_targets)
+    get_target_property(_bt_type ${_t} TYPE)
+    if(_bt_type STREQUAL "EXECUTABLE" AND ${_t} MATCHES "^test_")
+        add_dependencies(build_tests ${_t})
+    endif()
+endforeach()
+if(TARGET sgee_build_tests)
+    add_dependencies(build_tests sgee_build_tests)
+endif()
