@@ -696,6 +696,46 @@ error. Both directions are gated
 existing `0xEE` decode test), and the first is mutation-checked: making
 `UnknownTask` retryable reproduces the production stall.
 
+**Defect 4 — the ROOT CAUSE of the divergence: the lease deadline was computed
+from each replica's own clock.** `TaskBroker::lease_specific` set
+`deadline = cfg_.clock_ms() + window` at APPLY time, and `BrokerLease` carried
+the window but **not the instant it is measured from**. `BrokerSweep` carries the
+LEADER's `now_ms` and is compared against those per-replica deadlines, so a sweep
+landing between them expired a task on the leader that was still Leased on the
+follower.
+
+**The driver is replication delay, not clock skew.** A follower applies a
+committed entry tens of milliseconds after the leader, so its deadline is later
+by exactly that delay with perfectly synchronised clocks. NTP cannot help; the
+fault is computing anything replicated from a local clock at apply time. This is
+the SAME defect as `BrokerEnqueue::enqueue_ms`, fixed the same day, twenty lines
+away in the same file — one instance was found and its sibling was not.
+
+Shipped readers-first in two stages, because `BrokerLease`'s body is exactly 24
+bytes and the per-tag size check IS the versioning: Stage 1 accepts 24 and 32 and
+changes no bytes on the wire (the encoder emits 24 while the field is zero,
+mirroring `BrokerComplete`'s empty-result rule); Stage 2 is the one-line writer
+flip. Both shapes are fixed width, so there is no dead zone.
+
+**The existing test harness could not have caught it, and that is the lesson.**
+`Cluster` gives every node ONE virtual clock, so anything computed from
+`cfg_.clock_ms()` at apply time is identical on every replica in the harness and
+different on every replica in production — a test written there passes whether or
+not the bug exists. The fix required teaching the harness per-node clock SKEW
+before the property could even be stated.
+`ReplicatedBroker_VisibilityDeadlineIsTheLeadersOnEveryReplica` is
+mutation-checked, and two traps live inside it: zero is the "no timestamp
+carried" sentinel, so a skewed clock clamping to zero reproduces the bug's
+signature from the harness rather than the code; and the mutation check first
+"passed" against a **stale binary**, because `ninja`'s output was piped to
+`grep -c` and `ctest` ran before the relink finished.
+
+**What it was costing:** node 1 was the last replica never rebuilt and it was the
+leader, so every engine writeback failed and **every inference request fell back
+to local execution** while returning correct answers and HTTP 200. 12 writeback
+warnings before the rebuild, 0 after; 16 concurrent requests went 10.09 s ->
+8.65 s. Its snapshot was 355,772 bytes against the rebuilt nodes' 26–48 KB.
+
 **The only exit from that stalled state is wiping the volumes**, which destroys
 the evidence and re-bricks the rebuilt cluster the next time it happens — the
 same trap as the io_uring outage. `/statusz` now publishes `apply_rejections`
