@@ -289,6 +289,11 @@ deploy_one() {
     # purely size -- `railway up` has a fixed deadline that a slow leg of the
     # transfer can exceed. Failing the whole deploy on the first timeout means
     # a human retries by hand and learns nothing.
+    # The id of the newest deployment BEFORE this upload. A "failed" upload that
+    # nonetheless produced a new deployment did not fail -- see below.
+    local before_id
+    read -r before_id _ _ <<<"$(newest_deployment "${svc}")"
+
     echo "[deploy] uploading to ${svc}"
     local attempt
     for attempt in 1 2 3; do
@@ -301,9 +306,37 @@ deploy_one() {
             return 0
         fi
         echo "[deploy] upload attempt ${attempt} failed; retrying"
+
+        # A `railway up` TIMEOUT is a statement about the CLIENT, not the server.
+        # The deadline is on this end of the transfer, so the upload can be
+        # accepted and a deployment created while the CLI reports failure. Asking
+        # Railway whether a new deployment exists is the only way to tell the two
+        # apart, and getting it wrong is expensive in both directions: retrying a
+        # landed upload starts a second redundant build, and -- as happened on
+        # 2026-08-13 -- declaring FATAL on a landed upload STOPS A ROLLING DEPLOY
+        # HALFWAY, leaving the cluster on mixed binaries with nobody told.
+        local now_id now_status
+        read -r now_id now_status _ <<<"$(newest_deployment "${svc}")"
+        if [ -n "${now_id}" ] && [ "${now_id}" != "${before_id}" ]; then
+            echo "[deploy] ${svc}: the upload landed despite the client timeout" \
+                 "(${now_id} ${now_status}) -- continuing rather than re-uploading"
+            return 0
+        fi
         sleep 10
     done
-    echo "FATAL: three upload attempts to ${svc} all failed" >&2
+
+    # Same check once more before giving up: the third attempt can land in the
+    # window between its timeout and this line.
+    local final_id final_status
+    read -r final_id final_status _ <<<"$(newest_deployment "${svc}")"
+    if [ -n "${final_id}" ] && [ "${final_id}" != "${before_id}" ]; then
+        echo "[deploy] ${svc}: the upload landed despite the client timeout" \
+             "(${final_id} ${final_status}) -- continuing"
+        return 0
+    fi
+
+    echo "FATAL: three upload attempts to ${svc} all failed, and no new deployment" >&2
+    echo "  appeared for it -- so nothing was accepted. This is a genuine upload failure." >&2
     return 1
 }
 
