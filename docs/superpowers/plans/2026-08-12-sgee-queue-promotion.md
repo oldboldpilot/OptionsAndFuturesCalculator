@@ -94,13 +94,45 @@ formats that are load-bearing:
 
 Each stage is independently testable and independently deployable.
 
-**Stage 1 — formats, readers first.** Bump `kIndexSnapshotVersion` to 2, teach
-`decode_entry` both layouts, add the result field to `Task` and `TqRecord`
-encode/decode, and add the `BrokerComplete` result field to the command codec's
-**reader**. Write nothing new yet. Gate: existing snapshots and WALs still
-decode; a v2 buffer round-trips; a v1 buffer read by the v2 reader yields an
-empty result rather than garbage. Deploy and confirm all three nodes still
-agree — this stage must be a no-op in behaviour.
+**Stage 1 — formats, readers first. COMPLETE as of 2026-08-12, in two commits.**
+Teach every reader both layouts and write nothing new. All three formats now
+read v1 and v2:
+
+| format | reader | commit |
+| --- | --- | --- |
+| index snapshot (`decode_entry`) | `kIndexSnapshotVersionMax = 2`, writes 1 | `ca8f0a16` |
+| WAL `TaskCompleted` (`decode_completed`) | 8 bytes = v1, 12+len = v2 | this stage's second commit |
+| replicated `BrokerComplete` (`decode`) | 16 bytes = v1, 20+len = v2 | this stage's second commit |
+
+**The first commit claimed the whole stage and delivered half of it** — it
+touched `index.cppm`, `types.cppm` and one test, leaving `codec.cppm` and
+`broker_command_codec.cppm` untouched. That is worth recording rather than
+quietly fixing, because the missing half is the dangerous half: the snapshot
+reader is the one format that already had a version field, and the two that did
+not are the two where a wrong guess is unrecoverable.
+
+Note the shape each reader had to adopt, since there is no version byte in
+either wire format — the SIZE is the discriminator, and there is a dead zone
+between the two layouts (9..11 bytes for the WAL record, 17..19 for the command
+body) which must be REFUSED rather than read as a short v2. A length assembled
+from whatever bytes happen to follow is indistinguishable from a real one.
+
+An empty result is deliberately encoded as the v1 shape, so an empty result and
+a v1 record are the same bytes: the same fact, written the same way, still
+readable by a binary that predates v2.
+
+Gates: `BrokerCommandCodecTests` (**new — this format had no test at all**, 7
+cases) and four new cases in `TaskQueueCodecTests`, plus the four Stage-1
+snapshot cases in `TaskQueueCompactionTests`. Mutation-checked: restoring the
+old `body.size() != 16` check fails exactly `BrokerCmd_CompleteV2_DecodesTheResult`
+while the v1 compatibility case still passes.
+
+**This stage must now be DEPLOYED to all three nodes before Stage 2 starts.**
+That is not a formality: since `fbcd2d63` a frame a node cannot decode is no
+longer silently dropped — `apply_committed` stops without marking it, so
+`last_applied` freezes and the node retries the same entry forever. A
+writer-first rollout is a stalled node per un-upgraded replica, not a degraded
+window.
 
 **Stage 2 — writers.** `TaskBroker::complete(id, token, result)` persists it;
 `BrokerComplete` carries it; `apply_one` applies it. Gate:
