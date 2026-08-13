@@ -1687,3 +1687,85 @@ survived, under precisely the condition the fix was written for.
 after the rollout settles; a burst confined to the replacement window is the
 system degrading correctly, and treating it as a failure would train the check to
 be ignored.
+
+## ROOT CAUSE: the visibility deadline was computed from each replica's own clock
+
+Everything above — the rebuilds, the digest corrections, the rejection counters —
+was chasing a symptom. The cause is four lines in `TaskBroker::lease_specific`:
+
+```cpp
+const std::uint64_t now = cfg_.clock_ms();   // LOCAL clock, at APPLY time
+const std::uint64_t deadline = now + window;
+```
+
+`BrokerLease` carried the visibility WINDOW but not the instant it is measured
+from. `BrokerSweep` carries the **leader's** `now_ms` and is compared against
+those per-replica deadlines. A sweep landing between them expires the task on the
+leader and not on the follower: the leader marks it Dead or requeues it, the
+follower leaves it Leased, and the state machines diverge.
+
+**The driver is not clock skew — it is replication delay.** A follower applies a
+committed entry tens of milliseconds after the leader, so its deadline is later
+by exactly that delay with perfectly synchronised clocks. NTP does not help. It
+is inherent to computing anything from a local clock at apply time.
+
+This is the SAME defect as `BrokerEnqueue::enqueue_ms`, fixed earlier the same
+day, twenty lines away in the same file. One instance was found and its sibling
+was not.
+
+### It shipped in two stages, and the order was not optional
+
+`BrokerLease`'s body is exactly 24 bytes and the per-tag size check IS the
+versioning. Carrying the timestamp makes it 32, and since `fbcd2d63` a node that
+cannot decode a committed frame STALLS rather than dropping it — so writers
+before readers is a stalled node per un-upgraded replica.
+
+- **Stage 1** — readers accept 24 and 32; the encoder still emits 24 while the
+  field is zero, mirroring `BrokerComplete`'s empty-result rule. Zero bytes
+  changed on the wire. Gated by an assertion that the encoder still emits exactly
+  25 bytes, so the Stage-2 flip is provably inert until made.
+- **Stage 2** — the leader stamps `cfg_.clock_ms()`. One line.
+
+Both shapes are fixed width, so unlike `BrokerComplete` there is no dead zone and
+no length field that could be assembled out of trailing bytes.
+
+### The test could not have caught it, and that is the real lesson
+
+`Cluster` gives every node ONE virtual clock. Anything computed from
+`cfg_.clock_ms()` at apply time is therefore identical on every replica in the
+harness and different on every replica in production. **A test written against
+that harness passes whether or not the bug is present.** The fix required
+teaching the harness per-node clock SKEW before the property could even be
+expressed.
+
+Mutation-checked: restoring the zero timestamp makes the deadlines differ by
+exactly the injected skew.
+
+Two traps inside the test itself, both worth knowing:
+
+- **Zero is the "no timestamp carried" sentinel**, so a leader whose skewed clock
+  clamps to zero proposes the v1 shape and every replica falls back to its own
+  clock — reproducing the bug's exact signature from the HARNESS rather than the
+  code. The skews are all positive and the clock is advanced past them first.
+  Real clocks are epoch-ms and never zero.
+- **The mutation check first "passed" against the stale binary.** `ninja`'s output
+  was piped to `grep -c` and `ctest` ran before the relink finished — the trap
+  this repository documents in its own build notes, hit while verifying a fix for
+  something else. Check the binary's mtime against the source before believing a
+  mutation result.
+
+### What the divergence was actually costing
+
+Node 1 was the last replica never rebuilt, and it was the leader. Every engine
+writeback goes to the leader, so every one failed and **every inference request
+fell back to local execution.** Users saw correct answers and HTTP 200 throughout;
+the cluster was simply not doing the work. That is the same shape as everything
+else in this file: a system reporting success at the layer being watched while
+the layer that matters is idle.
+
+Measured across the rebuild: 12 writeback warnings before, **0 after**, and the
+same 16 concurrent requests went from 10.09 s to 8.65 s.
+
+Its snapshot was **355,772 bytes** against the rebuilt nodes' 26–48 KB —
+corroboration from disk, independent of any number the process reported about
+itself.
