@@ -602,12 +602,23 @@ peek/mark pair, plus `commit_index` published beside `last_applied` on `/statusz
 because the gap is the only way to tell caught-up from stalled. Promotion needs
 the fix deployed and the audit re-run. See `docs/SGEE_QUEUE_CLUSTER.md`.
 
-**Promotion is being carried out in five staged deploys**
-(`docs/superpowers/plans/2026-08-12-sgee-queue-promotion.md`), because the queue
-had no way to return an ANSWER: `CompleteRequest` carried no result, `Task` had
-no result field, and there was no RPC to read a task back at all. A submitter on
-one replica could not learn the outcome of a job executed on another, which is
-the whole reason `PostgresAdmission` exists.
+**`INFERENCE_QUEUE=sgee` IS LIVE on the engine as of 2026-08-13**, carried out
+in five staged deploys
+(`docs/superpowers/plans/2026-08-12-sgee-queue-promotion.md`). It needed five
+because the queue had no way to return an ANSWER: `CompleteRequest` carried no
+result, `Task` had no result field, and there was no RPC to read a task back at
+all. A submitter on one replica could not learn the outcome of a job executed on
+another, which is the whole reason `PostgresAdmission` exists — so this was a
+protocol change, never a configuration flip.
+
+Verified at the flip: 6 `model is LOADED` (3 replicas × 2 assistants), 3
+mortgage + 3 strategy logging `INFERENCE_QUEUE=sgee`, all three nodes agreeing
+`last_applied == commit_index`, `tick_errors: 0`. A real `ParseOperation`
+through the live ingress with the partner key answered in **2.18 s** with
+**zero** degrade-path warnings — and that last clause is the whole proof, because
+a degraded request returns the same answer. Every fallback branch in
+`SgeeAdmission` logs; silence is what distinguishes "served by the cluster" from
+"served locally after the cluster failed".
 
 **Stage 1 (readers) and Stage 2 (writers) are a two-phase deploy and the order
 is not negotiable.** The `BrokerComplete` frame carries no version byte and no

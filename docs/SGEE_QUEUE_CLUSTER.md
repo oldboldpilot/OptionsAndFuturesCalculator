@@ -998,3 +998,234 @@ but unfinished work:
   `PostgresAdmission`/`PostgresLeaseSource`, not a configuration flip.
 
 Postgres remains the system of record until both are done.
+
+---
+
+## Promotion, carried out 2026-08-12/13
+
+Both blockers named directly above are closed. mTLS is deployed on both ports
+(`04ebc42`), and the admission path that was missing now exists. Promotion was
+done as **five staged deploys**, not a configuration flip, for the reason the
+section above gives: the queue could not return an ANSWER.
+
+That gap, precisely: `CompleteRequest` carried no result, `Task` had no result
+field, and there was no RPC to read a task back at all. A submitter on replica A
+could not learn the outcome of a job executed on replica B — which is the entire
+reason `PostgresAdmission` exists, and why this was a protocol change.
+
+### The two-phase rule, and why it is not negotiable here
+
+A result must survive a leader change, so it must be **replicated and
+persisted** — it cannot live in a side table. That drags it through three
+formats, and one of them has no room to be polite about it.
+
+`BrokerComplete` is a *replicated command*: every replica decodes every one of
+them. The frame carries **no version byte and no length prefix** — it is
+`[tag u8][fields]` and nothing else — so the per-tag exact-size check IS the
+versioning. Since `fbcd2d63` a frame a node cannot decode is no longer silently
+dropped: `apply_committed` stops without marking it, `last_applied` freezes, and
+the node retries the same entry forever. **Writers before readers is a stalled
+node per un-upgraded replica, not a degraded window.**
+
+So Stage 1 shipped readers for all three formats and wrote nothing new:
+
+| format | reader | writes |
+| --- | --- | --- |
+| index snapshot (`decode_entry`) | `kIndexSnapshotVersionMax = 2` | v1 |
+| WAL `TaskCompleted` (`decode_completed`) | 8 bytes = v1, 12+len = v2 | v1 |
+| replicated `BrokerComplete` (`decode`) | 16 bytes = v1, 20+len = v2 | v1 |
+
+The first Stage-1 commit **claimed the whole stage and delivered half of it** —
+it touched the snapshot reader and left `codec.cppm` and
+`broker_command_codec.cppm` alone. That is recorded rather than quietly fixed
+because the missing half was the dangerous half: the snapshot is the one format
+that already had a version field, and the two that did not are the two where a
+wrong guess is unrecoverable.
+
+**Size is the discriminator, so there is a dead zone, and it must be REFUSED** —
+9..11 bytes for the WAL record, 17..19 for the command body. Reading one as a
+short v2 builds a length out of whatever bytes happen to follow, which is
+indistinguishable from a real one.
+
+**An empty result is encoded as the v1 shape.** An empty result and a v1 record
+are therefore the same bytes: the same fact, written the same way, still
+readable by a binary that predates v2. The consequence is the one that made the
+rollout safe — **the Stage-2 writer flip is inert on a cluster that is not yet
+recording results**, so the writers could roll before anything routed to them.
+
+`BrokerCommandCodecTests` is new, 9 cases. **That format had no test at all**,
+and it is the most dangerous one in the queue.
+
+### The deploy found two toolchain defects, and neither named its cause
+
+Both were latent from the `import std;` conversion and both surfaced on the
+first Stage-1 deploy.
+
+**The build never compiled.** `Dockerfile.queue-node` passed
+`-DCMAKE_CXX_COMPILER=clang++`. sensen resolves the libc++ std module as
+`dirname(dirname(CMAKE_CXX_COMPILER))/share/libc++/v1/std.cppm`, so the
+`/usr/bin/clang++` symlink — pointing at exactly the right compiler — resolved it
+to `/usr/share/libc++/v1`, which does not exist. `std_module_precompile` was
+never declared and every `import std;` in the tree failed with "module 'std' not
+found", naming neither the symlink nor the path arithmetic.
+`backend/Dockerfile` had been fixed for this in `bd11d00`; this file was missed.
+Note that `-DLIBCXX_MODULES_PATH=…` sits on the same command line and sensen
+never reads it — the flag that looks like it configures this is inert.
+
+**Then it failed at the LINK**, on `__cxxabiv1::__vmi_class_type_info`'s vtable,
+reported against `libstdc++.so.6` — which reads as a standard-library mix-up and
+is not one. A from-source libc++ installs `libc++.so` as a **linker script**,
+literally `INPUT(libc++.so.1 -lc++abi -lunwind)`, so the ABI library arrives
+unasked. apt.llvm.org ships a plain symlink to `libc++.so.1`, nothing pulls
+libc++abi in, and `ld` reported the only C++ runtime that *was* reachable
+transitively. Fixed with an explicit `-lc++abi`. The engine image had not hit it
+because it compiles no object that references a C++ ABI symbol directly.
+
+### The deploy script's diagnostic was wrong in both directions
+
+It printed `railway logs --service` output — which replays a dead session's
+scrollback — and the SSL handshake errors it showed were timestamped **three
+hours before** the deployment it was blaming. It then called the failure a
+healthcheck failure, pointing a reader at a container that had never started.
+
+The discriminator is the newest deployment's **`imageDigest`**: absent means no
+image was produced, so no container ran and it is a BUILD failure
+(`railway logs --build <id>`); present means the container started and did not
+stay up (`railway logs --deployment <id>`). Nothing else available there tells
+them apart.
+
+### Stage 2 — writers, and a bound that was wrong before results existed
+
+`TaskBroker::complete(id, token, result)` persists it, `BrokerComplete` carries
+it, `apply_one` applies it, `kIndexSnapshotVersion` 1 → 2.
+
+**The version bump and `encode_entry`'s result append are ONE commit.**
+Mutation-checked: reverting the bump alone fails three tests, two of them
+pre-existing round-trips, because a v1 header over v2 entries mis-parses from the
+second entry onward — the reader stops after the payload, then reads the result's
+length prefix as the next entry's task id. Neither direction is detectable as a
+version problem; both present as a corrupt snapshot.
+
+**The size bound was wrong, and this stage's own test caught it on first run.**
+`task_queue::kMaxPayloadBytes` and `persistence::kMaxPayloadBytes` are both
+64 MiB, but that names the size of the **encoded record**, and the record
+prefixes 12 bytes (WAL) or 21 (replicated command). A result at exactly the old
+bound was accepted at the write and refused at the append — precisely the
+"accepted here, rejected downstream" hazard the bound exists to prevent, off by
+the framing.
+
+The comment on `kMaxPayloadBytes` had claimed a payload of that size "can never
+produce a frame the codec would reject". That was false for enqueue too
+(`encode_enqueued` prefixes 17 bytes), so the latent defect **predates results
+entirely**. Now `kMaxUserBytes = kMaxPayloadBytes - 32` bounds what a CALLER
+supplies, one rule for both fields.
+
+### Stage 3 — the RPC surface
+
+`bytes result = 11` on `Task`, `bytes result = 3` on `CompleteRequest`, and a
+new `GetTask` RPC. `GetTask` returns `grpc::Status::OK` with the outcome in the
+embedded `Status`, per this proto's convention — an in-band code survives
+gRPC-Web/Envoy transcoding unchanged and needs no status-string parsing.
+
+The client's `get_task` returns `expected<optional<Task>, ClientStatus>` and the
+two "no answer" shapes are deliberately distinct: `nullopt` means the server
+answered and has no such task; `unexpected` means the call did not complete. A
+submitter must retry the second and stop on the first — collapsing them turns a
+network blip into "the job vanished".
+
+**`found == false` is not proof the task never existed.** Compaction reclaims
+terminal tasks past their retention window, and a reclaimed task reads
+identically to an unknown one. A submitter must poll inside that window.
+
+**There is deliberately NO `error` field.** The plan called for one. Carrying an
+error string would mean widening `BrokerFail` — a fixed 16-byte replicated
+command with no second shape any deployed node can read — plus the WAL's
+`Failed` and `MovedToDlq` payloads and a snapshot v3: a second full
+readers-first deploy cycle, for a diagnostic the worker already logs. A failure
+is signalled by the task reaching terminal `Dead`, which a reader already sees
+in `state`. **A proto field the replicated log silently dropped would be worse
+than no field — it would read as an answer.**
+
+One shared-code note: `detail::task_from_proto` now exists because the
+proto→native conversion was open-coded inside `lease()`. A hand-copied field
+list is how a field gets added to the wire and quietly dropped coming back —
+nothing fails, it returns a default. `result` was the first field to make that
+concrete.
+
+### Stage 4 — the engine admission path
+
+`set_lease_source()` and `lease_source_` were typed on the **concrete**
+`PostgresLeaseSource`, which made the storage substrate part of the decode
+loop's type rather than a deployment choice. An abstract `LeaseSource` with one
+virtual `fill()` is what made a second source possible at all.
+
+`SgeeLeaseSource` and `PostgresLeaseSource` are structurally identical, and that
+is not duplication for its own sake: the constraint that shaped the first —
+lease on the owner thread, never block there, hand the write-back to a
+short-lived helper — belongs to the **decode loop**, not to Postgres.
+
+`SgeeAdmission` **polls** `GetTask` on a 25 ms interval rather than awaiting,
+because SGEE has no await. That is the same shape the Postgres path degrades to
+whenever its `pg_notify` hint does not arrive — and `inference_queue.cppm` is
+explicit the hint is never load-bearing for correctness — so the two share
+failure modes rather than introducing a second set.
+
+A poll that does not complete keeps retrying until the deadline; a poll
+answering "not found" degrades immediately. A single lost RPC against a cluster
+mid-election is expected and the work may already be running — degrading there
+would run the whole inference twice.
+
+Gate: `test_inference_admission` asserts an unreachable cluster still yields the
+**local** backend's own answer AND yields it **promptly**. A path that degrades
+only after holding a gRPC handler for ninety seconds satisfies the letter of
+"degrade" and none of the point.
+
+### `SGEE_PEERS` means two different things — a third time
+
+The nodes read it and dial **consensus, 50052**. The engine's admission client
+reads the same variable name and dials the **client queue, 50053**. The engine's
+value is therefore:
+
+```
+1=sgee-queue-1.railway.internal:50053,2=...:50053,3=...:50053
+```
+
+Both ports carry the same mTLS credentials — "both ports or neither", since
+protecting consensus while leaving the port that ACCEPTS WORK open would secure
+the vote and not the queue — so the engine needs `SGEE_TLS_CA_CERT_B64` /
+`SGEE_TLS_CERT_B64` / `SGEE_TLS_KEY_B64`. They are all-or-nothing and the client
+logs loudly rather than downgrading to plaintext, because a silent downgrade
+against a cluster requiring client certificates fails as a handshake error that
+looks like a network problem.
+
+### The mixed-version window was exercised on the real cluster
+
+During the Stage-2 roll there was a genuine mixed-version window: node 1 on the
+writer binary, nodes 2 and 3 still on Stage-1 readers. Node 1 restarted at index
+25173 against a leader at 26033, caught up, and converged.
+`last_applied == commit_index` and `tick_errors: 0` on all three throughout.
+
+Be precise about what that proves. Node 1 rejoined as a **follower**, so it
+emitted no v2 commands; the direction exercised was new-reader-reads-old-writer,
+which is the safe one. The dangerous direction is covered **by construction**,
+not by that observation: `encode` emits the v1 shape whenever the result is
+empty, and nothing supplies a result until `INFERENCE_QUEUE=sgee` is set.
+
+### State at the flip
+
+| check | result |
+| --- | --- |
+| all three nodes on the writer binary | SUCCESS |
+| cluster agreement | `last_applied == commit_index == 28981`, one leader |
+| `tick_errors` / `dlq_depth` | 0 / 0 on all three |
+| engine cutover | 6 `model is LOADED` (3 replicas × 2 assistants), after the upload |
+
+`INFERENCE_QUEUE=sgee` and `SGEE_PEERS` were set together with
+`--skip-deploys`, then applied with one `railway redeploy`, so the engine
+restarted once rather than twice with a half-configured window in between.
+
+**Postgres remains writable and is the fallback target** of the degrade path for
+a full deploy cycle. Reverting the promotion is a variable change, not a
+rollback: `INFERENCE_QUEUE=postgres` restores the previous path exactly, and the
+queue-node binaries are compatible in both directions because the writer flip is
+inert once nothing supplies a result.
