@@ -133,9 +133,67 @@ which is restored state. It fixed the writeback failures and did not reset the
 counter, so the +112 survived it. When the real wipe happens, the boot baseline
 is the discriminator; deploy status is not.
 
+## 6. Deploy, wipe, and the convergence proof
+
+Deployed readers-first: Stage 1 to all three nodes, each verified ALIVE via
+`/statusz` rather than via Railway's SUCCESS, then Stage 2 + the id fix to all
+three. Six deploys, no scheduling stalls.
+
+**An idle cluster looked converged and was not.** Immediately after Stage 2, all
+three read identically: `last_applied == commit_index == 38810`,
+`apply_rejections` 121 on every node, `apply_id_mismatches` 0,
+`state_digest 0000000000000000`, `live_tasks 0`. That is exactly the healthy
+signature — and it was agreement on EMPTINESS. An empty live set hashes to zero,
+which is the all-zero agreement `live_tasks` was added to distinguish from a
+strong one. No enqueue had happened since the fix, so the id counters had not
+been exercised at all.
+
+Driving 24 concurrent `ParseOperation`s through the live ingress reversed it:
+
+| | node 1 (leader) | node 2 | node 3 |
+| --- | --- | --- | --- |
+| `apply_id_mismatches` | 0 | **24** | **24** |
+| `live_tasks` | 0 | 16 | 24 |
+| `state_digest` @ 38915 | `0000000000000000` | `1415537e144fd47b` | `6628b34606474b86` |
+| `apply_rejections` | 121 | 137 | 169 |
+
+24 mismatches per follower against 24 requests: EVERY enqueue mismatched. This
+is the residue the fix explicitly does not clean — the followers' `next_task_id_`
+was already offset in their volumes. The leader reads 0 because it predicts from
+its own state and matches itself; the disagreement is only visible on replicas.
+
+Wiped `broker.wal`, `broker.wal.snap`, `raft.wal`, `raft.wal.snap` on the two
+followers, ONE AT A TIME (quorum is two of three), preserving `node.id`. **The
+gate is the boot baseline, not the deploy status** — `Raft baseline: term=2
+is_leader=false leader_hint=none last_applied=0`. Compare with node 1's earlier
+"rebuild" the same day, which booted `term=3550 ... last_applied=34298`: that was
+a redeploy onto the existing volume and reset nothing.
+
+Both followers rebuilt from the leader's snapshot and caught up within one
+polling interval, which also proves the v3 index snapshot round-trips between
+nodes in production and not only in tests.
+
+The same 24-request load then produced:
+
+| | node 1 | node 2 | node 3 |
+| --- | --- | --- | --- |
+| `apply_id_mismatches` | 0 | **0** | **0** |
+| `apply_rejections` | 121 | **121** | **121** |
+| `last_applied` / `commit_index` | 39090 / 39090 | 39090 / 39090 | 39090 / 39090 |
+
+Equal `apply_rejections` across replicas is the healthy state; they were
+121/137/169 before.
+
+**The negative proof needed a second attempt, and the first one was worthless.**
+Checking the engine for degrade warnings returned zero — from a window
+containing NO LOG LINES AT ALL, because `railway logs` returns a bounded tail
+that had not yet reached the load test. A fresh 12-request burst, then a
+re-pull, gave 12 lines in the window and 0 WARN / 0 ERROR in it. **Count the
+lines in the window before believing a zero found in it.**
+
 ## Verification
 
 - `ninja -C backend/build build_tests && ctest --test-dir backend/build` —
   **99/99, 0 failed**, before and after.
 - Production unaffected throughout: `/healthz` `ok`, `Finance/ComputePayment`
-  `-3210.560578012665289866`.
+  `-3210.560578012665289866`, 36/36 concurrent `ParseOperation` HTTP 200.
