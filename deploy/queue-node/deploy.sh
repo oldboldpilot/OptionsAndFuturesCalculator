@@ -83,6 +83,7 @@ stage() {
     # confirms the files nobody was going to lose.
     local required=(
         "backend/Dockerfile.queue-node"
+        "backend/queue-node-entrypoint.sh"
         "backend/CMakeLists.txt"
         "backend/external/SGEE/CMakeLists.txt"
         "backend/external/SGEE/tools/sgee_queue_node.cpp"

@@ -1582,6 +1582,15 @@ target_link_libraries(test_sgee_queue_client PRIVATE logger sgee)
 
 add_test(NAME SgeeQueueClientTest COMMAND test_sgee_queue_client)
 
+# The queue-node entrypoint decides whether the three nodes come up on mutual
+# TLS, on plaintext, or not at all. It is shell, it ships inside the queue-node
+# image, and nothing else covers it -- a half-set trio of SGEE_TLS_*_B64 must
+# refuse rather than quietly serve plaintext. Needs no node, no container and no
+# network: it rewrites the script's exec and staging directory and asserts the
+# DECISION.
+add_test(NAME QueueNodeEntrypointTest
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/queue_node_entrypoint_test.sh)
+
 # The Postgres-backed half of the admission layer: PostgresLeaseSource and
 # PostgresAdmission, exercised through two separate process-local Queue/Pool
 # instances sharing one real Postgres (one submits only, one leases only --

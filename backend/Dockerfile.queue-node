@@ -214,5 +214,17 @@ RUN mkdir -p /data
 # bound to 0.0.0.0 is unreachable by its peers there.
 EXPOSE 8080 50052 50053
 
+# The node reads SGEE_TLS_* as FILE PATHS and a Railway variable is a value, so
+# something has to turn one into the other before the node starts. See the
+# script's own header for why the material arrives base64-encoded and why a
+# half-set trio is fatal here rather than being left to the node.
+#
+# It lives under backend/ rather than deploy/ because deploy/queue-node/deploy.sh
+# stages ONLY backend/ (plus railway.json) into the upload -- a COPY from
+# deploy/ would fail the build several minutes in, with a message naming the
+# file and nothing about the staging list that omitted it.
+COPY backend/queue-node-entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
 ENTRYPOINT []
-CMD ["/app/sgee_queue_node"]
+CMD ["/app/entrypoint.sh"]

@@ -58,6 +58,12 @@ CONSENSUS_PEERS="1=sgee-queue-1.railway.internal:50052,2=sgee-queue-2.railway.in
 ELECTION_TIMEOUT_MS="1500"
 HEARTBEAT_MS="300"
 
+# Mutual-TLS material, produced by deploy/queue-node/gen-tls.sh. Gitignored, and
+# absent by default -- a deployment with no material here is a supported
+# plaintext one, which is what the cluster ran as until certificates existed.
+TLS_DIR="${REPO_ROOT}/config/keys/sgee-tls"
+ENGINE_SERVICE="options-calculator-backend"
+
 ensure_token() {
     if grep -q '^SGEE_QUEUE_TOKEN=' "${ENV_FILE}" 2>/dev/null; then
         return 0
@@ -108,6 +114,45 @@ for n in 1 2 3; do
     printf '%s' "${TOKEN}" | railway variable set \
         --environment "${ENVIRONMENT}" --service "${svc}" \
         --skip-deploys --stdin "SGEE_QUEUE_TOKEN" > /dev/null
+
+    # Mutual TLS, when the material exists. Base64 of the PEM, because the value
+    # crosses a shell, the CLI and a JSON API on the way here and a multi-line
+    # PEM does not survive all three intact. The node's entrypoint decodes these
+    # back to files, since sgee_queue_node's config takes paths -- see
+    # backend/queue-node-entrypoint.sh.
+    #
+    # ALL THREE OR NONE, and the node refuses to boot on a half-set trio. Every
+    # key goes over stdin, never argv.
+    if [ -f "${TLS_DIR}/ca.pem" ]; then
+        printf '%s' "$(base64 -w0 "${TLS_DIR}/ca.pem")" | railway variable set \
+            --environment "${ENVIRONMENT}" --service "${svc}" \
+            --skip-deploys --stdin "SGEE_TLS_CA_CERT_B64" > /dev/null
+        printf '%s' "$(base64 -w0 "${TLS_DIR}/node.pem")" | railway variable set \
+            --environment "${ENVIRONMENT}" --service "${svc}" \
+            --skip-deploys --stdin "SGEE_TLS_CERT_B64" > /dev/null
+        printf '%s' "$(base64 -w0 "${TLS_DIR}/node.key")" | railway variable set \
+            --environment "${ENVIRONMENT}" --service "${svc}" \
+            --skip-deploys --stdin "SGEE_TLS_KEY_B64" > /dev/null
+        echo "[set-vars]   mTLS material set on ${svc}"
+    fi
 done
+
+# The engine is the other end of port 50053. Once the nodes REQUIRE a client
+# certificate, a mirror writer without one fails every write -- and mirror writes
+# are dropped by design, so the symptom is a mirror that silently stops
+# mirroring rather than anything that raises an alarm. It gets the CLIENT
+# certificate, not the node one, so it cannot present itself as a queue node.
+if [ -f "${TLS_DIR}/client.pem" ]; then
+    echo "[set-vars] ${ENGINE_SERVICE} (mirror client credentials)"
+    printf '%s' "$(base64 -w0 "${TLS_DIR}/ca.pem")" | railway variable set \
+        --environment "${ENVIRONMENT}" --service "${ENGINE_SERVICE}" \
+        --skip-deploys --stdin "SGEE_TLS_CA_CERT_B64" > /dev/null
+    printf '%s' "$(base64 -w0 "${TLS_DIR}/client.pem")" | railway variable set \
+        --environment "${ENVIRONMENT}" --service "${ENGINE_SERVICE}" \
+        --skip-deploys --stdin "SGEE_TLS_CERT_B64" > /dev/null
+    printf '%s' "$(base64 -w0 "${TLS_DIR}/client.key")" | railway variable set \
+        --environment "${ENVIRONMENT}" --service "${ENGINE_SERVICE}" \
+        --skip-deploys --stdin "SGEE_TLS_KEY_B64" > /dev/null
+fi
 
 echo "[set-vars] done. Variables set with --skip-deploys; run deploy.sh to roll them out."

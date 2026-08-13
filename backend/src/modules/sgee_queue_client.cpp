@@ -7,7 +7,9 @@ module;
 #include <cstdint>
 #include <cstdlib>
 #include <deque>
+#include <fstream>
 #include <functional>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -42,6 +44,65 @@ namespace {
     const char* raw = std::getenv(name);
     if (raw == nullptr || *raw == '\0') return std::nullopt;
     return std::string{raw};
+}
+
+/** Strict base64 decode. Returns nullopt on ANY malformed input rather than
+ *  decoding what it can: a partially-decoded PEM is not a weaker credential, it
+ *  is an unusable one, and the caller must be able to tell "not configured" from
+ *  "configured wrongly". Whitespace is skipped so a value that picked up a
+ *  newline in transit still decodes. */
+[[nodiscard]] auto base64_decode(std::string_view in) -> std::optional<std::string> {
+    static constexpr std::string_view kAlphabet =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve(in.size() / 4 * 3);
+    std::uint32_t buf = 0;
+    int bits = 0;
+    std::size_t pad = 0;
+    for (const char c : in) {
+        if (c == '\n' || c == '\r' || c == ' ' || c == '\t') continue;
+        if (c == '=') {
+            ++pad;
+            continue;
+        }
+        if (pad != 0) return std::nullopt;  // data after padding
+        const auto idx = kAlphabet.find(c);
+        if (idx == std::string_view::npos) return std::nullopt;
+        buf = (buf << 6) | static_cast<std::uint32_t>(idx);
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out.push_back(static_cast<char>((buf >> bits) & 0xFFU));
+        }
+    }
+    if (pad > 2) return std::nullopt;
+    return out;
+}
+
+/** The PEM behind a `*_B64` content variable, falling back to a path variable.
+ *  See channel_credentials() for why both forms exist. */
+[[nodiscard]] auto env_pem(const char* b64_name, const char* path_name)
+    -> std::optional<std::string> {
+    if (auto encoded = env_string_local(b64_name)) {
+        auto decoded = base64_decode(*encoded);
+        if (!decoded || decoded->empty()) {
+            logger::Logger::getInstance().error(
+                std::string("sgee_queue_client: ") + b64_name +
+                " is set but is not valid base64 -- treating it as unset, which will leave "
+                "this client on plaintext");
+            return std::nullopt;
+        }
+        return decoded;
+    }
+    if (auto path = env_string_local(path_name)) {
+        std::ifstream in(*path, std::ios::binary);
+        if (!in) return std::nullopt;
+        std::string contents((std::istreambuf_iterator<char>(in)),
+                             std::istreambuf_iterator<char>());
+        if (contents.empty()) return std::nullopt;
+        return contents;
+    }
+    return std::nullopt;
 }
 
 [[nodiscard]] auto parse_peers_str(std::string_view raw) -> std::map<std::string, std::string> {
@@ -151,9 +212,66 @@ class SgeeQueueClient::Impl {
         if (it != channels_.end()) {
             return it->second;
         }
-        auto ch = grpc::CreateChannel(addr, grpc::InsecureChannelCredentials());
+        auto ch = grpc::CreateChannel(addr, channel_credentials());
         channels_[addr] = ch;
         return ch;
+    }
+
+    /**
+     * Mutual TLS when the queue nodes require it, plaintext when they do not.
+     *
+     * The queue port (50053) accepts work from anything that can reach it, so
+     * when the cluster turns on mTLS the server side becomes
+     * GRPC_SSL_REQUEST_AND_REQUIRE_CLIENT_CERTIFICATE_AND_VERIFY -- it demands a
+     * client certificate AND checks it. A client still offering
+     * InsecureChannelCredentials is not rejected loudly at a layer anyone
+     * watches: every mirror write simply fails, and mirror writes are dropped
+     * by design (see this module's header), so the symptom is a mirror that
+     * silently stops mirroring. Hence this reads the same all-or-nothing trio
+     * the nodes do.
+     *
+     * ALL-OR-NOTHING, for the same reason it is on the node: a half-set trio
+     * here would fall back to plaintext against a server that now requires a
+     * certificate, which is the configuration most likely to be believed
+     * secure. It is loud instead -- an error log and NO channel credentials
+     * downgrade -- and unset-entirely stays a supported plaintext deployment.
+     */
+    [[nodiscard]] static auto channel_credentials()
+        -> std::shared_ptr<grpc::ChannelCredentials> {
+        // ONE deployment interface for both sides: SGEE_TLS_*_B64 carries the PEM
+        // itself, base64'd so it survives the CLI/shell/JSON path to a Railway
+        // variable in one line. The queue NODE cannot consume it directly --
+        // sgee_queue_node's config takes file PATHS -- so its entrypoint decodes
+        // these to files; this client is our own code and reads them straight.
+        // The path form is still honoured second, for a local run against PEMs
+        // already on disk.
+        const auto ca = env_pem("SGEE_TLS_CA_CERT_B64", "SGEE_TLS_CA_CERT");
+        const auto crt = env_pem("SGEE_TLS_CERT_B64", "SGEE_TLS_CERT");
+        const auto key = env_pem("SGEE_TLS_KEY_B64", "SGEE_TLS_KEY");
+        const int set_count = (ca ? 1 : 0) + (crt ? 1 : 0) + (key ? 1 : 0);
+        if (set_count == 0) {
+            return grpc::InsecureChannelCredentials();
+        }
+        if (set_count != 3) {
+            logger::Logger::getInstance().error(
+                "sgee_queue_client: " + std::to_string(set_count) +
+                " of 3 TLS paths set (SGEE_TLS_CA_CERT, SGEE_TLS_CERT, SGEE_TLS_KEY are "
+                "all-or-nothing) -- staying on plaintext, which will FAIL against a cluster "
+                "that requires client certificates");
+            return grpc::InsecureChannelCredentials();
+        }
+        grpc::SslCredentialsOptions opts;
+        opts.pem_root_certs = *ca;
+        opts.pem_cert_chain = *crt;
+        opts.pem_private_key = *key;
+        if (opts.pem_root_certs.empty() || opts.pem_cert_chain.empty() ||
+            opts.pem_private_key.empty()) {
+            logger::Logger::getInstance().error(
+                "sgee_queue_client: TLS was configured but at least one PEM was unreadable or "
+                "empty -- staying on plaintext");
+            return grpc::InsecureChannelCredentials();
+        }
+        return grpc::SslCredentials(opts);
     }
 
     auto worker_loop(std::stop_token st) -> void {
