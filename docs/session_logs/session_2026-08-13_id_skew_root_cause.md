@@ -197,3 +197,81 @@ lines in the window before believing a zero found in it.**
   **99/99, 0 failed**, before and after.
 - Production unaffected throughout: `/healthz` `ok`, `Finance/ComputePayment`
   `-3210.560578012665289866`, 36/36 concurrent `ParseOperation` HTTP 200.
+
+## 7. Production leader-kill test, 2026-08-14 — and the defect it found
+
+Run to decide whether the queue could be promoted from non-authoritative mirror
+to SYSTEM OF RECORD. The answer is NO, and the test is what established it.
+
+### What was tested
+
+The leader (node 1) was taken out via `railway redeploy` while load ran. Two
+things about that method matter and were learned the hard way:
+
+- **The node is pid 1**, so `kill -9 1` from inside the container is ignored.
+  This is a SIGTERM, i.e. a GRACEFUL shutdown -- strictly gentler than a crash.
+- **`railway redeploy` rebuilds the image before it swaps containers.** The
+  first attempt timed 36 requests against the redeploy COMMAND and measured a
+  fully healthy cluster, because the old leader kept serving for the whole
+  four-minute window. Load must be timed against the deployment reaching
+  DEPLOYING, not against the command.
+
+### Failover itself: clean
+
+Leadership moved 1 -> 3 (term 3670 -> 3685), all three held identical
+`last_applied`, `tick_errors` 0, and all 48 requests (36 steady-state + 12 fired
+into the swap window) returned HTTP 200.
+
+### Recovery: a double-apply that duplicates acknowledged work
+
+The RESTARTED node came back diverged and STAYED diverged -- 36 live tasks and
+48 id mismatches, unchanged across four minutes and ~70 further applied entries,
+while its two peers sat at 0.
+
+```
+Raft baseline: term=3673 is_leader=false last_applied=51421
+DIVERGENCE: applied BrokerEnqueue as id 890 but the leader logged id 854 (total 1)
+```
+
+**+36 on the first post-restart enqueue, and exactly 36 extra live tasks.** Those
+two numbers being equal is the tell: node 1's broker WAL had durably recorded ~36
+enqueues that its persisted Raft `last_applied` did not yet reflect. On recovery
+Raft replayed them, and `TaskBroker::enqueue` is NOT idempotent on replay -- it
+calls `reserve_task_id()` again. So it minted 36 DUPLICATE tasks and left its
+counter permanently +36, which is why every later enqueue mismatched.
+
+Note `apply_rejections` is NOT usable here: it resets at boot, so the restarted
+node's 36 against its peers' 121 says nothing. `live_tasks` is current state
+rather than a counter, and that is what exposed it.
+
+### Why this blocks promotion
+
+Duplicated acknowledged work across a restart. As a mirror with Postgres as the
+system of record it is absorbed -- the engine degrades and the user still gets an
+answer, which is exactly what the 48/48 HTTP 200 shows. As system of record there
+is nothing to reconcile against. And this was the GRACEFUL path; a real crash has
+strictly more room to leave the broker WAL ahead of persisted `last_applied`.
+
+This is the same shape as the previous three defects: two pieces of state that
+must agree, persisted by different mechanisms at different moments -- the lease
+deadline (local clock vs replicated command), the id prediction (applied state vs
+the log), and now the broker WAL vs Raft's `last_applied`.
+
+### Status and what is needed
+
+Node 1 was wiped and rebuilt; all three converge at 51929 with 0 mismatches and
+0 live tasks. Evidence preserved before the wipe.
+
+Blockers, in order:
+
+1. Recover broker state and Raft `last_applied` to ONE consistent point -- either
+   persist them atomically, or make the enqueue apply idempotent so a replayed
+   entry does not mint a new id.
+2. Re-run this test, and add a real SIGKILL. `QueueNodeDurabilityTest` kills a
+   node today and did NOT catch this, so it needs a case where the broker WAL is
+   deliberately ahead of persisted `last_applied` at the moment of death.
+3. Re-run the promotion audit.
+
+**Not yet confirmed in code.** The mechanism is inferred from the boot baseline,
+the +36/36 coincidence and the counters. Confirm against the recovery path before
+fixing, and reproduce it in a test first.
