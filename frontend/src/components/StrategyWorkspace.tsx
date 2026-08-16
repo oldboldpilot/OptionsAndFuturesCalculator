@@ -11,7 +11,6 @@ import PnLMatrix from './PnLMatrix';
 import OptionTicket from './OptionTicket';
 import ExerciseStylePanel from './ExerciseStylePanel';
 import PnLSurface from './PnLSurface';
-import AdSlot from './AdSlot';
 import TermStructure from './TermStructure';
 import { StrategySelector } from './StrategySelector';
 import AssistantPanel from './AssistantPanel';
@@ -177,21 +176,69 @@ export function StrategyWorkspace({
             panel's Bermudan date list has variable height, so it belongs
             here. */}
         <div className="stagger" style={{ ...column, overflowY: 'auto' }}>
-          <OptionTicket />
-          <PositionLegs />
-          <ExerciseStylePanel />
+          {/*
+            `flexShrink: 0` on all three, which is the whole fix for this
+            column.
+
+            It scrolls (`overflowY: auto`), so its panels should stand at their
+            natural height and let the COLUMN move. They were instead the flex
+            default, `0 1 auto`, so the browser compressed them to fit the
+            viewport and the column never had anything to scroll. Measured at
+            1440x900: the ticket was squeezed to 308px against 327px of content
+            and the exercise panel to 330 against 337 — both quietly clipped —
+            while Position was handed 131px total, a 91px body, for a panel
+            whose whole job is to list legs. Every leg added made it worse,
+            because the compression is proportional.
+
+            Position also gets `flex: 1` and a floor: it is the one panel here
+            that grows without bound, so it should absorb spare height when
+            there is some and never fall under roughly three legs when there is
+            not.
+          */}
+          <div style={{ flexShrink: 0, display: 'flex' }}>
+            <OptionTicket />
+          </div>
+          <div style={{ flex: 1, flexShrink: 0, minHeight: 260, display: 'flex' }}>
+            <PositionLegs />
+          </div>
+          <div style={{ flexShrink: 0, display: 'flex' }}>
+            <ExerciseStylePanel />
+          </div>
         </div>
 
         {/* Read the result */}
         <div className="stagger" style={column}>
-          <ProbabilityCurve />
+          {/*
+            The curve takes the leftover, and it is now the LARGEST region in
+            this column rather than the smallest.
+
+            This file's own header says the probability curve is the centre of
+            gravity and "gets the largest region rather than being demoted to a
+            panel in a split view". The fractions below contradicted it: with
+            the matrix at 40% and the surface at 30%, the curve got whatever
+            remained, which measured 219px against their 314 and 235 at
+            1440x900. The comment described the intent and the numbers
+            described a split view.
+
+            `minHeight` rather than a fraction, so a short viewport shrinks the
+            two panels below before it starts eating the plot — a distribution
+            under about 240px stops being readable as a shape at all.
+          */}
+          <div style={{ flex: 1, minHeight: 240, display: 'flex' }}>
+            <ProbabilityCurve />
+          </div>
           {/* The matrix wants width — a dozen date columns plus the price axis —
               so it lives in the widest column and scrolls internally rather
-              than forcing the page to scroll sideways. */}
-          <div style={{ flex: '0 0 40%', minHeight: 0, display: 'flex' }}>
+              than forcing the page to scroll sideways. It gives up 8 points of
+              height for the curve above; it already scrolls internally, so the
+              cost is rows per screen rather than reachable content. */}
+          <div style={{ flex: '0 0 32%', minHeight: 0, display: 'flex' }}>
             <PnLMatrix />
           </div>
-          <div style={{ flex: '0 0 30%', minHeight: 0, display: 'flex' }}>
+          {/* 26%, down from 30%. This panel is OFF by default and renders a
+              one-line message until someone turns it on, so it was the most
+              expensive idle space on the page. */}
+          <div style={{ flex: '0 0 26%', minHeight: 0, display: 'flex' }}>
             <PnLSurface />
           </div>
         </div>
@@ -199,13 +246,28 @@ export function StrategyWorkspace({
         {/* Reference: the chain, at full height, opened at the money */}
         <div className="stagger" style={column}>
           <TermStructure />
-          <OptionChain />
+          {/*
+            The chain takes the leftover height of this column, which is the
+            point of giving it a column at all.
+
+            There was a 300x250 `AdSlot size="rectangle"` below the metrics
+            panel here. It was not an ad: NEXT_PUBLIC_ADSENSE_SLOT_RECTANGLE is
+            unset, so AdSlot fell to its unconfigured branch and painted a
+            dashed placeholder box — no <ins>, no slot id, nothing served and
+            nothing earned. Measured at 1440x900 it held 250px while the chain's
+            own scrollable body had 204px, showing about 7 of 126 strikes
+            against a content height of 3564px. The largest single block in the
+            column was an empty box.
+
+            Removing it costs no revenue. The real unit is the multiplex below
+            the workspace, which fills normally.
+          */}
+          <div style={{ flex: 1, minHeight: 260, display: 'flex' }}>
+            <OptionChain />
+          </div>
           <div style={{ flex: '0 0 30%', minHeight: 0, display: 'flex' }}>
             <StrategyMetrics />
           </div>
-          {/* Reserved from first paint, so an ad arriving late cannot shove the
-              chain's buy and sell buttons out from under the cursor. */}
-          <AdSlot size="rectangle" />
         </div>
       </main>
     </div>
