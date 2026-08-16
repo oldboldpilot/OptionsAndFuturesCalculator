@@ -255,6 +255,27 @@ To dominate organic search results without relying on paid acquisition:
 3. **Structured Data JSON-LD**: Extensive `SoftwareApplication` and `FinancialProduct` schema markup to win Google Rich Snippets.
 4. **Performance Targets**: 100/100 Lighthouse score across Core Web Vitals to ensure top Google ranking.
 
+### 6.1 As built (2026-08-16), and one constraint the plan above does not state
+
+The route hierarchy is **two pages per strategy, 26 strategies**, not thousands
+of generated permutations, and `/ticker/<symbol>/…` does not exist:
+
+| route | intent | content |
+| --- | --- | --- |
+| `/calculator/<slug>` | "iron condor **calculator**" | the tool |
+| `/guides/<slug>` | "**what is** an iron condor" | the article |
+
+They are cross-linked in both directions and both are in `sitemap.xml`.
+
+**The constraint, which is not negotiable and is enforced at build time:**
+AdSense flagged this site on 2026-08-16 for Google-served ads on screens without
+publisher content, because all 26 calculator pages were identical to the word.
+Ads and publisher content must live on the same screens — so the guide pages
+carry the advertising and the calculator, widget and policy pages carry none.
+Adding a generated route means deciding which of those two it is.
+`frontend/scripts/check-export.mjs` fails `npm run build` otherwise. See
+CLAUDE.md, "Advertising and the publisher-content policy".
+
 ---
 
 ## 7. Governance, Repository & Code Review Policies

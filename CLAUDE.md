@@ -1046,8 +1046,7 @@ What was done, and the constraints on changing any of it:
 
 - `frontend/src/content/strategy-guides.ts` carries a distinct guide per slug —
   construction, closed-form max profit / max loss / breakeven, Greeks, when to
-  use, failure modes, a worked example and FAQs. Live pages now run **1251–1512
-  words with 26 of 26 distinct content hashes**. Every payoff identity is stated
+  use, failure modes, a worked example and FAQs. Every payoff identity is stated
   at expiry, **per share**, ×100 for one equity contract; the worked examples are
   arithmetic on the identity printed directly above them.
 - **A template with a substituted name would reproduce the violation in longer
@@ -1060,10 +1059,43 @@ What was done, and the constraints on changing any of it:
 - `page.tsx` became a **server** component. This is a static export, so anything
   a crawler or a reviewer reads must be in the HTML the CDN serves rather than
   assembled after hydration.
-- The workspace is `height: 100vh`, so the article opens exactly one viewport
-  down. `guideHref` renders the only above-the-fold cue that the page continues,
-  and an anchor is used deliberately: every column scrolls internally, so a wheel
-  gesture over a panel scrolls the panel, not the document.
+
+### The two intents are two screens, and the ads follow the writing
+
+The first fix put the article **below** the calculator on the same URL. Later the
+same day the site was restructured onto tabs (`SiteNav`: Calculator | Guides),
+which is the shape mortgagefvcalculator.com uses:
+
+| route | carries | Google ads |
+| --- | --- | --- |
+| `/`, `/calculator/<slug>`, `/widget` | the tool | **none** |
+| `/guides`, `/guides/<slug>` | the writing | yes |
+| `/privacy`, `/terms` | policy documents | none |
+
+**Moving the prose off the calculator screens while leaving the ads on them
+would have recreated the violation**, so `/` and `/calculator/*` joined
+`NO_AD_ROUTES`. What settled that direction was measuring the reference rather
+than reasoning about it: **mortgagefvcalculator.com serves zero AdSense** — no
+`adsbygoogle` anywhere on it — which is precisely why its own calculator screen
+can be 730 words of pure interface. Ad-free is what makes a text-light tool
+screen legitimate.
+
+`/calculator/long-call` and `/calculator/iron-condor` are therefore **byte
+identical again at 763 words**, which was the original violation and is now
+correct: they are the tool and they carry no ads. `check-export.mjs` fails the
+build if that stops being true.
+
+The guides run **767 (protective-put) to 954 (long-call) words**, 26 of 26
+distinct — *more* real content per ad-serving page than the 1251–1512 the
+combined pages measured, because that figure was ~750 words of UI vocabulary
+plus the article.
+
+Each strategy has two URLs on purpose: "iron condor calculator" wants the tool
+and "what is an iron condor" wants the article. Both are in `sitemap.xml` and
+each links to the other — `guideHref` renders "How this strategy works →" in the
+workspace header, and every guide links back with "Price a … on live market
+data →". `check-export.mjs` asserts both directions, because a split that buries
+one half is worse than no split.
 
 **`NO_AD_ROUTES` must live in a plain module — `frontend/src/config/ad-routes.ts`
 — and never in a `'use client'` one.** It sat in `AdSlot.tsx` for one build and
@@ -1076,18 +1108,29 @@ if(undefined.some(function(r){ ... })){ ...pauseAdRequests=1 }
 A server component importing a value out of a client module receives a
 **client-reference proxy**, so `JSON.stringify` returned the literal `undefined`.
 The guard then threw a TypeError while `<head>` was still parsing,
-`pauseAdRequests` was never set, and Auto Ads would have served on all three
-protected routes — **strictly worse than before, because `/widget` had been
-correctly excluded.** Nothing in the source looked wrong and no unit test could
-see it: a test importing the module directly always gets the real array.
+`pauseAdRequests` was never set, and Auto Ads would have served on every
+protected route — three at the time, five now — **strictly worse than before,
+because `/widget` had been correctly excluded.** Nothing in the source looked
+wrong and no unit test could see it: a test importing the module directly always
+gets the real array.
 
 That is why `frontend/scripts/check-export.mjs` exists and why `npm run build`
-runs it. It asserts the **emitted bytes**: the guard is present, well-formed and
-free of `undefined`; every ad-serving page clears a 1000-word floor (set above
-the 753 that was flagged, so passing requires prose rather than more interface);
-no two strategy pages render identical text; the home page links all 26; and
-every JSON-LD block parses. Both directions are mutation-checked — duplicating a
-page and re-introducing the `undefined` guard each fire it by name.
+runs it. It asserts the **emitted bytes**: the guard is present, well-formed,
+free of `undefined` and names all five routes; **no tool or policy page carries
+an ad unit**; every ad-serving page clears a word floor; no two guides render
+identical text; the two intents are cross-linked in both directions; and every
+JSON-LD block parses. Both directions are mutation-checked — duplicating a page
+and re-introducing the `undefined` guard each fire it by name.
+
+**That floor is 600, down from 1000, and the number moved because what it
+measures changed — not to make a failing check pass.** The 1000 was set when an
+ad-serving page was the calculator *with* the article below it, so roughly 750 of
+those words were interface and it only ever demanded ~250 words of prose. The
+guides are now the article alone, 767–954 words of which every one is publisher
+content, against a flagged baseline of 753 words that contained almost none. The
+floor sits below the thinnest real guide and far above any stub. Both figures are
+recorded in the script's own comment, because a moved threshold with no stated
+reason is indistinguishable from a moved goalpost.
 
 Two suppression points enforce one rule and **both** are required.
 `AdSlot` covers manual units; the inline `pauseAdRequests` script in the root
@@ -1106,6 +1149,60 @@ before concluding an upload was missed.
 
 `SponsoredBrokers` is unaffected throughout: it is this site's own affiliate
 markup, not Google-served, so the policy does not reach it.
+
+## Theme tokens and the workspace layout
+
+Both were changed on 2026-08-16 and neither is derivable from reading the code
+that consumes them.
+
+**The green is mortgagefvcalculator's `#008154`, on both themes.** The accent
+tokens already matched MFC exactly before this; the divergence a viewer actually
+saw was elsewhere, and finding it took measuring which token paints what:
+
+- **`--color-profit` paints 265 elements to `--color-accent`'s 23.** "The green
+  is too light" is therefore a statement about the *profit* token — changing the
+  accent alone would have altered almost nothing on screen. Both moved, plus
+  `--color-call-tint` and `--color-atm-tint`, which had the old mint baked into
+  their `rgba()` literals.
+- **`#008154` is 3.83:1 on the dark ground — below AA's 4.5:1 for body copy.**
+  Accepted knowingly, for chips and badges only, which is why `--color-profit`
+  exists as a separate token from the text colours rather than being reused for
+  prose.
+- **A consequence, unresolved and flagged to the owner:** on the dark theme gains
+  now read darker than losses, because `--color-loss` stayed bright. Rebalancing
+  is a one-line change nobody has asked for yet.
+
+**lightningcss drops a custom property that nothing USES, and the rule is use —
+not value.** `--rgb-profit` and `--rgb-loss` were declared in `:root` and read by
+nothing after the body wash moved to `--rgb-accent`; both vanished from the built
+CSS, in both blocks. The tempting explanation — "the values were identical across
+the two themes so it deduplicated" — is disproved by `--color-profit-dim`, which
+is `#00764c` dark and `#00603e` light and was dropped just the same. The practical
+consequence: **the body wash must interpolate `var(--rgb-accent)` and never a
+literal**, or the gradient stops tracking the theme while every token still looks
+right in the source.
+
+**`--nav-h` is declared once (`2.25rem`) and consumed twice** — `SiteNav` sets its
+own height from it, `StrategyWorkspace` is `calc(100vh - var(--nav-h))`.
+Hardcoding either gives a workspace exactly one tab-bar too tall on a shell that
+hides its own vertical overflow, so the bottom panel of every column is clipped
+silently.
+
+**A panel in a scrolling column needs `flexShrink: 0`.** Column 2 sets
+`overflowY: auto` but its panels were the flex default `0 1 auto`, so the browser
+compressed them to fit instead of letting the column scroll — measured at
+1440×900 the ticket was squeezed to 308px against 327px of content and Position
+was handed a 91px body. Nothing overflowed and nothing scrolled; the content was
+simply cut. Every leg added made it worse, because the compression is
+proportional.
+
+**The 300×250 `AdSlot` in the chain column was never an ad.**
+`NEXT_PUBLIC_ADSENSE_SLOT_RECTANGLE` is unset, so `AdSlot` fell to its
+unconfigured branch — no `<ins>`, no slot id, a dashed placeholder — while
+holding 250px in a column where the chain's own scrollable body had 204px and
+showed 7 of 126 strikes. Removing it cost no revenue and roughly doubled the
+chain. Measured after: chain body 204 → **462px**, probability distribution
+180 → **274px**, Position 131 → **260px**.
 
 ## Features & Capabilities
 
