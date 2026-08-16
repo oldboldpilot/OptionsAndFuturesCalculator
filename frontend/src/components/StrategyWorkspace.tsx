@@ -90,7 +90,11 @@ export function StrategyWorkspace({
       style={{
         display: 'flex',
         flexDirection: 'column',
-        height: '100vh',
+        // Minus the site tab bar above, which is outside this component. At a
+        // flat 100vh the workspace would be exactly --nav-h too tall and the
+        // bottom panel of every column would be clipped by that much — on a
+        // shell that hides its own vertical overflow, silently.
+        height: 'calc(100vh - var(--nav-h))',
         overflowX: 'auto',
         overflowY: 'hidden',
       }}
@@ -119,12 +123,12 @@ export function StrategyWorkspace({
             {heading}
           </h1>
           {/*
-            The only thing on the first screen that says the page continues.
-            This shell is `height: 100vh`, so the article below opens exactly
-            one viewport down with no visual hint above the fold that it is
-            there. An anchor also works regardless of where the pointer is:
-            every column here scrolls internally, so a wheel gesture over a
-            panel scrolls that panel rather than the document.
+            The route from the tool to the writing. It used to be a `#guide`
+            anchor into the same document; the article now has its own page, so
+            this is a real link and the arrow points sideways rather than down.
+            It is also the only crawlable path from a calculator page to its
+            guide, which is what keeps the two intents connected now that they
+            are separate URLs.
           */}
           {guideHref && (
             <a
@@ -136,7 +140,7 @@ export function StrategyWorkspace({
                 whiteSpace: 'nowrap',
               }}
             >
-              How this strategy works ↓
+              How this strategy works →
             </a>
           )}
         </div>

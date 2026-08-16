@@ -30,7 +30,27 @@
  *   screens as ineligible. They are also the pages a reviewer opens first when
  *   checking whether a site discloses its advertising and cookie use.
  */
-export const NO_AD_ROUTES = ['/widget', '/privacy', '/terms'] as const;
+export const NO_AD_ROUTES = [
+  // The tool screens. They carry the calculator and no publisher content, which
+  // is exactly the shape that got this site flagged — so they carry no Google
+  // ads either. That is not a workaround, it is the structure the reference
+  // site uses: mortgagefvcalculator.com's own calculator page is 730 words of
+  // pure interface and serves ZERO AdSense (measured 2026-08-16, no
+  // `adsbygoogle` anywhere in the document), monetising instead through the
+  // hand-built sponsored modules that are not Google-served.
+  //
+  // Advertising lives on /guides and /guides/<slug>, which carry the written
+  // material. Content and ads on the same screens; neither on their own.
+  //
+  // `'/'` matches only the exact home path: the check is
+  // `pathname === route || pathname.startsWith(route + '/')`, and `'//'` never
+  // prefixes a real path, so this does not blanket the whole site.
+  '/',
+  '/calculator',
+  '/widget',
+  '/privacy',
+  '/terms',
+] as const;
 
 /**
  * Shared by the two enforcement points that must agree: `AdSlot` (manual units)

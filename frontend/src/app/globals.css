@@ -172,6 +172,14 @@
   --text-base: 1rem;      /* 14px — section headings          */
   --text-lg: 1.25rem;      /* 17px — the spot price            */
 
+  /* Height of the site tab bar. Declared once here because two places must
+     agree on it exactly: SiteNav, which is that tall, and StrategyWorkspace,
+     which is `calc(100vh - var(--nav-h))`. Hardcoding it in either place gives
+     a workspace that is a few pixels too tall or too short, and on a shell
+     pinned to the viewport that shows up as a clipped bottom panel rather than
+     as an obvious mistake. Not themed. */
+  --nav-h: 2.25rem;
+
   --radius-sm: 3px;
   --radius: 6px;
   --radius-lg: 8px;

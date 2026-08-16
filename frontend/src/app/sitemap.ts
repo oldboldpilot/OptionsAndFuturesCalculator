@@ -42,13 +42,30 @@ export default function sitemap(): MetadataRoute.Sitemap {
       changeFrequency: 'weekly',
       priority: 1,
     },
-    // The strategy pages are the substance of the site and the reason anyone
-    // arrives from a search.
-    ...STRATEGY_SLUGS.map((slug) => ({
-      url: `${base}/calculator/${slug}`,
+    // The Guides index. Higher priority than any single guide because it is
+    // the hub every one of them links back to.
+    {
+      url: `${base}/guides`,
       changeFrequency: 'weekly' as const,
-      priority: 0.8,
-    })),
+      priority: 0.9,
+    },
+    // Two pages per strategy, deliberately, because they answer two different
+    // searches: "iron condor calculator" wants the tool and "what is an iron
+    // condor" wants the article. They were one page until 2026-08-16, which
+    // meant twenty-six calculator screens rendering identically apart from a
+    // heading. Both are listed and both are cross-linked.
+    ...STRATEGY_SLUGS.flatMap((slug) => [
+      {
+        url: `${base}/calculator/${slug}`,
+        changeFrequency: 'weekly' as const,
+        priority: 0.8,
+      },
+      {
+        url: `${base}/guides/${slug}`,
+        changeFrequency: 'monthly' as const,
+        priority: 0.7,
+      },
+    ]),
     {
       url: `${base}/privacy`,
       changeFrequency: 'yearly',

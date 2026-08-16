@@ -39,6 +39,7 @@ const fraunces = Fraunces({
 
 import { branding } from "@/config/branding";
 import { SiteStructuredData } from "@/components/StructuredData";
+import SiteNav from "@/components/SiteNav";
 import AdSlot from "@/components/AdSlot";
 // From the plain config module, NOT from AdSlot. AdSlot is `'use client'`, and
 // a server component importing a value out of a client module receives a
@@ -224,6 +225,13 @@ export default function RootLayout({
         />
       </head>
       <body>
+        {/*
+          Site tabs, above everything. Slim by design: the calculator below is
+          pinned to the viewport, so every pixel here comes out of the strike
+          ladder. It declares its height as --nav-h and the workspace subtracts
+          exactly that variable, so the two cannot drift apart.
+        */}
+        <SiteNav />
         <div id="root-container">
           {children}
         </div>

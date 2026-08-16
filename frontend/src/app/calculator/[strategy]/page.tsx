@@ -1,10 +1,8 @@
 import React from 'react';
 import { Metadata } from 'next';
 import StrategyWorkspace from '../../../components/StrategyWorkspace';
-import AdSlot from '@/components/AdSlot';
 import { branding } from '@/config/branding';
-import { StrategyStructuredData, FaqStructuredData } from '@/components/StructuredData';
-import StrategyGuide from '@/components/StrategyGuide';
+import { StrategyStructuredData } from '@/components/StructuredData';
 import { getStrategyGuide } from '@/content/strategy-guides';
 
 // Shared with the sitemap, so the pages exported and the pages advertised to
@@ -67,12 +65,19 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
 }
 
 /**
- * Per-strategy landing page.
+ * Per-strategy calculator page.
  *
- * Shares the workspace with the home route so there is exactly one calculator
- * UI to maintain. The previous version rendered a separate glassmorphism
- * dashboard whose probability panel was hardcoded to `mean={100}
- * stdDev={15}` — a distribution for an instrument that does not exist.
+ * The TOOL, and only the tool. The written guide that used to sit below this
+ * workspace now lives at `/guides/<slug>`, which is where the advertising went
+ * with it — these screens are in NO_AD_ROUTES and serve none, exactly as
+ * mortgagefvcalculator.com's own calculator page does.
+ *
+ * That split is what makes both pages honest. One page trying to be a tool and
+ * an article was neither: all twenty-six rendered identically apart from a
+ * heading, which is what "ads on screens without publisher-content" names.
+ * Now the intents are separate and cross-linked — "iron condor calculator"
+ * lands here, "what is an iron condor" lands on the guide, and each links to
+ * the other.
  */
 export default async function StrategyCalculatorPage({ params }: Props) {
   const resolvedParams = await params;
@@ -85,12 +90,7 @@ export default async function StrategyCalculatorPage({ params }: Props) {
     resolvedParams.strategy.startsWith('futures-') ||
     resolvedParams.strategy === 'covered-futures-call';
 
-  // The written guide for this structure. Every slug in STRATEGY_SLUGS has one
-  // and a build-time check enforces that, but this stays a lookup rather than a
-  // non-null assertion: a slug added to the list without a guide should render
-  // a page with no article, not throw during the static export and take the
-  // whole build down.
-  const guide = getStrategyGuide(resolvedParams.strategy);
+  const hasGuide = Boolean(getStrategyGuide(resolvedParams.strategy));
 
   return (
     <>
@@ -99,32 +99,13 @@ export default async function StrategyCalculatorPage({ params }: Props) {
         name={`${strategyName}${/futures/i.test(strategyName) ? '' : isFutures ? ' Futures' : ' Options'} Calculator`}
         description={`Model the profit, loss and Greeks of ${/^[aeiou]/i.test(strategyName) ? 'an' : 'a'} ${strategyName} strategy on live market data.`}
       />
-      {guide && <FaqStructuredData faqs={guide.faqs} />}
       <StrategyWorkspace
         heading={`${strategyName} Calculator`}
-        // The workspace is pinned to the viewport height, so the article below
-        // it starts one full screen down. Without a link nothing on the first
-        // screen says the page continues, and the content this page exists to
-        // carry would go unread -- which is the same outcome as not having it.
-        guideHref={guide ? '#guide' : undefined}
+        // A real URL now, not the `#guide` anchor: the article moved to its own
+        // page, so this is the crawlable link between the two intents rather
+        // than a jump down the same document.
+        guideHref={hasGuide ? `/guides/${resolvedParams.strategy}` : undefined}
       />
-
-      {guide && <StrategyGuide guide={guide} />}
-      {/*
-        In-article unit, on the strategy pages rather than in the root layout.
-
-        These are the pages search sends people to, and they are the only ones
-        that read as an article about one subject. The home page already carries
-        the multiplex grid; stacking a second manual unit there would put two ad
-        blocks in a row under the workspace.
-
-        Below the workspace, never above it: this format sizes itself on arrival,
-        and anything that changes height above a strike ladder moves the buy and
-        sell buttons under the cursor.
-      */}
-      <div style={{ maxWidth: '78rem', margin: '0 auto', padding: '0 1rem 2rem' }}>
-        <AdSlot size="in-article" label="Sponsored" />
-      </div>
     </>
   );
 }

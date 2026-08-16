@@ -142,9 +142,10 @@ export function SiteGuide() {
         Strategy guides
       </h2>
       <p style={p}>
-        Each page below prices one structure and explains it: how it is built, the closed-form
-        maximum profit, maximum loss and breakeven, how it behaves before expiry, and the specific
-        ways it goes wrong.
+        Each guide below explains one structure: how it is built, the closed-form maximum profit,
+        maximum loss and breakeven, how it behaves before expiry, and the specific ways it goes
+        wrong. Every one links through to the calculator, so you can price the structure on live
+        quotes once you have read how it behaves.
       </p>
 
       {GROUPS.map((group) => (
@@ -171,7 +172,10 @@ export function SiteGuide() {
               return (
                 <li key={slug}>
                   <Link
-                    href={`/calculator/${slug}`}
+                    // The GUIDE, not the calculator. This index is the Guides
+                    // tab, so a card here opens the article; each article then
+                    // carries its own link into the tool.
+                    href={`/guides/${slug}`}
                     style={{
                       display: 'block',
                       padding: '0.625rem 0.75rem',
