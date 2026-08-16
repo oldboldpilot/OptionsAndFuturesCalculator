@@ -54,29 +54,87 @@
      --destructive. Borrowing the brand for profit is deliberate: on a payoff
      chart the green line is the subject of the page, so the identity colour
      and the "this made money" colour should not be competing hues. */
-  --color-profit: #2dc08e;
-  --color-profit-dim: #1a7a58;
+  /* The same #008154 as the accent, so this theme has ONE green rather than a
+     brand green and a separate P&L green. Left at the mint #2dc08e it would
+     not have mattered how the accent was set: --color-profit has far more
+     consumers here (.profit, .chip-live, .dot, the P&L tint ramp, the
+     probability fill, the payoff bars, the chain's CALLS header), and a count
+     of painted elements on this theme put it at 265 against the accent's 23.
+     "Darken the green" is not delivered by the token nobody looks at.
+
+     The cost, stated because it is real: 3.83:1 against this ground, so
+     profit-coloured 11px figures sit under AA's 4.5:1. The gain/loss reading
+     is also now asymmetric — losses stay at the bright #f04c55 while gains are
+     muted — which is a consequence of matching one colour rather than
+     rebalancing the pair. */
+  --color-profit: #008154;
+  /* #00764c rather than the light theme's #00603e, for the reason given on
+     --color-accent-dim: a "dim" on this ground has a floor, and #00603e is
+     2.46:1 against it. */
+  --color-profit-dim: #00764c;
   --color-loss: #f04c55;
   --color-loss-dim: #a3262e;
   --color-flat: #777165;
 
-  /* Raw channels, for building rgba() ramps in the P&L grid */
-  --rgb-profit: 45, 192, 142;
-  --rgb-loss: 240, 76, 85;
+  /*
+   * --rgb-profit / --rgb-loss were here and are gone. They lost their last
+   * consumer when the body wash moved to --rgb-accent — nothing else builds an
+   * rgba() ramp, because the P&L grid and the chips use color-mix on
+   * --color-profit — and an unconsumed custom property does not reliably
+   * survive the build.
+   *
+   * The first version of this note blamed identical values across the two
+   * theme blocks. That was wrong and the counter-example is directly below:
+   * --color-profit-dim is #00764c here and #00603e on light, and the built
+   * chunk still carries only the `[data-theme=light]` one. The rule is USE,
+   * not value — lightningcss keeps --color-accent-dim in both blocks because
+   * something reads it, and drops the base-block copy of these because nothing
+   * does.
+   *
+   * Nothing broke, because nothing reads them. But the next person to write
+   * `rgba(var(--rgb-profit), .1)` would get a value that resolves on one theme
+   * and silently to nothing on the other, which reads as a theme bug and is
+   * not one. Deleted rather than left as bait.
+   */
 
   /* --- Accents ---------------------------------------------------------
      Accent is the brand. The remaining three follow the source's chart ramp
      (hues 235/285/85) so a multi-series plot stays in one system. */
-  --color-accent: #2dc08e;
-  --color-accent-dim: #1f9a70;
+  /* mortgagefvcalculator.com's DARK green, oklch(52% .14 165), on this theme
+     too — one brand green across both themes and both sites.
+
+     That site does NOT do this: it swaps its --brand up to oklch(72% .14 165)
+     in dark mode so the green stays legible on a near-black ground. Using the
+     52% green here is a deliberate choice to match the colour rather than the
+     strategy, and it costs contrast: #008154 on #0b121a is 3.83:1, which
+     clears the 3:1 bar for UI components and large text but is under AA's 4.5:1
+     for body copy. Accepted for chips and badges; it is why --color-profit
+     below does NOT follow it. */
+  --color-accent: #008154;
+  /* NOT #00603e, the light theme's dim. On this ground that is 2.46:1 and
+     fails even the 3:1 UI floor, so button borders and the focus ring would
+     effectively vanish. #00764c is 3.31:1 against the ground and still carries
+     white label text at 5.68:1. A "dim" on a dark theme has a floor that the
+     same token on paper does not. */
+  --color-accent-dim: #00764c;
+  /* Raw channels for the background wash. Bound to the ACCENT rather than to
+     --rgb-profit: the wash is brand identity, and profit is a P&L semantic
+     that has to stay readable independently. They happen to be equal on the
+     light theme and deliberately differ here. */
+  --rgb-accent: 0, 129, 84;
   --color-violet: #9794e0;
   --color-cyan: #57afe0;
   --color-warn: #e0af3b;
 
   /* --- Option-side tints --- */
-  --color-call-tint: rgba(45, 192, 142, 0.08);
+  /* Brand green, at the alphas that hold these tints' existing WEIGHT over the
+     #111921 panel — the darker green shifts a dark ground far less per unit of
+     alpha, so 0.08 -> 0.131 and 0.13 -> 0.212 both land within 0.01 ΔE of what
+     the mint produced. Left at 0.08/0.13 the call and ATM rows would have all
+     but disappeared. */
+  --color-call-tint: rgba(0, 129, 84, 0.131);
   --color-put-tint: rgba(240, 76, 85, 0.08);
-  --color-atm-tint: rgba(45, 192, 142, 0.13);
+  --color-atm-tint: rgba(0, 129, 84, 0.212);
 
   /* --- Elevation --- */
   --shadow-panel: 0 1px 2px rgba(0, 0, 0, 0.30), 0 6px 18px -8px rgba(0, 0, 0, 0.6);
@@ -88,9 +146,13 @@
      the same alpha is not the same STRENGTH on the two grounds: a wash over
      near-black lifts it gently, while the identical figure over warm paper
      reads as a tinted page. Measured in OKLCH ΔE against each theme's own
-     ground, these two pairs land within 0.1 of each other. */
-  --wash-strong: 0.08;   /* ΔE 5.26 over #0b121a */
-  --wash-soft: 0.05;     /* ΔE 3.31 over #0b121a */
+     ground, these two pairs land within 0.1 of each other.
+
+     Raised from 0.08/0.05 when the wash moved from the mint to the 52% brand
+     green: a darker green over a dark ground shifts it far less per unit of
+     alpha, so holding the same ΔE takes more of it. */
+  --wash-strong: 0.13;   /* ΔE 5.26 over #0b121a — the mint's old weight */
+  --wash-soft: 0.08;     /* ΔE 3.31 over #0b121a — likewise */
 
   /* --- Type ------------------------------------------------------------
      The three faces mortgagefvcalculator.com sets. Fraunces is a display
@@ -164,12 +226,13 @@
   --color-loss-dim: #9c1e1d;
   --color-flat: #747b83;
 
-  --rgb-profit: 0, 129, 84;
-  --rgb-loss: 204, 40, 39;
+  /* No --rgb-profit / --rgb-loss here either; see the note in the dark block. */
 
   /* One accent, doing real work: section rules, ATM, focus, the primary action. */
   --color-accent: #008154;
   --color-accent-dim: #00603e;
+  /* Same green as the dark theme's accent — one brand colour across both. */
+  --rgb-accent: 0, 129, 84;
   --color-violet: #584fa3;
   --color-cyan: #006c98;
   --color-warn: #a96b00;      /* assumptions only */
@@ -217,19 +280,24 @@ body {
      unrelated hues washing the ground was what made the previous theme read
      as "a dark UI" instead of as this product.
 
-     `var(--rgb-profit)`, NOT a literal. These two lines hardcoded
-     `45, 192, 142` — the dark theme's mint — and `body` sits outside both
-     theme blocks, so the light theme (which is the default) painted its whole
-     ground in a green at oklch 72% while every token on it, and every green on
-     mortgagefvcalculator.com, is oklch 52% #008154. It was the largest green
-     surface on the page and the only one that did not follow the theme.
+     `var(--rgb-accent)`, NOT a literal. These two lines hardcoded
+     `45, 192, 142` — the mint — and `body` sits outside both theme blocks, so
+     every theme painted its whole ground in a green at oklch 72% regardless of
+     its own palette. On the light theme, which is the default, that was twenty
+     lightness points lighter than #008154, which is every other green on it.
+     It was the largest green surface on the page and the only one that did not
+     follow the theme.
+
+     Bound to --rgb-ACCENT rather than --rgb-profit. The wash is brand
+     identity; profit is a P&L semantic that must stay readable on its own
+     terms, and on the dark theme the two are deliberately different colours.
 
      The alphas are themed for the same reason: see --wash-strong. */
   background:
     radial-gradient(1100px 620px at 12% -12%,
-      rgba(var(--rgb-profit), var(--wash-strong)), transparent 62%),
+      rgba(var(--rgb-accent), var(--wash-strong)), transparent 62%),
     radial-gradient(900px 520px at 92% 4%,
-      rgba(var(--rgb-profit), var(--wash-soft)), transparent 60%),
+      rgba(var(--rgb-accent), var(--wash-soft)), transparent 60%),
     var(--color-base-900);
   background-attachment: fixed;
   color: var(--color-ink-200);
