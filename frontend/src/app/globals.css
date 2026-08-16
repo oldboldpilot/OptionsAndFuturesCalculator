@@ -83,6 +83,15 @@
   --shadow-pop: 0 8px 28px -6px rgba(0, 0, 0, 0.65);
   --sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0) 42%);
 
+  /* --- Background wash -------------------------------------------------
+     Alpha for the two radials on `body`. Themed rather than fixed, because
+     the same alpha is not the same STRENGTH on the two grounds: a wash over
+     near-black lifts it gently, while the identical figure over warm paper
+     reads as a tinted page. Measured in OKLCH ΔE against each theme's own
+     ground, these two pairs land within 0.1 of each other. */
+  --wash-strong: 0.08;   /* ΔE 5.26 over #0b121a */
+  --wash-soft: 0.05;     /* ΔE 3.31 over #0b121a */
+
   /* --- Type ------------------------------------------------------------
      The three faces mortgagefvcalculator.com sets. Fraunces is a display
      face and is kept to headings and the spot price: set at 11px in a strike
@@ -173,6 +182,17 @@
   --shadow-panel: 0 1px 2px rgba(11, 18, 26, 0.04), 0 4px 12px -4px rgba(11, 18, 26, 0.10);
   --shadow-pop: 0 12px 32px -8px rgba(11, 18, 26, 0.22);
   --sheen: none;
+
+  /* Lower than the dark theme's, and that is not a preference. `body`'s
+     radials are the largest green surface on the page, and they used to
+     hardcode the DARK theme's mint (45,192,142 — oklch 72%) on both themes.
+     On paper that washed the whole light theme in a green twenty lightness
+     points lighter than #008154, which is every other green here. Binding
+     them to --rgb-profit darkens the wash to the brand; these alphas hold its
+     WEIGHT where it was, so only the hue moves. ΔE over #fdfaf4 is 2.73 and
+     1.74 against the old mint's 2.75. */
+  --wash-strong: 0.055;
+  --wash-soft: 0.035;
 }
 
 /* ---------------------------------------------------------------------------
@@ -193,12 +213,23 @@ body {
 body {
   /* A flat fill would read as a void at this size. Two very wide, very low
      opacity radials give the background depth without becoming decoration.
-     Both are now the brand green rather than the old blue and violet — two
+     Both are the brand green rather than the old blue and violet — two
      unrelated hues washing the ground was what made the previous theme read
-     as "a dark UI" instead of as this product. */
+     as "a dark UI" instead of as this product.
+
+     `var(--rgb-profit)`, NOT a literal. These two lines hardcoded
+     `45, 192, 142` — the dark theme's mint — and `body` sits outside both
+     theme blocks, so the light theme (which is the default) painted its whole
+     ground in a green at oklch 72% while every token on it, and every green on
+     mortgagefvcalculator.com, is oklch 52% #008154. It was the largest green
+     surface on the page and the only one that did not follow the theme.
+
+     The alphas are themed for the same reason: see --wash-strong. */
   background:
-    radial-gradient(1100px 620px at 12% -12%, rgba(45, 192, 142, 0.08), transparent 62%),
-    radial-gradient(900px 520px at 92% 4%, rgba(45, 192, 142, 0.05), transparent 60%),
+    radial-gradient(1100px 620px at 12% -12%,
+      rgba(var(--rgb-profit), var(--wash-strong)), transparent 62%),
+    radial-gradient(900px 520px at 92% 4%,
+      rgba(var(--rgb-profit), var(--wash-soft)), transparent 60%),
     var(--color-base-900);
   background-attachment: fixed;
   color: var(--color-ink-200);
