@@ -29,7 +29,14 @@ import { useCalculatorStore } from '../store/useCalculatorStore';
  * Both the home route and every /calculator/[strategy] landing page render
  * this, so there is one calculator to maintain rather than two that drift.
  */
-export function StrategyWorkspace({ heading }: { heading?: string }) {
+export function StrategyWorkspace({
+  heading,
+  guideHref,
+}: {
+  heading?: string;
+  /** Anchor to the written guide below, when the page has one. */
+  guideHref?: string;
+}) {
   const { calculateStrategy, legs, setSymbol, symbol } = useCalculatorStore();
 
   // Fetch the opening quote and chain once on mount.
@@ -92,18 +99,48 @@ export function StrategyWorkspace({ heading }: { heading?: string }) {
       <TopBar />
 
       {heading && (
-        <h1
+        <div
           className="animate-fade"
           style={{
-            fontSize: 'var(--text-base)',
-            fontWeight: 600,
-            color: 'var(--color-ink-200)',
+            display: 'flex',
+            alignItems: 'baseline',
+            justifyContent: 'space-between',
+            gap: '0.75rem',
             padding: '0.4375rem 0.75rem 0',
             flex: 'none',
           }}
         >
-          {heading}
-        </h1>
+          <h1
+            style={{
+              fontSize: 'var(--text-base)',
+              fontWeight: 600,
+              color: 'var(--color-ink-200)',
+            }}
+          >
+            {heading}
+          </h1>
+          {/*
+            The only thing on the first screen that says the page continues.
+            This shell is `height: 100vh`, so the article below opens exactly
+            one viewport down with no visual hint above the fold that it is
+            there. An anchor also works regardless of where the pointer is:
+            every column here scrolls internally, so a wheel gesture over a
+            panel scrolls that panel rather than the document.
+          */}
+          {guideHref && (
+            <a
+              href={guideHref}
+              style={{
+                fontSize: 'var(--text-2xs)',
+                color: 'var(--color-accent)',
+                textDecoration: 'none',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              How this strategy works ↓
+            </a>
+          )}
+        </div>
       )}
 
       <main

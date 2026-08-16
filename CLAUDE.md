@@ -1019,6 +1019,94 @@ handles deliberately, because both render stale data as fresh:
 A missing `fetched_at` renders DELAYED, never LIVE — which is what the site did
 between the frontend and backend deploys, and is the correct direction to fail.
 
+## Advertising and the publisher-content policy
+
+AdSense flagged this site on **2026-08-16** under *"Google-served ads on screens
+without publisher-content"* — the policy covering screens with no content or low
+value content. The diagnosis was a measurement, not a reading of the policy:
+
+```
+/calculator/long-call    → 753 words
+/calculator/iron-condor  → 753 words   ← identical
+```
+
+All 26 `/calculator/<slug>` pages rendered the same `StrategyWorkspace` and
+differed **only by the strategy name** in the `<h1>` and `<title>`. Neither they
+nor the home page contained one sentence of prose — `grep '<p>'` across
+`src/app/` returned nothing, and the ~750 "words" were ticker symbols, button
+labels and panel headings. Auto Ads was additionally live site-wide, so Google
+was placing units on `/privacy` and `/terms` as well.
+
+**A calculator is not content.** That is the load-bearing sentence. A tool whose
+screens carry only its own controls is a screen without publisher content no
+matter how good the tool is, and no amount of engine work changes that. The fix
+had to be writing.
+
+What was done, and the constraints on changing any of it:
+
+- `frontend/src/content/strategy-guides.ts` carries a distinct guide per slug —
+  construction, closed-form max profit / max loss / breakeven, Greeks, when to
+  use, failure modes, a worked example and FAQs. Live pages now run **1251–1512
+  words with 26 of 26 distinct content hashes**. Every payoff identity is stated
+  at expiry, **per share**, ×100 for one equity contract; the worked examples are
+  arithmetic on the identity printed directly above them.
+- **A template with a substituted name would reproduce the violation in longer
+  form.** `strategy-guides.test.ts` asserts uniqueness on the prose fields
+  (`lede`, `greeks`, `whenToUse`) individually — not on the whole record, because
+  `netCost` and `outlook` are short enumerations that *should* collide.
+- The home page had **no `<h1>` at all** and linked to none of the 26 pages: they
+  were reachable only from `sitemap.xml`, because the in-app strategy picker
+  changes client state rather than navigating. `SiteGuide` supplies both.
+- `page.tsx` became a **server** component. This is a static export, so anything
+  a crawler or a reviewer reads must be in the HTML the CDN serves rather than
+  assembled after hydration.
+- The workspace is `height: 100vh`, so the article opens exactly one viewport
+  down. `guideHref` renders the only above-the-fold cue that the page continues,
+  and an anchor is used deliberately: every column scrolls internally, so a wheel
+  gesture over a panel scrolls the panel, not the document.
+
+**`NO_AD_ROUTES` must live in a plain module — `frontend/src/config/ad-routes.ts`
+— and never in a `'use client'` one.** It sat in `AdSlot.tsx` for one build and
+shipped this:
+
+```js
+if(undefined.some(function(r){ ... })){ ...pauseAdRequests=1 }
+```
+
+A server component importing a value out of a client module receives a
+**client-reference proxy**, so `JSON.stringify` returned the literal `undefined`.
+The guard then threw a TypeError while `<head>` was still parsing,
+`pauseAdRequests` was never set, and Auto Ads would have served on all three
+protected routes — **strictly worse than before, because `/widget` had been
+correctly excluded.** Nothing in the source looked wrong and no unit test could
+see it: a test importing the module directly always gets the real array.
+
+That is why `frontend/scripts/check-export.mjs` exists and why `npm run build`
+runs it. It asserts the **emitted bytes**: the guard is present, well-formed and
+free of `undefined`; every ad-serving page clears a 1000-word floor (set above
+the 753 that was flagged, so passing requires prose rather than more interface);
+no two strategy pages render identical text; the home page links all 26; and
+every JSON-LD block parses. Both directions are mutation-checked — duplicating a
+page and re-introducing the `undefined` guard each fire it by name.
+
+Two suppression points enforce one rule and **both** are required.
+`AdSlot` covers manual units; the inline `pauseAdRequests` script in the root
+layout covers **Auto Ads**, which places units wherever it likes and ignores
+anything `AdSlot` decides. Auto Ads is the half that is easy to forget, and
+suppressing only one leaves the ads on the page. `/privacy` and `/terms` are
+policy documents rather than publisher content — and they are the first pages a
+reviewer opens to check whether the site discloses its advertising.
+
+**Edge propagation is not a failed deploy.** Immediately after `wrangler deploy`
+three of the 26 pages still measured 753 words while the other 23 measured
+1251–1512. A cache-busting query returned the *new* content from the same URLs,
+and a re-sweep a minute later showed all 26 updated. `wrangler.toml` already
+records this behaviour for asset 404s; it applies to stale HTML too. Re-measure
+before concluding an upload was missed.
+
+`SponsoredBrokers` is unaffected throughout: it is this site's own affiliate
+markup, not Google-served, so the policy does not reach it.
+
 ## Features & Capabilities
 
 1. **Futures & Options Strategy Modeler:**

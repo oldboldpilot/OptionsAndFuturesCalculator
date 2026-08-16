@@ -149,3 +149,37 @@ export function StrategyStructuredData({
     />
   );
 }
+
+/**
+ * The question-and-answer block on a strategy page, in schema.org terms.
+ *
+ * Only ever emitted for FAQs that are VISIBLE on the same page. Google's
+ * structured-data policy requires the markup to match what a reader sees, and
+ * marking up questions that are not rendered is a manual-action risk rather
+ * than an optimisation -- which is the opposite of what this site needs while
+ * it is already under review.
+ */
+export function FaqStructuredData({
+  faqs,
+}: {
+  faqs: ReadonlyArray<{ q: string; a: string }>;
+}) {
+  if (faqs.length === 0) return null;
+
+  const data = {
+    '@context': 'https://schema.org',
+    '@type': 'FAQPage',
+    mainEntity: faqs.map((faq) => ({
+      '@type': 'Question',
+      name: faq.q,
+      acceptedAnswer: { '@type': 'Answer', text: faq.a },
+    })),
+  };
+
+  return (
+    <script
+      type="application/ld+json"
+      dangerouslySetInnerHTML={{ __html: jsonLd(data) }}
+    />
+  );
+}

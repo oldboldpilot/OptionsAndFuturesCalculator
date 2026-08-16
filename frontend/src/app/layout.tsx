@@ -40,6 +40,11 @@ const fraunces = Fraunces({
 import { branding } from "@/config/branding";
 import { SiteStructuredData } from "@/components/StructuredData";
 import AdSlot from "@/components/AdSlot";
+// From the plain config module, NOT from AdSlot. AdSlot is `'use client'`, and
+// a server component importing a value out of a client module receives a
+// client-reference proxy rather than the value -- which serialised to the
+// literal `undefined` in the inline guard below and threw at head-parse time.
+import { NO_AD_ROUTES } from "@/config/ad-routes";
 import SponsoredBrokers from "@/components/SponsoredBrokers";
 
 export async function generateMetadata(): Promise<Metadata> {
@@ -160,12 +165,17 @@ export default function RootLayout({
           which is the whole point of ads.txt.
         */}
         {/*
-          No ad requests on /widget. That page exists to be iframed into other
-          people's sites, and AdSense policy forbids serving ads inside frames
-          on pages Google has not authorized — Auto Ads would otherwise inject
-          units there because this loader is in the shared root layout.
-          `pauseAdRequests` is AdSense's own gate for exactly this: the loader
-          still loads, but makes no requests.
+          No ad requests on the routes listed in NO_AD_ROUTES — the embeddable
+          /widget, and the /privacy and /terms policy pages. Auto Ads places
+          units wherever it likes and would otherwise inject them on all three,
+          because this loader lives in the shared root layout and knows nothing
+          about the route. `pauseAdRequests` is AdSense's own gate for exactly
+          this: the loader still loads, but makes no requests.
+
+          The route list is IMPORTED rather than repeated, so this guard and
+          AdSlot's own cannot drift. They enforce different halves of the same
+          rule — Auto Ads here, manual units there — and a route suppressed in
+          only one of them still shows ads.
 
           It does NOT run before the loader tag, and it cannot be made to.
           Next hoists every external <script> in <head> above every inline one,
@@ -181,7 +191,9 @@ export default function RootLayout({
         <script
           dangerouslySetInnerHTML={{
             __html:
-              "if(location.pathname==='/widget'||location.pathname.indexOf('/widget/')===0){(window.adsbygoogle=window.adsbygoogle||[]).pauseAdRequests=1}",
+              `if(${JSON.stringify(NO_AD_ROUTES)}.some(function(r){` +
+              "return location.pathname===r||location.pathname.indexOf(r+'/')===0" +
+              "})){(window.adsbygoogle=window.adsbygoogle||[]).pauseAdRequests=1}",
           }}
         />
         <script

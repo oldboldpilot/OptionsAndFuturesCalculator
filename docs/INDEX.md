@@ -66,6 +66,7 @@ smoke client.
 
 ## Session logs
 
+- [2026-08-16 — AdSense flagged ads on screens without publisher-content: 26 pages identical to the word, and a client-module import that shipped `if(undefined.some(...))`](session_logs/session_2026-08-16_adsense_publisher_content.md)
 - [2026-08-13 (second) — the id skew's root cause was a prediction from a local counter, plus an intra-term lease fence and the M3b merge](session_logs/session_2026-08-13_id_skew_root_cause.md)
 - [2026-08-13 — the SGEE queue promotion, its rollback on three defects, and the re-promotion under concurrent load](session_logs/session_2026-08-13_sgee_queue_promotion.md)
 - [2026-08-12 (second) — a refused io_uring ring bricked the queue cluster for a day, four error layers hid it, and the await budget's bounds were discharged through Z3](session_logs/session_2026-08-12_queue_outage_io_uring_and_formal_bounds.md)

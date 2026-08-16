@@ -3,7 +3,9 @@ import { Metadata } from 'next';
 import StrategyWorkspace from '../../../components/StrategyWorkspace';
 import AdSlot from '@/components/AdSlot';
 import { branding } from '@/config/branding';
-import { StrategyStructuredData } from '@/components/StructuredData';
+import { StrategyStructuredData, FaqStructuredData } from '@/components/StructuredData';
+import StrategyGuide from '@/components/StrategyGuide';
+import { getStrategyGuide } from '@/content/strategy-guides';
 
 // Shared with the sitemap, so the pages exported and the pages advertised to
 // crawlers cannot drift apart.
@@ -83,6 +85,13 @@ export default async function StrategyCalculatorPage({ params }: Props) {
     resolvedParams.strategy.startsWith('futures-') ||
     resolvedParams.strategy === 'covered-futures-call';
 
+  // The written guide for this structure. Every slug in STRATEGY_SLUGS has one
+  // and a build-time check enforces that, but this stays a lookup rather than a
+  // non-null assertion: a slug added to the list without a guide should render
+  // a page with no article, not throw during the static export and take the
+  // whole build down.
+  const guide = getStrategyGuide(resolvedParams.strategy);
+
   return (
     <>
       <StrategyStructuredData
@@ -90,7 +99,17 @@ export default async function StrategyCalculatorPage({ params }: Props) {
         name={`${strategyName}${/futures/i.test(strategyName) ? '' : isFutures ? ' Futures' : ' Options'} Calculator`}
         description={`Model the profit, loss and Greeks of ${/^[aeiou]/i.test(strategyName) ? 'an' : 'a'} ${strategyName} strategy on live market data.`}
       />
-      <StrategyWorkspace heading={`${strategyName} Calculator`} />
+      {guide && <FaqStructuredData faqs={guide.faqs} />}
+      <StrategyWorkspace
+        heading={`${strategyName} Calculator`}
+        // The workspace is pinned to the viewport height, so the article below
+        // it starts one full screen down. Without a link nothing on the first
+        // screen says the page continues, and the content this page exists to
+        // carry would go unread -- which is the same outcome as not having it.
+        guideHref={guide ? '#guide' : undefined}
+      />
+
+      {guide && <StrategyGuide guide={guide} />}
       {/*
         In-article unit, on the strategy pages rather than in the root layout.
 

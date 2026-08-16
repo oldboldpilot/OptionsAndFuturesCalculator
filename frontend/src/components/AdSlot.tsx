@@ -2,6 +2,7 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import { usePathname } from 'next/navigation';
+import { noAdsOnRoute } from '@/config/ad-routes';
 
 /**
  * An advertising unit that reserves its space before it fills it.
@@ -49,6 +50,7 @@ declare global {
   }
 }
 
+
 export function AdSlot({
   size = 'leaderboard',
   label = 'Advertisement',
@@ -66,13 +68,8 @@ export function AdSlot({
     : { width: 300, height: 250 };
 
   const slot = SLOTS[size];
-  // /widget exists to be embedded in <iframe>s on other people's sites.
-  // AdSense policy forbids serving ads inside an iframe on pages Google has
-  // not authorized, and an ad inside a third-party embed would also attribute
-  // that site's traffic to this publisher id. No ad, and no placeholder box
-  // either — an embed should carry only the calculator.
   const pathname = usePathname();
-  const isEmbed = pathname === '/widget' || pathname?.startsWith('/widget/');
+  const isEmbed = noAdsOnRoute(pathname);
   const pushed = useRef(false);
   // The <ins> is rendered only after mount. This is a static export served from
   // a CDN, so markup produced at build time must match the first client render;
