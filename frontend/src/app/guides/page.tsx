@@ -8,10 +8,18 @@ import { branding } from '@/config/branding';
  *
  * @author Olumuyiwa Oluwasanmi
  *
- * This page and `/guides/<slug>` are the only screens on the site that carry
- * Google advertising, and that is the whole point of separating them from the
- * calculator: they are the ones with publisher content on them. The tool
- * screens are in NO_AD_ROUTES.
+ * The index for the 26 articles, which are the only screens on this site that
+ * carry Google advertising — the point of separating them from the calculator
+ * being that they are the ones with publisher content on them.
+ *
+ * THIS PAGE CARRIES NO ADS, deliberately, and it is one segment above the
+ * layout that ships the loader (`guides/[strategy]/layout.tsx`) precisely so
+ * that stays true. It is a directory of 26 links, and the same policy that
+ * flagged this site names "screens used for alerts, navigation or other
+ * behavioral purposes" alongside screens without content. The ~300 words of
+ * introduction above the directory do not change what the page is FOR.
+ *
+ * One page of 27 given up, on an account that has already been flagged once.
  */
 export const metadata: Metadata = {
   title: 'Options & Futures Strategy Guides',

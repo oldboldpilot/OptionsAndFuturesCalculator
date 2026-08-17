@@ -7,7 +7,7 @@ import StrategyWorkspace from '../components/StrategyWorkspace';
  *
  * The written material that briefly lived below this workspace is now the
  * Guides tab, at `/guides`. Advertising went with it — this route is in
- * NO_AD_ROUTES and serves none.
+ * outside the ad-serving `/guides/<slug>` subtree, so it ships no ad code.
  *
  * That is the same shape mortgagefvcalculator.com uses and it is deliberate
  * rather than a concession: measured on 2026-08-16 its calculator page is 730

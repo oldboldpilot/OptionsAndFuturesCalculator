@@ -1,67 +1,65 @@
 /**
- * Routes that must never carry a Google-served ad.
+ * Where Google-served ads are allowed. Exactly one prefix.
  *
  * @author Olumuyiwa Oluwasanmi
  *
- * A PLAIN module, deliberately, and this is the load-bearing part. This list
- * lived in `AdSlot.tsx` for about ten minutes and produced a guard that read
- * `if(undefined.some(...))` in the shipped HTML. `AdSlot.tsx` carries
- * `'use client'`, and when a SERVER component imports a value from a client
- * module it receives a client-reference proxy rather than the value — so
- * `JSON.stringify` of the array returned `undefined`, and the inline Auto Ads
- * guard in the root layout threw a TypeError while the head was still parsing.
+ * An ALLOWLIST, and the inversion from the first version is the whole point of
+ * this file. It was a denylist — `/`, `/calculator`, `/widget`, `/privacy`,
+ * `/terms` — which is only correct if you can enumerate every screen the site
+ * will ever serve. You cannot, and the screen that was missed is the one nobody
+ * writes down: the 404.
  *
- * The failure direction is the bad one: a guard that throws never sets
- * `pauseAdRequests`, so ads would have served on every route listed here,
- * including the /widget embed that was correctly protected before. Keep this
- * file free of `'use client'` and of anything that would require it.
+ * A 404's `location.pathname` is whatever the visitor typed, so it matches no
+ * entry in any denylist. `/this-page-does-not-exist` was therefore ad-eligible:
+ * a thirteen-word error screen carrying a multiplex unit and page-level Auto
+ * Ads. That is the flagged policy text almost verbatim — a screen without
+ * content, used for alerts. Measured live on 2026-08-17, still serving, a day
+ * after the first fix was deployed and believed complete.
  *
- * Two different reasons for the entries, kept distinct because someone will
- * eventually be tempted to re-enable one:
+ * An allowlist fails the other way. An unanticipated route gets no ads until
+ * somebody decides it should: that costs impressions, and it cannot cost a
+ * policy strike.
  *
- *   `/widget` is embedded in <iframe>s on other people's sites. AdSense policy
- *   forbids serving ads inside a frame on pages Google has not authorized, and
- *   an ad inside a third-party embed would also attribute that site's traffic
- *   to this publisher id.
+ * `/guides` itself is deliberately NOT included. It is a directory of
+ * twenty-six links — a navigation screen, which is the third condition the
+ * policy names — and its ~300 words of introduction do not change what the page
+ * is FOR. One page of twenty-seven, and cheap insurance on an account that has
+ * already been flagged once.
  *
- *   `/privacy` and `/terms` are policy documents, not publisher content. The
- *   "Google-served ads on screens without publisher-content" policy — the one
- *   this site was flagged under on 2026-08-16 — treats legal and navigational
- *   screens as ineligible. They are also the pages a reviewer opens first when
- *   checking whether a site discloses its advertising and cookie use.
+ * A PLAIN module, with no `'use client'`, and that still matters. This list
+ * lived in `AdSlot.tsx` for one build and produced `if(undefined.some(...))` in
+ * the shipped HTML: a server component importing a value from a client module
+ * receives a client-reference proxy, not the value. Keep this file importable
+ * from a server component.
  */
-export const NO_AD_ROUTES = [
-  // The tool screens. They carry the calculator and no publisher content, which
-  // is exactly the shape that got this site flagged — so they carry no Google
-  // ads either. That is not a workaround, it is the structure the reference
-  // site uses: mortgagefvcalculator.com's own calculator page is 730 words of
-  // pure interface and serves ZERO AdSense (measured 2026-08-16, no
-  // `adsbygoogle` anywhere in the document), monetising instead through the
-  // hand-built sponsored modules that are not Google-served.
-  //
-  // Advertising lives on /guides and /guides/<slug>, which carry the written
-  // material. Content and ads on the same screens; neither on their own.
-  //
-  // `'/'` matches only the exact home path: the check is
-  // `pathname === route || pathname.startsWith(route + '/')`, and `'//'` never
-  // prefixes a real path, so this does not blanket the whole site.
-  '/',
-  '/calculator',
-  '/widget',
-  '/privacy',
-  '/terms',
-] as const;
+export const AD_ROUTE_PREFIX = '/guides/';
 
 /**
- * Shared by the two enforcement points that must agree: `AdSlot` (manual units)
- * and the inline `pauseAdRequests` guard in the root layout (Auto Ads, which
- * places units wherever it likes and would otherwise ignore anything AdSlot
- * decides). Suppressing one and not the other still leaves ads on the page —
- * Auto Ads is the half that is easy to forget.
+ * True only for an individual strategy guide.
+ *
+ * This is defence in depth, NOT the mechanism. The AdSense loader is emitted by
+ * `app/guides/[strategy]/layout.tsx` and nowhere else, so a page outside that
+ * subtree carries no Google ad code at all — there is nothing to suppress at
+ * runtime because nothing was shipped. Compare the old design, where every page
+ * on the site loaded the loader and a runtime pathname test decided whether it
+ * was allowed to fill: that test is what the 404 walked straight through.
+ *
+ * What this function still does: stops `AdSlot` rendering an `<ins>` that would
+ * have no loader to fill it, and gives the tests something to state the rule
+ * against.
+ */
+export function adsOnRoute(pathname: string | null | undefined): boolean {
+  if (!pathname) return false;
+  // The length test excludes `/guides/` itself — the index under a trailing
+  // slash, which the export serves alongside `/guides`.
+  return pathname.startsWith(AD_ROUTE_PREFIX) && pathname.length > AD_ROUTE_PREFIX.length;
+}
+
+/**
+ * Kept as the negation so call sites that read naturally as "suppress here" do
+ * not have to spell `!adsOnRoute(...)`. `AdSlot` and `SiteNav` both ask the
+ * question in that direction.
  */
 export function noAdsOnRoute(pathname: string | null | undefined): boolean {
-  if (!pathname) return false;
-  return NO_AD_ROUTES.some(
-    (route) => pathname === route || pathname.startsWith(`${route}/`),
-  );
+  return !adsOnRoute(pathname);
 }

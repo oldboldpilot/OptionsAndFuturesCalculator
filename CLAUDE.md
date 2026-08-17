@@ -1097,6 +1097,88 @@ workspace header, and every guide links back with "Price a … on live market
 data →". `check-export.mjs` asserts both directions, because a split that buries
 one half is worse than no split.
 
+### The denylist was the wrong shape, and the 404 proved it
+
+**On 2026-08-17 the site was still serving the violation, a day after the fix
+above was deployed and believed complete.** Measured, not inferred:
+
+```
+GET /this-page-does-not-exist  →  404
+                                  adsbygoogle loader        ✓
+                                  enable_page_level_ads     ✓
+                                  multiplex <ins>           ✓
+                                  content: 13 words
+```
+
+Every dead URL on the site — and a crawler probing for `/wp-admin`,
+`/index.php`, a renamed slug or a stale backlink generates many — served
+page-level Auto Ads and a manual unit on "404: This page could not be found".
+That is the notice's first and third conditions at once: a screen without
+content, used for alerts.
+
+**The mechanism was a denylist, and a denylist can only protect routes somebody
+enumerated.** The root layout loaded `adsbygoogle.js` on every page and an
+inline guard decided at runtime whether it could fill:
+
+```js
+if (["/","/calculator","/widget","/privacy","/terms"].some(r =>
+      location.pathname === r || location.pathname.indexOf(r+'/') === 0))
+  { ...pauseAdRequests = 1 }
+```
+
+**A 404's `location.pathname` is whatever the visitor typed**, so it matches no
+entry. The guard was not broken — it was correct, it was tested, and it ran. It
+simply had nothing to match. The error page is the one route nobody writes down,
+and it is the route a crawler of dead links hits most.
+
+**The fix is structural, not another guard.** The AdSense loader and the
+page-level push now ship from `frontend/src/app/guides/[strategy]/layout.tsx`
+and nowhere else — Next's documented way to load a third-party script on a
+subset of routes (`node_modules/next/dist/docs/01-app/02-guides/scripts.md`,
+"Layout Scripts"). A page outside that subtree carries **no Google ad code at
+all**: nothing to suppress, and no runtime behaviour that has to be right.
+
+Four consequences worth holding on to:
+
+- **The segment is `guides/[strategy]`, not `guides`.** One level up would also
+  cover the `/guides` index, which is a directory of 26 links — navigation, the
+  policy's third condition. That one level is load-bearing.
+- **`ad-routes.ts` is now an ALLOWLIST** (`AD_ROUTE_PREFIX = '/guides/'`,
+  `adsOnRoute`). It fails the other way: an unanticipated route gets no ads
+  until somebody decides it should, which costs impressions and cannot cost a
+  policy strike. `AdSlot` uses it as defence in depth, not as the mechanism.
+- **Site verification is unaffected**, which is why removing the loader from the
+  shared layout was safe. `<meta name="google-adsense-account">` stays in the
+  root layout on all 59 pages; it asserts ownership, the loader requests ads,
+  and they are separate tags.
+- **`src/app/not-found.tsx` now exists.** There was none, so the export shipped
+  Next's default one-sentence page. It renders real orientation — both tabs and
+  five popular strategies, each linked to its guide and its calculator — and is
+  `robots: { index: false }`. It carries no ads regardless, by construction.
+
+**The tests passed throughout, and that is the lesson worth carrying past this
+site.** `ad-routes.test.ts` asserted all five denylisted routes, all 26
+calculator pages, and the near-miss cases. Every assertion was true. They were
+written from the same list as the code, so they could only ask whether the
+enumeration was *implemented* — never whether it was *complete*. The rewritten
+file asks the complementary question first: what does an **unanticipated** route
+get? Six 404 paths are asserted by name, mutation-checked against the old
+predicate.
+
+`check-export.mjs` changed the same way. It used to verify the guard was present
+and named all five routes — which it was, and did, on the 404 as well. It now
+sweeps **every `.html` in `out/`** rather than a hand-written page list, and
+asserts that ad code (loader, page-level push, `data-ad-slot`) appears on the 26
+articles and on nothing else, plus that it has not *vanished* from the articles.
+A restored `pauseAdRequests` string fails the build by name, because its return
+would mean the denylist came back.
+
+Verified live after deploy: `/`, `/calculator/*`, `/guides`, `/widget`,
+`/privacy` and three separate 404 paths all carry `loader=0 push=0`;
+`/guides/<slug>` carries `loader=1 push=1`.
+
+### The client-module trap that created `check-export.mjs`
+
 **`NO_AD_ROUTES` must live in a plain module — `frontend/src/config/ad-routes.ts`
 — and never in a `'use client'` one.** It sat in `AdSlot.tsx` for one build and
 shipped this:
@@ -1132,13 +1214,14 @@ floor sits below the thinnest real guide and far above any stub. Both figures ar
 recorded in the script's own comment, because a moved threshold with no stated
 reason is indistinguishable from a moved goalpost.
 
-Two suppression points enforce one rule and **both** are required.
-`AdSlot` covers manual units; the inline `pauseAdRequests` script in the root
-layout covers **Auto Ads**, which places units wherever it likes and ignores
-anything `AdSlot` decides. Auto Ads is the half that is easy to forget, and
-suppressing only one leaves the ads on the page. `/privacy` and `/terms` are
-policy documents rather than publisher content — and they are the first pages a
-reviewer opens to check whether the site discloses its advertising.
+**That two-suppression-point design is gone, and do not reintroduce it.** It
+was `AdSlot` for manual units plus an inline `pauseAdRequests` script for Auto
+Ads, both reading the same denylist — two runtime guards that both had to be
+right, on every page, for a page to be safe. Now the ad code is only emitted
+where ads belong, so there is one rule and no suppression at all. `/privacy` and
+`/terms` remain ad-free for their own reason: they are policy documents rather
+than publisher content, and they are the first pages a reviewer opens to check
+whether the site discloses its advertising.
 
 **Edge propagation is not a failed deploy.** Immediately after `wrangler deploy`
 three of the 26 pages still measured 753 words while the other 23 measured

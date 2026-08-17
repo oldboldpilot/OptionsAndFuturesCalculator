@@ -3,7 +3,7 @@
 import React from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { noAdsOnRoute } from '@/config/ad-routes';
+
 
 /**
  * Site-level tabs, modelled on mortgagefvcalculator.com's header.
@@ -105,7 +105,17 @@ export function SiteNav() {
           whiteSpace: 'nowrap',
         }}
       >
-        {noAdsOnRoute(pathname) ? 'Ad-free tool' : null}
+        {/*
+          Tied to the CALCULATOR, not to the absence of ads.
+
+          It read `noAdsOnRoute(pathname)`, which was the right question while
+          that meant "one of the five tool and policy routes". Since the module
+          became an allowlist it means "anything that is not a guide article" —
+          which includes the guides index and the 404, neither of which is a
+          tool. Claiming "Ad-free tool" on an error page is a small lie in the
+          chrome of a site being reviewed for how it presents its advertising.
+        */}
+        {isActive('/') ? 'Ad-free tool' : null}
       </span>
     </nav>
   );

@@ -69,7 +69,7 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
  *
  * The TOOL, and only the tool. The written guide that used to sit below this
  * workspace now lives at `/guides/<slug>`, which is where the advertising went
- * with it — these screens are in NO_AD_ROUTES and serve none, exactly as
+ * with it — these screens are outside `/guides/<slug>`, so they ship no ad code, as
  * mortgagefvcalculator.com's own calculator page does.
  *
  * That split is what makes both pages honest. One page trying to be a tool and

@@ -2,7 +2,7 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import { usePathname } from 'next/navigation';
-import { noAdsOnRoute } from '@/config/ad-routes';
+import { adsOnRoute } from '@/config/ad-routes';
 
 /**
  * An advertising unit that reserves its space before it fills it.
@@ -69,7 +69,21 @@ export function AdSlot({
 
   const slot = SLOTS[size];
   const pathname = usePathname();
-  const isEmbed = noAdsOnRoute(pathname);
+  /*
+   * Belt to the loader's braces, and it is genuinely the belt now.
+   *
+   * The AdSense loader ships only from `app/guides/[strategy]/layout.tsx`, so
+   * outside that subtree there is no script to fill an `<ins>` anyway. This
+   * check stops one being rendered at all — an empty `<ins class="adsbygoogle">`
+   * on a page with no loader is a permanently blank reserved box, and on a page
+   * that later GAINS a loader it would be an unpoliced unit.
+   *
+   * It was `noAdsOnRoute` against a five-route denylist, which returned false —
+   * ads permitted — for `/this-page-does-not-exist`, so this component rendered
+   * the multiplex unit on every 404 the site served. An allowlist cannot fail
+   * that way: an unanticipated route gets no unit.
+   */
+  const suppressed = !adsOnRoute(pathname);
   const pushed = useRef(false);
   // The <ins> is rendered only after mount. This is a static export served from
   // a CDN, so markup produced at build time must match the first client render;
@@ -79,7 +93,7 @@ export function AdSlot({
   useEffect(() => setMounted(true), []);
 
   useEffect(() => {
-    if (!mounted || !slot || isEmbed || pushed.current) return;
+    if (!mounted || !slot || suppressed || pushed.current) return;
     // Guarded with a ref because React runs effects twice in development, and a
     // second push against an <ins> that already carries an ad throws
     // "All ins elements in the DOM with class=adsbygoogle already have ads".
@@ -91,7 +105,7 @@ export function AdSlot({
       // down with it. There is nothing to recover — the reserved box stays
       // empty, which is exactly what it looked like a moment earlier.
     }
-  }, [mounted, slot, isEmbed]);
+  }, [mounted, slot, suppressed]);
 
   // Multiplex must not be clamped: `maxWidth: 0` would collapse it to nothing,
   // and a fixed height would crop the recommendation grid it exists to show. It
@@ -118,7 +132,7 @@ export function AdSlot({
     flex: 'none',
   };
 
-  if (isEmbed) return null;
+  if (suppressed) return null;
 
   if (!slot) {
     return (

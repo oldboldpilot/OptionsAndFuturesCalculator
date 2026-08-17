@@ -54,57 +54,95 @@ const slugs = readdirSync(join(OUT, 'calculator'))
   .filter((f) => f.endsWith('.html'))
   .map((f) => f.replace(/\.html$/, ''));
 
-/**
- * Routes the layout's inline guard must name. Kept as a literal rather than
- * imported from src/config/ad-routes.ts: this script's whole job is to check
- * the build against an independently stated expectation, and importing the same
- * constant the build used would make the assertion circular.
+// The screens that carry the writing, and therefore the advertising. The 26
+// articles ONLY — `guides.html` is the index, a directory of 26 links, which is
+// a navigation screen under the same policy.
+const CONTENT_PAGES = slugs.map((s) => `guides/${s}.html`);
+
+/*
+ * EVERY other page the export emits. Built by enumerating `out/` rather than by
+ * listing the routes anybody thought of, because the page that produced the
+ * second violation is the one nobody lists.
+ *
+ * `404.html` and `_not-found.html` are the entire reason this is a sweep. The
+ * old check named `index.html`, `widget.html`, `privacy.html`, `terms.html` and
+ * the 26 calculator pages — a hand-written list that was complete for every
+ * route somebody had thought about, and silent about the two that shipped
+ * Google's ad loader on thirteen words of error text.
  */
-const EXPECTED_NO_AD_ROUTES = ['/', '/calculator', '/widget', '/privacy', '/terms'];
+const ALL_PAGES = readdirSync(OUT, { recursive: true })
+  .map((f) => String(f).replaceAll('\\', '/'))
+  .filter((f) => f.endsWith('.html'));
+const NO_AD_PAGES = ALL_PAGES.filter((f) => !CONTENT_PAGES.includes(f));
 
-// Screens with the calculator on them and no article. No Google ads.
-const TOOL_PAGES = ['index.html', 'widget.html', ...slugs.map((s) => `calculator/${s}.html`)];
-// Policy documents. Not publisher content, so also no ads.
-const POLICY_PAGES = ['privacy.html', 'terms.html'];
-// The screens that carry the writing, and therefore the advertising.
-const CONTENT_PAGES = ['guides.html', ...slugs.map((s) => `guides/${s}.html`)];
+/* ---- 1. Google ad code ships to the article pages and NOWHERE else ------- */
 
-/* ---- 1. The Auto Ads guard is present and well formed everywhere --------- */
+/*
+ * The load-bearing check, and it replaced one that could not have caught the
+ * defect it exists for.
+ *
+ * The previous design shipped `adsbygoogle.js` on every page and suppressed it
+ * at runtime with `if (NO_AD_ROUTES.some(r => location.pathname === r || ...))`.
+ * This script verified that guard was present and named all five routes — which
+ * it was, and did. The guard was correct. It simply cannot fire on a 404,
+ * whose pathname is whatever the visitor typed and matches no entry:
+ *
+ *     GET /this-page-does-not-exist  →  404, loader, page-level push,
+ *                                       multiplex <ins>, 13 words
+ *
+ * So the assertion is no longer about a guard being right. It is that pages
+ * which must not serve ads contain no ad code AT ALL — nothing to suppress, no
+ * runtime behaviour to depend on.
+ */
+const AD_CODE = [
+  ['loader', /pagead2\.googlesyndication\.com/],
+  ['page-level-push', /enable_page_level_ads/],
+  ['manual-unit', /data-ad-slot=/],
+];
 
-for (const page of [...TOOL_PAGES, ...POLICY_PAGES, ...CONTENT_PAGES]) {
-  if (!existsSync(join(OUT, page))) {
-    fail('missing-page', page);
-    continue;
-  }
-  const match = html(page).match(/<script>([^<]*pauseAdRequests[^<]*)<\/script>/);
-  if (!match) {
-    fail('auto-ads-guard', `${page} carries no pauseAdRequests guard`);
-    continue;
-  }
-  const guard = match[1];
-  if (guard.includes('undefined')) {
-    fail('auto-ads-guard', `${page} guard contains "undefined" — a value failed to serialise: ${guard}`);
-  }
-  for (const route of EXPECTED_NO_AD_ROUTES) {
-    if (!guard.includes(`"${route}"`)) {
-      fail('auto-ads-guard', `${page} guard does not list ${route}`);
+for (const page of NO_AD_PAGES) {
+  const source = html(page);
+  for (const [what, pattern] of AD_CODE) {
+    if (pattern.test(source)) {
+      fail('ad-code-off-content', `${page} contains AdSense ${what} but carries no article`);
     }
   }
 }
 
-/* ---- 2. Tool and policy screens carry no manual ad unit ------------------ */
-
-for (const page of [...TOOL_PAGES, ...POLICY_PAGES]) {
-  if (!existsSync(join(OUT, page))) continue;
-  // AdSlot renders its <ins> only after mount, so the static HTML should carry
-  // none anywhere. A slot id in the markup of a tool page would mean a unit was
-  // added outside AdSlot and outside the route guard entirely.
-  if (/data-ad-slot=/.test(html(page))) {
-    fail('ads-on-tool-screen', `${page} carries a manual ad unit but has no publisher content`);
+for (const page of CONTENT_PAGES) {
+  if (!existsSync(join(OUT, page))) {
+    fail('missing-page', page);
+    continue;
+  }
+  const source = html(page);
+  // The other direction, and it is not symmetry for its own sake: moving the
+  // loader into a nested layout is exactly the kind of change that can silently
+  // stop emitting it, and a site with no ad code anywhere fails quietly — as
+  // revenue, not as an error.
+  if (!/pagead2\.googlesyndication\.com/.test(source)) {
+    fail('no-ad-code-on-content', `${page} is an ad-serving page but carries no AdSense loader`);
+  }
+  if (!/enable_page_level_ads/.test(source)) {
+    fail('no-ad-code-on-content', `${page} carries the loader but never asks for page-level ads`);
   }
 }
 
-/* ---- 3. Every ad-serving screen carries real publisher content ----------- */
+/*
+ * The stale-guard check. `pauseAdRequests` was the old mechanism; if it comes
+ * back it means somebody restored the denylist, which is the design that let a
+ * 404 serve ads.
+ */
+for (const page of ALL_PAGES) {
+  if (/pauseAdRequests/.test(html(page))) {
+    fail(
+      'stale-guard',
+      `${page} carries a pauseAdRequests guard — the pathname denylist was restored; ` +
+        'ad code must be absent from non-article pages, not suppressed at runtime',
+    );
+  }
+}
+
+/* ---- 2. Every ad-serving screen carries real publisher content ----------- */
 
 /*
  * 600, down from 1000, and the number moved because what it measures changed —
@@ -192,7 +230,8 @@ if (failures.length > 0) {
 }
 
 console.log(
-  `check-export: OK — ${CONTENT_PAGES.length} ad-serving pages all clear ${MIN_WORDS} words and are distinct; ` +
-    `${TOOL_PAGES.length + POLICY_PAGES.length} tool/policy pages carry no ad unit; ` +
-    `guard lists ${EXPECTED_NO_AD_ROUTES.join(' ')}; ${slugs.length} strategies cross-linked both ways.`,
+  `check-export: OK — ${CONTENT_PAGES.length} article pages carry the AdSense loader, all clear ` +
+    `${MIN_WORDS} words and are distinct; ${NO_AD_PAGES.length} other pages ` +
+    `(including 404) carry NO ad code of any kind; ` +
+    `${slugs.length} strategies cross-linked both ways.`,
 );

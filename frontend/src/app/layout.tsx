@@ -40,12 +40,6 @@ const fraunces = Fraunces({
 import { branding } from "@/config/branding";
 import { SiteStructuredData } from "@/components/StructuredData";
 import SiteNav from "@/components/SiteNav";
-import AdSlot from "@/components/AdSlot";
-// From the plain config module, NOT from AdSlot. AdSlot is `'use client'`, and
-// a server component importing a value out of a client module receives a
-// client-reference proxy rather than the value -- which serialised to the
-// literal `undefined` in the inline guard below and threw at head-parse time.
-import { NO_AD_ROUTES } from "@/config/ad-routes";
 import SponsoredBrokers from "@/components/SponsoredBrokers";
 
 export async function generateMetadata(): Promise<Metadata> {
@@ -132,12 +126,14 @@ export default function RootLayout({
           }}
         />
         {/*
-          AdSense site verification.
+          AdSense site VERIFICATION, and the only AdSense-related tag in this
+          shared layout.
 
-          Google looks for this meta tag to confirm the publisher who claims
-          this site is the one who owns the account. It is separate from the ad
-          loader below -- the loader requests ads, this asserts ownership -- and
-          it is the tag AdSense asks for when a site is stuck awaiting review.
+          It asserts who owns the site; it requests nothing. That separation is
+          what lets the ad LOADER live in `app/guides/[strategy]/layout.tsx`
+          alone — ownership is still stated on all fifty-nine exported pages,
+          while ad code exists on twenty-six of them. Removing the loader from
+          here therefore cannot put the site back into "we can't find the code".
 
           The publisher id is not a secret: it is public in ads.txt by design.
         */}
@@ -147,82 +143,34 @@ export default function RootLayout({
         <SiteStructuredData />
 
         {/*
-          Google AdSense Auto Ads.
+          NO AD LOADER HERE, AND THAT IS THE FIX. Do not restore one.
 
-          `async` and placed after the theme script on purpose: this is
-          third-party code on the critical path of a page whose first job is to
-          show live prices, and it must never be able to delay or block that.
+          This head carried `adsbygoogle.js`, an `enable_page_level_ads` push,
+          and an inline guard that set `pauseAdRequests` when
+          `location.pathname` matched a denylist. Every page on the site loaded
+          Google's ad code and a runtime test decided whether it was allowed to
+          fill.
 
-          Auto Ads means Google chooses placements, so a unit can appear inside
-          the workspace rather than only in the box AdSlot reserves. On a layout
-          where the thing below an insertion point is a strike ladder with buy
-          and sell buttons, a late-arriving ad can shift a control under the
-          cursor. Auto Ads was chosen deliberately over a fixed unit; if that
-          shifting becomes a problem, the fix is to turn Auto Ads off in the
-          AdSense dashboard and wire a manual unit into AdSlot with its slot id,
-          which needs no code change here beyond the unit tag.
+          The 404 walked straight through that test. Its pathname is whatever
+          the visitor typed, so it matched no denylist entry, and
+          `/this-page-does-not-exist` served page-level Auto Ads plus the
+          multiplex unit that used to sit in this file's <body> — on a screen
+          whose own content is "404: This page could not be found". Measured
+          live on 2026-08-17, a day after the first publisher-content fix was
+          deployed and believed complete. AdSense's notice names exactly this:
+          screens without content, and screens used for alerts.
 
-          The publisher id is not a secret — it is public in ads.txt by design,
-          which is the whole point of ads.txt.
+          A denylist can only protect routes somebody enumerated. The error page
+          is the one route nobody writes down, and it is the one a crawler
+          probing dead URLs hits most.
+
+          So the loader moved to the ONE subtree that carries articles, per
+          Next's own guidance for loading a third-party script on a subset of
+          routes (`node_modules/next/dist/docs/01-app/02-guides/scripts.md`,
+          "Layout Scripts"). A page outside `/guides/<slug>` now has no ad code
+          to suppress, which is a stronger statement than a suppressed one and
+          needs no correct runtime behaviour to hold.
         */}
-        {/*
-          No ad requests on the routes listed in NO_AD_ROUTES — the embeddable
-          /widget, and the /privacy and /terms policy pages. Auto Ads places
-          units wherever it likes and would otherwise inject them on all three,
-          because this loader lives in the shared root layout and knows nothing
-          about the route. `pauseAdRequests` is AdSense's own gate for exactly
-          this: the loader still loads, but makes no requests.
-
-          The route list is IMPORTED rather than repeated, so this guard and
-          AdSlot's own cannot drift. They enforce different halves of the same
-          rule — Auto Ads here, manual units there — and a route suppressed in
-          only one of them still shows ads.
-
-          It does NOT run before the loader tag, and it cannot be made to.
-          Next hoists every external <script> in <head> above every inline one,
-          so the emitted order is loader-then-guard no matter what order they
-          are written in here — the theme script at the top of this head lands
-          after the loader too. Verified against the built widget.html.
-
-          The guard holds anyway, because the thing it has to beat is not the
-          loader's EXECUTION but Auto Ads' placement scan, which runs on DOM
-          ready. This inline script runs during head parsing, long before that.
-          Do not "fix" the ordering; it is not fixable and not the guarantee.
-        */}
-        <script
-          dangerouslySetInnerHTML={{
-            __html:
-              `if(${JSON.stringify(NO_AD_ROUTES)}.some(function(r){` +
-              "return location.pathname===r||location.pathname.indexOf(r+'/')===0" +
-              "})){(window.adsbygoogle=window.adsbygoogle||[]).pauseAdRequests=1}",
-          }}
-        />
-        <script
-          async
-          src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-3669553016263703"
-          crossOrigin="anonymous"
-        />
-        {/*
-          Page-level ads activation. Copied from mortgagefvcalculator.com, which
-          serves ads today on THIS SAME publisher id (pub-3669553016263703 — its
-          ads.txt is byte-identical to ours), and which had this push where we
-          had nothing. That site carries no <ins> at all: this one call is what
-          puts ads on the page there.
-
-          Loading adsbygoogle.js only makes the API available. It is this push
-          that asks for page-level placement. Auto Ads being enabled in the
-          dashboard and the loader being present are both necessary and, on the
-          evidence of the working site, together not sufficient.
-
-          Ordering is not a concern: the queue exists precisely so pushes can be
-          made before the loader executes, which is what `||[]` sets up.
-        */}
-        <script
-          dangerouslySetInnerHTML={{
-            __html:
-              '(adsbygoogle=window.adsbygoogle||[]).push({google_ad_client:"ca-pub-3669553016263703",enable_page_level_ads:true});',
-          }}
-        />
       </head>
       <body>
         {/*
@@ -248,20 +196,13 @@ export default function RootLayout({
           <SponsoredBrokers />
         </div>
         {/*
-          Multiplex (autorelaxed) unit — a grid of content recommendations.
-
-          Placed here, after the workspace and above the footer, rather than
-          inside the terminal. Multiplex grows to fit its content, and anything
-          that changes height late must not sit above a strike ladder whose buy
-          and sell buttons would shift under the cursor.
-
-          Google's snippet repeats the loader <script>; it is not repeated here
-          because the same loader is already in <head> for Auto Ads, and loading
-          it twice buys nothing.
+          The multiplex unit used to sit here, in the SHARED layout, which meant
+          it rendered on every screen the site serves — including the 404, whose
+          arbitrary pathname defeated the only check that suppressed it. It now
+          lives in `app/guides/[strategy]/layout.tsx` beside the loader that
+          fills it, so the unit and its ad code cannot be shipped to different
+          sets of pages.
         */}
-        <div style={{ maxWidth: '78rem', margin: '0 auto', padding: '1.25rem 1.25rem 0' }}>
-          <AdSlot size="multiplex" label="Sponsored" />
-        </div>
 
         {/*
           Site-wide footer.
