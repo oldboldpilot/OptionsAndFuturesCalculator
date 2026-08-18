@@ -164,8 +164,16 @@ kind; 26 strategies cross-linked both ways.
 
 166 frontend tests pass; `tsc --noEmit` clean.
 
-## 6. What is still the owner's
+## 6. The review, requested 2026-08-18
 
-Requesting the AdSense review. It is their account and their call. The
-difference from yesterday is that there is now a defect that was found and
-fixed between the two requests, rather than a re-request of the same site.
+The owner requested the AdSense review on **2026-08-18**, against the site as
+deployed above. It is their account and their call, which is why it was not
+done for them; the difference from the previous day's request is that a real
+defect was found and fixed between the two, rather than the same site being
+re-submitted unchanged.
+
+**The verdict, whenever it lands, is judging that deploy** — commit `58b4866`,
+the state the table in section 5 measures. If anything ships between now and
+the outcome, re-measure before concluding the review passed or failed on what
+is currently live: a reviewer looking at a stale crawl and a fresh `curl` can
+legitimately disagree, and only the second is evidence about today's bytes.
