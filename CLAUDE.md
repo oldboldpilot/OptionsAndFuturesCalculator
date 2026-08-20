@@ -606,6 +606,47 @@ v5's 69/98. The vocabulary extension was helping those eight operations by ~20
 rows while costing ~25 elsewhere, and that interaction is not accounted for by
 anything above. It is the first thing to look at if this is picked up again.
 
+### The SERVING PATH loses about half the accuracy, and the model is not at fault
+
+Measured 2026-08-20, immediately after v6 was promoted, on **one utterance, one
+model, two paths**:
+
+| path | result |
+| --- | --- |
+| local engine, sequential, `INFERENCE_QUEUE=postgres`, one replica | **12/12** |
+| production ingress, `INFERENCE_QUEUE=sgee`, `numReplicas: 3`, live traffic | **6/12**, stable across repeated rounds |
+
+Same GGUF, same greedy decode, same `repetition_penalty = 1.0`, byte-identical
+request. **A deterministic decode answering the same input two ways is a
+statement about the serving path, not the weights** — and it means the held-out
+39/42 for closing costs describes a model that production is not delivering.
+
+This is NOT a v6 property. CLAUDE.md already recorded "ten identical sequential
+requests return two different answers under greedy decode" before v6 existed;
+this is the first clean measurement of it, with the local control that makes it
+attributable.
+
+Three candidate mechanisms, none yet isolated — **do not assume the first one**:
+
+1. **Batched decode under concurrent live traffic.** `max_concurrent=4` with an
+   iteration-level scheduler means batch SHAPE varies with load, and a different
+   batch shape changes GEMM reduction order, so near-tied logits can flip the
+   argmax. The local control had the same `max_concurrent=4` and no concurrent
+   traffic, which fits.
+2. **The prefix cache.** `64 of 76 system-prompt tokens cached (block-aligned);
+   12 trailing token(s) plus the caller's own turn are recomputed on every
+   request` — with a q8 KV cache, what ran before can leave state behind.
+3. **SGEE routing.** A request is executed by whichever worker leases it. Every
+   replica now runs the same weights, so this cannot change the answer by
+   itself, but the degrade paths are worth checking — and every one of them
+   logs, so **zero `[WARN]` is the statement**, not a grep for hand-picked
+   phrases.
+
+The discriminator that made this attributable is worth reusing: **keep a local
+engine on the same GGUF and put the identical request through both.** Without
+that control, 6/12 reads as a bad model and the next move is a retrain — which
+is the mistake this file has now recorded three times.
+
 ### Two process failures worth more than the model numbers
 
 - **The 2026-08-13 promotion gate asserted "all HTTP 200", and a REFUSAL IS
