@@ -91,13 +91,40 @@ not evidence of what is behind it. That is now fixed going forward: the key
 names the version, and `MORTGAGE_MODEL_URL` moved with `MORTGAGE_MODEL_SHA256`
 in the same command.
 
-**Cutover was verified by a request only v6 can answer**, not by the healthcheck
-and not by `railway deployment list` — which still read `DEPLOYING` while the
-container was demonstrably serving. A `ParseOperation` on a closing-costs
-utterance returned all sixteen fields exact and admitted by the GP-ARA verifier,
-including `down_payment_percent "0.1000"` (the four-place format fix) and
-`prepaid_interest_days "15"` (the grounding fix). v2 would have refused: it
-cannot name the operation.
+**A SINGLE REQUEST IS NOT A CUTOVER CHECK, and this line claimed it was for
+about an hour.** One `ParseOperation` on a closing-costs utterance did return
+all sixteen fields exact and admitted by the GP-ARA verifier — including
+`down_payment_percent "0.1000"` (the four-place format fix) and
+`prepaid_interest_days "15"` (the grounding fix) — and v2 cannot name that
+operation at all, so the answer really did prove v6 was behind *that* request.
+It proved nothing about the other replicas.
+
+Repeating the IDENTICAL utterance ten times returned **3 params and 7
+refusals**. Under greedy decode one model cannot answer the same input two
+ways, so that ratio is the fleet mix, not model variance: roughly one replica
+in three was on v6 while the rest still served v2.
+
+**The cutover check is therefore N-of-N, and N must exceed the replica count.**
+`railway.json` sets `numReplicas: 3`; ten identical calls all returning the same
+shape is the statement. Both weaker checks fail here in the same direction:
+
+- `railway deployment list` read `DEPLOYING` for over an hour while the new
+  containers were provably healthy and serving — so status is not evidence of
+  cutover, in either direction. CLAUDE.md already records the mirror of this,
+  Railway reporting SUCCESS over a crash-looping container.
+- the healthcheck passes per container and says nothing about which containers
+  the router is using.
+
+This is the same shape as the SGEE queue promotion recorded in CLAUDE.md, which
+was verified with one request that was structurally incapable of reaching the
+defect it missed. **When a check passes, ask what its shape excluded.**
+
+**What the mixed fleet did and did not affect.** The deterministic surface was
+untouched: `Finance/ComputeClosingCosts` returned byte-identical results on 6/6
+calls across the fleet, because that RPC is arithmetic and carries no model. Nor
+was there a regression — a v2 replica refusing a closing-costs parse is exactly
+what it did before the promotion. Only the assistant's *improvement* was
+partial.
 
 **The checksum above was round-tripped from the serving URL**, not copied from
 the local file — `curl --aws-sigv4` GET, piped to `sha256sum`, matching the
