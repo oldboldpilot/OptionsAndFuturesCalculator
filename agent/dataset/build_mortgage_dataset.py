@@ -256,8 +256,48 @@ def rate_str(v: float, places: int = 6) -> str:
 
 
 def phrase_money(v: float) -> str:
-    v = round(v)
-    return f"${v:,}"
+    """Render a money figure for the UTTERANCE, derived from the LABEL string.
+
+    This used to be `v = round(v); return f"${v:,}"`, and that one `round`
+    made eight operations UNLEARNABLE. The label carries `money_str(v)` --
+    `f"{v:.2f}"`, so 1824.51 -- while the utterance said "$1,825". The cents
+    are not recoverable from the utterance, so the model was being trained to
+    produce a figure the input does not contain.
+
+    It is worse than an impossible target, because the serving path ALSO
+    refuses the answer: `mortgage_verification.cppm`'s grounding gate rejects
+    any emitted value that "does not correspond to anything in the request".
+    So the model was squeezed between two contradictory requirements --
+    emit 1824.51 and the verifier refuses it, emit 1825 and it fails the
+    label -- and it learned to split the difference and invent digits, which
+    is precisely the documented "corrupted value" failure mode.
+
+    It was invisible because most money in this generator comes from
+    `round_money(v, nearest=100)` and is already whole hundreds, where
+    rounding to the dollar is a no-op. Only COMPUTED values -- payments,
+    solved rates, present/future values -- carry real cents, which is why the
+    damage was confined to ComputePeriods, ComputePayoffTiming,
+    ComputeMortgageRecast, ComputeRefinance, ComputeRate, ComputeFutureValue,
+    ComputePresentValue and ComputeHomeFutureValue, at 99-100% of their rows
+    each, and exactly 0% everywhere else.
+
+    Measured before this fix, through the real RPC: those eight operations
+    scored **0/98** on the held-out set, for BOTH deployed models, while the
+    nineteen unaffected operations scored 255/422 (60.4%). A hard zero across
+    two independently trained models is a property of the DATA, not of either
+    model.
+
+    The fix derives the phrase from `money_str` rather than recomputing it, so
+    the two cannot disagree by construction -- a parallel computation is what
+    broke, and re-deriving is what stops it recurring. Whole amounts still
+    read "$280,000" rather than "$280,000.00", because that is how people
+    write them and the value is unchanged either way.
+    """
+    s = money_str(v)                      # the EXACT string the label carries
+    neg = s.startswith("-")
+    whole, cents = s.lstrip("-").split(".")
+    body = f"{int(whole):,}" if cents == "00" else f"{int(whole):,}.{cents}"
+    return f"{'-$' if neg else '$'}{body}"
 
 
 def phrase_pct(v: float) -> str:
