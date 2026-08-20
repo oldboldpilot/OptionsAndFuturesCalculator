@@ -1060,26 +1060,34 @@ def make_closing_costs_extraction(rng: random.Random) -> dict:
     tax_escrow_months = rng.randint(2, 6)
     seller_lender_credits = 0.0 if rng.random() < 0.45 else float(round_money(rng.randint(1000, 10000), nearest=500))
     sparse = rng.random() < 0.45
-    # In the sparse shape the utterance says NOTHING about prepaid interest, so
-    # the label must say nothing either: `prepaid_interest_days` is the only
-    # explicit-presence field in finance.proto, ABSENT means the 15-day
-    # convention, and sensen reads it as `value_or(15)` -- so omitting the key
-    # and emitting 15 compute the identical closing costs.
+    # PREPAID INTEREST IS ALWAYS STATED, in every shape. Two ways of not
+    # stating it have now been measured on held-out rows and both fail, for
+    # the same reason:
     #
-    # It used to emit 15, on the reasoning that mortgage_verification.cppm's
-    # kConventionValues admits an ungrounded 15. The verifier does admit it;
-    # the MODEL could not produce it. Measured on v4, 25 of 26 held-out
-    # closing-cost failures involved this field and 21 involved ONLY it --
-    # every gold value 15, every emission an arbitrary number scraped from
-    # elsewhere in the utterance (180, 30, 36, 150, 250...). It is the last
-    # field of the longest, most digit-dense answer in the label space, and
-    # asking for a constant with no anchor in the input, at that position, is
-    # asking to be guessed.
+    #   * label it 15 (the convention) on an utterance that never mentions it
+    #     -- the model emitted numbers scraped from elsewhere in the request
+    #     (180, 30, 36, 150, 250). 21 of 26 closing-cost failures were this
+    #     field alone.
+    #   * OMIT the key, which is what finance.proto's explicit presence is for
+    #     -- the model never once omitted it. 25 of 25 held-out rows whose gold
+    #     omitted the field got a value anyway, 17 of them a literal 0, which
+    #     is NOT the same computation: absent means `value_or(15)`, an explicit
+    #     0 means a closing on the last day of a month owing nothing.
     #
-    # This is the same defect as the phrase_money rounding bug documented on
-    # that function: a LABEL carrying something the UTTERANCE does not contain.
-    # Omitting the key removes it and shortens the answer.
-    prepaid_interest_days = None if sparse else (15 if rng.random() < 0.5 else rng.randint(10, 30))
+    # 48% of training rows omitted it and inference omitted it 0% of the time.
+    # The model treats a sixteen-field answer as a fixed schema and fills every
+    # slot, so the only slot it can fill correctly is one the utterance
+    # actually grounds. The sparse shape still omits ZERO COSTS, which is what
+    # it exists for and which the model does handle; it just no longer omits
+    # the one field that has no anchor.
+    # The DRAW PATTERN is deliberately the original one -- the sparse branch
+    # consumes no rng call and yields the convention value -- because every
+    # generator here shares one Random and changing how many draws this
+    # function makes reshuffles all 12,000 rows, moving held-out rows into
+    # training. That is not hypothetical: it happened once in this session and
+    # was caught only by diffing against a kept copy. A change meant to affect
+    # one operation must consume the same randomness as what it replaces.
+    prepaid_interest_days = 15 if sparse else (15 if rng.random() < 0.5 else rng.randint(10, 30))
 
     def money(v):
         return phrase_money(v)
@@ -1109,8 +1117,7 @@ def make_closing_costs_extraction(rng: random.Random) -> dict:
     prepaid = [f"homeowners insurance at {money(homeowners_insurance_annual)} a year",
                f"property tax at {money(property_tax_annual)} a year",
                f"{tax_escrow_months} months of tax escrow"]
-    if prepaid_interest_days is not None:
-        prepaid.append(f"{prepaid_interest_days} days of prepaid interest")
+    prepaid.append(f"{prepaid_interest_days} days of prepaid interest")
     if seller_lender_credits or not sparse:
         prepaid.append(f"{money(seller_lender_credits)} in seller or lender credits")
 
@@ -1169,9 +1176,8 @@ def make_closing_costs_extraction(rng: random.Random) -> dict:
         "property_tax_annual": money_str(property_tax_annual),
         "tax_escrow_months": tax_escrow_months,
         "seller_lender_credits": money_str(seller_lender_credits),
+        "prepaid_interest_days": prepaid_interest_days,
     }
-    if prepaid_interest_days is not None:
-        obj["prepaid_interest_days"] = prepaid_interest_days
     return convo(("system", SYSTEM), ("user", user), ("assistant", params_block(op, obj)))
 
 
