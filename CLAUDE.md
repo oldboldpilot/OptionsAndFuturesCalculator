@@ -686,6 +686,41 @@ same 16 rows scored **4/16, 7/16, 7/16** on three sequential runs, again a
 different row set each time, again union 9 against local's unchanged 11. So this
 is not a stale image, a half-rolled fleet, or anything a redeploy fixes.
 
+**BOTH candidates above are now FALSIFIED, and by the cheap experiment rather
+than the expensive one.** Two external models (Gemini 3.7 Flash High and
+GPT-5.3-Codex-High, consulted independently on the evidence) both named shared
+prefix-cache / KV state under concurrent traffic as the root cause, and both
+proposed the same decisive test: bypass the prefix cache in production. Neither
+survives contact with the local control:
+
+- **Per-replica personality: falsified.** One row asked 30 times in a row
+  scored 14/30 with lag-3 self-agreement **0.59 against 0.50 chance**. Three
+  internally-deterministic replicas would give ~1.00. Costs nothing, needs no
+  config change, and should be the FIRST thing run — it eliminates a whole class
+  of hypothesis before anyone touches a live service.
+- **Batch shape AND prefix-cache contamination: both falsified together.** The
+  local engine was re-measured while three background threads kept the batch
+  full with DIFFERENT utterances — **375 concurrent background requests sharing
+  the same prefix cache** — and it returned `11/16` with the byte-identical row
+  pattern, three runs out of three. Concurrency, batch fusion and a shared
+  prefix cache are therefore all present locally, all exercised, and all
+  harmless.
+
+So the cause is **not** concurrency, **not** batch shape, and **not** the prefix
+cache. What still differs between the two hosts, and is now where to look:
+`INFERENCE_QUEUE=sgee` versus `postgres`; three replicas versus one; the Envoy
+transcoder versus native gRPC; and **the CPU itself** — this box is Zen 5 and
+Railway's is not, so sensen's SIMD waterfall (`cpu_features.cppm`) may dispatch a
+different kernel with a different reduction order. That last one predicts a
+STABLE difference, though, and production is not stable, so it cannot be the
+whole story on its own.
+
+**The decisive next test is `numReplicas: 1`,** because it is the one variable
+that separates "each replica answers differently" from "one replica answers
+differently each time" — and the 30-run lag test cannot settle it, since SGEE
+leases a request to whichever worker takes it rather than round-robin, so
+per-replica determinism need not be periodic.
+
 The discriminator worth reusing: **keep a local engine on the same GGUF, send it
 the SAME rows the same way, and repeat each arm.** One run of each cannot tell a
 worse host from an unrepeatable one, and those need different fixes.
