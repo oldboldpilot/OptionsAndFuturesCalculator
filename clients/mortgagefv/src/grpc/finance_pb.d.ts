@@ -2543,6 +2543,181 @@ export namespace RiskContributionResponse {
   }
 }
 
+export class ClosingCostsRequest extends jspb.Message {
+  getHomePrice(): string;
+  setHomePrice(value: string): ClosingCostsRequest;
+
+  getDownPaymentPercent(): string;
+  setDownPaymentPercent(value: string): ClosingCostsRequest;
+
+  getAnnualRate(): string;
+  setAnnualRate(value: string): ClosingCostsRequest;
+
+  getOriginationFeePercent(): string;
+  setOriginationFeePercent(value: string): ClosingCostsRequest;
+
+  getDiscountPointsPercent(): string;
+  setDiscountPointsPercent(value: string): ClosingCostsRequest;
+
+  getOtherLenderFees(): string;
+  setOtherLenderFees(value: string): ClosingCostsRequest;
+
+  getTitleSettlementPercent(): string;
+  setTitleSettlementPercent(value: string): ClosingCostsRequest;
+
+  getAppraisalFee(): string;
+  setAppraisalFee(value: string): ClosingCostsRequest;
+
+  getInspectionFee(): string;
+  setInspectionFee(value: string): ClosingCostsRequest;
+
+  getRecordingFees(): string;
+  setRecordingFees(value: string): ClosingCostsRequest;
+
+  getTransferTaxPercent(): string;
+  setTransferTaxPercent(value: string): ClosingCostsRequest;
+
+  getHomeownersInsuranceAnnual(): string;
+  setHomeownersInsuranceAnnual(value: string): ClosingCostsRequest;
+
+  getPropertyTaxAnnual(): string;
+  setPropertyTaxAnnual(value: string): ClosingCostsRequest;
+
+  getTaxEscrowMonths(): number;
+  setTaxEscrowMonths(value: number): ClosingCostsRequest;
+
+  getSellerLenderCredits(): string;
+  setSellerLenderCredits(value: string): ClosingCostsRequest;
+
+  getPrepaidInterestDays(): number;
+  setPrepaidInterestDays(value: number): ClosingCostsRequest;
+  hasPrepaidInterestDays(): boolean;
+  clearPrepaidInterestDays(): ClosingCostsRequest;
+
+  serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): ClosingCostsRequest.AsObject;
+  static toObject(includeInstance: boolean, msg: ClosingCostsRequest): ClosingCostsRequest.AsObject;
+  static serializeBinaryToWriter(message: ClosingCostsRequest, writer: jspb.BinaryWriter): void;
+  static deserializeBinary(bytes: Uint8Array): ClosingCostsRequest;
+  static deserializeBinaryFromReader(message: ClosingCostsRequest, reader: jspb.BinaryReader): ClosingCostsRequest;
+}
+
+export namespace ClosingCostsRequest {
+  export type AsObject = {
+    homePrice: string,
+    downPaymentPercent: string,
+    annualRate: string,
+    originationFeePercent: string,
+    discountPointsPercent: string,
+    otherLenderFees: string,
+    titleSettlementPercent: string,
+    appraisalFee: string,
+    inspectionFee: string,
+    recordingFees: string,
+    transferTaxPercent: string,
+    homeownersInsuranceAnnual: string,
+    propertyTaxAnnual: string,
+    taxEscrowMonths: number,
+    sellerLenderCredits: string,
+    prepaidInterestDays?: number,
+  }
+
+  export enum PrepaidInterestDaysCase { 
+    _PREPAID_INTEREST_DAYS_NOT_SET = 0,
+    PREPAID_INTEREST_DAYS = 16,
+  }
+}
+
+export class ClosingCostsResponse extends jspb.Message {
+  getOriginationFee(): string;
+  setOriginationFee(value: string): ClosingCostsResponse;
+
+  getDiscountPoints(): string;
+  setDiscountPoints(value: string): ClosingCostsResponse;
+
+  getOtherLenderFees(): string;
+  setOtherLenderFees(value: string): ClosingCostsResponse;
+
+  getTitleSettlement(): string;
+  setTitleSettlement(value: string): ClosingCostsResponse;
+
+  getAppraisalFee(): string;
+  setAppraisalFee(value: string): ClosingCostsResponse;
+
+  getInspectionFee(): string;
+  setInspectionFee(value: string): ClosingCostsResponse;
+
+  getRecordingFees(): string;
+  setRecordingFees(value: string): ClosingCostsResponse;
+
+  getTransferTax(): string;
+  setTransferTax(value: string): ClosingCostsResponse;
+
+  getHomeownersInsurancePrepaid(): string;
+  setHomeownersInsurancePrepaid(value: string): ClosingCostsResponse;
+
+  getPropertyTaxEscrow(): string;
+  setPropertyTaxEscrow(value: string): ClosingCostsResponse;
+
+  getPrepaidInterest(): string;
+  setPrepaidInterest(value: string): ClosingCostsResponse;
+
+  getPrepaidInterestDays(): number;
+  setPrepaidInterestDays(value: number): ClosingCostsResponse;
+
+  getItemisedSubtotal(): string;
+  setItemisedSubtotal(value: string): ClosingCostsResponse;
+
+  getSellerLenderCredits(): string;
+  setSellerLenderCredits(value: string): ClosingCostsResponse;
+
+  getTotalClosingCosts(): string;
+  setTotalClosingCosts(value: string): ClosingCostsResponse;
+
+  getLoanAmount(): string;
+  setLoanAmount(value: string): ClosingCostsResponse;
+
+  getDownPayment(): string;
+  setDownPayment(value: string): ClosingCostsResponse;
+
+  getTotalCashToClose(): string;
+  setTotalCashToClose(value: string): ClosingCostsResponse;
+
+  getClosingCostsPercentOfPrice(): number;
+  setClosingCostsPercentOfPrice(value: number): ClosingCostsResponse;
+
+  serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): ClosingCostsResponse.AsObject;
+  static toObject(includeInstance: boolean, msg: ClosingCostsResponse): ClosingCostsResponse.AsObject;
+  static serializeBinaryToWriter(message: ClosingCostsResponse, writer: jspb.BinaryWriter): void;
+  static deserializeBinary(bytes: Uint8Array): ClosingCostsResponse;
+  static deserializeBinaryFromReader(message: ClosingCostsResponse, reader: jspb.BinaryReader): ClosingCostsResponse;
+}
+
+export namespace ClosingCostsResponse {
+  export type AsObject = {
+    originationFee: string,
+    discountPoints: string,
+    otherLenderFees: string,
+    titleSettlement: string,
+    appraisalFee: string,
+    inspectionFee: string,
+    recordingFees: string,
+    transferTax: string,
+    homeownersInsurancePrepaid: string,
+    propertyTaxEscrow: string,
+    prepaidInterest: string,
+    prepaidInterestDays: number,
+    itemisedSubtotal: string,
+    sellerLenderCredits: string,
+    totalClosingCosts: string,
+    loanAmount: string,
+    downPayment: string,
+    totalCashToClose: string,
+    closingCostsPercentOfPrice: number,
+  }
+}
+
 export enum AnnuityTiming { 
   END_OF_PERIOD = 0,
   BEGINNING_OF_PERIOD = 1,

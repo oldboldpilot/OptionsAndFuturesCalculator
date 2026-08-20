@@ -3,9 +3,9 @@
 //
 // Source:   https://github.com/oldboldpilot/OptionsAndFuturesCalculator
 //           backend/proto/finance.proto
-// Content:  6764749c6b3cc910bfe240dfc1584a51147d9d29  (2026-08-05) -- the last
+// Content:  901ba0c1e1f5e48370be28ffd1007c12bb69e010  (2026-08-19) -- the last
 //           upstream commit that CHANGED this file.
-// Verified: d2ac44a3cd428dc161b65305bb48f0b4cfccd149  (2026-08-06) -- diffed
+// Verified: 901ba0c1e1f5e48370be28ffd1007c12bb69e010  (2026-08-20) -- diffed
 //           against upstream at this commit; this header block is the ONLY
 //           difference, so the contract below is current, not merely old.
 //
@@ -14,14 +14,26 @@
 // update means: pull the file at a newer commit, update BOTH hashes above,
 // re-run the diff, and re-run gen_proto.sh. See ../README.md.
 //
-// EVERY RPC DECLARED BELOW IS LIVE at api.optionsandfuturescalculator.com.
-// An earlier revision of this header said six of them were NOT YET LIVE and
-// answered UNIMPLEMENTED (grpc-status 12) -- ComputeRefinance,
-// ComputePayoffTiming, ComputeMortgageRecast, ComputeHomeFutureValue,
-// ComputeRentVsBuy, ComputeHomeNpv. That is no longer true: all six were
-// deployed. See ../README.md and ../../../docs/MORTGAGEFV_INTEGRATION.md.
+// LIVENESS IS PER-RPC AND THIS HEADER IS THE PLACE IT IS RECORDED. Every RPC
+// below is live at api.optionsandfuturescalculator.com EXCEPT:
+//
+//   ComputeClosingCosts -- added 2026-08-19, NOT YET DEPLOYED. Calling it
+//   against production answers UNIMPLEMENTED (grpc-status 12) until the
+//   backend carrying it ships. Check before building UI on it.
+//
+// An earlier revision of this header said six RPCs were NOT YET LIVE when they
+// had in fact been deployed -- ComputeRefinance, ComputePayoffTiming,
+// ComputeMortgageRecast, ComputeHomeFutureValue, ComputeRentVsBuy,
+// ComputeHomeNpv. All six are live. A stale liveness claim in EITHER direction
+// costs a caller real debugging, so this block is updated with the hashes, not
+// separately. See ../README.md and ../../../docs/MORTGAGEFV_INTEGRATION.md.
+//
+// NOTE ON `optional`: prepaid_interest_days is this file's only
+// explicit-presence field. proto3 optional is stable from protoc 3.15 and the
+// pinned toolchain here is libprotoc 3.19.1, so it generates has/clear
+// accessors rather than failing. Absent means the 15-day convention; an
+// explicit 0 means zero days. Do not "simplify" it to a bare int32.
 // ============================================================================
-
 syntax = "proto3";
 
 package sensen.finance;
@@ -110,6 +122,7 @@ service Finance {
   rpc ComputeHomeFutureValue (HomeFutureValueRequest) returns (HomeFutureValueResponse);
   rpc ComputeRentVsBuy (RentVsBuyRequest) returns (RentVsBuyResponse);
   rpc ComputeHomeNpv (HomeNpvRequest) returns (HomeNpvResponse);
+  rpc ComputeClosingCosts (ClosingCostsRequest) returns (ClosingCostsResponse);
 
   // -- Options ---------------------------------------------------------------
   rpc PriceOptionTree (OptionTreeRequest) returns (OptionPricingResponse);
@@ -894,4 +907,96 @@ message RiskContributionResponse {
   // volatility, which is what makes this a decomposition rather than a
   // collection of standalone volatilities.
   repeated double contributions = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Closing costs.
+//
+// Itemises what a buyer pays ON TOP OF the down payment to close a purchase,
+// grouped the way a Loan Estimate groups them: lender fees, third-party
+// services, government fees, and prepaids/escrow.
+//
+// Every percentage here is a DECIMAL FRACTION (0.0075 for 0.75%), matching
+// `selling_closing_cost_percent` and every other rate in this file. The UI
+// collects whole percents and converts; the contract does not, because a file
+// with two percentage conventions is one where the wrong one eventually gets
+// used and still parses.
+//
+// Note WHICH base each percentage applies to -- they are not all the same, and
+// getting it wrong produces a plausible number rather than an error:
+// origination and discount points are percentages of the LOAN, while title and
+// transfer tax are percentages of the PURCHASE PRICE.
+message ClosingCostsRequest {
+  string home_price = 1;
+  string down_payment_percent = 2;         // 0.10 for 10%; loan = price - down
+  // Used ONLY to compute prepaid interest. It does not price a payment here.
+  string annual_rate = 3;                  // 0.0675 for 6.75%
+
+  // Section A -- lender fees.
+  string origination_fee_percent = 4;      // of the LOAN
+  string discount_points_percent = 5;      // of the LOAN; 1 point = 0.01
+  string other_lender_fees = 6;            // flat: underwriting, processing, credit report
+
+  // Third-party services.
+  string title_settlement_percent = 7;     // of the PRICE
+  string appraisal_fee = 8;
+  string inspection_fee = 9;
+
+  // Government fees.
+  string recording_fees = 10;
+  string transfer_tax_percent = 11;        // of the PRICE
+
+  // Prepaids and escrow.
+  string homeowners_insurance_annual = 12; // twelve months are collected at closing
+  string property_tax_annual = 13;
+  int32 tax_escrow_months = 14;
+
+  // Subtracted from the itemised subtotal, NOT from any single line.
+  string seller_lender_credits = 15;
+
+  // Days of interest collected at closing. ABSENT means "use the convention"
+  // (15 -- a half-month, and what the site shows); an explicit 0 means zero
+  // days, which a closing on the last day of a month genuinely owes.
+  //
+  // `optional` -- the only explicit-presence field in this file -- because
+  // those two cases are different answers and a bare proto3 int32 collapses
+  // them. A sentinel was tried first and made "zero days" unrepresentable.
+  optional int32 prepaid_interest_days = 16;
+}
+
+message ClosingCostsResponse {
+  // Section A -- lender fees.
+  string origination_fee = 1;
+  string discount_points = 2;
+  string other_lender_fees = 3;
+
+  // Third-party services.
+  string title_settlement = 4;
+  string appraisal_fee = 5;
+  string inspection_fee = 6;
+
+  // Government fees.
+  string recording_fees = 7;
+  string transfer_tax = 8;
+
+  // Prepaids and escrow.
+  string homeowners_insurance_prepaid = 9;
+  string property_tax_escrow = 10;
+  string prepaid_interest = 11;
+  int32 prepaid_interest_days = 12;        // echoed: what the 0 default resolved to
+
+  // The itemised lines above, summed. Credits are NOT applied here -- a credit
+  // reduces what you WRITE, not what each service CHARGES, and collapsing the
+  // two would make the itemisation stop adding up to its own subtotal.
+  string itemised_subtotal = 13;
+  string seller_lender_credits = 14;
+  string total_closing_costs = 15;         // subtotal - credits
+  string loan_amount = 16;
+  string down_payment = 17;
+  string total_cash_to_close = 18;         // down payment + total closing costs
+  // Share of the purchase price, computed NET of credits -- it is
+  // `total_closing_costs / home_price`, not the itemised subtotal, so it
+  // tracks the figure the buyer actually writes. A double because it is a
+  // display ratio that nothing further is computed from.
+  double closing_costs_percent_of_price = 19;
 }

@@ -1544,6 +1544,49 @@ export class FinanceClient {
     this.methodDescriptorComputeHomeNpv);
   }
 
+  methodDescriptorComputeClosingCosts = new grpcWeb.MethodDescriptor(
+    '/sensen.finance.Finance/ComputeClosingCosts',
+    grpcWeb.MethodType.UNARY,
+    finance_pb.ClosingCostsRequest,
+    finance_pb.ClosingCostsResponse,
+    (request: finance_pb.ClosingCostsRequest) => {
+      return request.serializeBinary();
+    },
+    finance_pb.ClosingCostsResponse.deserializeBinary
+  );
+
+  computeClosingCosts(
+    request: finance_pb.ClosingCostsRequest,
+    metadata?: grpcWeb.Metadata | null): Promise<finance_pb.ClosingCostsResponse>;
+
+  computeClosingCosts(
+    request: finance_pb.ClosingCostsRequest,
+    metadata: grpcWeb.Metadata | null,
+    callback: (err: grpcWeb.RpcError,
+               response: finance_pb.ClosingCostsResponse) => void): grpcWeb.ClientReadableStream<finance_pb.ClosingCostsResponse>;
+
+  computeClosingCosts(
+    request: finance_pb.ClosingCostsRequest,
+    metadata?: grpcWeb.Metadata | null,
+    callback?: (err: grpcWeb.RpcError,
+               response: finance_pb.ClosingCostsResponse) => void) {
+    if (callback !== undefined) {
+      return this.client_.rpcCall(
+        this.hostname_ +
+          '/sensen.finance.Finance/ComputeClosingCosts',
+        request,
+        metadata || {},
+        this.methodDescriptorComputeClosingCosts,
+        callback);
+    }
+    return this.client_.unaryCall(
+    this.hostname_ +
+      '/sensen.finance.Finance/ComputeClosingCosts',
+    request,
+    metadata || {},
+    this.methodDescriptorComputeClosingCosts);
+  }
+
   methodDescriptorPriceOptionTree = new grpcWeb.MethodDescriptor(
     '/sensen.finance.Finance/PriceOptionTree',
     grpcWeb.MethodType.UNARY,
