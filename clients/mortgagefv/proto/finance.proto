@@ -14,19 +14,22 @@
 // update means: pull the file at a newer commit, update BOTH hashes above,
 // re-run the diff, and re-run gen_proto.sh. See ../README.md.
 //
-// LIVENESS IS PER-RPC AND THIS HEADER IS THE PLACE IT IS RECORDED. Every RPC
-// below is live at api.optionsandfuturescalculator.com EXCEPT:
-//
-//   ComputeClosingCosts -- added 2026-08-19, NOT YET DEPLOYED. Calling it
-//   against production answers UNIMPLEMENTED (grpc-status 12) until the
-//   backend carrying it ships. Check before building UI on it.
+// EVERY RPC DECLARED BELOW IS LIVE at api.optionsandfuturescalculator.com,
+// ComputeClosingCosts included -- deployed 2026-08-20 and verified through the
+// live ingress by identity, not by a recorded figure: every itemised line
+// recomputed against its OWN base (origination and points on the LOAN, title
+// and transfer tax on the PRICE), the lines summing to itemised_subtotal
+// (15,335.96), cash to close (60,335.96) equal to down payment plus total, a
+// 5,000 credit moving the total while leaving the itemisation alone, an
+// all-cash purchase at exactly 1.0, an explicit 0 prepaid-interest days
+// distinguishable from an absent one, and an over-credit refused with 9.
 //
 // An earlier revision of this header said six RPCs were NOT YET LIVE when they
 // had in fact been deployed -- ComputeRefinance, ComputePayoffTiming,
 // ComputeMortgageRecast, ComputeHomeFutureValue, ComputeRentVsBuy,
-// ComputeHomeNpv. All six are live. A stale liveness claim in EITHER direction
-// costs a caller real debugging, so this block is updated with the hashes, not
-// separately. See ../README.md and ../../../docs/MORTGAGEFV_INTEGRATION.md.
+// ComputeHomeNpv. A stale liveness claim in EITHER direction costs a caller
+// real debugging, so this block is updated with the hashes, not separately.
+// See ../README.md and ../../../docs/MORTGAGEFV_INTEGRATION.md.
 //
 // NOTE ON `optional`: prepaid_interest_days is this file's only
 // explicit-presence field. proto3 optional is stable from protoc 3.15 and the

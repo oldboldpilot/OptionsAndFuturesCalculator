@@ -184,7 +184,7 @@ checkable, not a promise:
 
 ```bash
 diff clients/mortgagefv/proto/finance.proto backend/proto/finance.proto
-# 1,24d0  -- the 24-line header block and nothing else
+# 1,39d0  -- the 39-line header block and nothing else
 ```
 
 When updating: pull the file at a newer commit, update both hashes, re-run
@@ -293,7 +293,7 @@ strip) before displaying it as "your monthly payment is $1,798.65".
 | Symptom | Meaning | What to do |
 | --- | --- | --- |
 | `err.code === 3` (`INVALID_ARGUMENT`) | A field failed validation -- malformed decimal string, **a required field omitted** (named in the message), `compound_frequency=0`, ragged batch arrays, term over 1200 months | Fix the input; this is not retryable |
-| `err.code === 12` (`UNIMPLEMENTED`) | The RPC exists in `finance.proto` but the *deployed* server doesn't have it yet | **True today of `ComputeClosingCosts` only** -- it is in this contract and not yet deployed. For any OTHER RPC, your vendored proto is newer than the server; re-check the pinned commit |
+| `err.code === 12` (`UNIMPLEMENTED`) | The RPC exists in `finance.proto` but the *deployed* server doesn't have it yet | Not currently true of any RPC in this contract -- `ComputeClosingCosts` was the last one and went live 2026-08-20. If you see it, your vendored proto is newer than the server; re-check the pinned commit. **Reproduce it over gRPC-Web, not curl**: the JSON transcoder cannot map an unknown method, falls through to raw gRPC, and reports `grpc-status 2` "Missing :te header" instead -- which sends you after a header bug |
 | `err.code === 9` (`FAILED_PRECONDITION`) | The maths has no answer -- a payment below the periodic interest, a solver that cannot converge | Surface it; do not substitute a default |
 | `err.code === 8` (`RESOURCE_EXHAUSTED`) | Quota exceeded (per-caller, or the shared anonymous bucket) | Message includes a `retry in <N>s`; honor it, don't tight-retry |
 | `err.code === 16` / `7` | Only once the server enforces API keys (`FINANCE_REQUIRE_KEY=enforce`, not set today): 16 = no/bad/expired key, 7 = known key but wrong origin/scope | Send `x-api-key` now so the flip is a no-op |
@@ -301,24 +301,31 @@ strip) before displaying it as "your monthly payment is $1,798.65".
 
 ## Known constraints
 
-- **`ComputeClosingCosts` is in this contract and is NOT YET DEPLOYED.** It
-  answers `UNIMPLEMENTED` (grpc-status 12) against
-  `api.optionsandfuturescalculator.com` until the backend carrying it ships.
-  It is vendored ahead of the deploy deliberately, so the client can be built
-  and typed against it -- but do not put it on a user path before checking.
-  This entry is the liveness record; delete it once the RPC is live, the same
-  way the six-RPC note below was resolved rather than left standing.
+- **`ComputeClosingCosts` is LIVE as of 2026-08-20.** Verified through the
+  live ingress by identity rather than against a recorded figure: every
+  itemised line recomputed against its own base, the lines summing to
+  `itemised_subtotal` (15,335.96), `total_cash_to_close` (60,335.96) equal to
+  down payment plus total, a credit moving the total and not the itemisation,
+  an all-cash purchase at exactly 1.0, explicit-0 prepaid days distinguishable
+  from absent, and an over-credit refused with `FAILED_PRECONDITION`.
 
   Two things about its shape that the type signature does not tell you.
   `prepaid_interest_days` is the contract's ONLY explicit-presence field:
   absent means the 15-day convention, and an explicit `0` means zero days,
-  which a closing on the last day of a month genuinely owes -- so use
-  `clearPrepaidInterestDays()` for "use the convention" and
-  `setPrepaidInterestDays(0)` for "none", because they are different requests.
-  And the percentage inputs **do not share a base**: `origination_fee_percent`
-  and `discount_points_percent` are shares of the LOAN, while
+  which a closing on the last day of a month genuinely owes -- so
+  `clearPrepaidInterestDays()` and `setPrepaidInterestDays(0)` are DIFFERENT
+  requests, and both were exercised against production. And the percentage
+  inputs **do not share a base**: `origination_fee_percent` and
+  `discount_points_percent` are shares of the LOAN, while
   `title_settlement_percent` and `transfer_tax_percent` are shares of the
-  PRICE. Mixing them yields a plausible figure rather than an error.
+  PRICE. Mixing them yields a plausible figure rather than an error, which is
+  why the verification recomputes each line separately instead of checking one
+  sum.
+
+  **The mortgage ASSISTANT cannot yet name this operation from prose.** The RPC
+  is a `sensen.finance.Finance` method and works on its own; parsing "what are
+  my closing costs on..." into it is a separate capability that is not
+  deployed. Construct the request yourself.
 
 - **All six home-finance RPCs are now live.** `ComputeRefinance`,
   `ComputePayoffTiming`, `ComputeMortgageRecast`, `ComputeHomeFutureValue`,

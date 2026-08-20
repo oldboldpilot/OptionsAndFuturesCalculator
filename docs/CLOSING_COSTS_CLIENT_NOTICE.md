@@ -2,7 +2,9 @@
 
 @author Olumuyiwa Oluwasanmi
 
-Status as of 2026-08-20. This document answers one question — *does the
+Status as of 2026-08-20, AFTER the deploy: `ComputeClosingCosts` is LIVE and
+verified through the live ingress (all identity checks passed). This document
+answers one question — *does the
 frontend need to change to accommodate the new backend?* — separately for each
 client, because the answer is different for each and a single yes/no would be
 wrong for at least one of them.
@@ -69,9 +71,15 @@ the headline to 10,336.
 
 ## How this is communicated, and the one thing that must be said
 
-**`ComputeClosingCosts` is vendored ahead of its deploy on purpose** so the
-client can be built and typed against it. Until the backend carrying it ships,
-calling it answers `UNIMPLEMENTED` (grpc-status 12).
+**`ComputeClosingCosts` was vendored ahead of its deploy on purpose** so the
+client could be built and typed against it. It went LIVE on 2026-08-20, so the
+`UNIMPLEMENTED` window is closed and the entries recording it have been
+deleted rather than left standing as a hedge -- which is what this section
+said the obligation was.
+
+The transport table below is kept because it is a permanent property of the
+ingress, not a fact about this one RPC: it is how you tell "the server does not
+have this method" from "your headers are wrong" for ANY method.
 
 **The status depends on the TRANSPORT, and only one of the two is the
 contract.** Measured against production on 2026-08-20, before the deploy:
@@ -92,25 +100,64 @@ denial. HTTP status carries no information at this boundary; read
 `grpc-status`. A promotion gate in this repository once asserted "all HTTP 200"
 and passed while requests were being refused.
 
-That fact is recorded in TWO places and both are load-bearing:
+Liveness lives in TWO places and both were updated together on deploy:
 
 1. `clients/mortgagefv/proto/finance.proto`'s header block, beside the pinned
    hashes — so liveness is updated when the hashes are, rather than in a file
    that can rot separately.
-2. `clients/mortgagefv/README.md`'s failure-mode table, whose `err.code === 12`
-   row previously read *"Not currently true of any RPC in this contract"*.
+2. `clients/mortgagefv/README.md`'s failure-mode table and Known-constraints
+   entry.
 
-That row is why this section exists. This README has already carried a stale
-liveness claim in the OTHER direction — it asserted that six deployed RPCs
-answered `UNIMPLEMENTED` — and a wrong liveness claim costs a caller real
-debugging in both directions. Delete the entry when the RPC goes live; do not
-leave it standing as a hedge.
+Both now say LIVE. This README has already carried a stale liveness claim in
+the OTHER direction — it asserted that six deployed RPCs answered
+`UNIMPLEMENTED` — and a wrong claim costs a caller real debugging in both
+directions, which is why the "not yet deployed" entries were deleted on the day
+rather than left standing.
+
+## What was verified against production, and how
+
+Deployed 2026-08-20. The cutover was confirmed by the boot sequence, not the
+healthcheck: 6 `model is LOADED` lines (3 replicas x 2 assistants), 3 boot
+banners (each replica booting ONCE, so not a crash loop), 0 `[ERROR]`, 0
+`[WARN]`. Railway reports SUCCESS while a container crash-loops, so a green
+deployment is not evidence anything is serving.
+
+The RPC itself was then checked BY IDENTITY rather than against a recorded
+figure — every itemised line recomputed against its OWN base, because a single
+sum identity would catch a dropped term but never a swapped base:
+
+| check | result |
+| --- | --- |
+| origination 405,000 x 0.0075 (LOAN base) | 3,037.50 |
+| title 450,000 x 0.0055 (PRICE base) | 2,475.00 |
+| transfer tax 450,000 x 0.005 (PRICE base) | 2,250.00 |
+| prepaid interest 405,000 x r x 15/365 | 1,123.4589 |
+| lines sum == `itemised_subtotal` | 15,335.9589 |
+| `total_cash_to_close` == down payment + total | 60,335.9589 |
+| 5,000 credit: subtotal unchanged, total 10,335.96 | pass |
+| all-cash at exactly 1.0 (no loan, transfer tax still owed) | pass |
+| explicit 0 prepaid days distinguishable from absent | pass |
+| over-credit refused `FAILED_PRECONDITION` (9) | pass |
+
+All checks passed. The subtotal and cash-to-close agree with the live
+mortgagefvcalculator.com page, which is agreement between two independent
+implementations rather than a figure copied forward.
 
 ## What the assistant does NOT yet do
 
 `ComputeClosingCosts` is a `sensen.finance.Finance` RPC and works on its own.
 The MORTGAGE ASSISTANT naming it from a plain-English utterance is a separate
-capability with a separate gate, and it is not covered by deploying this RPC.
-A client that needs "compute my closing costs" parsed from prose should treat
-that as unavailable until the assistant's own holdout says otherwise; a client
-that constructs the request itself is unaffected.
+capability with a separate gate, and deploying this RPC did not deliver it.
+
+**Measured, so this is not a hedge.** The v3 candidate trained for it scores
+**7/42 (16.7%)** numerically correct on the held-out closing-cost rows, with
+**10/42** collapsing into a degenerate zero-loop at the final field, and it
+regresses the other 26 operations by 39 rows at p = 3.5e-05. It was NOT
+deployed; production serves v2, whose label space does not contain
+`ComputeClosingCosts` at all, so the assistant's score for this operation in
+production is **0/42 by construction**.
+
+A client that needs "what are my closing costs on..." parsed from prose must
+treat that as unavailable. A client that constructs the request itself is
+unaffected and fully served — which is every case the type-safe generated
+client covers.
