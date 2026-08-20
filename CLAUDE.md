@@ -615,69 +615,74 @@ v5's 69/98. The vocabulary extension was helping those eight operations by ~20
 rows while costing ~25 elsewhere, and that interaction is not accounted for by
 anything above. It is the first thing to look at if this is picked up again.
 
-### The SERVING PATH loses about half the accuracy, and the model is not at fault
+### Production's decode is NOT REPRODUCIBLE. Local's is. That is the finding
 
-Measured 2026-08-20, immediately after v6 was promoted, on **one utterance, one
-model, two paths**:
+Measured 2026-08-20, **16 fixed closing-cost holdout rows, the same rows through
+every arm**, scored on which arm of `ParseResponse`'s `outcome` oneof is set --
+never on message text.
 
-| path | result |
-| --- | --- |
-| local engine, sequential, `INFERENCE_QUEUE=postgres`, one replica | **12/12** |
-| production ingress, `INFERENCE_QUEUE=sgee`, `numReplicas: 3`, live traffic | **6/12**, stable across repeated rounds |
+| arm | params / 16 | rows answered |
+| --- | --- | --- |
+| local sequential, run 1 | 11 | `.PPPPP.PP.P.P.PP` |
+| local sequential, run 2 | 11 | `.PPPPP.PP.P.P.PP` |
+| local sequential, run 3 | 11 | `.PPPPP.PP.P.P.PP` |
+| production sequential, run 1 | 6 | `.PPP.P....P...P.` |
+| production sequential, run 2 | 6 | `.P.....PP.P.P.P.` |
+| production sequential, run 3 | 7 | `.P.P.P.PP.P.P...` |
 
-Same GGUF, same greedy decode, same `repetition_penalty = 1.0`, byte-identical
-request. **A deterministic decode answering the same input two ways is a
-statement about the serving path, not the weights** — and it means the held-out
-39/42 for closing costs describes a model that production is not delivering.
+**The count is not the finding; the PATTERN is.** Local is byte-identical three
+times over. Production lands on a *different set of rows every run* while its
+total barely moves -- 6, 6, 7. Only rows 2 and 11 are answered in all three, and
+the union of the three attempts is **9 of 16**, against local's 11. So
+production is not missing the capability. It is failing to reproduce it: over
+three tries it recovers nine of the eleven rows local answers every time, and on
+any single try it delivers six.
 
-This is NOT a v6 property. CLAUDE.md already recorded "ten identical sequential
-requests return two different answers under greedy decode" before v6 existed;
-this is the first clean measurement of it, with the local control that makes it
-attributable.
+That is a different defect from the one this section used to describe, and it
+has a different consequence. A fixed loss is a worse model in production; a
+non-reproducible decode is a **retry that would work**, and a user who presses
+the button twice gets a different answer to the same question.
 
-Three candidate mechanisms, none yet isolated — **do not assume the first one**:
+**The measurement this replaces was wrong, and it was wrong in a way worth
+recording.** It reported "12/12 locally, 6/12 in production" and concluded the
+serving path loses half the accuracy. It compared a **sequential** local run
+against a **concurrent** production run, on **one** cherry-picked utterance.
+Two variables moved at once -- host AND concurrency -- so it could attribute
+nothing to either, and a single row cannot separate "this question is hard" from
+"this host is worse". Crossing both variables on a fixed row set is what turned
+an unattributable gap into a statement about reproducibility. The local control
+was the right instinct; holding only one variable was the error.
 
-1. **Batched decode under concurrent live traffic.** `max_concurrent=4` with an
-   iteration-level scheduler means batch SHAPE varies with load, and a different
-   batch shape changes GEMM reduction order, so near-tied logits can flip the
-   argmax. The local control had the same `max_concurrent=4` and no concurrent
-   traffic, which fits.
-2. **The prefix cache.** `64 of 76 system-prompt tokens cached (block-aligned);
-   12 trailing token(s) plus the caller's own turn are recomputed on every
-   request` — with a q8 KV cache, what ran before can leave state behind.
-3. **SGEE routing.** A request is executed by whichever worker leases it. Every
-   replica now runs the same weights, so this cannot change the answer by
-   itself, but the degrade paths are worth checking — and every one of them
-   logs, so **zero `[WARN]` is the statement**, not a grep for hand-picked
-   phrases.
+Concurrency does cost something, and it is the smaller effect: production
+sequential 6/16 against production concurrent 3/16, 3 rows flipping. Local at
+16-way concurrency returns 7 params and **7 `RESOURCE_EXHAUSTED`** -- the
+admission queue refusing, which is `max_concurrent=4 queue_depth=8` behaving
+exactly as configured, not a decode failure. Errors and refusals are counted
+separately for that reason.
 
-The discriminator that made this attributable is worth reusing: **keep a local
-engine on the same GGUF and put the identical request through both.** Without
-that control, 6/12 reads as a bad model and the next move is a retrain — which
-is the mistake this file has now recorded three times.
+**Both hosts run the same weights, verified rather than assumed.** The local
+GGUF hashes `22c182e8...` and production's `MORTGAGE_MODEL_SHA256` is the same
+value; `pgrep -x calculator_engi` is 1, so no second engine is splitting
+requests over `SO_REUSEPORT`.
 
-### Two process failures worth more than the model numbers
+**Zero `[WARN]` and zero `[ERROR]` in the deployment across every run**, which
+rules out the SGEE degrade paths: every fallback branch in `SgeeAdmission` logs,
+so silence is the negative proof. Two candidates remain and NEITHER is isolated:
 
-- **The 2026-08-13 promotion gate asserted "all HTTP 200", and a REFUSAL IS
-  HTTP 200.** It could not have caught any of this.
-- **Nothing recorded which seed built the corpus on disk.** The argparse default
-  is 3407; the corpus was built with `--seed 0`, this module's own documented
-  invocation. A rebuild meant to change only the closing-cost rows reseeded all
-  11,400 — **11,198 of 11,400 rows changed, moving held-out rows into
-  training** — and it was caught only by diffing against a kept copy.
-  `build_mortgage_dataset.py` now writes `meta.json` with the seed, the row
-  counts and the sha256 of both the generator and the proto. A change meant to
-  affect one operation must also consume the same randomness as what it
-  replaces, because every generator shares one `Random`.
+1. **Batch shape under live traffic.** `max_concurrent=4` with an
+   iteration-level scheduler means batch shape varies with load, and a different
+   shape changes GEMM reduction order, so a near-tied logit can flip the argmax.
+   The local control has the same `max_concurrent=4` and no other traffic, so
+   its batch is always 1 -- which is exactly the difference. **But local's own
+   4-way batching did NOT flip any row it answered**, so this is a hypothesis
+   with a piece of evidence against it, not a conclusion.
+2. **The prefix cache over a q8 KV cache.** 64 of 76 system-prompt tokens are
+   cached block-aligned and 12 trailing tokens are recomputed per request; what
+   ran before can leave state behind.
 
-**A `<params>`-level intelligibility gate is separate from the score, and it has
-to be.** `raw_block_invalid` counts unparseable blocks and is 0 for a non-empty
-`<think>` (the system prompt did not take), a fullwidth zero U+FF10 inside a
-numeric literal (a different token id that escapes the penalty), and truncation
-(which yields a MISSING block, not a malformed one). Score and intelligibility
-are different questions. **And score numerically as well as by string equality**
-— v4's closing costs were 0/42 exact and 16/42 numerically, the entire gap being
-a format convention. A wrong digit and a trailing zero are different findings.
+The discriminator worth reusing: **keep a local engine on the same GGUF, send it
+the SAME rows the same way, and repeat each arm.** One run of each cannot tell a
+worse host from an unrepeatable one, and those need different fixes.
 
 ## Pro tier and quota
 
