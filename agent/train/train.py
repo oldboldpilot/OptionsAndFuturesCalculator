@@ -170,8 +170,10 @@ def extend_vocabulary(model, tokenizer, tokens: list[str]) -> int:
     #
     # Leaving the matrix alone also keeps the exported GGUF's vocab at 151936,
     # so the serving artifact is unchanged in shape -- only its contents move.
-    current_rows = model.get_input_embeddings().weight.shape[0]
-    if len(tokenizer) > current_rows:
+    rows_before = model.get_input_embeddings().weight.shape[0]
+    current_rows = rows_before
+    grew = len(tokenizer) > current_rows
+    if grew:
         model.resize_token_embeddings(len(tokenizer))
         current_rows = model.get_input_embeddings().weight.shape[0]
 
@@ -188,11 +190,21 @@ def extend_vocabulary(model, tokenizer, tokens: list[str]) -> int:
             if head_w is not None and not tied:
                 head_w[new_id] = head_w[src].mean(dim=0).to(head_w.dtype)
 
+    # Say which of the three states the matrix is in, not two. `current_rows ==
+    # len(tokenizer)` is TRUE both when the matrix was grown to fit and when it
+    # already fitted exactly, so reporting "grown" on that test alone claims a
+    # resize that may never have happened -- and whether the resize ran is the
+    # one fact this line exists to record.
+    if grew:
+        fit = f"grown from {rows_before} to {current_rows}"
+    elif current_rows == len(tokenizer):
+        fit = "unchanged -- already an exact fit"
+    else:
+        fit = f"unchanged -- {current_rows - len(tokenizer)} reserved row(s) still spare"
     print(
         f"vocab: added {added} token(s), seeded from sub-token means "
         f"(lm_head {'tied' if tied else 'seeded separately'}); "
-        f"tokenizer now {len(tokenizer)}, embedding rows {current_rows} "
-        f"({'grown' if current_rows == len(tokenizer) else 'unchanged -- new ids fit the reserved rows'})"
+        f"tokenizer now {len(tokenizer)}, embedding rows {current_rows} ({fit})"
     )
     return added
 
@@ -572,6 +584,15 @@ def main() -> None:
                 "s_per_step": dt / steps,
                 "peak_gpu_bytes": torch.cuda.max_memory_allocated(),
                 "train_rows": len(train_rows),
+                # Provenance for the vocabulary extension. Without these two a
+                # vocab-extended run is INDISTINGUISHABLE from a plain one by
+                # its own metadata -- and the two produce different artifacts
+                # from the same recipe fields, because --extend-vocab also puts
+                # LoRA on embed_tokens/lm_head and so moves trainable params
+                # from ~2.5% to ~18%. A checkpoint whose provenance cannot say
+                # which recipe produced it is how the wrong one gets rerun.
+                "extend_vocab": bool(args.extend_vocab),
+                "vocab_added": vocab_added,
             },
             indent=2,
         )
