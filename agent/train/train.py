@@ -123,7 +123,7 @@ def closing_cost_vocab(train_path: str) -> list[str]:
     return sorted(found)
 
 
-def extend_vocabulary(model, tokenizer, tokens: list[str]) -> int:
+def extend_vocabulary(model, tokenizer, tokens: list[str]) -> tuple[int, int]:
     """Add `tokens` as single tokens and seed each from its own sub-tokens.
 
     Two things matter here and neither is default behaviour.
@@ -144,7 +144,10 @@ def extend_vocabulary(model, tokenizer, tokens: list[str]) -> int:
 
     fresh = [t for t in tokens if len(tokenizer(t, add_special_tokens=False)["input_ids"]) > 1]
     if not fresh:
-        return 0
+        # Nothing to add -- every identifier is already a single token. Report a
+        # boundary anyway so the caller can unpack unconditionally; with 0 added
+        # rows the freeze mask is never installed, so the value is inert.
+        return 0, len(tokenizer)
 
     # Capture the OLD decomposition before the tokenizer learns the new tokens,
     # otherwise each string now tokenizes to itself and the mean is undefined.
@@ -152,6 +155,10 @@ def extend_vocabulary(model, tokenizer, tokens: list[str]) -> int:
         t: tokenizer(t, add_special_tokens=False)["input_ids"] for t in fresh
     }
 
+    # The row index the new tokens start at, captured BEFORE they are added.
+    # This is the freeze boundary: everything below it is pre-existing and
+    # must not move, everything at or above it is new and must train.
+    first_new_row = len(tokenizer)
     added = tokenizer.add_tokens(fresh)
 
     # Resize ONLY to grow, never to shrink -- and here it does not need to grow
@@ -206,7 +213,59 @@ def extend_vocabulary(model, tokenizer, tokens: list[str]) -> int:
         f"(lm_head {'tied' if tied else 'seeded separately'}); "
         f"tokenizer now {len(tokenizer)}, embedding rows {current_rows} ({fit})"
     )
-    return added
+    return added, first_new_row
+
+
+def _patch_merged_embedding(out_dir: Path, model) -> None:
+    """Write the LIVE embedding matrix into the merged export, and verify it.
+
+    See the call site for why this is necessary. The verification is the point:
+    a patch that silently no-ops leaves exactly the artifact it was written to
+    prevent, and the failure is invisible because the tokenizer still carries
+    the new tokens.
+
+    lm_head is tied on this checkpoint and is therefore absent from the
+    exported state dict entirely (`[k for k in sd if "lm_head" in k] == []`),
+    so patching the input embedding fixes the read side and the write side
+    together. If a future checkpoint untied them, extend_vocabulary already
+    refuses to train it.
+    """
+    from safetensors.torch import load_file, save_file
+
+    live = model.get_input_embeddings().weight.detach().to(torch.bfloat16).cpu()
+
+    shards = sorted(out_dir.glob("model*.safetensors"))
+    if not shards:
+        raise RuntimeError(f"no safetensors to patch in {out_dir}")
+
+    key = "model.embed_tokens.weight"
+    for shard in shards:
+        sd = load_file(str(shard))
+        if key not in sd:
+            continue
+        before = sd[key].float()
+        if tuple(before.shape) != tuple(live.shape):
+            raise RuntimeError(
+                f"embedding shape mismatch: file {tuple(before.shape)} vs live "
+                f"{tuple(live.shape)} -- refusing to patch"
+            )
+        moved = (before - live.float()).abs().max().item()
+        sd[key] = live
+        # save_file drops metadata; safetensors for HF needs the format tag or
+        # transformers refuses to load the shard.
+        save_file(sd, str(shard), metadata={"format": "pt"})
+        print(
+            f"patched {key} into {shard.name}: max |file - live| was {moved:.3e} "
+            f"(0.0 would mean the export already had it)"
+        )
+
+        check = load_file(str(shard))[key].float()
+        if (check - live.float()).abs().max().item() != 0.0:
+            raise RuntimeError("embedding patch did not round-trip -- refusing to continue")
+        print("  verified: re-read matches the live matrix exactly")
+        return
+
+    raise RuntimeError(f"{key} not found in any shard of {out_dir}")
 
 
 def main() -> None:
@@ -332,6 +391,7 @@ def main() -> None:
     # order is not negotiable: resizing the embedding matrix after the adapters
     # are attached leaves LoRA wrapping a matrix of the old width.
     vocab_added = 0
+    tokenizer_rows_before_extension = 0
     if args.extend_vocab:
         toks = closing_cost_vocab(str(Path(args.data) / "train.jsonl"))
         if not toks:
@@ -341,7 +401,9 @@ def main() -> None:
                 "silently training the old label space is how a retrain gets "
                 "attributed to the wrong recipe."
             )
-        vocab_added = extend_vocabulary(model, tokenizer, toks)
+        vocab_added, tokenizer_rows_before_extension = extend_vocabulary(
+            model, tokenizer, toks
+        )
 
     if qlora:
         model = FastLanguageModel.get_peft_model(
@@ -358,12 +420,22 @@ def main() -> None:
                 "gate_proj",
                 "up_proj",
                 "down_proj",
-            ]
-            # New rows in the embedding matrix are useless unless something
-            # TRAINS them. QLoRA freezes the 4-bit base, so without these two
-            # the added tokens keep their seeded values for the whole run and
-            # the extension buys nothing but a bigger vocab.
-            + (["embed_tokens", "lm_head"] if vocab_added else []),
+            ],
+            # NOT "embed_tokens"/"lm_head". v3 put LoRA on both and REGRESSED
+            # the untouched operations from 60.4% to 51.2% (paired McNemar
+            # p = 3.5e-05, 63 rows lost against 24 gained), concentrated as
+            # label blurring in the amortization cluster -- 43 of the 63
+            # newly-broken rows were ComputeDetailedAmortization and
+            # ComputeAmortization, and 33 of 63 named the WRONG operation.
+            #
+            # The mechanism is not subtle: a LoRA adapter on the embedding is a
+            # low-rank update applied to the WHOLE matrix, so training it to
+            # place seventeen new rows also moves all 151,669 existing ones,
+            # including every operation-name embedding the label space depends
+            # on. The new rows needed gradient. The rest did not.
+            #
+            # They are trained instead by unfreezing the embedding matrix and
+            # masking the gradient to the new rows only -- see below.
             lora_alpha=args.lora_alpha,
             lora_dropout=args.lora_dropout,  # 0 is Unsloth's optimised path
             bias="none",  # ditto
@@ -372,6 +444,56 @@ def main() -> None:
             max_seq_length=args.max_seq_length,
             use_rslora=False,
         )
+
+        # ------------------------------------------------------------------
+        # Train ONLY the newly added embedding rows.
+        # ------------------------------------------------------------------
+        # get_peft_model has just frozen every base parameter, so this must run
+        # AFTER it or PEFT undoes it.
+        #
+        # The embedding is not a 4-bit Linear -- bitsandbytes quantizes Linear
+        # layers, not embeddings -- so its weight is a real bf16 tensor that can
+        # take a gradient directly. Unfreezing it and zeroing the gradient for
+        # every pre-existing row trains the seventeen new ones at full rank
+        # while leaving the other 151,669 bit-identical. That is strictly more
+        # capacity for the new tokens than a LoRA adapter gave them, and
+        # strictly less disturbance to everything else, which is the whole
+        # point: v3 had it backwards on both counts.
+        #
+        # lm_head is TIED to the input embedding on Qwen3-0.6B (verified by
+        # data_ptr() equality in extend_vocabulary), so one masked tensor
+        # trains the read side and the write side together. If it were ever
+        # untied, the output side would need the same treatment and the assert
+        # below is what would catch it.
+        if vocab_added:
+            emb = model.get_input_embeddings().weight
+            frozen_rows = tokenizer_rows_before_extension
+            emb.requires_grad_(True)
+
+            def _freeze_existing_rows(grad, _n=frozen_rows):
+                # In place, and returning the same tensor: a clone here is
+                # 151936 x 1024 floats on every single backward pass.
+                grad[:_n].zero_()
+                return grad
+
+            emb.register_hook(_freeze_existing_rows)
+
+            head = model.get_output_embeddings()
+            tied = head is not None and head.weight.data_ptr() == emb.data_ptr()
+            print(
+                f"vocab: training rows [{frozen_rows}:{emb.shape[0]}] only "
+                f"({emb.shape[0] - frozen_rows} row(s)); rows [0:{frozen_rows}] "
+                f"gradient-masked; lm_head "
+                f"{'tied -- trained by the same tensor' if tied else 'UNTIED -- NOT masked, see comment'}"
+            )
+            if not tied:
+                raise SystemExit(
+                    "lm_head is untied on this checkpoint, so masking the input "
+                    "embedding alone leaves the OUTPUT rows for the new tokens "
+                    "untrained -- the model could read them and not write them, "
+                    "which on structured output is the half that matters. Add the "
+                    "same mask to the output embedding before training this model."
+                )
         trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
         total = sum(p.numel() for p in model.parameters())
         print(
@@ -533,6 +655,33 @@ def main() -> None:
             "merged_16bit",
             lambda: model.save_pretrained_merged(args.out, tokenizer, save_method="merged_16bit"),
         )
+
+        # ------------------------------------------------------------------
+        # save_pretrained_merged DISCARDS in-place edits to the base weights.
+        # ------------------------------------------------------------------
+        # It reloads the base checkpoint from disk and folds the LoRA adapters
+        # into it, so anything written directly into a base tensor -- the
+        # seeded rows for new tokens, and everything the masked embedding
+        # gradient trained -- never reaches the file.
+        #
+        # MEASURED, v4, before this fix-up existed: q_proj differed from base
+        # by 1.7e-03 and up_proj by 3.7e-02 (the adapters merged correctly),
+        # while embed_tokens differed by EXACTLY 0.000e+00 and the seventeen
+        # new rows still carried the base's untouched reserved-row norm of
+        # 0.36135 instead of the ~0.9 a seeded row has. The model trained with
+        # seeded, masked-trainable rows and exported without them.
+        #
+        # This is silent in the worst way: the TOKENIZER is saved with the new
+        # tokens, so text tokenises to ids whose embeddings are untrained
+        # reserved rows. The artifact is not merely unimproved, it is
+        # incoherent -- and it loads, and it decodes, and it looks fine.
+        #
+        # It also means the mean-seeding in extend_vocabulary had never once
+        # reached an artifact before now. v3 appeared to work only because its
+        # LoRA adapter on embed_tokens did merge; its seeding was discarded the
+        # same way.
+        if vocab_added:
+            _patch_merged_embedding(Path(args.out), model)
 
     # 1. The intended path: auto-detects the QAT model and converts it.
     attempt("torchao", lambda: model.save_pretrained_torchao(args.out, tokenizer=tokenizer))
