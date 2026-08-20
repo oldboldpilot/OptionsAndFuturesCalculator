@@ -615,115 +615,70 @@ v5's 69/98. The vocabulary extension was helping those eight operations by ~20
 rows while costing ~25 elsewhere, and that interaction is not accounted for by
 anything above. It is the first thing to look at if this is picked up again.
 
-### Production's decode is NOT REPRODUCIBLE. Local's is. That is the finding
+### RESOLVED: the SGEE queue path was the cause. `INFERENCE_QUEUE=postgres` fixes it
 
-Measured 2026-08-20, **16 fixed closing-cost holdout rows, the same rows through
-every arm**, scored on which arm of `ParseResponse`'s `outcome` oneof is set --
-never on message text.
+**One variable, measured end to end on 2026-08-20.** The same 16 closing-cost
+holdout rows, the same bytes, the same engine image, scored on which arm of
+`ParseResponse`'s `outcome` oneof is set:
 
-| arm | params / 16 | rows answered |
-| --- | --- | --- |
-| local sequential, run 1 | 11 | `.PPPPP.PP.P.P.PP` |
-| local sequential, run 2 | 11 | `.PPPPP.PP.P.P.PP` |
-| local sequential, run 3 | 11 | `.PPPPP.PP.P.P.PP` |
-| production sequential, run 1 | 6 | `.PPP.P....P...P.` |
-| production sequential, run 2 | 6 | `.P.....PP.P.P.P.` |
-| production sequential, run 3 | 7 | `.P.P.P.PP.P.P...` |
+| arm | run 1 | run 2 | run 3 | row pattern |
+| --- | --- | --- | --- | --- |
+| local, `postgres`, 1 replica | 11/16 | 11/16 | 11/16 | identical every run |
+| local, `postgres`, **375 concurrent background requests** | 11/16 | 11/16 | 11/16 | identical every run |
+| production, **`sgee`**, 3 replicas | 4/16 | 7/16 | 7/16 | **different every run** |
+| production, **`sgee`**, **1 replica** | 4/16 | 5/16 | 1/16 | **different every run** |
+| production, **`postgres`**, 3 replicas | **11/16** | **11/16** | **11/16** | **identical, and identical to local** |
 
-**The count is not the finding; the PATTERN is.** Local is byte-identical three
-times over. Production lands on a *different set of rows every run* while its
-total barely moves -- 6, 6, 7. Only rows 2 and 11 are answered in all three, and
-the union of the three attempts is **9 of 16**, against local's 11. So
-production is not missing the capability. It is failing to reproduce it: over
-three tries it recovers nine of the eleven rows local answers every time, and on
-any single try it delivers six.
+`.PPPPP.PP.P.P.PP` is the pattern local produces and the pattern production
+produces on `postgres`. The two hosts now agree **row for row**, and production
+went from a typical 6/16 to 11/16 — it was throwing away roughly **45% of the
+model's answers**, not to a worse model but to the queue.
 
-That is a different defect from the one this section used to describe, and it
-has a different consequence. A fixed loss is a worse model in production; a
-non-reproducible decode is a **retry that would work**, and a user who presses
-the button twice gets a different answer to the same question.
+**`INFERENCE_QUEUE` is set to `postgres` on the Railway service as of
+2026-08-20, and that is the fix.** The SGEE promotion recorded further down this
+file is rolled back for the inference path. Do not re-promote it without
+reproducing this table.
 
-**The measurement this replaces was wrong, and it was wrong in a way worth
-recording.** It reported "12/12 locally, 6/12 in production" and concluded the
-serving path loses half the accuracy. It compared a **sequential** local run
-against a **concurrent** production run, on **one** cherry-picked utterance.
-Two variables moved at once -- host AND concurrency -- so it could attribute
-nothing to either, and a single row cannot separate "this question is hard" from
-"this host is worse". Crossing both variables on a fixed row set is what turned
-an unattributable gap into a statement about reproducibility. The local control
-was the right instinct; holding only one variable was the error.
+Four things about how this was found are worth more than the finding:
 
-Concurrency does cost something, and it is the smaller effect: production
-sequential 6/16 against production concurrent 3/16, 3 rows flipping. Local at
-16-way concurrency returns 7 params and **7 `RESOURCE_EXHAUSTED`** -- the
-admission queue refusing, which is `max_concurrent=4 queue_depth=8` behaving
-exactly as configured, not a decode failure. Errors and refusals are counted
-separately for that reason.
+- **The elimination order was cheapest-first, and it mattered.** A 30-request
+  periodicity probe (free, no config change) killed per-replica personality:
+  lag-3 self-agreement **0.59 against 0.50 chance**, where three
+  internally-deterministic replicas would give ~1.00. Then adding background
+  load to the LOCAL engine — 375 concurrent requests sharing one prefix cache —
+  killed batch shape and prefix-cache contamination together, because local
+  stayed bit-identical through all of it. Only then was a live config touched.
+- **Two external models were consulted and both were wrong, in the same
+  direction.** Gemini 3.7 Flash High and GPT-5.3-Codex-High independently named
+  shared prefix-cache / KV state under concurrent traffic, and both proposed the
+  same decisive test: bypass the prefix cache in production. That would have
+  cost a code change and a deploy to test a hypothesis the local control refutes
+  for free. Both reasoned about what *could* break under concurrency; neither
+  asked whether concurrency breaks it *here*.
+- **`numReplicas: 1` was the test that pointed at the queue**, by exclusion. A
+  single replica was MORE erratic (4, 5, 1), not less, so nothing about having
+  three replicas explained it — which left the transport and the queue, and the
+  queue is an env var.
+- **ZERO `[WARN]` and ZERO `[ERROR]` throughout, on every SGEE run.** Every
+  degrade branch in `SgeeAdmission` logs, so the fallback paths never fired.
+  **SGEE was not degrading — it was returning wrong answers quietly.** That is
+  strictly worse than a fallback, and it means "zero warns" proved the request
+  was served by the cluster and proved nothing whatever about the answer.
 
-**Both hosts run the same weights, verified rather than assumed.** The local
-GGUF hashes `22c182e8...` and production's `MORTGAGE_MODEL_SHA256` is the same
-value; `pgrep -x calculator_engi` is 1, so no second engine is splitting
-requests over `SO_REUSEPORT`.
+**What is NOT yet known: which part of the SGEE path corrupts the request.** The
+prompt could be truncated or re-ordered in the payload round trip, the result
+could be taken from the wrong task, or the lease/replay machinery could be
+re-executing a decode against state that has moved. `BrokerComplete` carries a
+result but no error text by design, so a mangled payload has no channel to
+announce itself. The next step is to log the exact prompt bytes and the exact
+returned bytes on both sides of the queue and diff them — the answer is a
+comparison, not a theory.
 
-**Zero `[WARN]` and zero `[ERROR]` in the deployment across every run**, which
-rules out the SGEE degrade paths: every fallback branch in `SgeeAdmission` logs,
-so silence is the negative proof. Two candidates remain and NEITHER is isolated:
-
-1. **Batch shape under live traffic.** `max_concurrent=4` with an
-   iteration-level scheduler means batch shape varies with load, and a different
-   shape changes GEMM reduction order, so a near-tied logit can flip the argmax.
-   The local control has the same `max_concurrent=4` and no other traffic, so
-   its batch is always 1 -- which is exactly the difference. **But local's own
-   4-way batching did NOT flip any row it answered**, so this is a hypothesis
-   with a piece of evidence against it, not a conclusion.
-2. **The prefix cache over a q8 KV cache.** 64 of 76 system-prompt tokens are
-   cached block-aligned and 12 trailing tokens are recomputed per request; what
-   ran before can leave state behind.
-
-**Re-confirmed after a FULL REBUILD AND CUTOVER**, deployment `c0073947`,
-6 `model is LOADED` (3 replicas x 2 assistants), 0 `[WARN]`, 0 `[ERROR]`: the
-same 16 rows scored **4/16, 7/16, 7/16** on three sequential runs, again a
-different row set each time, again union 9 against local's unchanged 11. So this
-is not a stale image, a half-rolled fleet, or anything a redeploy fixes.
-
-**BOTH candidates above are now FALSIFIED, and by the cheap experiment rather
-than the expensive one.** Two external models (Gemini 3.7 Flash High and
-GPT-5.3-Codex-High, consulted independently on the evidence) both named shared
-prefix-cache / KV state under concurrent traffic as the root cause, and both
-proposed the same decisive test: bypass the prefix cache in production. Neither
-survives contact with the local control:
-
-- **Per-replica personality: falsified.** One row asked 30 times in a row
-  scored 14/30 with lag-3 self-agreement **0.59 against 0.50 chance**. Three
-  internally-deterministic replicas would give ~1.00. Costs nothing, needs no
-  config change, and should be the FIRST thing run — it eliminates a whole class
-  of hypothesis before anyone touches a live service.
-- **Batch shape AND prefix-cache contamination: both falsified together.** The
-  local engine was re-measured while three background threads kept the batch
-  full with DIFFERENT utterances — **375 concurrent background requests sharing
-  the same prefix cache** — and it returned `11/16` with the byte-identical row
-  pattern, three runs out of three. Concurrency, batch fusion and a shared
-  prefix cache are therefore all present locally, all exercised, and all
-  harmless.
-
-So the cause is **not** concurrency, **not** batch shape, and **not** the prefix
-cache. What still differs between the two hosts, and is now where to look:
-`INFERENCE_QUEUE=sgee` versus `postgres`; three replicas versus one; the Envoy
-transcoder versus native gRPC; and **the CPU itself** — this box is Zen 5 and
-Railway's is not, so sensen's SIMD waterfall (`cpu_features.cppm`) may dispatch a
-different kernel with a different reduction order. That last one predicts a
-STABLE difference, though, and production is not stable, so it cannot be the
-whole story on its own.
-
-**The decisive next test is `numReplicas: 1`,** because it is the one variable
-that separates "each replica answers differently" from "one replica answers
-differently each time" — and the 30-run lag test cannot settle it, since SGEE
-leases a request to whichever worker takes it rather than round-robin, so
-per-replica determinism need not be periodic.
-
-The discriminator worth reusing: **keep a local engine on the same GGUF, send it
-the SAME rows the same way, and repeat each arm.** One run of each cannot tell a
-worse host from an unrepeatable one, and those need different fixes.
+**Do not read this as "SGEE is broken."** It is the queue for a *replicated task
+log*, and the audit trail in `docs/SGEE_QUEUE_CLUSTER.md` is real work. What is
+established here is narrower and completely certain: **routing model inference
+through it costs 45% of the answers and all of the reproducibility**, and
+Postgres was always the documented system of record and degrade target.
 
 ## Pro tier and quota
 
@@ -934,7 +889,16 @@ peek/mark pair, plus `commit_index` published beside `last_applied` on `/statusz
 because the gap is the only way to tell caught-up from stalled. Promotion needs
 the fix deployed and the audit re-run. See `docs/SGEE_QUEUE_CLUSTER.md`.
 
-**`INFERENCE_QUEUE=sgee` is LIVE on the engine as of 2026-08-13** — promoted,
+**ROLLED BACK ON 2026-08-20: `INFERENCE_QUEUE` is `postgres`.** Serving
+inference through SGEE cost 45% of the mortgage assistant's answers and all of
+its reproducibility — production scored 4/16, 7/16, 7/16 on a fixed holdout with
+a different row set each run, and 11/16 three times identically the moment the
+queue was flipped back. See "RESOLVED: the SGEE queue path was the cause" above
+for the full table and for why zero `[WARN]` did not catch it. Everything in the
+rest of this section is the history of the promotion and is retained because the
+defects it records are real; the promotion itself is not in force.
+
+**`INFERENCE_QUEUE=sgee` was LIVE on the engine from 2026-08-13** — promoted,
 rolled back to `postgres` the same day on three defects, and re-promoted once
 all three were fixed, deployed and verified **under concurrent load**. Postgres
 remains the system of record and the degrade target.
