@@ -281,8 +281,25 @@ neither is a supported image.
 
 Two things to hold on to before trusting its output:
 
-- **It measures 27.8% params exact-match (25/90) through the real RPC**, against
-  the strategy model's 95.0%. **Quote that number, not `evaluate.py`'s.**
+- **It measures 62.5% params exact-match (325/520) through the real RPC**, on a
+  holdout whose labels are POSSIBLE. **Quote that number, not the 27.8% this
+  line carried until 2026-08-20, and not `evaluate.py`'s.**
+
+  The 27.8% was never a property of the model. It was measured against a corpus
+  in which `phrase_money` rendered `round(v)` into the utterance while the label
+  kept `f"{v:.2f}"` — so a stated "$1,825" had to become `1824.51`, which is not
+  recoverable from the input. Eight operations were a hard **0/98** for two
+  independently trained models, which is what proves it is the data. Fixing the
+  generator and re-scoring the SAME deployed weights, unchanged, moved them to
+  49/98 and the pooled figure from 49.0% to **62.5%**; refusals fell 214 → 135.
+  The model was always better than the number; the number was measuring an
+  impossible target. See `agent/dataset/build_mortgage_dataset.py`'s
+  `phrase_money` docstring and commit `c6bcc62`.
+
+  This is the third time in this file that a score turned out to describe the
+  harness rather than the model — after the strategy assistant's `llama-cli`
+  phantom and the `evaluate.py` bf16 gap. **A low score is a hypothesis about
+  the model; confirm it is not a statement about the measurement first.**
   `agent/train/evaluate.py` scores **transformers on the merged bf16
   intermediate** — an artefact that never ships — and reports 31.7% (59/186) for
   the same weights. What ships is the Q8_0 GGUF on sensen, and that is the 27.8%.
@@ -473,68 +490,144 @@ appeared to come from three places. Section 23 of
 every engine-level refusal reached clients as `FAILED_PRECONDITION` rather than
 `INVALID_ARGUMENT`, because `fail()` maps engine errors that way.
 
-### The mortgage assistant is separately BROKEN, and this did not fix it
+### The assistant was not broken. The CORPUS was, and it took three retrains to prove it
 
-Held-out rows through the live ingress score **0/16 on closing costs and 0/24
-across mixed operations** against a documented 27.8%; ten identical sequential
-requests return two different answers under greedy decode. **The 2026-08-13
-promotion gate could not have caught this: it asserted "all HTTP 200", and a
-REFUSAL IS HTTP 200.** A retrain should not be spent until this is fixed,
-because its score could not be trusted.
+Held-out rows through the live ingress once scored **0/16 on closing costs and
+0/24 across mixed operations**, and this section previously read that as a
+broken model. It was a broken dataset, in three separate places, each of which
+is the same defect: **a label carrying something the utterance does not
+contain.** The model cannot extract what was never stated, and
+`mortgage_verification.cppm`'s grounding gate then REFUSES what it invents — so
+it is squeezed from both sides and learns to split the difference. That is the
+documented "corrupted value" failure, and it is trained behaviour rather than
+decode corruption.
 
-### The retrain WAS spent, on 2026-08-20, and v3 is NOT deployed
+The three, in the order they were found, with what each was worth measured
+through the real `ParseOperation` RPC on the Q8_0 GGUF:
 
-v3 = v2's recipe plus the closing-cost rows and a seventeen-token vocabulary
-extension (QLoRA rank 16, 4 epochs, RTX 5090, 728 steps, train_loss 0.2476).
-Measured through the real `ParseOperation` RPC on the Q8_0 GGUF, against v2 on
-the SAME 520 rows, same engine, same harness, one engine on `:50051`:
+1. **`phrase_money` rounded away the cents the label kept.** A stated "$1,825"
+   had to become `1824.51`. Eight operations were a hard **0/98** for two
+   independently trained models. Fixing the generator and re-scoring the SAME
+   deployed weights moved the pooled legacy figure **49.0% → 62.5%** with no
+   retrain at all. Commit `c6bcc62`.
+2. **`prepaid_interest_days` labelled the 15-day convention on utterances that
+   never mention prepaid interest.** 21 of 26 held-out closing-cost failures
+   were that field alone, every gold value 15 and every emission a number
+   scraped from elsewhere (180, 30, 36, 150, 250).
+3. **The closing-cost generator printed six decimal places for percents
+   generated with `round(..., 4)`.** All 3270 labels ended in "00"; the model
+   emitted the four-place convention it sees everywhere else, so rows that were
+   numerically exact failed string equality — **0/42 string, 16/42 numeric**.
 
-| | v2 | v3 |
-| --- | --- | --- |
-| raw params exact | **255/520 (49.0%)** | **216/520 (41.5%)** |
-| served exact | 226 (43.5%) | 195 (37.5%) |
-| closing costs, numerically correct | 0/42 (not in its label space) | **7/42 (16.7%)** |
-| non-param rows withheld correctly | — | 31/38 (81.6%) |
+### Three retrains, and what each one actually proved
 
-Paired McNemar on the row index: **63 rows v2 got right that v3 gets wrong**
-against 24 the other way, 433 concordant, **p = 3.5e-05**. That is a
-regression, not sampling noise. **v2 remains the model of record.**
+v4, v5 and v6 were all trained 2026-08-20 from `unsloth/Qwen3-0.6B`, QLoRA rank
+16, 4 epochs, on the RTX 5090, and all measured against v2 on the SAME 520-row
+legacy holdout, the same engine, one engine on `:50051`.
 
-Three findings from it, each of which is easy to misread as something else:
+| | v2 (deployed) | v3 | v4 | v5 | **v6** |
+| --- | --- | --- | --- | --- | --- |
+| legacy raw exact / 520 | **325** | — | 320 | 317 | 313 |
+| legacy served exact | **296** | — | 297 | 291 | 282 |
+| closing costs, numerically correct / 42 | 0 | 7 | 16 | 15 | **39 (92.9%)** |
+| closing costs served as params | 0 | — | 11 | 20 | **28** |
+| vocabulary extension | none | 17 tokens, LoRA | 17 tokens, masked | 16 tokens, masked | **none** |
 
-- **The regression is label BLURRING, not general forgetting.** 43 of the 63
-  newly-broken rows are `ComputeDetailedAmortization` (23) and
-  `ComputeAmortization` (20), and 33 of 63 name the WRONG OPERATION. Putting
-  LoRA on `embed_tokens`/`lm_head` at lr 2e-4 for four epochs moves EVERY
-  operation-name embedding, not only the new one, so adjacent labels blur. The
-  seeded-mean initialisation worked; making the other 151,669 rows trainable is
-  what cost the discrimination. A gradient mask training only the new rows
-  targets that mechanism; not extending the vocabulary at all also does.
-- **Ten of 42 closing-cost rows were scored as TRUNCATED and are not.** The
-  model emits a complete sixteen-field answer and then, at the final field,
-  loops on `0` for 189 characters instead of closing the JSON; all ten land at
-  726-727 chars, i.e. the same cap. There were **zero** such rows in 621 legacy
-  decodes in the same run. `repetition_penalty` is pinned to 1.0 deliberately
-  (1.1 compounded per occurrence and took params exact-match to 0/90), which
-  leaves nothing damping a digit loop on the longest, most digit-dense output
-  in the label space. **Raising `kMaxNewTokens` makes the loop longer, not
-  fixed** — tell the two apart by the tail: a budget truncation cuts at an
-  arbitrary point, a degenerate loop ends in a long run of ONE character and
-  every affected row has the SAME total length.
-- **The closing-cost generator emits SIX decimal places for every percent
-  field in all 545 training rows; the other twenty-six operations use four.**
-  The model emits the four-place majority convention, so seven rows are
-  numerically exact and fail string equality — the GP-ARA verifier compares
-  numerically, admits them, and serves them. A 4.8%-of-rows format minority
-  being overridden is a dataset inconsistency, not a model defect, and
-  normalising the generator is the cheaper fix.
+**v6 is the model to ship, and its legacy cost does not survive a significance
+test:** paired McNemar against v2 on the row index is 40 lost / 28 gained, net
+−12, **p = 0.182**. Against that it gains an operation v2 cannot express at all.
 
-**A `<params>`-level intelligibility gate is now separate from the score, and
-it has to be.** `raw_block_invalid` counts unparseable blocks and is 0 for all
-three of the failure modes above: a non-empty `<think>` (the system prompt did
-not take), a fullwidth zero U+FF10 inside a numeric literal (a different token
-id that escapes the penalty), and truncation (which yields a MISSING block, not
-a malformed one). Score and intelligibility are different questions.
+Three findings, each of which was a correct diagnosis of a real defect and two
+of which were NOT the cause of the symptom:
+
+- **The vocabulary extension WAS the legacy regression, and the mechanism is
+  the parameter split rather than the tokens.** `--extend-vocab` calls
+  `requires_grad_(True)` on the whole embedding, making it **155,582,464 of
+  165,675,008 trainable parameters (93.9%)** and leaving the LoRA adapters at
+  6.1%. Global gradient-norm clipping is then dominated by freshly-seeded rows
+  and starves every adapter update. Removing it recovered the clean family from
+  217 to 237 of 357, and trainable parameters to exactly **10,092,544**. The
+  extension was never needed: the model spells `ComputeClosingCosts` as an
+  ordinary BPE sequence, and v6's GGUF is byte-for-byte the same size as v2's.
+
+  **A gradient mask does not fix this and measurably held while the regression
+  happened** — all 151,669 pre-existing rows moved `0.000e+00`. The mask stops
+  the weights moving; it cannot take them out of the optimizer.
+
+- **An added token retokenises that string EVERYWHERE, including rows it was
+  never meant to touch.** v4 added `annual_rate` because it is a
+  ComputeClosingCosts field. It is also a field of six other operations —
+  10,425 occurrences outside closing-cost rows, including the system prompt's
+  own label-space listing — and HuggingFace splits added tokens out with a trie
+  BEFORE BPE, so every one of them moved onto a single fresh row.
+  `closing_cost_vocab` now excludes any candidate occurring outside a
+  closing-cost row, tested as a SUBSTRING of raw row text rather than by
+  JSON-key equality. Exactly one of seventeen is excluded.
+
+  **This was a real defect and it was not the cause.** Removing it made the
+  regression WORSE (v4 −23 rows, v5 −31), and the broken rows name
+  `ComputeAmortization` — `ComputeDetailedAmortization`'s own sibling, nothing
+  to do with retokenisation. Finding *a* bug is not finding *the* bug; the test
+  is whether the number moves the way the mechanism predicts.
+
+- **proto3 explicit presence is correct on the contract and useless as a
+  label.** Omitting `prepaid_interest_days` is exactly what `optional` is for —
+  absent means the convention, `value_or(15)` computes it. The model omitted it
+  **0 times in 25 held-out rows whose gold omitted it**, 17 of them emitting a
+  literal `0`, which is a different computation. 48% of training rows omitted
+  the field; inference omitted it never. It fills every slot of a sixteen-field
+  answer, so the only slot it can fill correctly is one the utterance grounds.
+  Grounding it took closing costs 15/42 → **39/42**.
+
+**Carried forward from v3, still true and not superseded by any of the above:**
+
+- **A degenerate digit loop is NOT truncation, and raising the token budget
+  makes it longer rather than fixing it.** Ten of v3's 42 closing-cost rows were
+  scored as truncated and were not: the model emits a complete sixteen-field
+  answer and then, at the final field, loops on `0` for 189 characters instead
+  of closing the JSON. All ten land at 726-727 characters — the SAME total
+  length — where a budget truncation cuts at an arbitrary point. There were
+  **zero** such rows in 621 legacy decodes in the same run.
+  `repetition_penalty` is pinned to 1.0 deliberately (1.1 compounded per
+  occurrence and took params exact-match to 0/90), which leaves nothing damping
+  a digit loop on the longest, most digit-dense output in the label space. Tell
+  the two apart by the tail, not by the length alone.
+- **v3's own regression was label BLURRING from putting LoRA on
+  `embed_tokens`/`lm_head`.** 43 of its 63 newly-broken rows were
+  `ComputeDetailedAmortization` (23) and `ComputeAmortization` (20), and 33 of
+  63 named the WRONG operation. Paired McNemar p = 3.5e-05. A LoRA adapter on an
+  embedding is a low-rank update to the WHOLE matrix, so every
+  operation-name embedding moves. The masked variants in v4/v5 fixed that
+  specific mechanism — and still regressed, for the parameter-split reason
+  above.
+
+**Unexplained and left open:** v6's formerly-poisoned family is 46/98 against
+v5's 69/98. The vocabulary extension was helping those eight operations by ~20
+rows while costing ~25 elsewhere, and that interaction is not accounted for by
+anything above. It is the first thing to look at if this is picked up again.
+
+### Two process failures worth more than the model numbers
+
+- **The 2026-08-13 promotion gate asserted "all HTTP 200", and a REFUSAL IS
+  HTTP 200.** It could not have caught any of this.
+- **Nothing recorded which seed built the corpus on disk.** The argparse default
+  is 3407; the corpus was built with `--seed 0`, this module's own documented
+  invocation. A rebuild meant to change only the closing-cost rows reseeded all
+  11,400 — **11,198 of 11,400 rows changed, moving held-out rows into
+  training** — and it was caught only by diffing against a kept copy.
+  `build_mortgage_dataset.py` now writes `meta.json` with the seed, the row
+  counts and the sha256 of both the generator and the proto. A change meant to
+  affect one operation must also consume the same randomness as what it
+  replaces, because every generator shares one `Random`.
+
+**A `<params>`-level intelligibility gate is separate from the score, and it has
+to be.** `raw_block_invalid` counts unparseable blocks and is 0 for a non-empty
+`<think>` (the system prompt did not take), a fullwidth zero U+FF10 inside a
+numeric literal (a different token id that escapes the penalty), and truncation
+(which yields a MISSING block, not a malformed one). Score and intelligibility
+are different questions. **And score numerically as well as by string equality**
+— v4's closing costs were 0/42 exact and 16/42 numerically, the entire gap being
+a format convention. A wrong digit and a trailing zero are different findings.
 
 ## Pro tier and quota
 
