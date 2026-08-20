@@ -769,6 +769,214 @@ auto check_futures_quote(calculator::OptionsCalculator::Stub& stub) -> bool {
  * failure mode is a wrong figure, not a crash.
  */
 auto check_finance(sensen::finance::Finance::Stub& stub) -> bool {
+    // -- Closing costs, against the identities that define the itemisation ---
+    //
+    // Deliberately NOT checked against figures this engine produced earlier.
+    // Two properties define a correct itemisation and neither needs a
+    // reference number: the lines SUM to the subtotal, and a credit moves the
+    // total WITHOUT moving that subtotal. The one external figure here --
+    // origination against its own base -- is recomputed from the request in
+    // this file, sharing no code with the engine.
+    {
+        sensen::finance::ClosingCostsRequest req;
+        req.set_home_price("450000");
+        req.set_down_payment_percent("0.10");
+        req.set_annual_rate("0.0675");
+        req.set_origination_fee_percent("0.0075");
+        req.set_discount_points_percent("0");
+        req.set_other_lender_fees("1400");
+        req.set_title_settlement_percent("0.0055");
+        req.set_appraisal_fee("650");
+        req.set_inspection_fee("500");
+        req.set_recording_fees("225");
+        req.set_transfer_tax_percent("0.005");
+        req.set_homeowners_insurance_annual("2100");
+        req.set_property_tax_annual("6300");
+        req.set_tax_escrow_months(3);
+        req.set_seller_lender_credits("0");
+        // prepaid_interest_days deliberately NOT set -- absent means the
+        // 15-day convention. Setting it to 0 now means zero days.
+
+        sensen::finance::ClosingCostsResponse res;
+        const auto ctx = make_context();
+        if (const auto st = stub.ComputeClosingCosts(ctx.get(), req, &res); !st.ok()) {
+            std::cerr << "ComputeClosingCosts FAILED: " << st.error_message() << "\n";
+            return false;
+        }
+
+        const double lines =
+            std::stod(res.origination_fee()) + std::stod(res.discount_points()) +
+            std::stod(res.other_lender_fees()) + std::stod(res.title_settlement()) +
+            std::stod(res.appraisal_fee()) + std::stod(res.inspection_fee()) +
+            std::stod(res.recording_fees()) + std::stod(res.transfer_tax()) +
+            std::stod(res.homeowners_insurance_prepaid()) +
+            std::stod(res.property_tax_escrow()) + std::stod(res.prepaid_interest());
+        const double subtotal = std::stod(res.itemised_subtotal());
+        if (std::abs(lines - subtotal) > 0.005) {
+            std::cerr << "closing-cost lines sum to " << lines << " but subtotal is "
+                      << subtotal << "\n";
+            return false;
+        }
+        // EVERY percentage line recomputed here against its OWN base, not just
+        // origination. Checking one of them leaves the others free to use the
+        // wrong base while the lines still sum to the subtotal -- the sum
+        // identity above cannot see a base error, only a dropped term.
+        const double price = 450000.0;
+        const double loan = price * (1.0 - 0.10);          // 405000
+        struct Line { double got; double want; const char* what; };
+        const Line lines_v[] = {
+            {std::stod(res.loan_amount()),          loan,                 "loan = price - down"},
+            {std::stod(res.down_payment()),         price * 0.10,         "down payment = 10% of price"},
+            {std::stod(res.origination_fee()),      loan * 0.0075,        "origination = 0.75% of LOAN"},
+            {std::stod(res.title_settlement()),     price * 0.0055,       "title = 0.55% of PRICE"},
+            {std::stod(res.transfer_tax()),         price * 0.005,        "transfer tax = 0.5% of PRICE"},
+            {std::stod(res.property_tax_escrow()),  6300.0 * 3.0 / 12.0,  "escrow = 3/12 of the annual bill"},
+            {std::stod(res.prepaid_interest()),     loan * 0.0675 / 365.0 * 15.0, "prepaid interest = loan*rate/365*15"},
+            {std::stod(res.homeowners_insurance_prepaid()), 2100.0,       "HOI prepaid = the annual premium"},
+            {std::stod(res.total_cash_to_close()),  60335.9589,           "cash to close"},
+        };
+        for (const auto& l : lines_v) {
+            if (std::abs(l.got - l.want) > 0.01) {
+                std::cerr << "closing-cost " << l.what << ": got " << l.got
+                          << ", independently computed " << l.want << "\n";
+                return false;
+            }
+        }
+        if (res.prepaid_interest_days() != 15) {
+            std::cerr << "prepaid_interest_days 0 did not resolve to the 15-day convention\n";
+            return false;
+        }
+        if (std::abs(std::stod(res.total_cash_to_close()) -
+                     (std::stod(res.down_payment()) + std::stod(res.total_closing_costs()))) > 0.005) {
+            std::cerr << "cash to close is not down payment plus total closing costs\n";
+            return false;
+        }
+
+        // The credit identity. Re-issued with one field changed, so the
+        // comparison isolates exactly that field.
+        req.set_seller_lender_credits("5000");
+        sensen::finance::ClosingCostsResponse credited;
+        const auto ctx2 = make_context();
+        if (const auto st = stub.ComputeClosingCosts(ctx2.get(), req, &credited); !st.ok()) {
+            std::cerr << "ComputeClosingCosts (credited) FAILED: " << st.error_message() << "\n";
+            return false;
+        }
+        if (std::abs(std::stod(credited.itemised_subtotal()) - subtotal) > 0.005) {
+            std::cerr << "a seller credit moved the itemised subtotal, which it must not\n";
+            return false;
+        }
+        if (std::abs(std::stod(credited.total_closing_costs()) - (subtotal - 5000.0)) > 0.005) {
+            std::cerr << "a seller credit did not reduce the total by its own amount\n";
+            return false;
+        }
+        // Discount points were ZERO above, which is what the site's default
+        // scenario uses -- and a zero line cannot distinguish "share of the
+        // loan" from "share of the price", because both are zero. Priced
+        // again with real points so that base is actually exercised.
+        req.set_seller_lender_credits("0");
+        req.set_discount_points_percent("0.01");   // one point
+        sensen::finance::ClosingCostsResponse pointed;
+        const auto ctx3 = make_context();
+        if (const auto st = stub.ComputeClosingCosts(ctx3.get(), req, &pointed); !st.ok()) {
+            std::cerr << "ComputeClosingCosts (points) FAILED: " << st.error_message() << "\n";
+            return false;
+        }
+        if (std::abs(std::stod(pointed.discount_points()) - loan * 0.01) > 0.005) {
+            std::cerr << "one discount point is not 1% of the LOAN (got "
+                      << pointed.discount_points() << ", loan " << loan << ")\n";
+            return false;
+        }
+        if (std::abs(std::stod(pointed.itemised_subtotal()) - (subtotal + loan * 0.01)) > 0.005) {
+            std::cerr << "adding a discount point did not raise the subtotal by its own cost\n";
+            return false;
+        }
+        req.set_discount_points_percent("0");
+
+        // A NEGATIVE credit would be a surcharge wearing a credit's name: it
+        // reduces nothing and silently inflates the total. Refused.
+        req.set_seller_lender_credits("-5000");
+        sensen::finance::ClosingCostsResponse negative;
+        const auto ctx4 = make_context();
+        if (stub.ComputeClosingCosts(ctx4.get(), req, &negative).ok()) {
+            std::cerr << "a NEGATIVE seller credit was accepted; it inflates the total\n";
+            return false;
+        }
+        req.set_seller_lender_credits("0");
+
+        // Eleven of the sixteen fields are genuinely optional -- a closing may
+        // have no inspection, no points, no transfer tax. An omitted field must
+        // read as zero rather than refusing the request, so the minimal
+        // three-field call has to succeed.
+        sensen::finance::ClosingCostsRequest minimal;
+        minimal.set_home_price("450000");
+        minimal.set_down_payment_percent("0.10");
+        minimal.set_annual_rate("0.0675");
+        sensen::finance::ClosingCostsResponse min_res;
+        const auto ctx5 = make_context();
+        if (const auto st = stub.ComputeClosingCosts(ctx5.get(), minimal, &min_res); !st.ok()) {
+            std::cerr << "a minimal closing-cost request was refused: " << st.error_message() << "\n";
+            return false;
+        }
+        if (std::abs(std::stod(min_res.itemised_subtotal()) -
+                     std::stod(min_res.prepaid_interest())) > 0.005) {
+            std::cerr << "with every optional cost omitted, only prepaid interest should remain\n";
+            return false;
+        }
+
+        // An ALL-CASH purchase is a real transaction: no loan, so no lender
+        // lines and no prepaid interest, but title, appraisal, recording,
+        // transfer tax and escrow are all still owed.
+        sensen::finance::ClosingCostsRequest cash = req;
+        cash.set_down_payment_percent("1.0");
+        cash.set_seller_lender_credits("0");
+        sensen::finance::ClosingCostsResponse cash_res;
+        const auto ctx6 = make_context();
+        if (const auto st = stub.ComputeClosingCosts(ctx6.get(), cash, &cash_res); !st.ok()) {
+            std::cerr << "an all-cash purchase was refused: " << st.error_message() << "\n";
+            return false;
+        }
+        if (std::stod(cash_res.loan_amount()) != 0.0 ||
+            std::stod(cash_res.origination_fee()) != 0.0 ||
+            std::stod(cash_res.prepaid_interest()) != 0.0) {
+            std::cerr << "an all-cash purchase still produced loan-derived charges\n";
+            return false;
+        }
+        if (std::abs(std::stod(cash_res.title_settlement()) - 450000.0 * 0.0055) > 0.005) {
+            std::cerr << "an all-cash purchase dropped the title fee, which is owed on the PRICE\n";
+            return false;
+        }
+
+        // A credit larger than the bill would return a negative total.
+        sensen::finance::ClosingCostsRequest over = req;
+        over.set_seller_lender_credits("100000");
+        sensen::finance::ClosingCostsResponse over_res;
+        const auto ctx7 = make_context();
+        if (stub.ComputeClosingCosts(ctx7.get(), over, &over_res).ok()) {
+            std::cerr << "a credit exceeding the closing costs was accepted\n";
+            return false;
+        }
+
+        // An explicit ZERO day count must mean zero, not the convention.
+        sensen::finance::ClosingCostsRequest zero_days = req;
+        zero_days.set_seller_lender_credits("0");
+        zero_days.set_prepaid_interest_days(0);
+        sensen::finance::ClosingCostsResponse zd;
+        const auto ctx8 = make_context();
+        if (const auto st = stub.ComputeClosingCosts(ctx8.get(), zero_days, &zd); !st.ok()) {
+            std::cerr << "an explicit 0-day prepaid interest was refused: " << st.error_message() << "\n";
+            return false;
+        }
+        if (std::stod(zd.prepaid_interest()) != 0.0 || zd.prepaid_interest_days() != 0) {
+            std::cerr << "an explicit 0 prepaid-interest days was silently treated as 15\n";
+            return false;
+        }
+
+        std::cout << "Finance   closing costs: " << std::fixed << std::setprecision(2)
+                  << subtotal << " itemised, " << std::stod(res.total_cash_to_close())
+                  << " cash to close; credit of 5000 -> "
+                  << std::stod(credited.total_closing_costs()) << "\n";
+    }
+
     // -- Time value of money, against the closed-form annuity formula --------
     {
         sensen::finance::PaymentRequest req;

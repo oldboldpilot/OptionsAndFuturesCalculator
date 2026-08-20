@@ -176,15 +176,24 @@ constexpr std::string_view kSystemPrompt =
 /**
  * Upper bound on generated tokens per call.
  *
- * Sized from the training set rather than guessed: the longest assistant turn
- * in agent/dataset/data_mortgage/train.jsonl is 473 characters -- a
- * `ComputeHomeNpv` block, fourteen fields, mostly digits -- which is the
- * worst case this label space can produce, since every operation emits exactly
- * its request message's fields and `HomeNpvRequest`/`RefinanceRequest` are the
- * widest at fourteen. Digit-dense JSON tokenizes at roughly two to three
- * characters per token on Qwen3's vocabulary, so that block plus the empty
- * `<think>` wrapper lands near 200 tokens; 384 is headroom over the widest
- * real answer, not a shot in the dark.
+ * Sized from the training set rather than guessed, and RE-MEASURED when
+ * `ComputeClosingCosts` arrived: `ClosingCostsRequest` has SIXTEEN fields and
+ * its widest generated block is 547 characters, against the 473 of the
+ * `ComputeHomeNpv` block that held the record before. The old note here
+ * claimed `HomeNpvRequest`/`RefinanceRequest` were the widest "at fourteen";
+ * that stopped being true and is corrected rather than left to mislead the
+ * next person who adds an operation.
+ *
+ * Digit-dense JSON tokenizes at roughly two to three characters per token on
+ * Qwen3's vocabulary, so 547 characters plus the empty `<think>` wrapper lands
+ * near 280 tokens in the worst case. 384 still clears it with headroom, so the
+ * number is UNCHANGED -- deliberately, because it is also the exact figure
+ * `cost_llm_generate` charges against, and moving it would reprice every call
+ * to buy margin that measurement says is already there.
+ *
+ * The check to repeat when adding an operation: the widest params block the
+ * generator can emit, in characters, halved, plus the wrapper -- against this
+ * constant.
  *
  * It is deliberately LARGER than the strategy assistant's 256, because that
  * model's widest answer is six short fields and this one's is fourteen. It
@@ -1515,6 +1524,25 @@ constexpr std::array<Field, 6> kFields_ComputeAmortizationBatch{{
     {"home_values", Kind::RepeatedDouble, {}},
 }};
 
+constexpr std::array<Field, 16> kFields_ComputeClosingCosts{{
+    {"home_price", Kind::Decimal, {}},
+    {"down_payment_percent", Kind::Decimal, {}},
+    {"annual_rate", Kind::Decimal, {}},
+    {"origination_fee_percent", Kind::Decimal, {}},
+    {"discount_points_percent", Kind::Decimal, {}},
+    {"other_lender_fees", Kind::Decimal, {}},
+    {"title_settlement_percent", Kind::Decimal, {}},
+    {"appraisal_fee", Kind::Decimal, {}},
+    {"inspection_fee", Kind::Decimal, {}},
+    {"recording_fees", Kind::Decimal, {}},
+    {"transfer_tax_percent", Kind::Decimal, {}},
+    {"homeowners_insurance_annual", Kind::Decimal, {}},
+    {"property_tax_annual", Kind::Decimal, {}},
+    {"tax_escrow_months", Kind::Int, {}},
+    {"seller_lender_credits", Kind::Decimal, {}},
+    {"prepaid_interest_days", Kind::Int, {}},
+}};
+
 constexpr std::array<Field, 7> kFields_ComputeCumulative{{
     {"component", Kind::Enum, kComponentValues},
     {"rate", Kind::Double, {}},
@@ -1735,9 +1763,10 @@ constexpr std::array<Field, 4> kFields_ComputeXnpv{{
     {"guess", Kind::Double, {}},
 }};
 
-constexpr std::array<Operation, 26> kOperations{{
+constexpr std::array<Operation, 27> kOperations{{
     {"ComputeAmortization", "AmortizationRequest", kFields_ComputeAmortization},
     {"ComputeAmortizationBatch", "AmortizationBatchRequest", kFields_ComputeAmortizationBatch},
+    {"ComputeClosingCosts", "ClosingCostsRequest", kFields_ComputeClosingCosts},
     {"ComputeCumulative", "CumulativeRequest", kFields_ComputeCumulative},
     {"ComputeDepreciation", "DepreciationRequest", kFields_ComputeDepreciation},
     {"ComputeDetailedAmortization", "DetailedAmortizationRequest", kFields_ComputeDetailedAmortization},

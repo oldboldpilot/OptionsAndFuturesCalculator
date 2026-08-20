@@ -364,6 +364,11 @@ auto is_ident_char(char c) -> bool {
  * line that is not a field (an enum constant has ONE identifier before '='). */
 auto parse_field_line(std::string_view line) -> std::optional<std::pair<std::string, std::string>> {
     std::string_view s = trim(line);
+    // `optional` is proto3 EXPLICIT PRESENCE -- a presence marker, not a
+    // type. Unstripped it parses as the type and shifts the name, which
+    // silently drops the real field from the drift comparison.
+    if (s.starts_with("optional ")) s.remove_prefix(9);
+    s = trim(s);
     if (s.starts_with("repeated ")) s.remove_prefix(9);
     s = trim(s);
 
@@ -562,11 +567,38 @@ auto main() -> int {
         std::string joined;
         for (const auto& u : unclassified) joined += (joined.empty() ? "" : ", ") + u;
         check(unclassified.empty(),
-              unclassified.empty() ? "all 160 (operation, field) pairs classify"
+              unclassified.empty() ? "all 176 (operation, field) pairs classify"
                                    : ("unclassified: " + joined));
 
         // Spot checks on the rules that are easiest to get backwards.
         check(mv::classify_slot("annual_rate") == mv::SlotKind::Rate, "annual_rate -> Rate");
+
+        // ComputeClosingCosts. Without these eight in kMoneyFields the slot is
+        // Unclassified, translate() returns Indeterminate, and EVERY
+        // closing-cost parse is refused -- a failure that looks like the model
+        // being bad rather than the table being short.
+        check(mv::classify_slot("home_price") == mv::SlotKind::Money, "home_price -> Money");
+        check(mv::classify_slot("appraisal_fee") == mv::SlotKind::Money, "appraisal_fee -> Money");
+        check(mv::classify_slot("recording_fees") == mv::SlotKind::Money, "recording_fees -> Money");
+        check(mv::classify_slot("seller_lender_credits") == mv::SlotKind::Money,
+              "seller_lender_credits -> Money");
+        check(mv::classify_slot("other_lender_fees") == mv::SlotKind::Money,
+              "other_lender_fees -> Money");
+        check(mv::classify_slot("homeowners_insurance_annual") == mv::SlotKind::Money,
+              "homeowners_insurance_annual -> Money");
+        check(mv::classify_slot("property_tax_annual") == mv::SlotKind::Money,
+              "property_tax_annual -> Money");
+        check(mv::classify_slot("inspection_fee") == mv::SlotKind::Money, "inspection_fee -> Money");
+        check(mv::classify_slot("transfer_tax_percent") == mv::SlotKind::Ratio,
+              "transfer_tax_percent -> Ratio");
+        check(mv::classify_slot("down_payment_percent") == mv::SlotKind::Ratio,
+              "down_payment_percent -> Ratio");
+        check(mv::classify_slot("tax_escrow_months") == mv::SlotKind::MonthCount,
+              "tax_escrow_months -> MonthCount");
+        // prepaid_interest_days is a DAY COUNT, and zero is legitimate. As a
+        // MonthCount it would be refused by the positivity bound.
+        check(mv::classify_slot("prepaid_interest_days") == mv::SlotKind::DayOffsets,
+              "prepaid_interest_days -> DayOffsets (zero days must be expressible)");
         check(mv::classify_slot("annual_rent_increase") == mv::SlotKind::Rate,
               "annual_rent_increase -> Rate (not Money via a 'rent' substring)");
         check(mv::classify_slot("max_ltv_rate") == mv::SlotKind::Ratio,
@@ -882,6 +914,60 @@ auto main() -> int {
                                               {"original_home_value", "350000.00"}}),
                "Amortize a $350,000 loan at 45% over 30 years.", mv::Outcome::Unsafe,
                mv::ReasonCode::OutOfRange, "bounds: a grounded 45% rate is still out of scope");
+
+        // ComputeClosingCosts. The control PASSES and its twin, differing in
+        // exactly one field, is REFUSED -- which is what makes the bound mean
+        // something rather than proving a verifier that refuses everything.
+        expect(params("ComputeClosingCosts", {{"home_price", "450000.00"},
+                                              {"down_payment_percent", "0.100000"},
+                                              {"annual_rate", "0.067500"},
+                                              {"origination_fee_percent", "0.007500"},
+                                              {"discount_points_percent", "0.000000"},
+                                              {"other_lender_fees", "1400.00"},
+                                              {"title_settlement_percent", "0.005500"},
+                                              {"appraisal_fee", "650.00"},
+                                              {"inspection_fee", "500.00"},
+                                              {"recording_fees", "225.00"},
+                                              {"transfer_tax_percent", "0.005000"},
+                                              {"homeowners_insurance_annual", "2100.00"},
+                                              {"property_tax_annual", "6300.00"},
+                                              {"tax_escrow_months", "3"},
+                                              {"seller_lender_credits", "0.00"},
+                                              {"prepaid_interest_days", "15"}}),
+               "Closing costs on a $450,000 home with 10% down at 6.75%: 0.75% origination, 0% discount points, $1,400 other lender fees, 0.55% title and settlement, $650 appraisal, $500 inspection, $225 recording, 0.5% transfer tax, $2,100 a year homeowners insurance, $6,300 a year property tax, 3 months of tax escrow, $0 seller credits, 15 days of prepaid interest.",
+               mv::Outcome::Proven, mv::ReasonCode::None,
+               "ComputeClosingCosts: every one of the sixteen figures stated -> Proven");
+
+        // A share above 1.0 is refused. `sensen::validate_closing_costs`
+        // refuses the same value with INVALID_ARGUMENT; this is the verifier
+        // half of that pair (the engine half is
+        // test_finance_service_validation.cpp section 23). The GLOBAL ratio
+        // ceiling is 1.5, so without kUnitCappedRatioFields this would be
+        // Proven here and refused by the engine -- the caller getting a
+        // transport error where an honest refusal belongs.
+        expect(params("ComputeClosingCosts", {{"home_price", "450000.00"},
+                                              {"down_payment_percent", "0.100000"},
+                                              {"annual_rate", "0.067500"},
+                                              {"origination_fee_percent", "1.200000"},
+                                              {"discount_points_percent", "0.000000"},
+                                              {"other_lender_fees", "1400.00"},
+                                              {"title_settlement_percent", "0.005500"},
+                                              {"appraisal_fee", "650.00"},
+                                              {"inspection_fee", "500.00"},
+                                              {"recording_fees", "225.00"},
+                                              {"transfer_tax_percent", "0.005000"},
+                                              {"homeowners_insurance_annual", "2100.00"},
+                                              {"property_tax_annual", "6300.00"},
+                                              {"tax_escrow_months", "3"},
+                                              {"seller_lender_credits", "0.00"},
+                                              {"prepaid_interest_days", "15"}}),
+               "Closing costs on a $450,000 home with 10% down at 6.75%: 120% origination, "
+               "0% discount points, $1,400 other lender fees, 0.55% title and settlement, "
+               "$650 appraisal, $500 inspection, $225 recording, 0.5% transfer tax, "
+               "$2,100 a year homeowners insurance, $6,300 a year property tax, "
+               "3 months of tax escrow, $0 seller credits, 15 days of prepaid interest.",
+               mv::Outcome::Unsafe, mv::ReasonCode::OutOfRange,
+               "bounds: a share above 1.0 is refused, matching the engine's own cap");
 
         expect(params("ComputeAmortization", {{"loan_amount", "350000.00"},
                                               {"annual_rate", "0.0575"},

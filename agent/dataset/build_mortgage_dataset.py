@@ -101,7 +101,7 @@ def _find_matching_brace(text: str, open_idx: int) -> int:
 
 
 _FIELD_RE = re.compile(
-    r"^\s*(repeated\s+)?([A-Za-z_]\w*)\s+([a-zA-Z_]\w*)\s*=\s*\d+\s*(\[[^\]]*\])?;"
+    r"^\s*(?:optional\s+)?(repeated\s+)?([A-Za-z_]\w*)\s+([a-zA-Z_]\w*)\s*=\s*\d+\s*(\[[^\]]*\])?;"
 )
 # Two identifiers (type, name) before '='. This is what excludes proto3 enum
 # constants (`STRAIGHT_LINE = 0;`, one identifier) from matching as fields --
@@ -956,6 +956,133 @@ def make_home_npv_extraction(rng: random.Random) -> dict:
                  ("assistant", params_block(op, obj)))
 
 
+
+# Closing costs: the itemised cash-to-close estimate. Sixteen fields, every one
+# of which must be STATED in the utterance -- the verifier grounds each emitted
+# number against the request, so a field the phrasing leaves out is a refusal
+# rather than a guess. That is why these utterances read as long as they do.
+#
+# Percentages are decimal fractions and their BASES DIFFER: origination and
+# discount points are shares of the LOAN, title and transfer tax are shares of
+# the PRICE. finance.proto says so on the fields themselves.
+def make_closing_costs_extraction(rng: random.Random) -> dict:
+    """Closing costs. Sixteen fields, and the phrasing carries the whole risk.
+
+    Two shapes, deliberately mixed. The FULL shape names every figure. The
+    SPARSE shape omits the costs that are zero and says nothing about prepaid
+    interest -- which is how a real buyer writes, and which the earlier
+    version of this generator never produced: it stated "$0 in seller/lender
+    credits" and "0% discount points" in every row, so the model only ever saw
+    a world where absent costs are announced.
+
+    The sparse shape is only SAFE because mortgage_verification.cppm carries
+    convention values for exactly these fields (zero for each omittable cost,
+    15 for an unnamed prepaid-interest day count). A field omitted from the
+    utterance and NOT in that list is an ungrounded value and gets refused, so
+    the two files have to agree about which costs may go unsaid.
+    """
+    op = "ComputeClosingCosts"
+    home_price = round_money(rng.randint(150_000, 1_200_000), nearest=5000)
+    down_payment_percent = round(rng.choice(range(3, 26)) / 100.0, 4)
+    annual_rate = round(rng.choice(range(450, 851, 25)) / 10000.0, 4)
+    origination_fee_percent = 0.0 if rng.random() < 0.25 else round(rng.choice(range(25, 151, 25)) / 10000.0, 4)
+    discount_points_percent = 0.0 if rng.random() < 0.35 else round(rng.choice(range(25, 201, 25)) / 10000.0, 4)
+    other_lender_fees = 0.0 if rng.random() < 0.12 else float(round_money(rng.randint(700, 2500), nearest=50))
+    title_settlement_percent = round(rng.choice(range(30, 81, 5)) / 10000.0, 4)
+    appraisal_fee = 0.0 if rng.random() < 0.12 else float(round_money(rng.randint(450, 900), nearest=25))
+    inspection_fee = 0.0 if rng.random() < 0.25 else float(round_money(rng.randint(300, 700), nearest=25))
+    recording_fees = 0.0 if rng.random() < 0.12 else float(round_money(rng.randint(100, 400), nearest=10))
+    transfer_tax_percent = 0.0 if rng.random() < 0.3 else round(rng.choice(range(50, 201, 25)) / 10000.0, 4)
+    homeowners_insurance_annual = float(round_money(rng.randint(900, 4000), nearest=50))
+    property_tax_annual = float(round_money(rng.randint(2000, 18000), nearest=100))
+    tax_escrow_months = rng.randint(2, 6)
+    seller_lender_credits = 0.0 if rng.random() < 0.45 else float(round_money(rng.randint(1000, 10000), nearest=500))
+    sparse = rng.random() < 0.45
+    # In the sparse shape an unnamed day count means the convention, so the
+    # emitted value must BE the convention -- 15, not a sampled number.
+    prepaid_interest_days = 15 if sparse else (15 if rng.random() < 0.5 else rng.randint(10, 30))
+
+    def money(v):
+        return phrase_money(v)
+
+    # Each clause is (text, is_present). In the sparse shape a zero cost simply
+    # does not appear; in the full shape it is stated as zero.
+    lender = []
+    if origination_fee_percent or not sparse:
+        lender.append(f"a {phrase_pct(origination_fee_percent)} origination fee")
+    if discount_points_percent or not sparse:
+        lender.append(f"{phrase_pct(discount_points_percent)} in discount points")
+    if other_lender_fees or not sparse:
+        lender.append(f"{money(other_lender_fees)} in other lender fees")
+
+    third = [f"{phrase_pct(title_settlement_percent)} for title and settlement"]
+    if appraisal_fee or not sparse:
+        third.append(f"a {money(appraisal_fee)} appraisal")
+    if inspection_fee or not sparse:
+        third.append(f"a {money(inspection_fee)} inspection")
+
+    govt = []
+    if recording_fees or not sparse:
+        govt.append(f"{money(recording_fees)} in recording fees")
+    if transfer_tax_percent or not sparse:
+        govt.append(f"a {phrase_pct(transfer_tax_percent)} transfer tax")
+
+    prepaid = [f"homeowners insurance at {money(homeowners_insurance_annual)} a year",
+               f"property tax at {money(property_tax_annual)} a year",
+               f"{tax_escrow_months} months of tax escrow"]
+    if not sparse:
+        prepaid.append(f"{prepaid_interest_days} days of prepaid interest")
+    if seller_lender_credits or not sparse:
+        prepaid.append(f"{money(seller_lender_credits)} in seller or lender credits")
+
+    def join(items):
+        if not items:
+            return ""
+        if len(items) == 1:
+            return items[0]
+        return ", ".join(items[:-1]) + " and " + items[-1]
+
+    head = rng.choice([
+        f"What are my closing costs on a {money(home_price)} house with "
+        f"{phrase_pct(down_payment_percent)} down at {phrase_pct(annual_rate)}?",
+        f"I'm buying at {money(home_price)}, putting {phrase_pct(down_payment_percent)} down, "
+        f"rate {phrase_pct(annual_rate)}. How much cash do I need to close?",
+        f"Estimate cash to close: {money(home_price)} purchase, "
+        f"{phrase_pct(down_payment_percent)} down payment, {phrase_pct(annual_rate)} interest rate.",
+        f"Work out the closing costs on a {money(home_price)} purchase -- "
+        f"{phrase_pct(down_payment_percent)} down, borrowing at {phrase_pct(annual_rate)}.",
+    ])
+
+    parts = [head]
+    if lender:
+        parts.append(f"Lender charges are {join(lender)}.")
+    parts.append(f"Third-party costs are {join(third)}.")
+    if govt:
+        parts.append(f"Government fees are {join(govt)}.")
+    parts.append(f"For prepaids and escrow: {join(prepaid)}.")
+    user = " ".join(parts)
+
+    obj = {
+        "home_price": money_str(home_price),
+        "down_payment_percent": rate_str(down_payment_percent),
+        "annual_rate": rate_str(annual_rate),
+        "origination_fee_percent": rate_str(origination_fee_percent),
+        "discount_points_percent": rate_str(discount_points_percent),
+        "other_lender_fees": money_str(other_lender_fees),
+        "title_settlement_percent": rate_str(title_settlement_percent),
+        "appraisal_fee": money_str(appraisal_fee),
+        "inspection_fee": money_str(inspection_fee),
+        "recording_fees": money_str(recording_fees),
+        "transfer_tax_percent": rate_str(transfer_tax_percent),
+        "homeowners_insurance_annual": money_str(homeowners_insurance_annual),
+        "property_tax_annual": money_str(property_tax_annual),
+        "tax_escrow_months": tax_escrow_months,
+        "seller_lender_credits": money_str(seller_lender_credits),
+        "prepaid_interest_days": prepaid_interest_days,
+    }
+    return convo(("system", SYSTEM), ("user", user), ("assistant", params_block(op, obj)))
+
+
 # ============================================================================
 # 4. Clarification: missing information -> ONE question, then the params.
 #    Four-turn shape (user, assistant question, user reply, assistant
@@ -1777,6 +1904,7 @@ def main() -> None:
         (0.018, make_home_future_value_extraction),
         (0.0135, make_mortgage_recast_extraction),
         (0.0135, make_home_npv_extraction),
+        (0.045, make_closing_costs_extraction),
         (0.126, make_clarification),
         (0.090, make_modification),
         (0.07, make_refusal),

@@ -11,8 +11,8 @@
 // on. The module derives it rather than copying it, so agreement is
 // structural -- but "structural" is a claim, and this file checks it against
 // a FRESH parse of backend/proto/finance.proto with the same section banners
-// and the same two exclusions build_mortgage_dataset.py uses. 26 operations,
-// 160 fields, in declaration order, and it fails loudly on drift in either
+// and the same two exclusions build_mortgage_dataset.py uses. 27 operations,
+// 176 fields, in declaration order, and it fails loudly on drift in either
 // direction. The one table the module cannot derive (the enum constants,
 // which mortgage_verification keeps unexported) is checked BOTH against the
 // .proto and against `verify_mortgage_params` itself.
@@ -123,6 +123,13 @@ auto parse_field_line(std::string_view line) -> std::optional<std::pair<std::str
     std::string_view s = trim(line);
     if (s.starts_with("//")) {
         return std::nullopt;
+    }
+    // `optional` is proto3 EXPLICIT PRESENCE -- a presence marker, not a type.
+    // Unstripped it parses AS the type and shifts the name across, silently
+    // dropping the real field from the drift comparison.
+    if (s.starts_with("optional ")) {
+        s.remove_prefix(9);
+        s = trim(s);
     }
     if (s.starts_with("repeated ")) {
         s.remove_prefix(9);
@@ -534,10 +541,10 @@ auto main() -> int {
         check(valid.has_value(),
               valid.has_value() ? "validate_label_space: schema matches mortgage_verification"
                                 : ("validate_label_space FAILED: " + valid.error()));
-        check(schema.operation_count() == 26,
-              "26 operations (schema has " + std::to_string(schema.operation_count()) + ")");
-        check(schema.field_count() == 160,
-              "160 fields (schema has " + std::to_string(schema.field_count()) + ")");
+        check(schema.operation_count() == 27,
+              "27 operations (schema has " + std::to_string(schema.operation_count()) + ")");
+        check(schema.field_count() == 176,
+              "176 fields (schema has " + std::to_string(schema.field_count()) + ")");
     }
 
     // ---------------------------------------------------------------------

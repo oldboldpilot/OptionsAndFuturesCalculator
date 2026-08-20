@@ -403,6 +403,85 @@ monthly-rate-with-`periods=30` refused, annual-rate-with-`periods=360` refused.
 Mutation-checked — restoring the hardcoded x12 reproduces the production message
 verbatim AND flips the mismatched pair back to `Proven`.
 
+## Closing costs (`ComputeClosingCosts`)
+
+mortgagefvcalculator.com grew a standalone, itemised closing-costs screen, and
+`finance.proto` had closing costs only as SCALAR FIELDS inside `ComputeRefinance`
+and `ComputeHomeNpv`. The assistant's job is to name an operation in its label
+space, so there was nothing to name: the failure was STRUCTURAL, not a weak
+model, and the grammar correctly refused every invented name.
+
+`sensen::calculate_closing_costs` reproduces the live site exactly — subtotal
+15,335.96, cash to close 60,335.96, 3.41% of price — and that agreement is
+between two independent implementations, which is the point.
+
+Four things are load-bearing:
+
+1. **The percentages do not share a base.** Origination and discount points are
+   shares of the LOAN; title and transfer tax are shares of the PRICE. Mixing
+   them yields a plausible figure rather than an error, so `check_finance`
+   recomputes EVERY line against its own base — the sum identity sees a dropped
+   term, never a wrong base.
+2. **A credit reduces the TOTAL, not the itemisation.** Measured on the live
+   page: a 5,000 credit left the subtotal at 15,336 and moved the headline to
+   10,336. Hence both `itemised_subtotal` and `total_closing_costs`; folding it
+   into a line would stop the itemisation summing to its own subtotal.
+3. **`down_payment_percent` may be exactly 1.0** — an all-cash purchase, no
+   loan, but title/appraisal/recording/transfer/escrow still owed. The first
+   version refused it on a comment claiming the loan would go negative, which is
+   false at exactly 1.0.
+4. **`prepaid_interest_days` is `optional int32`**, the only explicit-presence
+   field in the file. Absent means the 15-day convention; an explicit 0 means
+   zero days, which a closing on the last day of a month owes. A sentinel
+   mapping 0 to 15 made that unrepresentable. **Adding it silently broke all
+   three text-level proto parsers**, which strip `repeated ` but not
+   `optional ` — reading the presence marker AS the type and dropping the field
+   from the drift comparison rather than erroring.
+
+`validate_closing_costs` is split out so the service answers `INVALID_ARGUMENT`
+for a bad argument while direct sensen callers get the identical refusal from
+the engine. One contract, two callers. A credit larger than the bill is the
+deliberate exception and keeps `FAILED_PRECONDITION`: 100,000 is ordinary on a
+larger closing and wrong only relative to a subtotal that cannot be known until
+the itemisation runs.
+
+### An operation must reach FOUR tables, and the fourth gates dispatch
+
+`kLabelSpace`/`kOperationIds` and the slot classifier in
+`mortgage_verification.cppm`, `kConventionValues`, and **a fourth copy of the
+label space in `mortgage_assistant_service.cpp`** that refuses the operation
+AFTER the verifier admits it. Eight fields classified `Unclassified` until they
+were added to `kMoneyFields`, and an Unclassified slot makes `translate()`
+return Indeterminate — so every parse would have been refused, which looks
+exactly like a bad model.
+
+**A verifier LOOSER than the engine it guards is not a safety property.** Its
+Ratio ceiling is 1.5 and the engine caps shares at 1.0, so it would prove a
+parse the engine then refuses and the caller gets a transport error where an
+honest refusal belongs. `kUnitCappedRatioFields` closes that; the global 1.5
+stays, because an LTV above 1.0 is real on an underwater loan. The mirror
+mismatch also existed: the verifier refused `tax_escrow_months = 0` while the
+engine accepts it, and loans without escrow accounts are ordinary.
+
+### The tests were not wired, and wiring them found seven defects
+
+`test_financial.cpp` lives in sensen's tree, which this repo builds
+`BUILD_TESTS OFF ... FORCE`; `smoke_client` needs a running engine and is not a
+ctest target. **Zero of 99 ctest tests touched this operation** while coverage
+appeared to come from three places. Section 23 of
+`test_finance_service_validation.cpp` closed it and failed 7 checks immediately:
+every engine-level refusal reached clients as `FAILED_PRECONDITION` rather than
+`INVALID_ARGUMENT`, because `fail()` maps engine errors that way.
+
+### The mortgage assistant is separately BROKEN, and this did not fix it
+
+Held-out rows through the live ingress score **0/16 on closing costs and 0/24
+across mixed operations** against a documented 27.8%; ten identical sequential
+requests return two different answers under greedy decode. **The 2026-08-13
+promotion gate could not have caught this: it asserted "all HTTP 200", and a
+REFUSAL IS HTTP 200.** A retrain should not be spent until this is fixed,
+because its score could not be trusted.
+
 ## Pro tier and quota
 
 Entitlement flows through Supabase `auth.users.app_metadata.tier` (never

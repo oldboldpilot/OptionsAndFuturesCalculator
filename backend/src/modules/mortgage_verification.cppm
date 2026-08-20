@@ -194,7 +194,7 @@ namespace detail {
 // its own OPERATIONS dict (parse_finance_proto + build_operations, the
 // same IN_SCOPE_SECTIONS and EXCLUDE_RPCS). The test re-parses the .proto
 // and fails if this table has drifted from it in either direction.
-constexpr std::array<FieldSpec, 160> kLabelSpace{{
+constexpr std::array<FieldSpec, 176> kLabelSpace{{
     {.operation = "ComputeAmortization", .field = "loan_amount", .proto_type = "string", .repeated = false},
     {.operation = "ComputeAmortization", .field = "annual_rate", .proto_type = "string", .repeated = false},
     {.operation = "ComputeAmortization", .field = "term_months", .proto_type = "int32", .repeated = false},
@@ -207,6 +207,22 @@ constexpr std::array<FieldSpec, 160> kLabelSpace{{
     {.operation = "ComputeAmortizationBatch", .field = "extra_payments", .proto_type = "double", .repeated = true},
     {.operation = "ComputeAmortizationBatch", .field = "pmi_rates", .proto_type = "double", .repeated = true},
     {.operation = "ComputeAmortizationBatch", .field = "home_values", .proto_type = "double", .repeated = true},
+    {.operation = "ComputeClosingCosts", .field = "home_price", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeClosingCosts", .field = "down_payment_percent", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeClosingCosts", .field = "annual_rate", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeClosingCosts", .field = "origination_fee_percent", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeClosingCosts", .field = "discount_points_percent", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeClosingCosts", .field = "other_lender_fees", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeClosingCosts", .field = "title_settlement_percent", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeClosingCosts", .field = "appraisal_fee", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeClosingCosts", .field = "inspection_fee", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeClosingCosts", .field = "recording_fees", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeClosingCosts", .field = "transfer_tax_percent", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeClosingCosts", .field = "homeowners_insurance_annual", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeClosingCosts", .field = "property_tax_annual", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeClosingCosts", .field = "tax_escrow_months", .proto_type = "int32", .repeated = false},
+    {.operation = "ComputeClosingCosts", .field = "seller_lender_credits", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeClosingCosts", .field = "prepaid_interest_days", .proto_type = "int32", .repeated = false},
     {.operation = "ComputeCumulative", .field = "component", .proto_type = "Component", .repeated = false},
     {.operation = "ComputeCumulative", .field = "rate", .proto_type = "double", .repeated = false},
     {.operation = "ComputeCumulative", .field = "periods", .proto_type = "int32", .repeated = false},
@@ -357,8 +373,9 @@ constexpr std::array<FieldSpec, 160> kLabelSpace{{
     {.operation = "ComputeXnpv", .field = "guess", .proto_type = "double", .repeated = false},
 }};
 
-constexpr std::array<std::string_view, 26> kOperationIds{
-    "ComputeAmortization", "ComputeAmortizationBatch", "ComputeCumulative",
+constexpr std::array<std::string_view, 27> kOperationIds{
+    "ComputeAmortization", "ComputeAmortizationBatch", "ComputeClosingCosts",
+    "ComputeCumulative",
     "ComputeDepreciation", "ComputeDetailedAmortization", "ComputeFutureValue",
     "ComputeFutureValueDetailed", "ComputeHeloc", "ComputeHomeFutureValue",
     "ComputeHomeNpv", "ComputeInterestPayment", "ComputeIrr",
@@ -1056,7 +1073,7 @@ template <std::size_t N>
 constexpr std::array<std::string_view, 4> kEnumFields{"timing", "component", "method",
                                                       "closing_cost_type"};
 constexpr std::array<std::string_view, 1> kBoolFields{"discounted"};
-constexpr std::array<std::string_view, 1> kDayFields{"dates"};
+constexpr std::array<std::string_view, 2> kDayFields{"dates", "prepaid_interest_days"};
 constexpr std::array<std::string_view, 1> kDimensionlessFields{"factor"};
 constexpr std::array<std::string_view, 3> kFrequencyFields{"payments_per_year", "periods_per_year",
                                                            "compound_frequency"};
@@ -1077,7 +1094,29 @@ struct ConventionValue {
     std::string_view field;
     std::string_view value;
 };
-constexpr std::array<ConventionValue, 16> kConventionValues{{
+constexpr std::array<ConventionValue, 28> kConventionValues{{
+    // ComputeClosingCosts: the lines a closing may genuinely not have.
+    // Sixteen fields must all be emitted, so without these a request
+    // that never mentions an inspection is refused rather than read as
+    // "no inspection fee". Same trade as the payment/future_value zeros
+    // below: it also stops catching a STATED figure dropped to zero.
+    {.field = "origination_fee_percent", .value = "0"},
+    {.field = "discount_points_percent", .value = "0"},
+    {.field = "other_lender_fees", .value = "0"},
+    {.field = "appraisal_fee", .value = "0"},
+    {.field = "inspection_fee", .value = "0"},
+    {.field = "recording_fees", .value = "0"},
+    {.field = "transfer_tax_percent", .value = "0"},
+    {.field = "homeowners_insurance_annual", .value = "0"},
+    {.field = "property_tax_annual", .value = "0"},
+    {.field = "seller_lender_credits", .value = "0"},
+    // The day count a caller never names. 15 is the half-month convention the
+    // proto documents as the ABSENT behaviour, so a request that says nothing
+    // about prepaid interest must be able to emit it; 0 is the deliberate
+    // "closing on the last day of the month, none owed".
+    {.field = "prepaid_interest_days", .value = "15"},
+    {.field = "prepaid_interest_days", .value = "0"},
+
     // The monthly cadence, when the user said nothing about frequency.
     {.field = "payments_per_year", .value = "12"},
     {.field = "periods_per_year", .value = "12"},
@@ -1123,6 +1162,32 @@ constexpr __int128 kMaxRateUnits = (static_cast<__int128>(30) * Decimal::kScale)
 /** 150%. LTV caps and cost percentages legitimately exceed 100% of nothing
  * useful, but a 1.5 ceiling still refuses a percent-as-whole-number slip. */
 constexpr __int128 kMaxRatioUnits = (static_cast<__int128>(150) * Decimal::kScale) / 100;
+
+/** Ratio fields the ENGINE refuses above 1.0, listed so the verifier refuses
+ * them too.
+ *
+ * The global ceiling above is 1.5 because an LTV legitimately exceeds 1.0 on an
+ * underwater loan. These are shares of a price or a loan, where above 1.0 is
+ * always a mistake -- and `sensen::validate_closing_costs` says so, returning
+ * INVALID_ARGUMENT.
+ *
+ * Listed here because a verifier LOOSER than the engine it guards is not a
+ * safety property: it proves a parse admissible and the engine then refuses it,
+ * so the caller gets a transport error instead of the honest "I could not
+ * ground that" this layer exists to produce.
+ *
+ * Keep in step with `sensen::validate_closing_costs`. The two sides are
+ * asserted SEPARATELY, because this module is deliberately free of sensen,
+ * proto and gRPC and so cannot call the engine to compare: the verifier half
+ * is in test_mortgage_verification.cpp ("a share above 1.0 is refused"), the
+ * engine half in test_finance_service_validation.cpp section 23 ("a fee share
+ * above 100%"). Both must move together; neither test can notice on its own
+ * that the other side changed. */
+constexpr std::array<std::string_view, 5> kUnitCappedRatioFields{
+    "down_payment_percent", "origination_fee_percent", "discount_points_percent",
+    "title_settlement_percent", "transfer_tax_percent",
+};
+constexpr __int128 kMaxUnitRatioUnits = Decimal::kScale;
 /** 1200 months / 100 years -- the horizon the misuse spec fixes for this
  * product, and the same figure `finance_service.cpp`'s own guard header
  * cites for its compounding check. */
@@ -1304,7 +1369,10 @@ auto classify_slot(std::string_view f) -> SlotKind {
     // is deliberately last; a name the rules above do not reach and that is
     // not a money field would be an unclassified slot, which the test's
     // totality assertion is what actually rules out.
-    static constexpr std::array<std::string_view, 39> kMoneyFields{
+    static constexpr std::array<std::string_view, 47> kMoneyFields{
+        // ComputeClosingCosts. Absent, these classify Unclassified ->
+        // Indeterminate and every closing-cost parse is refused.
+        "appraisal_fee", "home_price", "homeowners_insurance_annual", "inspection_fee", "other_lender_fees", "property_tax_annual", "recording_fees", "seller_lender_credits",
         "annual_contribution",          "cash_out_amount",
         "closing_costs",                "closing_costs_buy",
         "cost",                         "current_loan_balance",
@@ -1757,9 +1825,31 @@ namespace detail {
             return too_big(kMaxRateUnits, "interest-rate");
         case SlotKind::Ratio:
             if (v.is_negative()) return std::string{field} + " = " + v.to_string() + " is negative";
+            // Shares of a price or a loan cannot exceed the whole. Refused
+            // HERE as well as in the engine so the verdict is a grounded
+            // refusal rather than an INVALID_ARGUMENT from the far side.
+            if (detail::is_one_of(detail::kUnitCappedRatioFields, field) &&
+                v.units() > detail::kMaxUnitRatioUnits) {
+                return std::string{field} + " = " + v.to_string() +
+                       " exceeds 1.0, and it is a decimal fraction (0.0075 for 0.75%)";
+            }
             return too_big(kMaxRatioUnits, "proportion");
         case SlotKind::MonthCount:
-            if (v.units() <= 0) return std::string{field} + " = " + v.to_string() + " is not positive";
+            // Zero months of TAX ESCROW is a real closing -- plenty of loans
+            // collect no escrow reserve at all -- so it is carved out of the
+            // positivity rule the same way `values` is carved out of Money's
+            // negativity rule above. A zero TERM or zero `periods` remains an
+            // error; this exemption is by field name, not by kind.
+            //
+            // It has to live HERE rather than in kConventionValues: bounds run
+            // in translate() (G5), before ground_emitted_values (G3) ever
+            // consults a convention, so a convention entry would never be
+            // reached. The engine accepts 0..24 for this field, and a verifier
+            // stricter than the RPC it guards refuses requests the service
+            // would have answered.
+            if (v.units() < 0 || (v.units() == 0 && field != "tax_escrow_months")) {
+                return std::string{field} + " = " + v.to_string() + " is not positive";
+            }
             return too_big(kMaxMonthUnits, "term");
         case SlotKind::YearCount:
             if (v.units() <= 0) return std::string{field} + " = " + v.to_string() + " is not positive";

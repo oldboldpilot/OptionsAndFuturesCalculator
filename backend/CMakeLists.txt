@@ -766,6 +766,18 @@ target_sources(sensen_slim
             "${SENSEN_SRC}/pytorch_weight_loader.cppm"
             "${SENSEN_SRC}/qwen35moe.cppm"
             "${SENSEN_SRC}/qwen35moe_serving_model.cppm"
+            # Qwen3.8 arrived with the 2026-08-19 sensen merge and is NOT listed
+            # here, deliberately. The whole chain is CUDA-only --
+            # Qwen38AttentionKvCache lives inside `#ifdef SENSEN_HAS_CUDA` and
+            # qwen38_gdn_state.cppm names it unconditionally -- and this engine
+            # builds ENABLE_CUDA=OFF. llm_pipeline.cppm now imports the adapter
+            # under the same guard as the use site that already threw
+            # "requires a CUDA build", so on a CPU build these modules are never
+            # named and must not be compiled.
+            #
+            # A CUDA build DOES need them; add them back under a
+            # `if(SENSEN_HAS_CUDA)` branch rather than unconditionally, or the
+            # CPU build breaks again exactly as it did on the merge.
             "${SENSEN_SRC}/rms_norm.cppm"
             # Pulled in by autograd_cuda.cppm as of sensen 8ffda361, which
             # added `import sensen.rope_context_ext;` for RopeExtConfig::mscale()
@@ -787,6 +799,7 @@ target_sources(sensen_slim
             "${SENSEN_SRC}/training_attention.cppm"
             "${SENSEN_SRC}/training_autocast.cppm"
             "${SENSEN_SRC}/training_cross_attention.cppm"
+            "${SENSEN_SRC}/training_gated_attention.cppm"
             "${SENSEN_SRC}/training_gated_deltanet.cppm"
             "${SENSEN_SRC}/training_moe.cppm"
             "${SENSEN_SRC}/training_primitives.cppm"

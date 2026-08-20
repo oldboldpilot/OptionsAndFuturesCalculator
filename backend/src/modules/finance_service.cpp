@@ -2525,6 +2525,120 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         return Status::OK;
     }
 
+    /** Itemises closing costs and totals the cash a buyer brings to closing.
+     *
+     * Flat cost: this is eleven multiplies and a sum with no iteration, no
+     * schedule and no solve, so it is the cheapest thing on the real-estate
+     * surface rather than being priced like its neighbours.
+     */
+    auto ComputeClosingCosts(ServerContext* context,
+                             const sensen::finance::ClosingCostsRequest* request,
+                             sensen::finance::ClosingCostsResponse* response) -> Status override {
+        if (request == nullptr || response == nullptr) {
+            return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
+        }
+        CHARGE("ComputeClosingCosts", quota::cost_default());
+
+        // Bounded rather than merely non-negative. An escrow of a few months is
+        // the whole point of the field; a four-figure one is a typo that would
+        // otherwise return a confident number built from it.
+        if (request->tax_escrow_months() < 0 || request->tax_escrow_months() > 24) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "tax_escrow_months must be between 0 and 24");
+        }
+        if (request->has_prepaid_interest_days() &&
+            (request->prepaid_interest_days() < 0 || request->prepaid_interest_days() > 365)) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "prepaid_interest_days must be between 0 and 365");
+        }
+
+        // Only three fields are genuinely required. The rest are costs a
+        // closing may simply not have, and REQUIRE_DECIMAL_SAFE refuses an
+        // EMPTY string -- so requiring them would force every client to send
+        // "0" eleven times and refuse the request the first time it forgot
+        // one. READ_DECIMAL_SAFE keeps the magnitude guard and reads an
+        // absent field as zero, which is what "I have no inspection fee"
+        // means. Sign is checked in the engine, so an omitted field and a
+        // hostile negative one are still told apart.
+        REQUIRE_DECIMAL_SAFE(price, request->home_price(), "home_price");
+        REQUIRE_DECIMAL_SAFE(down_pct, request->down_payment_percent(), "down_payment_percent");
+        REQUIRE_DECIMAL_SAFE(rate, request->annual_rate(), "annual_rate");
+        READ_DECIMAL_SAFE(orig_pct, request->origination_fee_percent(),
+                             "origination_fee_percent");
+        READ_DECIMAL_SAFE(points_pct, request->discount_points_percent(),
+                             "discount_points_percent");
+        READ_DECIMAL_SAFE(other_fees, request->other_lender_fees(), "other_lender_fees");
+        READ_DECIMAL_SAFE(title_pct, request->title_settlement_percent(),
+                             "title_settlement_percent");
+        READ_DECIMAL_SAFE(appraisal, request->appraisal_fee(), "appraisal_fee");
+        READ_DECIMAL_SAFE(inspection, request->inspection_fee(), "inspection_fee");
+        READ_DECIMAL_SAFE(recording, request->recording_fees(), "recording_fees");
+        READ_DECIMAL_SAFE(transfer_pct, request->transfer_tax_percent(),
+                             "transfer_tax_percent");
+        READ_DECIMAL_SAFE(hoi, request->homeowners_insurance_annual(),
+                             "homeowners_insurance_annual");
+        READ_DECIMAL_SAFE(ptax, request->property_tax_annual(), "property_tax_annual");
+        READ_DECIMAL_SAFE(credits, request->seller_lender_credits(), "seller_lender_credits");
+
+        sensen::ClosingCostsInput input{};
+        input.home_price = price;
+        input.down_payment_percent = down_pct;
+        input.annual_rate = rate;
+        input.origination_fee_percent = orig_pct;
+        input.discount_points_percent = points_pct;
+        input.other_lender_fees = other_fees;
+        input.title_settlement_percent = title_pct;
+        input.appraisal_fee = appraisal;
+        input.inspection_fee = inspection;
+        input.recording_fees = recording;
+        input.transfer_tax_percent = transfer_pct;
+        input.homeowners_insurance_annual = hoi;
+        input.property_tax_annual = ptax;
+        input.tax_escrow_months = request->tax_escrow_months();
+        input.seller_lender_credits = credits;
+        if (request->has_prepaid_interest_days()) {
+            input.prepaid_interest_days = request->prepaid_interest_days();
+        }
+
+        // Validate BEFORE dispatching, against the engine's OWN rules --
+        // `sensen::validate_closing_costs` is the same function
+        // `calculate_closing_costs` runs, not a second copy that could drift.
+        //
+        // It matters which status code says so. `fail()` maps an engine error
+        // to FAILED_PRECONDITION, which is right for "the system cannot do
+        // this now" and WRONG for "your argument is bad": a negative fee is
+        // invalid regardless of any system state. Running the contract here
+        // lets a bad request answer INVALID_ARGUMENT, while a direct sensen
+        // caller still gets the identical refusal from the engine itself.
+        if (auto ok = sensen::validate_closing_costs(input); !ok) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT, ok.error());
+        }
+
+        const auto r = sensen::calculate_closing_costs(input);
+        if (!r) return fail(r);
+
+        response->set_origination_fee(r->origination_fee.to_string());
+        response->set_discount_points(r->discount_points.to_string());
+        response->set_other_lender_fees(r->other_lender_fees.to_string());
+        response->set_title_settlement(r->title_settlement.to_string());
+        response->set_appraisal_fee(r->appraisal_fee.to_string());
+        response->set_inspection_fee(r->inspection_fee.to_string());
+        response->set_recording_fees(r->recording_fees.to_string());
+        response->set_transfer_tax(r->transfer_tax.to_string());
+        response->set_homeowners_insurance_prepaid(r->homeowners_insurance_prepaid.to_string());
+        response->set_property_tax_escrow(r->property_tax_escrow.to_string());
+        response->set_prepaid_interest(r->prepaid_interest.to_string());
+        response->set_prepaid_interest_days(r->prepaid_interest_days);
+        response->set_itemised_subtotal(r->itemised_subtotal.to_string());
+        response->set_seller_lender_credits(r->seller_lender_credits.to_string());
+        response->set_total_closing_costs(r->total_closing_costs.to_string());
+        response->set_loan_amount(r->loan_amount.to_string());
+        response->set_down_payment(r->down_payment.to_string());
+        response->set_total_cash_to_close(r->total_cash_to_close.to_string());
+        response->set_closing_costs_percent_of_price(r->closing_costs_percent_of_price);
+        return Status::OK;
+    }
+
     // -- Options -------------------------------------------------------------
 
     auto PriceOptionTree(ServerContext* context, const sensen::finance::OptionTreeRequest* request,

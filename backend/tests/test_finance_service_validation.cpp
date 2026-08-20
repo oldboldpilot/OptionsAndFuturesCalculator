@@ -118,6 +118,7 @@
 // and this pass's time budget went to the prioritised RPCs above).
 #include <chrono>
 #include <cmath>
+#include <functional>
 #include <cstdio>
 #include <limits>
 #include <memory>
@@ -1948,6 +1949,199 @@ auto main() -> int {
               "...but a legitimate $1 billion present_value still computes a finite, "
               "negative (interest is an outflow) cumulative-interest figure: got " +
                   std::to_string(resp.value()));
+    }
+
+    // =======================================================================
+    section("23. ComputeClosingCosts: bases, bounds, presence and optionality");
+    // =======================================================================
+    //
+    // Wired into ctest deliberately. The engine-level assertions for this
+    // operation live in sensen's own test_financial.cpp, which this repo does
+    // NOT build (backend/CMakeLists.txt sets BUILD_TESTS OFF FORCE for the
+    // sensen subtree), and in smoke_client, which needs a running engine and is
+    // not a ctest target. Without this section the whole operation had zero
+    // coverage in the 99-test suite while looking covered from three places.
+    {
+        // The scenario the production website shows at its defaults, so the
+        // expected figures are an INDEPENDENT implementation's, not ours.
+        const auto reference = [] {
+            sensen::finance::ClosingCostsRequest r;
+            r.set_home_price("450000");
+            r.set_down_payment_percent("0.10");
+            r.set_annual_rate("0.0675");
+            r.set_origination_fee_percent("0.0075");
+            r.set_discount_points_percent("0");
+            r.set_other_lender_fees("1400");
+            r.set_title_settlement_percent("0.0055");
+            r.set_appraisal_fee("650");
+            r.set_inspection_fee("500");
+            r.set_recording_fees("225");
+            r.set_transfer_tax_percent("0.005");
+            r.set_homeowners_insurance_annual("2100");
+            r.set_property_tax_annual("6300");
+            r.set_tax_escrow_months(3);
+            r.set_seller_lender_credits("0");
+            // prepaid_interest_days deliberately absent -> 15-day convention.
+            return r;
+        };
+
+        {
+            auto req = reference();
+            sensen::finance::ClosingCostsResponse resp;
+            auto ctx = make_context();
+            auto status = stub.ComputeClosingCosts(ctx.get(), req, &resp);
+            check(status.ok(), "the reference scenario computes");
+            if (status.ok()) {
+                const double price = 450000.0;
+                const double loan = price * 0.90;
+                // Each percentage recomputed HERE against its own base. A
+                // single wrong base still sums to the same subtotal, so the
+                // sum identity alone cannot see it.
+                check(std::abs(std::stod(resp.loan_amount()) - loan) < 0.005,
+                      "loan = price - down payment");
+                check(std::abs(std::stod(resp.origination_fee()) - loan * 0.0075) < 0.005,
+                      "origination is 0.75% of the LOAN, not the price");
+                check(std::abs(std::stod(resp.title_settlement()) - price * 0.0055) < 0.005,
+                      "title is 0.55% of the PRICE, not the loan");
+                check(std::abs(std::stod(resp.transfer_tax()) - price * 0.005) < 0.005,
+                      "transfer tax is 0.5% of the PRICE");
+                check(std::abs(std::stod(resp.property_tax_escrow()) - 6300.0 * 3.0 / 12.0) < 0.005,
+                      "escrow is three twelfths of the annual tax bill");
+                check(std::abs(std::stod(resp.prepaid_interest()) -
+                               loan * 0.0675 / 365.0 * 15.0) < 0.01,
+                      "prepaid interest is loan x rate / 365 x 15");
+                check(resp.prepaid_interest_days() == 15,
+                      "an ABSENT prepaid_interest_days resolves to the 15-day convention");
+                check(std::abs(std::stod(resp.itemised_subtotal()) - 15335.9589) < 0.01,
+                      "subtotal agrees with the reference implementation (15,336)");
+                check(std::abs(std::stod(resp.total_cash_to_close()) - 60335.9589) < 0.01,
+                      "cash to close agrees with the reference implementation (60,336)");
+            }
+        }
+        {
+            // Explicit presence: 0 must mean ZERO days, not the convention.
+            // This is the whole reason the field is `optional int32`.
+            auto req = reference();
+            req.set_prepaid_interest_days(0);
+            sensen::finance::ClosingCostsResponse resp;
+            auto ctx = make_context();
+            auto status = stub.ComputeClosingCosts(ctx.get(), req, &resp);
+            check(status.ok() && resp.prepaid_interest_days() == 0 &&
+                      std::stod(resp.prepaid_interest()) == 0.0,
+                  "an EXPLICIT prepaid_interest_days = 0 means zero days, not 15 -- a closing "
+                  "on the last day of a month owes no prepaid interest, and the sentinel this "
+                  "replaced made that unrepresentable");
+        }
+        {
+            // An all-cash purchase: no loan, so no lender lines and no prepaid
+            // interest, but title/appraisal/recording/transfer/escrow all stand.
+            auto req = reference();
+            req.set_down_payment_percent("1.0");
+            sensen::finance::ClosingCostsResponse resp;
+            auto ctx = make_context();
+            auto status = stub.ComputeClosingCosts(ctx.get(), req, &resp);
+            check(status.ok(), "an ALL-CASH purchase (100% down) is accepted, not refused");
+            if (status.ok()) {
+                check(std::stod(resp.loan_amount()) == 0.0 &&
+                          std::stod(resp.origination_fee()) == 0.0 &&
+                          std::stod(resp.prepaid_interest()) == 0.0,
+                      "...with every loan-derived charge at zero");
+                check(std::abs(std::stod(resp.title_settlement()) - 450000.0 * 0.0055) < 0.005,
+                      "...but the title fee, which is owed on the PRICE, is still charged");
+            }
+        }
+        {
+            // Eleven of the sixteen fields are genuinely optional. An omitted
+            // one must read as zero rather than refusing the request.
+            sensen::finance::ClosingCostsRequest req;
+            req.set_home_price("450000");
+            req.set_down_payment_percent("0.10");
+            req.set_annual_rate("0.0675");
+            sensen::finance::ClosingCostsResponse resp;
+            auto ctx = make_context();
+            auto status = stub.ComputeClosingCosts(ctx.get(), req, &resp);
+            check(status.ok(), "a minimal three-field request is accepted");
+            if (status.ok()) {
+                check(std::abs(std::stod(resp.itemised_subtotal()) -
+                               std::stod(resp.prepaid_interest())) < 0.005,
+                      "...and with every optional cost omitted only prepaid interest remains");
+            }
+        }
+
+        // -- refusals. Each is a request that would otherwise return a
+        //    confident, wrong number rather than an error.
+        struct Bad { const char* what; std::function<void(sensen::finance::ClosingCostsRequest&)> poison; };
+        const Bad bad[] = {
+            {"down_payment_percent above 1 (loan would go negative)",
+             [](auto& r){ r.set_down_payment_percent("1.5"); }},
+            {"a NEGATIVE seller credit (a surcharge wearing a credit's name)",
+             [](auto& r){ r.set_seller_lender_credits("-5000"); }},
+            {"a negative fee",
+             [](auto& r){ r.set_appraisal_fee("-650"); }},
+            {"a fee share above 100%",
+             [](auto& r){ r.set_origination_fee_percent("1.5"); }},
+            {"a whole-number percent where a decimal fraction belongs (75 for 0.75%)",
+             [](auto& r){ r.set_title_settlement_percent("75"); }},
+            {"tax_escrow_months beyond two years",
+             [](auto& r){ r.set_tax_escrow_months(25); }},
+            {"prepaid_interest_days beyond a year",
+             [](auto& r){ r.set_prepaid_interest_days(366); }},
+            {"a negative escrow month count",
+             [](auto& r){ r.set_tax_escrow_months(-1); }},
+            {"a malformed decimal string",
+             [](auto& r){ r.set_home_price("4.5.0"); }},
+            {"an empty REQUIRED field",
+             [](auto& r){ r.set_home_price(""); }},
+            {"a zero price (every percentage line would be meaningless)",
+             [](auto& r){ r.set_home_price("0"); }},
+        };
+        for (const auto& b : bad) {
+            auto req = reference();
+            b.poison(req);
+            sensen::finance::ClosingCostsResponse resp;
+            auto ctx = make_context();
+            auto status = stub.ComputeClosingCosts(ctx.get(), req, &resp);
+            check(is_invalid_argument(status),
+                  std::string("REJECTED: ") + b.what);
+        }
+        {
+            // A credit larger than the bill, checked SEPARATELY because it
+            // answers a different status code -- and deliberately so.
+            //
+            // Every refusal above is bad in isolation: a negative fee is
+            // invalid whatever else the request says, so it is INVALID_ARGUMENT
+            // and the service checks it before dispatching. A credit of
+            // $100,000 is not invalid in isolation at all -- it is ordinary on
+            // a larger closing. It is wrong only RELATIVE to the subtotal this
+            // request computes, which cannot be known until the itemisation
+            // runs. That is FAILED_PRECONDITION's meaning, and it is the code
+            // the engine's own refusal carries through `fail()`.
+            //
+            // Asserted as a specific code rather than "not ok" so that a
+            // future change collapsing the two back together fails here.
+            auto req = reference();
+            req.set_seller_lender_credits("100000");
+            sensen::finance::ClosingCostsResponse resp;
+            auto ctx = make_context();
+            auto status = stub.ComputeClosingCosts(ctx.get(), req, &resp);
+            check(!status.ok() &&
+                      status.error_code() == grpc::StatusCode::FAILED_PRECONDITION,
+                  "REJECTED (FAILED_PRECONDITION, not INVALID_ARGUMENT): a credit larger "
+                  "than the itemised bill -- valid in isolation, impossible for THIS bill");
+        }
+        {
+            // Zero escrow months is NOT an error -- plenty of loans collect no
+            // escrow reserve. Paired with the -1 refusal above so the bound is
+            // shown to discriminate rather than merely refuse.
+            auto req = reference();
+            req.set_tax_escrow_months(0);
+            sensen::finance::ClosingCostsResponse resp;
+            auto ctx = make_context();
+            auto status = stub.ComputeClosingCosts(ctx.get(), req, &resp);
+            check(status.ok() && std::stod(resp.property_tax_escrow()) == 0.0,
+                  "...but ZERO escrow months is accepted and collects nothing -- a loan "
+                  "without an escrow account is ordinary, not an error");
+        }
     }
 
     // -----------------------------------------------------------------
