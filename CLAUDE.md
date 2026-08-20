@@ -482,6 +482,60 @@ promotion gate could not have caught this: it asserted "all HTTP 200", and a
 REFUSAL IS HTTP 200.** A retrain should not be spent until this is fixed,
 because its score could not be trusted.
 
+### The retrain WAS spent, on 2026-08-20, and v3 is NOT deployed
+
+v3 = v2's recipe plus the closing-cost rows and a seventeen-token vocabulary
+extension (QLoRA rank 16, 4 epochs, RTX 5090, 728 steps, train_loss 0.2476).
+Measured through the real `ParseOperation` RPC on the Q8_0 GGUF, against v2 on
+the SAME 520 rows, same engine, same harness, one engine on `:50051`:
+
+| | v2 | v3 |
+| --- | --- | --- |
+| raw params exact | **255/520 (49.0%)** | **216/520 (41.5%)** |
+| served exact | 226 (43.5%) | 195 (37.5%) |
+| closing costs, numerically correct | 0/42 (not in its label space) | **7/42 (16.7%)** |
+| non-param rows withheld correctly | — | 31/38 (81.6%) |
+
+Paired McNemar on the row index: **63 rows v2 got right that v3 gets wrong**
+against 24 the other way, 433 concordant, **p = 3.5e-05**. That is a
+regression, not sampling noise. **v2 remains the model of record.**
+
+Three findings from it, each of which is easy to misread as something else:
+
+- **The regression is label BLURRING, not general forgetting.** 43 of the 63
+  newly-broken rows are `ComputeDetailedAmortization` (23) and
+  `ComputeAmortization` (20), and 33 of 63 name the WRONG OPERATION. Putting
+  LoRA on `embed_tokens`/`lm_head` at lr 2e-4 for four epochs moves EVERY
+  operation-name embedding, not only the new one, so adjacent labels blur. The
+  seeded-mean initialisation worked; making the other 151,669 rows trainable is
+  what cost the discrimination. A gradient mask training only the new rows
+  targets that mechanism; not extending the vocabulary at all also does.
+- **Ten of 42 closing-cost rows were scored as TRUNCATED and are not.** The
+  model emits a complete sixteen-field answer and then, at the final field,
+  loops on `0` for 189 characters instead of closing the JSON; all ten land at
+  726-727 chars, i.e. the same cap. There were **zero** such rows in 621 legacy
+  decodes in the same run. `repetition_penalty` is pinned to 1.0 deliberately
+  (1.1 compounded per occurrence and took params exact-match to 0/90), which
+  leaves nothing damping a digit loop on the longest, most digit-dense output
+  in the label space. **Raising `kMaxNewTokens` makes the loop longer, not
+  fixed** — tell the two apart by the tail: a budget truncation cuts at an
+  arbitrary point, a degenerate loop ends in a long run of ONE character and
+  every affected row has the SAME total length.
+- **The closing-cost generator emits SIX decimal places for every percent
+  field in all 545 training rows; the other twenty-six operations use four.**
+  The model emits the four-place majority convention, so seven rows are
+  numerically exact and fail string equality — the GP-ARA verifier compares
+  numerically, admits them, and serves them. A 4.8%-of-rows format minority
+  being overridden is a dataset inconsistency, not a model defect, and
+  normalising the generator is the cheaper fix.
+
+**A `<params>`-level intelligibility gate is now separate from the score, and
+it has to be.** `raw_block_invalid` counts unparseable blocks and is 0 for all
+three of the failure modes above: a non-empty `<think>` (the system prompt did
+not take), a fullwidth zero U+FF10 inside a numeric literal (a different token
+id that escapes the penalty), and truncation (which yields a MISSING block, not
+a malformed one). Score and intelligibility are different questions.
+
 ## Pro tier and quota
 
 Entitlement flows through Supabase `auth.users.app_metadata.tier` (never

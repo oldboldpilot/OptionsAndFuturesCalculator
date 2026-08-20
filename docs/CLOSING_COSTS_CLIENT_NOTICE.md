@@ -73,6 +73,25 @@ the headline to 10,336.
 client can be built and typed against it. Until the backend carrying it ships,
 calling it answers `UNIMPLEMENTED` (grpc-status 12).
 
+**The status depends on the TRANSPORT, and only one of the two is the
+contract.** Measured against production on 2026-08-20, before the deploy:
+
+| transport | unmapped method | a mapped method, as control |
+| --- | --- | --- |
+| gRPC-Web (what this client uses) | `grpc-status: 12` | `grpc-status: 3`, "periods must be positive" |
+| JSON via the transcoder (curl) | `grpc-status: 2`, **"Missing :te header"** | `{"value":"-3210.560578012665289866"}` |
+
+12 is the real answer. The 2 is an artefact: `grpc_json_transcoder` cannot map
+a method it has no descriptor for, so it passes the request through as raw
+gRPC, which then fails on a header a JSON client never sends. **Anyone
+reproducing this with curl is told to fix a header and chases the wrong thing
+entirely.** Use a gRPC-Web request to see the real status.
+
+**Every one of those four cells is HTTP 200** — as is a refusal, as is a quota
+denial. HTTP status carries no information at this boundary; read
+`grpc-status`. A promotion gate in this repository once asserted "all HTTP 200"
+and passed while requests were being refused.
+
 That fact is recorded in TWO places and both are load-bearing:
 
 1. `clients/mortgagefv/proto/finance.proto`'s header block, beside the pinned
