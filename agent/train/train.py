@@ -87,15 +87,44 @@ def load_jsonl(path: Path) -> list[dict]:
 # Vocabulary extension
 # ---------------------------------------------------------------------------
 def closing_cost_vocab(train_path: str) -> list[str]:
-    """The identifiers a ComputeClosingCosts answer must reproduce verbatim.
+    """The identifiers a ComputeClosingCosts answer must reproduce verbatim,
+    MINUS any string that also occurs anywhere else in the corpus.
 
     Derived from the DATA rather than hardcoded, so it cannot drift from the
     proto the dataset was generated against: every key the generator emits for
     that operation, plus the operation id itself.
+
+    THE EXCLUSION PASS IS THE POINT, AND v4 IS WHY IT EXISTS.
+
+    An added token is not merely available to the model -- HuggingFace splits
+    added tokens out of the text with a trie BEFORE BPE runs, so adding a
+    string RETOKENISES every occurrence of it in the whole corpus, including
+    occurrences that belong to other operations and to the system prompt.
+    Those occurrences stop using the multi-token BPE sequence the base model
+    was pretrained on and start using one fresh, mean-seeded row.
+
+    v4 added `annual_rate` because it is a ComputeClosingCosts field. It is
+    also a field of six OTHER operations and appears 10,425 times outside
+    closing-cost rows. The measured cost, against v2 on the same holdout and
+    the same engine, was 23 rows of the nineteen untouched operations
+    (69.5% -> 63.0%, paired McNemar p = 0.0006), concentrated exactly where
+    the retokenisation was densest -- ComputeDetailedAmortization 24/26 ->
+    11/26, over half the entire loss from one operation.
+
+    The gradient mask in extend_vocabulary was working and is not the fix for
+    this: it froze the pre-existing embedding ROWS, and the damage was that
+    those rows stopped being REACHED. A token list has to be tailored, not
+    just trained carefully.
+
+    The test is substring occurrence in the raw row text, not JSON-key
+    equality, because the trie does not care about JSON structure -- a field
+    name mentioned in the system prompt's label-space listing is hijacked
+    exactly as one inside a params block is.
     """
     import json, re
 
     found: set[str] = set()
+    others: list[str] = []
     with open(train_path) as fh:
         for line in fh:
             # Parse the ROW first: the file is JSON, so a naive regex over the
@@ -106,7 +135,9 @@ def closing_cost_vocab(train_path: str) -> list[str]:
                 row = json.loads(line)
             except Exception:
                 continue
-            for turn in row.get("conversations", []):
+            turns = row.get("conversations", [])
+            is_cc = False
+            for turn in turns:
                 if turn.get("role") != "assistant":
                     continue
                 m = re.search(r"<params>(.*?)</params>", turn.get("content", ""), re.S)
@@ -118,9 +149,28 @@ def closing_cost_vocab(train_path: str) -> list[str]:
                     continue
                 if obj.get("operation") != "ComputeClosingCosts":
                     continue
+                is_cc = True
                 found.add("ComputeClosingCosts")
                 found.update(k for k in obj if k != "operation")
-    return sorted(found)
+            if not is_cc:
+                others.append("".join(t.get("content", "") for t in turns))
+
+    if not found:
+        return []
+
+    elsewhere = "\n".join(others)
+    tailored = sorted(t for t in found if elsewhere.count(t) == 0)
+    dropped = sorted(found - set(tailored))
+    if dropped:
+        print(
+            "[vocab] excluded "
+            + str(len(dropped))
+            + " candidate token(s) that also occur outside ComputeClosingCosts: "
+            + ", ".join(f"{t} ({elsewhere.count(t)} hits)" for t in dropped),
+            flush=True,
+        )
+    print(f"[vocab] tailored vocabulary: {len(tailored)} tokens", flush=True)
+    return tailored
 
 
 def extend_vocabulary(model, tokenizer, tokens: list[str]) -> tuple[int, int]:

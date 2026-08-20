@@ -71,6 +71,7 @@ Output is ShareGPT-shaped JSONL, identical in shape to build_dataset.py's:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import random
 import re
@@ -101,8 +102,16 @@ def _find_matching_brace(text: str, open_idx: int) -> int:
 
 
 _FIELD_RE = re.compile(
-    r"^\s*(?:optional\s+)?(repeated\s+)?([A-Za-z_]\w*)\s+([a-zA-Z_]\w*)\s*=\s*\d+\s*(\[[^\]]*\])?;"
+    r"^\s*(optional\s+)?(repeated\s+)?([A-Za-z_]\w*)\s+([a-zA-Z_]\w*)\s*=\s*\d+\s*(\[[^\]]*\])?;"
 )
+# `optional` is CAPTURED, not discarded. It used to be a non-capturing group,
+# which made this parser agree with the two others in the tree that strip
+# `repeated ` and not `optional ` -- and being able to see the keyword but not
+# record it is how an explicit-presence field silently becomes a required one.
+# proto3 explicit presence is the whole reason prepaid_interest_days exists in
+# that form: ABSENT means the 15-day convention, an explicit 0 means a closing
+# on the last day of a month. A label set that cannot omit the field cannot
+# express the convention, so params_block would reject the only correct answer.
 # Two identifiers (type, name) before '='. This is what excludes proto3 enum
 # constants (`STRAIGHT_LINE = 0;`, one identifier) from matching as fields --
 # no brace-depth tracking needed to tell a message's own fields apart from a
@@ -116,8 +125,10 @@ def _extract_fields(body: str) -> list[dict]:
     for line in body.splitlines():
         m = _FIELD_RE.match(line)
         if m:
-            repeated, ftype, fname = m.group(1), m.group(2), m.group(3)
-            fields.append({"name": fname, "type": ftype, "repeated": bool(repeated)})
+            optional, repeated, ftype, fname = (
+                m.group(1), m.group(2), m.group(3), m.group(4))
+            fields.append({"name": fname, "type": ftype,
+                           "repeated": bool(repeated), "optional": bool(optional)})
     return fields
 
 
@@ -345,13 +356,24 @@ def params_block(op: str, obj: dict) -> str:
     # preserves parse order), same rationale as build_dataset.py's fixed key
     # order: one serialization to learn, not several. `operation` always
     # leads because it is the dispatch key.
-    expected = op_field_names(op)
-    assert set(obj.keys()) == expected, (
-        f"{op}: emitted {sorted(obj.keys())}, proto requires {sorted(expected)}"
+    known = op_field_names(op)
+    # An explicit-presence field may be OMITTED; every other field is required.
+    # Omission is not the same as a zero and is the only way to say "use the
+    # convention" -- see _FIELD_RE for why this parser has to know the
+    # difference at all.
+    required = {f["name"] for f in OPERATIONS[op]["fields"] if not f.get("optional")}
+    emitted = set(obj.keys())
+    assert emitted <= known, (
+        f"{op}: emitted {sorted(emitted - known)} which the proto does not declare"
+    )
+    assert emitted >= required, (
+        f"{op}: missing required {sorted(required - emitted)} "
+        f"(only explicit-presence fields may be omitted)"
     )
     ordered = {"operation": op}
     for f in OPERATIONS[op]["fields"]:
-        ordered[f["name"]] = obj[f["name"]]
+        if f["name"] in obj:
+            ordered[f["name"]] = obj[f["name"]]
     return f"<params>{json.dumps(ordered, separators=(',', ':'))}</params>"
 
 
@@ -1038,9 +1060,26 @@ def make_closing_costs_extraction(rng: random.Random) -> dict:
     tax_escrow_months = rng.randint(2, 6)
     seller_lender_credits = 0.0 if rng.random() < 0.45 else float(round_money(rng.randint(1000, 10000), nearest=500))
     sparse = rng.random() < 0.45
-    # In the sparse shape an unnamed day count means the convention, so the
-    # emitted value must BE the convention -- 15, not a sampled number.
-    prepaid_interest_days = 15 if sparse else (15 if rng.random() < 0.5 else rng.randint(10, 30))
+    # In the sparse shape the utterance says NOTHING about prepaid interest, so
+    # the label must say nothing either: `prepaid_interest_days` is the only
+    # explicit-presence field in finance.proto, ABSENT means the 15-day
+    # convention, and sensen reads it as `value_or(15)` -- so omitting the key
+    # and emitting 15 compute the identical closing costs.
+    #
+    # It used to emit 15, on the reasoning that mortgage_verification.cppm's
+    # kConventionValues admits an ungrounded 15. The verifier does admit it;
+    # the MODEL could not produce it. Measured on v4, 25 of 26 held-out
+    # closing-cost failures involved this field and 21 involved ONLY it --
+    # every gold value 15, every emission an arbitrary number scraped from
+    # elsewhere in the utterance (180, 30, 36, 150, 250...). It is the last
+    # field of the longest, most digit-dense answer in the label space, and
+    # asking for a constant with no anchor in the input, at that position, is
+    # asking to be guessed.
+    #
+    # This is the same defect as the phrase_money rounding bug documented on
+    # that function: a LABEL carrying something the UTTERANCE does not contain.
+    # Omitting the key removes it and shortens the answer.
+    prepaid_interest_days = None if sparse else (15 if rng.random() < 0.5 else rng.randint(10, 30))
 
     def money(v):
         return phrase_money(v)
@@ -1070,7 +1109,7 @@ def make_closing_costs_extraction(rng: random.Random) -> dict:
     prepaid = [f"homeowners insurance at {money(homeowners_insurance_annual)} a year",
                f"property tax at {money(property_tax_annual)} a year",
                f"{tax_escrow_months} months of tax escrow"]
-    if not sparse:
+    if prepaid_interest_days is not None:
         prepaid.append(f"{prepaid_interest_days} days of prepaid interest")
     if seller_lender_credits or not sparse:
         prepaid.append(f"{money(seller_lender_credits)} in seller or lender credits")
@@ -1102,24 +1141,37 @@ def make_closing_costs_extraction(rng: random.Random) -> dict:
     parts.append(f"For prepaids and escrow: {join(prepaid)}.")
     user = " ".join(parts)
 
+    # rate_str DEFAULTS to six places and every percent here is generated with
+    # round(..., 4), so the default appended two zeros carrying no information
+    # -- measured, 3270 of 3270 six-place labels ended in "00". The model
+    # emitted the four-place majority convention it sees everywhere else, so
+    # rows that were NUMERICALLY exact failed string equality: v4 scored 0/42
+    # exact and 16/42 numerically on held-out closing costs, entirely from
+    # this. Four places is not a house style imposed here -- it is the
+    # precision the values actually have.
+    #
+    # Do NOT "normalise" the other six-place operations to match. Their rates
+    # are PER-PERIOD (ComputePayment's 0.005625 is 6.75%/12) and genuinely
+    # need six; truncating those to 0.0056 prices a different loan.
     obj = {
         "home_price": money_str(home_price),
-        "down_payment_percent": rate_str(down_payment_percent),
-        "annual_rate": rate_str(annual_rate),
-        "origination_fee_percent": rate_str(origination_fee_percent),
-        "discount_points_percent": rate_str(discount_points_percent),
+        "down_payment_percent": rate_str(down_payment_percent, 4),
+        "annual_rate": rate_str(annual_rate, 4),
+        "origination_fee_percent": rate_str(origination_fee_percent, 4),
+        "discount_points_percent": rate_str(discount_points_percent, 4),
         "other_lender_fees": money_str(other_lender_fees),
-        "title_settlement_percent": rate_str(title_settlement_percent),
+        "title_settlement_percent": rate_str(title_settlement_percent, 4),
         "appraisal_fee": money_str(appraisal_fee),
         "inspection_fee": money_str(inspection_fee),
         "recording_fees": money_str(recording_fees),
-        "transfer_tax_percent": rate_str(transfer_tax_percent),
+        "transfer_tax_percent": rate_str(transfer_tax_percent, 4),
         "homeowners_insurance_annual": money_str(homeowners_insurance_annual),
         "property_tax_annual": money_str(property_tax_annual),
         "tax_escrow_months": tax_escrow_months,
         "seller_lender_credits": money_str(seller_lender_credits),
-        "prepaid_interest_days": prepaid_interest_days,
     }
+    if prepaid_interest_days is not None:
+        obj["prepaid_interest_days"] = prepaid_interest_days
     return convo(("system", SYSTEM), ("user", user), ("assistant", params_block(op, obj)))
 
 
@@ -1981,6 +2033,28 @@ def main() -> None:
             for r in part:
                 fh.write(json.dumps(r) + "\n")
         print(f"  {p}  {len(part)} rows")
+
+    # PROVENANCE. The corpus is deterministic in (seed, n, val_frac) and the
+    # generator source, and nothing else records which of those produced the
+    # files on disk. That gap is not theoretical: the v4 corpus was built with
+    # `--seed 0` (the invocation in this module's own docstring) while the
+    # argparse DEFAULT is 3407, so a later rebuild "to change only the
+    # closing-cost rows" silently reseeded all 11,400 and put held-out rows
+    # into training. It was caught by diffing against a kept copy; without one
+    # it would have been invisible and would have contaminated the holdout.
+    meta = {
+        "seed": args.seed,
+        "n": args.n,
+        "val_frac": args.val_frac,
+        "rows": len(rows),
+        "train_rows": len(train),
+        "val_rows": len(val),
+        "generator_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "proto_sha256": hashlib.sha256(PROTO_PATH.read_bytes()).hexdigest(),
+    }
+    (out / "meta.json").write_text(json.dumps(meta, indent=2) + "\n")
+    print(f"  {out / 'meta.json'}  seed={args.seed} n={args.n} "
+          f"generator={meta['generator_sha256'][:12]}")
 
     print(f"\n  requested {args.n}, produced {len(rows)} unique after dedup")
     print("  generator mix (measured):")
