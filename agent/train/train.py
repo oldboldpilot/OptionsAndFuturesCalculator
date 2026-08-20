@@ -82,12 +82,144 @@ def load_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
+
+# ---------------------------------------------------------------------------
+# Vocabulary extension
+# ---------------------------------------------------------------------------
+def closing_cost_vocab(train_path: str) -> list[str]:
+    """The identifiers a ComputeClosingCosts answer must reproduce verbatim.
+
+    Derived from the DATA rather than hardcoded, so it cannot drift from the
+    proto the dataset was generated against: every key the generator emits for
+    that operation, plus the operation id itself.
+    """
+    import json, re
+
+    found: set[str] = set()
+    with open(train_path) as fh:
+        for line in fh:
+            # Parse the ROW first: the file is JSON, so a naive regex over the
+            # raw line matches escaped text and yields keys with backslashes in
+            # them -- tokens that would then be added to the vocabulary and
+            # never appear in a real answer.
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            for turn in row.get("conversations", []):
+                if turn.get("role") != "assistant":
+                    continue
+                m = re.search(r"<params>(.*?)</params>", turn.get("content", ""), re.S)
+                if not m:
+                    continue
+                try:
+                    obj = json.loads(m.group(1))
+                except Exception:
+                    continue
+                if obj.get("operation") != "ComputeClosingCosts":
+                    continue
+                found.add("ComputeClosingCosts")
+                found.update(k for k in obj if k != "operation")
+    return sorted(found)
+
+
+def extend_vocabulary(model, tokenizer, tokens: list[str]) -> int:
+    """Add `tokens` as single tokens and seed each from its own sub-tokens.
+
+    Two things matter here and neither is default behaviour.
+
+    ONE: a token added to the tokenizer gets a FRESH row in the embedding
+    matrix, and a randomly initialised row is noise the model must unlearn
+    before it can use the token at all. Each new row is initialised to the MEAN
+    of the embeddings of the sub-tokens the string used to decompose into, so
+    `homeowners_insurance_annual` starts life pointing where
+    ['home','owners','_ins','urance','_ann','ual'] already pointed. It begins
+    approximately right instead of at noise.
+
+    TWO: the same is done for the OUTPUT side (`lm_head`) when it is untied.
+    Seeding the input embedding alone leaves the model able to read the token
+    and unable to write it, which on structured output is the half that matters.
+    """
+    import torch as _torch
+
+    fresh = [t for t in tokens if len(tokenizer(t, add_special_tokens=False)["input_ids"]) > 1]
+    if not fresh:
+        return 0
+
+    # Capture the OLD decomposition before the tokenizer learns the new tokens,
+    # otherwise each string now tokenizes to itself and the mean is undefined.
+    decomposition = {
+        t: tokenizer(t, add_special_tokens=False)["input_ids"] for t in fresh
+    }
+
+    added = tokenizer.add_tokens(fresh)
+
+    # Resize ONLY to grow, never to shrink -- and here it does not need to grow
+    # at all. Qwen3-0.6B ships 151936 embedding rows against a tokenizer of
+    # ~151669: the surplus is reserved padding, so seventeen new ids land at
+    # 151669..151685, inside the matrix that already exists.
+    #
+    # Calling resize_token_embeddings(len(tokenizer)) unconditionally SHRINKS
+    # it to 151686 and discards 250 unused rows. That looks harmless and is
+    # not: PEFT builds the lm_head adapter from the config's vocab_size, so the
+    # base output becomes 151686 while lora_B stays 151936 and the first full
+    # logits computation dies with
+    #   "The size of tensor a (151686) must match the size of tensor b (151936)".
+    # Training survived 179 steps before hitting it, because packed training
+    # never materialises full logits and the first evaluation does.
+    #
+    # Leaving the matrix alone also keeps the exported GGUF's vocab at 151936,
+    # so the serving artifact is unchanged in shape -- only its contents move.
+    current_rows = model.get_input_embeddings().weight.shape[0]
+    if len(tokenizer) > current_rows:
+        model.resize_token_embeddings(len(tokenizer))
+        current_rows = model.get_input_embeddings().weight.shape[0]
+
+    embed = model.get_input_embeddings().weight
+    head = model.get_output_embeddings()
+    head_w = head.weight if head is not None else None
+    tied = head_w is not None and head_w.data_ptr() == embed.data_ptr()
+
+    with _torch.no_grad():
+        for tokstr, pieces in decomposition.items():
+            new_id = tokenizer.convert_tokens_to_ids(tokstr)
+            src = _torch.tensor(pieces, device=embed.device)
+            embed[new_id] = embed[src].mean(dim=0).to(embed.dtype)
+            if head_w is not None and not tied:
+                head_w[new_id] = head_w[src].mean(dim=0).to(head_w.dtype)
+
+    print(
+        f"vocab: added {added} token(s), seeded from sub-token means "
+        f"(lm_head {'tied' if tied else 'seeded separately'}); "
+        f"tokenizer now {len(tokenizer)}, embedding rows {current_rows} "
+        f"({'grown' if current_rows == len(tokenizer) else 'unchanged -- new ids fit the reserved rows'})"
+    )
+    return added
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", default="../dataset/data")
     ap.add_argument("--out", default="/scratch/agents/param-agent")
     ap.add_argument("--max-seq-length", type=int, default=1024)
     ap.add_argument("--epochs", type=float, default=2.0)
+    # Vocabulary extension is OPT-IN and off by default, because it changes what
+    # the SERVING ARTIFACT contains: the token ids an answer decodes to move,
+    # and every gate in the consuming repo is defined against the current set.
+    #
+    # It does NOT necessarily change the vocab SIZE, and on this model it does
+    # not: Qwen3-0.6B's 151936 embedding rows already exceed its ~151669-token
+    # tokenizer, so the new ids land in reserved padding and the exported GGUF
+    # is 151936 wide before and after. Do not read "extended vocabulary" as
+    # "resized matrix" -- the resize is conditional, and skipping it is what
+    # keeps the artifact's shape stable.
+    ap.add_argument(
+        "--extend-vocab",
+        action="store_true",
+        help="add the ComputeClosingCosts identifiers as single tokens and train "
+             "the embeddings (LoRA on embed_tokens/lm_head). Changes which token "
+             "ids an answer decodes to; grows the matrix only if it must.",
+    )
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--grad-accum", type=int, default=4)
     # Default None so the method can pick its own: LoRA and full fine-tuning do
@@ -184,6 +316,21 @@ def main() -> None:
         **({} if qlora else {"qat_scheme": QAT_SCHEME}),
     )
 
+    # Vocabulary extension happens BETWEEN loading and get_peft_model, and the
+    # order is not negotiable: resizing the embedding matrix after the adapters
+    # are attached leaves LoRA wrapping a matrix of the old width.
+    vocab_added = 0
+    if args.extend_vocab:
+        toks = closing_cost_vocab(str(Path(args.data) / "train.jsonl"))
+        if not toks:
+            raise SystemExit(
+                "--extend-vocab was requested but no ComputeClosingCosts rows were "
+                "found in the training data. Regenerate the dataset before training; "
+                "silently training the old label space is how a retrain gets "
+                "attributed to the wrong recipe."
+            )
+        vocab_added = extend_vocabulary(model, tokenizer, toks)
+
     if qlora:
         model = FastLanguageModel.get_peft_model(
             model,
@@ -199,7 +346,12 @@ def main() -> None:
                 "gate_proj",
                 "up_proj",
                 "down_proj",
-            ],
+            ]
+            # New rows in the embedding matrix are useless unless something
+            # TRAINS them. QLoRA freezes the 4-bit base, so without these two
+            # the added tokens keep their seeded values for the whole run and
+            # the extension buys nothing but a bigger vocab.
+            + (["embed_tokens", "lm_head"] if vocab_added else []),
             lora_alpha=args.lora_alpha,
             lora_dropout=args.lora_dropout,  # 0 is Unsloth's optimised path
             bias="none",  # ditto

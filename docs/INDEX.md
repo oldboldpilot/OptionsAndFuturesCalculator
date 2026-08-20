@@ -14,6 +14,11 @@
   statistics. Note the `QUOTA_POLICY` example in this document omits the `pro`
   tier; an unknown tier silently falls back to the *anonymous* allowance, so a
   policy copied from here verbatim would under-serve paying subscribers.
+- [Closing-costs client notice](CLOSING_COSTS_CLIENT_NOTICE.md) — what each
+  client must do for `ComputeClosingCosts`, answered per client because the
+  answer differs: `frontend/` needs nothing (it calls one Finance RPC and this
+  is not it), `clients/mortgagefv/` is re-vendored, and the RPC answers
+  `UNIMPLEMENTED` until the backend carrying it ships.
 - [Business API](BUSINESS_API.md) — partner/commercial surface
 - [API Security](API_SECURITY.md) — threat model, key handling, quota enforcement
 
