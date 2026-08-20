@@ -680,6 +680,12 @@ so silence is the negative proof. Two candidates remain and NEITHER is isolated:
    cached block-aligned and 12 trailing tokens are recomputed per request; what
    ran before can leave state behind.
 
+**Re-confirmed after a FULL REBUILD AND CUTOVER**, deployment `c0073947`,
+6 `model is LOADED` (3 replicas x 2 assistants), 0 `[WARN]`, 0 `[ERROR]`: the
+same 16 rows scored **4/16, 7/16, 7/16** on three sequential runs, again a
+different row set each time, again union 9 against local's unchanged 11. So this
+is not a stale image, a half-rolled fleet, or anything a redeploy fixes.
+
 The discriminator worth reusing: **keep a local engine on the same GGUF, send it
 the SAME rows the same way, and repeat each arm.** One run of each cannot tell a
 worse host from an unrepeatable one, and those need different fixes.
