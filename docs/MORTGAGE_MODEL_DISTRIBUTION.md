@@ -66,11 +66,43 @@ belongs with the service that owns it
 
 | | value |
 | --- | --- |
-| file | `mortgagefv-assistant-v2-q8_0.gguf` |
+| file | `mortgagefv-assistant-v6-q8_0.gguf` |
 | size | 639,447,136 bytes |
-| sha256 | `269efd32a5533ff94fc31975f0cbee2c46ba47863a924a0745886fdbc3b413fe` |
+| sha256 | `22c182e87519b3fd8b22ed9d1f5057d7af2eecc35ec7b12478db42a226843870` |
 | format | Q8_0 GGUF, Qwen3-0.6B |
+| bucket key | `mortgagefv-assistant-v6-q8_0.gguf` |
 | served from | `MORTGAGE_MODEL_PATH` (`/app/model/mortgage-assistant.gguf` in the image) |
+| promoted | 2026-08-20, deployment `8ccc41d1` |
+
+**v6 is the model of record as of 2026-08-20. v2
+(`269efd32a5533ff94fc31975f0cbee2c46ba47863a924a0745886fdbc3b413fe`) is the
+rollback target and is still in the bucket under `mortgagefv-assistant-q8_0.gguf`.**
+
+v6 gains `ComputeClosingCosts` — **39/42 numerically correct on held-out rows
+against v2's 0/42**, which is not a weaker score but an absent capability: the
+operation is not in v2's label space at all. Its legacy cost is net −12 rows of
+520, paired McNemar **p = 0.182**, which does not survive a significance test.
+See CLAUDE.md's mortgage-assistant section and
+`session_logs/session_2026-08-20_mortgage_corpus_and_three_retrains.md`.
+
+**It was uploaded BESIDE v2, under its own key, not over it.** v2 was uploaded
+over v1's key, which is why the paragraph below has to warn that the key name is
+not evidence of what is behind it. That is now fixed going forward: the key
+names the version, and `MORTGAGE_MODEL_URL` moved with `MORTGAGE_MODEL_SHA256`
+in the same command.
+
+**Cutover was verified by a request only v6 can answer**, not by the healthcheck
+and not by `railway deployment list` — which still read `DEPLOYING` while the
+container was demonstrably serving. A `ParseOperation` on a closing-costs
+utterance returned all sixteen fields exact and admitted by the GP-ARA verifier,
+including `down_payment_percent "0.1000"` (the four-place format fix) and
+`prepaid_interest_days "15"` (the grounding fix). v2 would have refused: it
+cannot name the operation.
+
+**The checksum above was round-tripped from the serving URL**, not copied from
+the local file — `curl --aws-sigv4` GET, piped to `sha256sum`, matching the
+local value. That is the check this file's own §2 demands and the reason it
+exists.
 
 **v2 is the model of record; v1 is not.** v1
 (`31ed8f45b3fca52cf46d99ccecc65e9a7210b736cbc39ae043270be40c5630a5`) was trained
