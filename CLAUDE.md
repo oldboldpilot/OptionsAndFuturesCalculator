@@ -229,10 +229,19 @@ Two earlier worries about this fix were checked and are closed:
 
 **Residual, untested:** the mirrored CUDA kernel `apply_rep_penalty_batch_kernel`
 (`backend/sensen/src/cuda/cuda_llm_prefill.cu`) received the same dedup fix and
-has been **compiled by nobody** — this machine builds `ENABLE_CUDA=OFF` and has
-no `nvcc`. Every number above is CPU. The device-parity gates
+has not been compiled here. Every number above is CPU. The device-parity gates
 (`test_gpu_batched_decode` Test 7, `test_gpu_argmax_softcap`) must run on a CUDA
 build before that half is trusted.
+
+**"No CUDA here" is a fact about THIS host, not about the project, and writing it
+the other way has already produced a wrong conclusion.** The box this repository
+is developed and deployed from — `oluwasanmi-fedora-server` — has an AMD
+integrated GPU, no `/dev/nvidia*`, no `nvidia-smi` and no CUDA toolkit, so the
+engine correctly builds `ENABLE_CUDA=OFF` and `sensen_slim` correctly excludes
+every `qwen38` module. The MULTI-GPU SERVER is a different machine, and it is
+where the CUDA builds, the QLoRA training runs and the Qwen3.8 work happen. A
+CUDA-only change is therefore **not ungateable — it is gateable somewhere else**,
+and the honest note on one is "needs the GPU server", never "compiled by nobody".
 
 Concurrency comes from sensen's iteration-level scheduler, not threads —
 `generate()` cannot be called concurrently, because `FeedForwardNetwork` holds
