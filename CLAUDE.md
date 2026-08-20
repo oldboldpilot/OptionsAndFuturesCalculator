@@ -665,14 +665,61 @@ Four things about how this was found are worth more than the finding:
   strictly worse than a fallback, and it means "zero warns" proved the request
   was served by the cluster and proved nothing whatever about the answer.
 
-**What is NOT yet known: which part of the SGEE path corrupts the request.** The
-prompt could be truncated or re-ordered in the payload round trip, the result
-could be taken from the wrong task, or the lease/replay machinery could be
-re-executing a decode against state that has moved. `BrokerComplete` carries a
-result but no error text by design, so a mangled payload has no channel to
-announce itself. The next step is to log the exact prompt bytes and the exact
-returned bytes on both sides of the queue and diff them — the answer is a
-comparison, not a theory.
+**ROOT CAUSE FOUND: the SGEE lease is not partitioned by SURFACE, so the two
+assistants steal each other's work.** The Postgres path carries the surface
+through both halves and the SGEE path drops it entirely:
+
+| | submit | lease |
+| --- | --- | --- |
+| Postgres | `PostgresAdmission(queue, **Surface**, local, deadline)` | `queue_->lease(**surface_**, worker_id_)` |
+| SGEE | `SgeeAdmission(client, local, deadline)` | `client_.lease_blocking(worker_id_, visibility_ms_)` |
+
+`SgeeLeaseSource`'s constructor takes no `Surface` and its `fill()` passes none
+(`inference_admission.cpp`, `SgeeLeaseSource::fill`). `encode_prompt` writes
+`{"prompt": ...}` and no surface tag, so the surface is not merely unused — it is
+**not in the payload at all** and cannot be recovered downstream. Both services
+then build a lease source against the SAME cluster, differing only in a worker
+id (`::getpid() * 2 + 0` for strategy, `+ 1` for mortgage).
+
+So the strategy assistant's owner thread can lease a MORTGAGE task, run that
+prompt through the STRATEGY fine-tune, and complete it `OK`. The mortgage
+grounding verifier then refuses parameters that came from a model trained on
+option spreads — an honest refusal to a question that was never asked of the
+right model.
+
+It accounts for all four observations, which is what makes it the answer rather
+than a candidate:
+
+- **Zero `[WARN]`.** Nothing failed. The queue leased, the model decoded, the
+  writeback completed, the RPC returned `OK` with a `Refusal` — every layer did
+  exactly what it was built to do.
+- **The failing row set changes run to run.** Which owner thread wins the race
+  for a given lease is OS scheduling, so a different subset is stolen each time.
+- **The total stays roughly constant.** Two workers poll, one is wrong, so about
+  half of every batch is misrouted. Predicted 11 x 0.5 = 5.5; measured 4, 5, 7,
+  4, 7, 7 — mean **5.7**.
+- **One replica was no better** (4, 5, 1). Each process runs BOTH assistants, so
+  halving the replicas does not change the ratio of wrong workers to right ones.
+  This is exactly why `numReplicas: 1` failed to help and why that result
+  pointed at the queue rather than at the fleet.
+
+**The fix is to give the SGEE path the dimension the Postgres path already
+has:** add `Surface` to `SgeeAdmission` / `SgeeLeaseSource`, write it into
+`encode_prompt`, and make `fill()` release any lease whose surface is not its
+own. Until then `INFERENCE_QUEUE=postgres` is the correct setting, and it is
+what is deployed.
+
+**Two external models found this independently and both were right** — Gemini
+3.7 Flash High (via `agy`) and GPT-5.3-Codex-High (via `cursor-agent`), each
+given the measurement and the file list and each reading the code themselves.
+Both named the missing surface partition; both quoted the same two lines. That
+is the opposite of the earlier consultation, where both were confidently wrong
+about the prefix cache — and the difference is what they were given. The first
+round got a prose description of symptoms and produced plausible mechanisms; the
+second got **the isolated component plus the working control to diff against**,
+and the control is what made it findable. "Diff the path that works against the
+path that does not" is the instruction that turned two wrong answers into two
+right ones.
 
 **Do not read this as "SGEE is broken."** It is the queue for a *replicated task
 log*, and the audit trail in `docs/SGEE_QUEUE_CLUSTER.md` is real work. What is
