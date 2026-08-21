@@ -814,10 +814,39 @@ export class PostgresAdmission final : public InferenceBackend {
  * unchanged -- never collapsed to its local_token, which would drop precisely
  * the field that makes it safe across a leader change.
  */
+/**
+ * The SGEE payload's surface tag and the lease-time filter built from it — the
+ * wire contract between a submitter and whichever worker leases its task.
+ * Exported so `test_inference_admission` can gate them directly: this is a
+ * format shared by two processes, and the defect it fixes was invisible to
+ * every layer above it.
+ */
+export [[nodiscard]] auto encode_prompt_for_surface(
+    options_calculator::inference_queue::Surface surface, const std::string& prompt) -> std::string;
+
+/** The raw `surface` string a payload carries, or nullopt when it carries none.
+ *  Deliberately returns the NAME rather than a `Surface`: "no tag" and "a tag
+ *  naming something this build does not know" are different facts with different
+ *  handling, and an optional<Surface> cannot express both. */
+export [[nodiscard]] auto decode_surface_name(std::string_view payload_json)
+    -> std::optional<std::string>;
+
+/** The bytes a lease source asks the broker to match against a task's payload. */
+export [[nodiscard]] auto surface_lease_filter(
+    options_calculator::inference_queue::Surface surface) -> std::string;
+
+/** The prompt half of the same payload, through the SAME decoder the worker path
+ *  uses — so a test can prove a surface-tagged payload still yields its prompt. */
+export [[nodiscard]] auto decode_prompt_payload(std::string_view payload_json) -> std::string;
+
 export class SgeeLeaseSource final : public LeaseSource {
   public:
-    SgeeLeaseSource(SgeeQueueClient client, std::uint64_t worker_id,
-                     std::uint64_t visibility_ms);
+    /** @param surface the ONLY surface this source may execute. The broker applies
+     *         it as a lease-time payload filter, so a task belonging to somebody
+     *         else is never chosen for this worker in the first place. */
+    SgeeLeaseSource(SgeeQueueClient client,
+                     options_calculator::inference_queue::Surface surface,
+                     std::uint64_t worker_id, std::uint64_t visibility_ms);
     ~SgeeLeaseSource() override;
 
     [[nodiscard]] auto fill(std::size_t want) -> std::vector<PendingJob> override;
@@ -828,8 +857,19 @@ export class SgeeLeaseSource final : public LeaseSource {
     auto reap_finished_locked() -> void;
 
     SgeeQueueClient client_;
+    options_calculator::inference_queue::Surface surface_;
+    /** The bytes sent as the broker's lease-time payload filter. Built once from
+     *  the ENCODER's own serialiser so it cannot drift from what is written. */
+    std::string lease_filter_;
     std::uint64_t worker_id_;
     std::uint64_t visibility_ms_;
+
+    /** Owner-thread only, like every member here except those under `helpers_mu_`:
+     *  fill() is called solely from QueuedBackend::take_jobs on the backend's own
+     *  worker thread. Both exist only for the broker-not-filtering path, which is
+     *  a deployment fault rather than a routine event. */
+    std::chrono::steady_clock::time_point foreign_backoff_until_{};
+    std::uint64_t foreign_leases_{0};
 
     std::mutex helpers_mu_;
     std::vector<std::jthread> helpers_;
@@ -857,8 +897,11 @@ export class SgeeLeaseSource final : public LeaseSource {
  */
 export class SgeeAdmission final : public InferenceBackend {
   public:
-    SgeeAdmission(SgeeQueueClient client, InferenceBackend& local,
-                   std::chrono::milliseconds remote_deadline);
+    /** @param surface stamped into every submitted payload, and the value the
+     *         leasing worker's filter matches on. */
+    SgeeAdmission(SgeeQueueClient client,
+                   options_calculator::inference_queue::Surface surface,
+                   InferenceBackend& local, std::chrono::milliseconds remote_deadline);
 
     [[nodiscard]] auto submit(std::string prompt) -> std::optional<InferenceOutcome> override;
     [[nodiscard]] auto name() const noexcept -> std::string_view override { return "sgee"; }
@@ -872,6 +915,7 @@ export class SgeeAdmission final : public InferenceBackend {
 
   private:
     SgeeQueueClient client_;
+    options_calculator::inference_queue::Surface surface_;
     InferenceBackend& local_;
     std::chrono::milliseconds remote_deadline_;
 };

@@ -74,7 +74,146 @@ namespace {
     return std::string(obj["text"].as_string());
 }
 
+
+// ── SGEE surface routing ──────────────────────────────────────────────────────
+//
+// SGEE's lease() takes a worker id and, until the payload filter below existed,
+// no routing dimension at all -- PlacementTarget says WHERE to run (Cpu/Gpu),
+// not WHICH model. Both assistants therefore polled one undifferentiated queue,
+// and a strategy worker ran mortgage prompts through the strategy fine-tune,
+// completed them OK, and the mortgage grounding verifier refused the result --
+// silently, because nothing failed at any layer. Measured cost on a fixed 16-row
+// holdout through the live ingress: 11/16 -> ~6/16, a different failing row set
+// every run.
+//
+// The fix is a filter applied where the broker CHOOSES, not a check after it
+// hands the task over. Leasing-then-releasing cannot work here and the reason is
+// structural: lease() has no skip, and a released task returns to the head with
+// its ORIGINAL enqueue time, so the wrong worker is blocked by the same task
+// next time AND burns one `attempt` per release -- `lease` being the only place
+// `attempt` is incremented. An idle worker drives a perfectly good task into the
+// DLQ in seconds without ever executing it.
+
+/**
+ * How long a lease source stands down after being handed a task belonging to
+ * another surface DESPITE having asked the broker to filter.
+ *
+ * With `payload_filter` honoured this never fires. It exists for the one window
+ * where it can: a new engine talking to a queue node old enough to ignore the
+ * field. Two seconds rather than a few hundred milliseconds because the thing
+ * being waited on is another worker finishing a DECODE, which takes seconds; a
+ * backoff an order of magnitude shorter than the event it waits for is just a
+ * faster spin.
+ */
+constexpr auto kForeignLeaseBackoff = std::chrono::seconds(2);
+
+/**
+ * What a payload says about its owning surface. THREE states, not two, and the
+ * third is why this is an enum rather than an optional:
+ *
+ *  - None     no `surface` field: a legacy payload written before this existed.
+ *             It has no owner, so any worker that is HANDED one may run it.
+ *
+ *             Read that precisely. Once the broker applies the lease filter, an
+ *             untagged task matches NO worker's filter and is therefore never
+ *             handed to anybody -- this branch is defence in depth for the
+ *             unfiltered path, not a guarantee that legacy work drains. See
+ *             `docs/SGEE_QUEUE_CLUSTER.md` on deploy order: the engines are the
+ *             only producer, so untagged tasks exist only while an OLD engine is
+ *             still enqueuing, and an old engine leases unfiltered and drains its
+ *             own. The window that can strand one is an untagged task enqueued
+ *             just before the last old engine goes away. No REQUEST is lost even
+ *             then -- SgeeAdmission::submit falls back to the local backend -- but
+ *             the task itself is orphaned in `pending_`, so the queue should be
+ *             drained before the cutover rather than during it.
+ *  - Known    a surface this build recognises.
+ *  - Unknown  a `surface` field naming something this build has never heard of.
+ *             That is a POSITIVE statement that another worker owns the task,
+ *             and running it here is guaranteed wrong. Collapsing it onto None
+ *             would re-create this very defect on the third surface anyone adds.
+ */
+enum class SurfaceTag : std::uint8_t { None, Known, Unknown };
+
+struct DecodedSurface {
+    SurfaceTag tag{SurfaceTag::None};
+    options_calculator::inference_queue::Surface surface{};
+};
+
+/**
+ * Recovers what `encode_prompt_for_surface` wrote.
+ *
+ * Malformed JSON decodes to None rather than Unknown: a payload that is not an
+ * object never made a claim about ownership, so there is nothing to honour.
+ * `decode_prompt` yields an empty prompt for it and the model refuses that
+ * sensibly, which is the pre-existing contract for a corrupt payload.
+ *
+ * The name-to-enum mapping is `inference_queue::surface_from_string`,
+ * deliberately NOT an if-chain here. A hand-rolled copy is a table a new
+ * `Surface` fails to update while `to_string`'s switch is caught by -Wswitch --
+ * and a surface this table silently failed to recognise is one every worker
+ * would then run.
+ */
+[[nodiscard]] auto decode_surface(std::string_view payload_json) -> DecodedSurface {
+    auto parsed = fastjson::parse(payload_json);
+    if (!parsed.has_value() || !parsed->is_object()) return {};
+    const auto& obj = parsed.value();
+    if (!obj.contains("surface") || !obj["surface"].is_string()) return {};
+    if (const auto s = options_calculator::inference_queue::surface_from_string(
+            obj["surface"].as_string())) {
+        return {SurfaceTag::Known, *s};
+    }
+    return {SurfaceTag::Unknown, {}};
+}
+
 }  // namespace
+
+/**
+ * Encodes one prompt for the SGEE queue, naming the surface it belongs to.
+ *
+ * The field is ADDITIVE: `decode_prompt` reads "prompt" and ignores everything
+ * else, so a worker built before this change still recovers the prompt from a
+ * payload written after it. That is what makes a rolling deploy safe in either
+ * order -- an old worker simply cannot honour a tag it does not read.
+ */
+[[nodiscard]] auto encode_prompt_for_surface(options_calculator::inference_queue::Surface surface,
+                                             const std::string& prompt) -> std::string {
+    fastjson::json_object obj;
+    obj["surface"] = fastjson::json_value(std::string(to_string(surface)));
+    obj["prompt"] = fastjson::json_value(prompt);
+    return fastjson::json_value(std::move(obj)).to_string();
+}
+
+/**
+ * The bytes a lease source asks the broker to match, built by the ENCODER's own
+ * serialiser so the filter and the payload cannot drift apart by being written
+ * twice. Returns the `"surface":"..."` member without the enclosing braces:
+ * what has to appear inside the real payload is the member, not a whole object.
+ */
+[[nodiscard]] auto surface_lease_filter(options_calculator::inference_queue::Surface surface)
+    -> std::string {
+    fastjson::json_object probe;
+    probe["surface"] = fastjson::json_value(std::string(to_string(surface)));
+    const auto rendered = fastjson::json_value(std::move(probe)).to_string();
+    return rendered.substr(1, rendered.size() - 2);
+}
+
+/** The raw `surface` string a payload carries, or nullopt when it carries none.
+ *  See decode_surface() above for why the NAME rather than a Surface. */
+[[nodiscard]] auto decode_surface_name(std::string_view payload_json)
+    -> std::optional<std::string> {
+    auto parsed = fastjson::parse(payload_json);
+    if (!parsed.has_value() || !parsed->is_object()) return std::nullopt;
+    const auto& obj = parsed.value();
+    if (!obj.contains("surface") || !obj["surface"].is_string()) return std::nullopt;
+    return std::string(obj["surface"].as_string());
+}
+
+/** Exported forwarder for the anonymous-namespace `decode_prompt`, so a test
+ *  exercises the SAME function the worker path uses, not a re-implementation. */
+[[nodiscard]] auto decode_prompt_payload(std::string_view payload_json) -> std::string {
+    return decode_prompt(payload_json);
+}
+
 
 // QueuedBackend's submit()/take_jobs()/drain_and_fail()/set_lease_source()/
 // lease_source_snapshot() are all defined in inference_admission.cppm itself
@@ -310,9 +449,12 @@ auto PostgresAdmission::submit(std::string prompt) -> std::optional<InferenceOut
 // SgeeLeaseSource
 // ---------------------------------------------------------------------------
 
-SgeeLeaseSource::SgeeLeaseSource(SgeeQueueClient client, std::uint64_t worker_id,
-                                   std::uint64_t visibility_ms)
-    : client_(std::move(client)), worker_id_(worker_id), visibility_ms_(visibility_ms) {}
+SgeeLeaseSource::SgeeLeaseSource(SgeeQueueClient client,
+                                   options_calculator::inference_queue::Surface surface,
+                                   std::uint64_t worker_id, std::uint64_t visibility_ms)
+    : client_(std::move(client)), surface_(surface),
+      lease_filter_(surface_lease_filter(surface)), worker_id_(worker_id),
+      visibility_ms_(visibility_ms) {}
 
 SgeeLeaseSource::~SgeeLeaseSource() {
     // Same contract as PostgresLeaseSource's destructor: every helper is joined
@@ -333,13 +475,59 @@ auto SgeeLeaseSource::fill(std::size_t want) -> std::vector<PendingJob> {
         reap_finished_locked();
     }
 
+    // Only reachable when the broker did NOT honour the filter -- see the branch
+    // below. Standing down hands the queue to the worker that can run the head.
+    if (std::chrono::steady_clock::now() < foreign_backoff_until_) return out;
+
     for (std::size_t i = 0; i < want; ++i) {
-        auto leased = client_.lease_blocking(worker_id_, visibility_ms_);
+        // The filter is applied by the broker when it CHOOSES, so a task belonging
+        // to another surface is normally never leased here at all -- and, just as
+        // importantly, this worker's own tasks queued BEHIND one stay reachable. A
+        // post-lease check can give neither property, because lease() has no skip.
+        auto leased = client_.lease_blocking(worker_id_, visibility_ms_, lease_filter_);
         if (!leased.has_value()) {
             // Nothing eligible, OR the cluster did not answer. Both stop this
             // fill pass and both are correct to treat identically here -- the
             // owner thread's next move is the same either way. The client has
             // already logged whichever it was.
+            break;
+        }
+
+        // Defence in depth for ONE window: a new engine against a queue node old
+        // enough to ignore `payload_filter`. It cannot fire otherwise.
+        //
+        // The task is failed ONCE rather than released-and-retried, and that is
+        // the whole difference from the design an earlier revision of this file
+        // shipped. A retry loop burns one `attempt` per pass -- `lease` being the
+        // only place `attempt` is incremented -- and kills a perfectly good task
+        // in seconds without executing it. One failure is answered by
+        // SgeeAdmission::submit falling back to the LOCAL backend: a correct
+        // answer, on the right model, slightly slower. Unknown counts as foreign,
+        // for the reason DecodedSurface documents.
+        if (const auto tagged = decode_surface(leased->payload);
+            (tagged.tag == SurfaceTag::Known && tagged.surface != surface_) ||
+            tagged.tag == SurfaceTag::Unknown) {
+            const bool reported = client_.fail_blocking(*leased);
+            ++foreign_leases_;
+            foreign_backoff_until_ = std::chrono::steady_clock::now() + kForeignLeaseBackoff;
+            // ERROR rather than warn: with the lease filter in place this is a
+            // statement that the broker is not applying it, which is a deployment
+            // fault, not a routine event. The reason is named for the same reason
+            // the writeback path names its own -- "it failed" without "why" cannot
+            // tell a refused task from a moved leader.
+            logger::Logger::getInstance().error(
+                "inference_admission: SGEE handed a '{}' task ({}) to the '{}' worker despite a "
+                "payload filter -- the broker is not applying it (an older queue node?). "
+                "Reporting the task failed so the submitter falls back locally{}; {} foreign "
+                "lease(s) so far.",
+                tagged.tag == SurfaceTag::Unknown ? std::string("unrecognised")
+                                                  : std::string(to_string(tagged.surface)),
+                leased->task_id, to_string(surface_),
+                reported ? std::string{}
+                         : std::format(" -- BUT THE REPORT ITSELF FAILED ({}), so the task stays "
+                                       "leased until its {} ms visibility window expires",
+                                       client_.last_failure(), visibility_ms_),
+                foreign_leases_);
             break;
         }
 
@@ -454,13 +642,16 @@ auto SgeeLeaseSource::reap_finished_locked() -> void {
 // SgeeAdmission
 // ---------------------------------------------------------------------------
 
-SgeeAdmission::SgeeAdmission(SgeeQueueClient client, InferenceBackend& local,
+SgeeAdmission::SgeeAdmission(SgeeQueueClient client,
+                               options_calculator::inference_queue::Surface surface,
+                               InferenceBackend& local,
                                std::chrono::milliseconds remote_deadline)
-    : client_(std::move(client)), local_(local), remote_deadline_(remote_deadline) {}
+    : client_(std::move(client)), surface_(surface), local_(local),
+      remote_deadline_(remote_deadline) {}
 
 auto SgeeAdmission::submit(std::string prompt) -> std::optional<InferenceOutcome> {
     const auto deadline = std::chrono::steady_clock::now() + remote_deadline_;
-    const std::string payload_json = encode_prompt(prompt);
+    const std::string payload_json = encode_prompt_for_surface(surface_, prompt);
 
     auto task_id = client_.submit_blocking(payload_json);
     if (!task_id.has_value()) {
@@ -504,10 +695,17 @@ auto SgeeAdmission::submit(std::string prompt) -> std::optional<InferenceOutcome
             result.text = decode_result(outcome->result);
             return result;
         }
-        InferenceOutcome result;
-        result.ok = false;
-        result.error = "the SGEE inference queue reported failure";
-        return result;
+        // The queue reported the task Dead. That is a failure OF THE QUEUE PATH,
+        // and this class's contract -- stated in its own header, honoured by every
+        // other branch here -- is to fall back to the local backend on any such
+        // failure. Returning the error instead made attempt exhaustion a
+        // user-visible request failure while the local model sat idle and able to
+        // answer correctly.
+        logger::Logger::getInstance().warn(
+            "inference_admission: SGEE task {} reached a terminal failure -- falling back to the "
+            "local backend rather than failing the request",
+            *task_id);
+        return local_.submit(std::move(prompt));
     }
 
     logger::Logger::getInstance().warn(

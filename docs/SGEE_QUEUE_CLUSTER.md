@@ -31,6 +31,65 @@ to the cluster yet — `SgeeQueueClient` is mirror-mode only, so promotion means
 building an SGEE-backed admission path rather than flipping a flag. Postgres
 remains the system of record until both are done.
 
+## The lease is partitioned by SURFACE, and the deploy order follows from it
+
+`lease()` used to take a worker id and nothing else. Two assistants — strategy
+and mortgage — poll one queue from one process, so whichever worker asked first
+got whatever was at the head, ran it through ITS model, and completed it `OK`.
+The mortgage grounding verifier then refused parameters produced by a model
+trained on option spreads. Nothing failed at any layer, so nothing logged.
+Measured through the live ingress on a fixed 16-row holdout: **11/16 → ~6/16,
+with a different failing row set every run.** `CLAUDE.md` carries the full table.
+
+`LeaseRequest.payload_filter` fixes it at the point of CHOICE. The broker returns
+the earliest pending task whose payload CONTAINS those bytes; empty is the
+default and preserves strict head-of-line behaviour exactly.
+
+**Filtering at the choice is not a preference — the alternative does not work.**
+Leasing a task and handing it back fails on two structural properties of this
+queue at once:
+
+- `lease()` has **no skip**, and `mark_requeued` returns a task to `pending_`
+  with its **original** `enqueue_time_ms`. A released task therefore goes back to
+  the HEAD, so the worker that cannot run it meets it again on the next poll and
+  can never reach its own work queued behind it.
+- **`lease` is the only place `attempt` is incremented.** Every hand-back spends
+  one of the task's `max_attempts` lives while executing nothing, so an idle
+  worker polling a queue whose head belongs to a busy peer drives a perfectly
+  good task into the DLQ in seconds.
+  `Broker_PayloadFilter_RepeatedPollsDoNotSpendAForeignTasksAttempts` pins
+  exactly this: ten filtered polls leave the foreign task at `attempt == 0`.
+
+**It needs no readers-first rollout, and that is a property of where it lives.**
+The filter is evaluated only on the LEADER when choosing; the proposed
+`BrokerLease` still names one task id and replicas still apply it through
+`lease_specific`. No replicated command changes shape, and an older node ignores
+the field and leases unfiltered — the behaviour it has today.
+
+**DEPLOY ORDER: queue nodes first, engines second, and drain the queue between.**
+The engines are the only producer, so an untagged payload can only come from an
+engine that predates the tag — and such an engine leases unfiltered and drains
+its own. Once the filter is live, an untagged task matches **no** worker's filter
+and is handed to nobody. No REQUEST is lost by that (`SgeeAdmission::submit`
+falls back to the local backend), but the task is orphaned in `pending_`, so the
+queue should be empty of untagged work before the cutover rather than during it.
+
+**The filter's bytes are produced by the payload's own serialiser** —
+`surface_lease_filter` renders the same member `encode_prompt_for_surface`
+writes — so the two cannot drift apart by being written twice. The consequence is
+that the payload format is owned by `inference_admission.cpp` and nothing else
+may enqueue onto this queue: a producer rendering `{"surface": "mortgage"}` with
+a space would not match, and would strand silently.
+
+**Selection is over the ORDERED PENDING SET, not over every id ever issued.**
+`ReplicatedTaskBroker::earliest_leasable_excluding` used to scan
+`1..next_task_id()` with a hash lookup per id — O(all tasks ever enqueued), on
+the LEADER, per lease, on a single-threaded event loop. At a million lifetime
+tasks with several workers polling, that is long enough to miss Raft heartbeat
+deadlines and cause an election. It now delegates to the broker's `pending_`
+walk. The selection rule is unchanged: earliest `enqueue_time_ms`, ties broken by
+the lower id.
+
 ## Topology
 
 | | |

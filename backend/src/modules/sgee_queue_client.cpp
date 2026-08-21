@@ -551,12 +551,13 @@ class SgeeQueueClient::Impl {
     }
 
 
-    [[nodiscard]] auto submit_blocking(std::string_view payload, std::chrono::milliseconds budget)
+    [[nodiscard]] auto submit_blocking(std::string_view payload, std::chrono::milliseconds budget,
+                                       std::uint32_t max_attempts)
         -> std::optional<std::uint64_t> {
         auto bytes = std::as_bytes(std::span(payload.data(), payload.size()));
         return with_leader(
-            [bytes](sgee::task_queue::grpc_client::TaskQueueClient& c) {
-                return c.enqueue(bytes, sgee::task_queue::PlacementTarget::Cpu);
+            [bytes, max_attempts](sgee::task_queue::grpc_client::TaskQueueClient& c) {
+                return c.enqueue(bytes, sgee::task_queue::PlacementTarget::Cpu, max_attempts);
             },
             budget);
     }
@@ -585,11 +586,19 @@ class SgeeQueueClient::Impl {
     }
 
     [[nodiscard]] auto lease_blocking(std::uint64_t worker_id, std::uint64_t visibility_ms,
-                                       std::chrono::milliseconds budget)
+                                       std::chrono::milliseconds budget, std::string_view filter)
         -> std::optional<SgeeLeasedJob> {
+        // Copied, not captured by view: with_leader may retry the closure against a
+        // different peer, and the caller's string_view need not outlive that.
+        const std::vector<std::byte> needle = [&] {
+            std::vector<std::byte> v(filter.size());
+            std::transform(filter.begin(), filter.end(), v.begin(),
+                           [](char c) { return static_cast<std::byte>(c); });
+            return v;
+        }();
         auto leased = with_leader(
-            [worker_id, visibility_ms](sgee::task_queue::grpc_client::TaskQueueClient& c) {
-                return c.lease(worker_id, visibility_ms);
+            [worker_id, visibility_ms, &needle](sgee::task_queue::grpc_client::TaskQueueClient& c) {
+                return c.lease(worker_id, visibility_ms, needle);
             },
             budget);
         if (!leased.has_value() || !leased->available) return std::nullopt;
@@ -730,9 +739,10 @@ auto SgeeQueueClient::create_for_admission() -> std::optional<SgeeQueueClient> {
     return SgeeQueueClient(std::move(impl));
 }
 
-auto SgeeQueueClient::submit_blocking(std::string_view payload) -> std::optional<std::uint64_t> {
+auto SgeeQueueClient::submit_blocking(std::string_view payload, std::uint32_t max_attempts)
+    -> std::optional<std::uint64_t> {
     if (!impl_) return std::nullopt;
-    return impl_->submit_blocking(payload, std::chrono::milliseconds(1000));
+    return impl_->submit_blocking(payload, std::chrono::milliseconds(1000), max_attempts);
 }
 
 auto SgeeQueueClient::poll_task(std::uint64_t task_id) -> std::optional<SgeeTaskOutcome> {
@@ -740,10 +750,12 @@ auto SgeeQueueClient::poll_task(std::uint64_t task_id) -> std::optional<SgeeTask
     return impl_->poll_task(task_id, std::chrono::milliseconds(1000));
 }
 
-auto SgeeQueueClient::lease_blocking(std::uint64_t worker_id, std::uint64_t visibility_ms)
+auto SgeeQueueClient::lease_blocking(std::uint64_t worker_id, std::uint64_t visibility_ms,
+                                     std::string_view payload_filter)
     -> std::optional<SgeeLeasedJob> {
     if (!impl_) return std::nullopt;
-    return impl_->lease_blocking(worker_id, visibility_ms, std::chrono::milliseconds(1000));
+    return impl_->lease_blocking(worker_id, visibility_ms, std::chrono::milliseconds(1000),
+                                 payload_filter);
 }
 
 auto SgeeQueueClient::last_failure() const -> std::string {

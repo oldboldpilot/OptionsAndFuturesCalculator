@@ -1693,7 +1693,7 @@ class AssistantWorker {
         // decoding and hand it to someone else -- paying for the same inference
         // twice and, worse, fencing out the answer that arrives first.
         auto lease_source = std::make_shared<inference_admission::SgeeLeaseSource>(
-            *client, worker_id, /*visibility_ms=*/90000);
+            *client, inference_queue::Surface::Strategy, worker_id, /*visibility_ms=*/90000);
         backend_->set_lease_source(lease_source);
         lease_source_ = std::move(lease_source);
 
@@ -1701,7 +1701,8 @@ class AssistantWorker {
         // is a bound on a genuinely stuck request, not a target latency. The
         // poll returns the instant the task turns terminal.
         admission_ = std::make_unique<inference_admission::SgeeAdmission>(
-            *client, *backend_, std::chrono::milliseconds(90000));
+            *client, inference_queue::Surface::Strategy, *backend_,
+            std::chrono::milliseconds(90000));
 
         logger::Logger::getInstance().info(
             "Strategy assistant: INFERENCE_QUEUE=sgee -- submitting through the SGEE queue cluster "

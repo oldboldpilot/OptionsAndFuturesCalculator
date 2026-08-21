@@ -23,6 +23,7 @@
 
 import inference_admission;
 import sgee_queue_client;
+import inference_queue;
 
 using namespace std::chrono_literals;
 using options_calculator::inference_admission::Device;
@@ -333,7 +334,8 @@ auto main() -> int {
         local.open_gate();
 
         options_calculator::inference_admission::SgeeAdmission admission(
-            SgeeQueueClient{}, local, std::chrono::milliseconds(90000));
+            SgeeQueueClient{}, options_calculator::inference_queue::Surface::Strategy, local,
+            std::chrono::milliseconds(90000));
 
         const auto started = std::chrono::steady_clock::now();
         const auto out = admission.submit("hello");
@@ -353,6 +355,108 @@ auto main() -> int {
         check(std::string_view(admission.device()) == std::string_view(local.device()),
               "and it forwards device() to the wrapped backend rather than hardcoding \"cpu\" -- "
               "a leased job still decodes wherever that backend runs");
+    }
+
+    // ── The SGEE surface tag ───────────────────────────────────────────────
+    //
+    // This is the wire contract that stops one assistant executing the other's
+    // work. SGEE's lease() takes a worker id and NO routing dimension, so both
+    // assistants poll one undifferentiated queue; without the tag, a strategy
+    // worker leased mortgage prompts, ran them through the strategy fine-tune,
+    // completed them OK, and the mortgage grounding verifier refused the result.
+    // Nothing failed at any layer, so nothing logged. Measured cost on a fixed
+    // 16-row holdout through the live ingress: 11/16 -> ~6/16, with a DIFFERENT
+    // failing row set every run.
+    //
+    // These checks are on the CODEC rather than on a live cluster deliberately:
+    // the defect was a missing field, and a missing field is decidable here in
+    // microseconds where reproducing it end to end needs three Raft nodes and a
+    // load generator.
+    // ── The SGEE surface tag ───────────────────────────────────────────────
+    //
+    // The wire contract that stops one assistant executing the other's work.
+    // SGEE's lease() takes a worker id and, before the payload filter, had no
+    // routing dimension; both assistants polled one undifferentiated queue, a
+    // strategy worker ran mortgage prompts through the strategy fine-tune,
+    // completed them OK, and the mortgage grounding verifier refused the result.
+    // Nothing failed at any layer, so nothing logged. Measured cost on a fixed
+    // 16-row holdout: 11/16 -> ~6/16, a different failing row set every run.
+    //
+    // The ROUTING behaviour this tag feeds is gated where it lives, in SGEE's own
+    // broker_test.cpp (Broker_PayloadFilter_*). These checks are the codec only,
+    // and say so: a codec suite that implied it covered routing would be the
+    // ad-routes.test.ts mistake again -- every assertion true, none of them the
+    // question that matters.
+    section("the SGEE payload names its surface, and the tag's three states stay distinct");
+    {
+        using options_calculator::inference_queue::Surface;
+        using options_calculator::inference_queue::surface_from_string;
+        using options_calculator::inference_admission::decode_prompt_payload;
+        using options_calculator::inference_admission::decode_surface_name;
+        using options_calculator::inference_admission::encode_prompt_for_surface;
+        using options_calculator::inference_admission::surface_lease_filter;
+
+        const std::string prompt = "How much cash do I need to close on $160,000?";
+
+        for (const auto s : {Surface::Strategy, Surface::Mortgage}) {
+            const auto payload = encode_prompt_for_surface(s, prompt);
+            const auto name = decode_surface_name(payload);
+            check(name.has_value() && surface_from_string(*name) == s,
+                  "a payload round-trips its own surface");
+            check(decode_prompt_payload(payload) == prompt,
+                  "and the prompt survives beside it, through the SAME decoder the worker "
+                  "path uses -- the tag must not disturb the field it travels with");
+            check(payload.find(surface_lease_filter(s)) != std::string::npos,
+                  "and the lease filter built for that surface is literally present in the "
+                  "payload -- filter and encoder must not be able to drift apart");
+        }
+
+        // The whole defect in one assertion: the two surfaces must be
+        // DISTINGUISHABLE. A codec that round-trips but collapses both onto one
+        // value would pass every check above and fix nothing.
+        check(decode_surface_name(encode_prompt_for_surface(Surface::Strategy, prompt)) !=
+                  decode_surface_name(encode_prompt_for_surface(Surface::Mortgage, prompt)),
+              "and the two surfaces do not decode to the same value");
+        check(surface_lease_filter(Surface::Strategy) != surface_lease_filter(Surface::Mortgage),
+              "and neither do their lease filters");
+        check(encode_prompt_for_surface(Surface::Mortgage, prompt)
+                  .find(surface_lease_filter(Surface::Strategy)) == std::string::npos,
+              "and one surface's filter does not match the other's payload -- the property the "
+              "broker's skip actually depends on");
+
+        // NO TAG is not the same fact as an UNKNOWN TAG, and the call site treats
+        // them oppositely: a legacy payload has no owner and any worker may run
+        // it, while a payload naming an unrecognised surface is a positive claim
+        // that somebody else owns it. Collapsing the two would re-create this bug
+        // on the third surface anyone adds.
+        check(!decode_surface_name(R"({"prompt":"hi"})").has_value(),
+              "a payload with no surface field yields no name, so any worker may run it");
+        check(decode_prompt_payload(R"({"prompt":"hi"})") == "hi",
+              "and a legacy payload still yields its prompt");
+
+        const auto unknown = decode_surface_name(R"({"surface":"quantum","prompt":"hi"})");
+        check(unknown.has_value(),
+              "an unknown surface name is still REPORTED rather than erased -- the caller has "
+              "to be able to tell it from a payload that named nothing");
+        check(unknown.has_value() && !surface_from_string(*unknown).has_value(),
+              "and it does not resolve to a real surface");
+        check(decode_prompt_payload(R"({"surface":"quantum","prompt":"hi"})") == "hi",
+              "and its prompt is still recoverable");
+
+        // Malformed input must not throw on the worker's owner thread.
+        check(!decode_surface_name("not json at all").has_value(),
+              "malformed JSON yields no name rather than throwing");
+        check(!decode_surface_name("").has_value(), "an empty payload yields no name");
+        check(!decode_surface_name(R"({"surface":7,"prompt":"hi"})").has_value(),
+              "a non-string surface yields no name rather than being coerced");
+        check(!decode_surface_name(R"(["surface","mortgage"])").has_value(),
+              "a JSON array is not an object and yields no name");
+
+        // The tag uses inference_queue's own spelling, so the two halves of the
+        // system cannot drift apart silently.
+        check(decode_surface_name(encode_prompt_for_surface(Surface::Mortgage, "x")) ==
+                  std::optional<std::string>(std::string(to_string(Surface::Mortgage))),
+              "the encoded tag uses inference_queue::to_string's own spelling");
     }
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);

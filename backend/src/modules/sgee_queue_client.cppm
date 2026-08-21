@@ -85,9 +85,27 @@ export class SgeeQueueClient {
     // mirror path does, and all are bounded in time -- nothing here can hang an
     // RPC handler.
 
-    [[nodiscard]] auto submit_blocking(std::string_view payload) -> std::optional<std::uint64_t>;
+    /**
+     * @param max_attempts 0 keeps the broker's own default (3). Pass a larger
+     *        budget when the caller may RELEASE a lease for routing reasons
+     *        rather than because the work failed: `lease` is the only place
+     *        `attempt` is incremented, so a release costs one attempt even
+     *        though nothing was executed. See SgeeLeaseSource::fill.
+     */
+    [[nodiscard]] auto submit_blocking(std::string_view payload,
+                                       std::uint32_t max_attempts = 0)
+        -> std::optional<std::uint64_t>;
     [[nodiscard]] auto poll_task(std::uint64_t task_id) -> std::optional<SgeeTaskOutcome>;
-    [[nodiscard]] auto lease_blocking(std::uint64_t worker_id, std::uint64_t visibility_ms)
+    /**
+     * @param payload_filter when non-empty, lease only a task whose payload CONTAINS these
+     *        bytes. The broker applies it when CHOOSING, so a task belonging to somebody else
+     *        is never leased here at all -- which is the only version that works: `lease()` has
+     *        no skip, so a caller that leases and hands back is still blocked by the same head
+     *        task next time AND burns one `attempt` per release, since `lease` is the only
+     *        place `attempt` is incremented.
+     */
+    [[nodiscard]] auto lease_blocking(std::uint64_t worker_id, std::uint64_t visibility_ms,
+                                       std::string_view payload_filter = {})
         -> std::optional<SgeeLeasedJob>;
     auto complete_blocking(SgeeLeasedJob const& job, std::string_view result) -> bool;
     auto fail_blocking(SgeeLeasedJob const& job) -> bool;
