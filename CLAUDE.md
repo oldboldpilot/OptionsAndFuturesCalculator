@@ -615,7 +615,43 @@ v5's 69/98. The vocabulary extension was helping those eight operations by ~20
 rows while costing ~25 elsewhere, and that interaction is not accounted for by
 anything above. It is the first thing to look at if this is picked up again.
 
-### RESOLVED: the SGEE queue path was the cause. `INFERENCE_QUEUE=postgres` fixes it
+### RE-PROMOTED 2026-08-20, and this time the queue is faster AND correct
+
+`INFERENCE_QUEUE=sgee` is live again, after the root cause below was found and
+fixed at the lease. The gate, on the same 16 rows that measured the defect:
+
+| arm | run 1 | run 2 | run 3 | pattern |
+| --- | --- | --- | --- | --- |
+| new binary, `postgres` (control) | 11/16 | 11/16 | 11/16 | `.PPPPP.PP.P.P.PP` |
+| new binary, **`sgee`** | **11/16** | **11/16** | **11/16** | **same pattern** |
+| new binary, **`sgee`**, 16-way concurrent | 11/16 | 11/16 | — | same, **0 errors** |
+
+Byte-identical to the local engine, to Postgres, and to itself across runs — the
+reproducibility that was missing is back. And the queue now earns its keep:
+**80 s against Postgres's 127 s** for the same sequential sixteen, and at 16-way
+concurrency it absorbed every request in 20 s with **zero** `RESOURCE_EXHAUSTED`,
+where a single local replica sheds 7 of 16 to its admission queue.
+
+Cluster after the load, all three nodes: `last_applied == commit_index`,
+`tick_errors 0`, `dlq_depth 0`, `apply_id_mismatches 0`, and `apply_rejections`
+**0 and EQUAL across replicas** — the cross-replica comparison, not a comparison
+against zero. Engine: **0 `[WARN]`, 0 `[ERROR]`, 0 foreign leases, 0
+terminal-failure fallbacks.** That last group is the negative proof that matters:
+the defence-in-depth branch never fired, so the broker is applying the filter.
+
+**The deploy order was queue nodes first, engines second, and it is not
+cosmetic.** All three nodes reported `live_tasks: 0` before anything moved, which
+is the drain precondition — once the filter is live an untagged payload matches
+no worker's filter and is handed to nobody. Nodes were rolled one at a time,
+followers first and the leader last, so exactly one election happened.
+
+**A control on the same binary came first, deliberately.** Deploying the new
+engine while still on `postgres` and measuring 11/16 three times proves the code
+change regressed nothing, so anything the flip changes is attributable to the
+flip. Without it a good result reads as "the fix worked" and a bad one as "the
+queue is still broken", and neither would be earned.
+
+### The root cause, and why `INFERENCE_QUEUE=postgres` was the right holding position
 
 **One variable, measured end to end on 2026-08-20.** The same 16 closing-cost
 holdout rows, the same bytes, the same engine image, scored on which arm of
@@ -936,7 +972,12 @@ peek/mark pair, plus `commit_index` published beside `last_applied` on `/statusz
 because the gap is the only way to tell caught-up from stalled. Promotion needs
 the fix deployed and the audit re-run. See `docs/SGEE_QUEUE_CLUSTER.md`.
 
-**ROLLED BACK ON 2026-08-20: `INFERENCE_QUEUE` is `postgres`.** Serving
+**ROLLED BACK 2026-08-20, ROOT-CAUSED, AND RE-PROMOTED THE SAME DAY.**
+`INFERENCE_QUEUE` is `sgee` again — see "RE-PROMOTED 2026-08-20" above for the
+gate. The account below is what the rollback found, and it is kept because the
+defect it describes is the reason the lease is now partitioned by surface.
+
+**What the rollback measured:** serving
 inference through SGEE cost 45% of the mortgage assistant's answers and all of
 its reproducibility — production scored 4/16, 7/16, 7/16 on a fixed holdout with
 a different row set each run, and 11/16 three times identically the moment the

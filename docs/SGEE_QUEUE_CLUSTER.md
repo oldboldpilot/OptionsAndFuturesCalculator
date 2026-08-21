@@ -31,6 +31,35 @@ to the cluster yet — `SgeeQueueClient` is mirror-mode only, so promotion means
 building an SGEE-backed admission path rather than flipping a flag. Postgres
 remains the system of record until both are done.
 
+## Promoted for inference again on 2026-08-20, with the lease partitioned
+
+`INFERENCE_QUEUE=sgee` is live on the engine. The gate, on the fixed 16-row
+holdout that measured the original defect:
+
+| arm | runs | pattern |
+| --- | --- | --- |
+| new binary, `postgres` (control) | 11/16, 11/16, 11/16 | `.PPPPP.PP.P.P.PP` |
+| new binary, **`sgee`** | **11/16, 11/16, 11/16** | **identical** |
+| new binary, **`sgee`**, 16-way concurrent | 11/16, 11/16 | identical, **0 errors** |
+
+Sequential wall clock **80 s against Postgres's 127 s**, and 16-way concurrency
+completed in 20 s with zero `RESOURCE_EXHAUSTED` — a single local replica sheds
+7 of 16 to its admission queue at that load, which is the fragmentation this
+cluster exists to remove.
+
+Cluster after the load, all three nodes: `last_applied == commit_index`,
+`tick_errors 0`, `dlq_depth 0`, `apply_id_mismatches 0`, `apply_rejections` **0
+and equal across replicas**. Engine: **0 `[WARN]`, 0 `[ERROR]`, 0 foreign
+leases, 0 terminal-failure fallbacks** — the defence-in-depth branch never fired,
+which is the positive evidence that the broker is applying the filter.
+
+Order followed exactly as below: `live_tasks: 0` verified on all three before
+anything moved, then nodes rolled one at a time (followers first, leader last, so
+one election), then the engine deployed while STILL on `postgres` and measured as
+a control, and only then the flip. The control is what makes the result
+attributable — without it, a good number reads as "the fix worked" and a bad one
+as "the queue is still broken", and neither would be earned.
+
 ## The lease is partitioned by SURFACE, and the deploy order follows from it
 
 `lease()` used to take a worker id and nothing else. Two assistants — strategy
