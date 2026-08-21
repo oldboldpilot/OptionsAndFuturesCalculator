@@ -194,6 +194,26 @@ struct DecodedSurface {
     fastjson::json_object probe;
     probe["surface"] = fastjson::json_value(std::string(to_string(surface)));
     const auto rendered = fastjson::json_value(std::move(probe)).to_string();
+    // Returns the bare `"surface":"..."` member, unanchored.
+    //
+    // ANCHORING WAS TRIED AND IS THE WRONG TOOL. The broker matches a raw byte
+    // substring over an opaque payload, so an unanchored tag also matches a
+    // NESTED occurrence: `{"surface":"mortgage","meta":{"surface":"strategy"}}`
+    // satisfies the strategy filter while decoding as mortgage. Prefixing the
+    // filter with `{` would exclude that -- but only if the surface is serialised
+    // FIRST, and fastjson orders keys ALPHABETICALLY, so it is serialised last
+    // (`prompt` < `surface`). A test written to pin the anchor caught that
+    // immediately, which is the only reason this comment is right rather than
+    // hopeful. Anchoring the other end fails too: a nested `{"surface":"x"}`
+    // ends with the same bytes a top-level one does.
+    //
+    // So the filter is a routing HINT and the top-level decode in
+    // SgeeLeaseSource::fill is the CHECK -- and that division is sound because a
+    // spoofed payload requires a producer other than encode_prompt_for_surface,
+    // which does not exist: this module owns the format and nothing else enqueues
+    // here (docs/SGEE_QUEUE_CLUSTER.md states it). If one ever did, the mismatch
+    // is caught before any decode and answered by a local fallback, not by a
+    // wrong answer.
     return rendered.substr(1, rendered.size() - 2);
 }
 

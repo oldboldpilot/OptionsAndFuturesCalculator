@@ -74,6 +74,18 @@ and is handed to nobody. No REQUEST is lost by that (`SgeeAdmission::submit`
 falls back to the local backend), but the task is orphaned in `pending_`, so the
 queue should be empty of untagged work before the cutover rather than during it.
 
+**The filter is a routing HINT; the top-level decode is the CHECK.** Matching is
+a raw byte substring over an opaque payload, so an unanchored tag also matches a
+NESTED one — `{"surface":"mortgage","meta":{"surface":"strategy"}}` satisfies the
+strategy filter. Anchoring the filter with a leading `{` was tried and does not
+work: fastjson orders keys ALPHABETICALLY, so `surface` is serialised last, and
+anchoring the other end fails too because a nested object ends with the same
+bytes. A test written to pin the anchor caught this in the first run, which is
+why this paragraph is a measurement rather than a hope. The division is sound
+because a spoofed payload needs a producer other than
+`encode_prompt_for_surface`, and if one ever existed the mismatch is caught
+before any decode and answered by a local fallback rather than a wrong answer.
+
 **The filter's bytes are produced by the payload's own serialiser** —
 `surface_lease_filter` renders the same member `encode_prompt_for_surface`
 writes — so the two cannot drift apart by being written twice. The consequence is

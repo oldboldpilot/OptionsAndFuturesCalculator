@@ -408,7 +408,8 @@ auto main() -> int {
                   "path uses -- the tag must not disturb the field it travels with");
             check(payload.find(surface_lease_filter(s)) != std::string::npos,
                   "and the lease filter built for that surface is literally present in the "
-                  "payload -- filter and encoder must not be able to drift apart");
+                  "payload -- filter and encoder must not be able to drift apart, which they "
+                  "could if the filter were written out by hand instead of rendered");
         }
 
         // The whole defect in one assertion: the two surfaces must be
@@ -423,6 +424,22 @@ auto main() -> int {
                   .find(surface_lease_filter(Surface::Strategy)) == std::string::npos,
               "and one surface's filter does not match the other's payload -- the property the "
               "broker's skip actually depends on");
+
+        // The spoof the anchor exists to stop: a payload that IS mortgage at the
+        // top level but mentions another surface in a nested object. Unanchored,
+        // the strategy filter matches it and the strategy worker leases a mortgage
+        // task -- the original defect, reached through a different door.
+        const std::string nested =
+            R"({"surface":"mortgage","prompt":"p","meta":{"surface":"strategy"}})";
+        check(nested.find(surface_lease_filter(Surface::Strategy)) != std::string::npos,
+              "a nested mention of another surface DOES match that surface's byte filter -- "
+              "asserted in the direction that is true, because the filter is a routing hint "
+              "over opaque bytes and cannot be anything else. Pinning the limitation is what "
+              "stops somebody later reading the filter as a guarantee");
+        check(decode_surface_name(nested) == std::optional<std::string>("mortgage"),
+              "and the CHECK that matters reads the TOP-LEVEL surface, so a payload that "
+              "routed on a nested mention is caught before any decode -- by the branch that "
+              "fails it once and lets the submitter answer locally");
 
         // NO TAG is not the same fact as an UNKNOWN TAG, and the call site treats
         // them oppositely: a legacy payload has no owner and any worker may run
