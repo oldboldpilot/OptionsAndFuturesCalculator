@@ -233,6 +233,40 @@ export class InferenceBackend {
 };
 
 /**
+ * The local backend of a replica that deliberately carries NO model.
+ *
+ * `SgeeAdmission`/`PostgresAdmission` hold an `InferenceBackend&` as the local
+ * fallback they degrade to when the shared queue cannot take a job. That is the
+ * right contract for a replica that HAS weights. It is the wrong shape for the
+ * split-fleet topology, where most replicas exist to serve the calculator and
+ * finance RPCs and deliberately hold no assistant weights at all -- there the
+ * queue is not a faster path to a local model, it is the ONLY path.
+ *
+ * Handing those replicas this object keeps the admission classes unchanged: it
+ * is a reference to something real, so no signature becomes a pointer and no
+ * call site learns about nullability. What changes is only what a degrade MEANS
+ * on a model-less replica -- an honest, populated failure instead of an
+ * execution that cannot happen.
+ *
+ * It can never hang. `QueuedBackend`'s promise is fulfilled by an owner thread
+ * driving a decode loop; a replica with no weights has no such thread, so
+ * enqueueing here would be a permanent wait. Returning `ok == false` is what
+ * stands between a queue outage and a stuck request.
+ */
+export class NoLocalBackend final : public InferenceBackend {
+  public:
+    [[nodiscard]] auto submit(std::string /*prompt*/) -> std::optional<InferenceOutcome> override {
+        return InferenceOutcome{
+            .ok = false,
+            .text = {},
+            .error = "this replica carries no assistant model and the inference queue did not "
+                     "accept the job"};
+    }
+
+    [[nodiscard]] auto name() const noexcept -> std::string_view override { return "no-local"; }
+};
+
+/**
  * Where a `QueuedBackend`'s owner thread draws SHARED work from, in addition to
  * its own local queue.
  *

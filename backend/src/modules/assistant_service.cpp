@@ -1446,7 +1446,12 @@ class AssistantWorker {
 
     /** True iff a backend initialised successfully at process start.
      * Immutable after construction, so no synchronization is needed. */
-    [[nodiscard]] auto available() const noexcept -> bool { return backend_ != nullptr; }
+    [[nodiscard]] auto available() const noexcept -> bool {
+        // Either this replica can execute (backend_), or it can submit to a
+        // shared queue that will (admission_ in submit-only mode). Both are
+        // immutable after construction, so no synchronization is needed.
+        return backend_ != nullptr || admission_ != nullptr;
+    }
 
     [[nodiscard]] auto submit(std::string prompt) -> std::optional<InferenceOutcome> {
         if (backend_ == nullptr) {
@@ -1478,9 +1483,20 @@ class AssistantWorker {
     AssistantWorker() {
         const auto path = env_string("MODEL_PATH");
         if (!path.has_value()) {
-            logger::Logger::getInstance().warn(
-                "MODEL_PATH is not set -- the strategy assistant will return a Refusal on "
-                "every call. The calculator and finance services are unaffected.");
+            // No weights here -- still a supported image, and no longer
+            // necessarily a refusal. With a SHARED inference queue configured,
+            // this replica accepts the RPC and hands the work to a replica that
+            // does carry the model; configure_inference_queue() builds a
+            // submit-only admission (no lease source, so this process never
+            // executes). With INFERENCE_QUEUE=local there is nowhere to submit
+            // and it stays a Refusal on every call, exactly as before.
+            configure_inference_queue();
+            if (admission_ == nullptr) {
+                logger::Logger::getInstance().warn(
+                    "MODEL_PATH is not set and no shared inference queue is configured -- the "
+                    "strategy assistant will return a Refusal on every call. The calculator and "
+                    "finance services are unaffected.");
+            }
             return;
         }
 
@@ -1692,21 +1708,31 @@ class AssistantWorker {
         // window would let the cluster reclaim a task this worker is still
         // decoding and hand it to someone else -- paying for the same inference
         // twice and, worse, fencing out the answer that arrives first.
-        auto lease_source = std::make_shared<inference_admission::SgeeLeaseSource>(
-            *client, inference_queue::Surface::Strategy, worker_id, /*visibility_ms=*/90000);
-        backend_->set_lease_source(lease_source);
-        lease_source_ = std::move(lease_source);
+        // A replica with no weights must NEVER install a lease source: leasing
+        // is what commits it to executing, and it has nothing to execute with.
+        InferenceBackend* local = backend_.get();
+        if (local != nullptr) {
+            auto lease_source = std::make_shared<inference_admission::SgeeLeaseSource>(
+                *client, inference_queue::Surface::Strategy, worker_id, /*visibility_ms=*/90000);
+            backend_->set_lease_source(lease_source);
+            lease_source_ = std::move(lease_source);
+        } else {
+            no_local_ = std::make_unique<inference_admission::NoLocalBackend>();
+            local = no_local_.get();
+        }
 
         // The same 90s ceiling the Postgres path uses, for the same reason: it
         // is a bound on a genuinely stuck request, not a target latency. The
         // poll returns the instant the task turns terminal.
         admission_ = std::make_unique<inference_admission::SgeeAdmission>(
-            *client, inference_queue::Surface::Strategy, *backend_,
+            *client, inference_queue::Surface::Strategy, *local,
             std::chrono::milliseconds(90000));
 
         logger::Logger::getInstance().info(
-            "Strategy assistant: INFERENCE_QUEUE=sgee -- submitting through the SGEE queue cluster "
-            "(worker_id={}), with the local backend as fallback and lease source",
+            "Strategy assistant: INFERENCE_QUEUE=sgee -- {} through the SGEE queue cluster "
+            "(worker_id={})",
+            backend_ != nullptr ? "submitting and leasing, with the local backend as fallback"
+                                : "SUBMIT-ONLY (no local weights; never leases)",
             worker_id);
     }
 
@@ -1779,10 +1805,17 @@ class AssistantWorker {
         queue_->start_sweep_ticker();
 
         const std::string worker_id = "strategy-" + std::to_string(::getpid());
-        auto lease_source = std::make_shared<inference_admission::PostgresLeaseSource>(
-            queue_, inference_queue::Surface::Strategy, worker_id);
-        backend_->set_lease_source(lease_source);
-        lease_source_ = std::move(lease_source);
+        // See the SGEE path: a replica with no weights never leases.
+        InferenceBackend* local = backend_.get();
+        if (local != nullptr) {
+            auto lease_source = std::make_shared<inference_admission::PostgresLeaseSource>(
+                queue_, inference_queue::Surface::Strategy, worker_id);
+            backend_->set_lease_source(lease_source);
+            lease_source_ = std::move(lease_source);
+        } else {
+            no_local_ = std::make_unique<inference_admission::NoLocalBackend>();
+            local = no_local_.get();
+        }
 
         // 90s, matching this queue's own design (was 20s here, a drift from
         // that design this task's own measurement caught: a 20s window gave
@@ -1796,11 +1829,13 @@ class AssistantWorker {
         // genuinely stuck request, at which point falling back late is still
         // strictly better than an anonymous MODEL_UNAVAILABLE.
         admission_ = std::make_unique<inference_admission::PostgresAdmission>(
-            queue_, inference_queue::Surface::Strategy, *backend_, std::chrono::milliseconds(90000));
+            queue_, inference_queue::Surface::Strategy, *local, std::chrono::milliseconds(90000));
 
         logger::Logger::getInstance().info(
-            "Strategy assistant: INFERENCE_QUEUE=postgres -- submitting through the shared "
-            "queue (worker_id={}), with the local backend as fallback and lease source",
+            "Strategy assistant: INFERENCE_QUEUE=postgres -- {} the shared queue (worker_id={})",
+            backend_ != nullptr
+                ? "submitting through and leasing from, with the local backend as fallback"
+                : "SUBMIT-ONLY through (no local weights; never leases)",
             worker_id);
     }
 
@@ -1808,6 +1843,10 @@ class AssistantWorker {
     std::shared_ptr<pg::Pool> pool_;
     std::shared_ptr<inference_queue::Queue> queue_;
     std::shared_ptr<inference_admission::LeaseSource> lease_source_;
+    /// Stand-in local backend for a submit-only replica (no weights here).
+    /// Held because the admission classes take an `InferenceBackend&` that must
+    /// outlive them. Null whenever `backend_` is real.
+    std::unique_ptr<InferenceBackend> no_local_;
     std::unique_ptr<InferenceBackend> admission_;
 };
 
