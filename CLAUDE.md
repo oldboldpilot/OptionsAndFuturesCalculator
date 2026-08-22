@@ -1465,6 +1465,74 @@ Two consequences worth keeping:
 pure Q8_0 with nothing left to squeeze; the fat was entirely in how the weights
 were loaded.
 
+### The rest of it was 612 MB of duplicated RoPE tables, found by profiling
+
+After the weights were accounted for, anonymous memory was still ~1,473 MB per
+model against 604 MB of live weights. Seven hypotheses were measured and
+essentially all of them died: `MAX_CONCURRENT`, `CONTEXT_TOKENS`,
+`INFERENCE_THREADS`, `QUEUE_DEPTH`, jemalloc tuning (143 MB), the GGUF parser's
+dequantization cache (**empty**), and the transient FP32 weight buffers the
+MHA/FFN constructors zero-fill (~105 MB — the allocator was already recycling
+those pages for the quantized buffers allocated moments later).
+
+**The answer came from an allocation profile, not from another hypothesis.**
+valgrind massif on a one-model boot put **612.5 MiB in `RotaryEmbedding`'s
+cos/sin caches — 41% of the heap**, matching the arithmetic to the byte:
+
+`RotaryEmbedding` holds `cos_cached_`/`sin_cached_` as
+`std::vector<std::vector<float>>` of shape `[max_seq_len][dim/2]`, and
+**`max_seq_len` is the GGUF's `context_length` — the model's TRAINED ceiling,
+not the serving budget.** For Qwen3-0.6B that is 40,960, so one table pair is
+40,960 × 64 × 4 B × 2 = 20.97 MB. `MultiHeadAttention` built **one
+`RotaryEmbedding` per LAYER**, so 28 identical copies:
+
+```
+inner rows     40,960 x 64 x 4 B x 2 tables x 28 layers = 587,202,560 B
+outer headers  40,960 x 24 B x 56 vectors               =  55,050,240 B
+                                                          -----------
+                                                          612.5 MiB
+```
+
+**This is also why `ASSISTANT_CONTEXT_TOKENS` measured inert** — that knob sizes
+the paged KV cache, which commits on demand; it has nothing to do with this
+table, which is sized from the checkpoint.
+
+Fixed in sensen `65adac57`: `RotaryEmbedding::shared()` returns one immutable
+instance per distinct `(dim, max_seq_len, base, scaling, yarn)` tuple. Sharing
+is safe **by construction rather than by convention** — the pointer is `const`,
+the tables are written once by `precompute_freqs_cis()` in the constructor, and
+the class has no mutable state and no non-const member outside the constructor,
+so concurrent readers on different layers' owner threads cannot race. Held by
+`weak_ptr`, so the table dies with the last layer using it. Both assistants are
+the same architecture, so the process holds **one** table set, not one per model.
+
+Measured, both models loaded: RSS **4,184.1 → 2,942.1 MB**, anonymous
+**2,945.9 → 1,703.7 MB (−42%)**. Byte-identical output (SHA
+`2cccb62e6a410ed9`, 0/20 rows), ctest 100/100.
+
+**Do not "fix" this by clamping `max_seq_len` instead.** It saves a similar
+amount but is a behaviour change for long requests: `cfg.max_seq_len` also feeds
+the sequence-length refusal checks and, on a CUDA build, the paged-attention
+partition choice. Sharing has no such coupling.
+
+**Known and NOT fixed: `SENSEN_QKV_FUSION=0` recovers nothing.**
+`build_qkv_decode_plan()` interleaves Q+K+V into `qkv_fused_storage_` — a full
+second copy, 124,780,544 B (119 MiB) per model, with `q_wq_`/`q_wk_`/`q_wv_`
+retained. The env var is checked only at USE (`multi_head_attention.cppm:2533`,
+`:3001`), never at build, so setting it to 0 measured byte-identical memory.
+Honouring it at build is a one-line change worth −119 MB per model, at the cost
+of three matvec dispatches per decode step instead of one. Freeing the
+originals instead (keeping fusion) needs an audit of the non-plan paths that
+still read them.
+
+**The remaining per-model anonymous memory is ~660 MB and is the actual Q8_0
+weights.** It is irreducible without changing quantization.
+
+**The lesson, since this file has now paid for it twice:** a plausible mechanism
+with the right order of magnitude is not a finding. Seven of them were wrong
+here. Profile the allocator before changing anything sized in gigabytes.
+
+
 ## Option chain cache
 
 `market_data.cppm` caches chains and quotes in a `TtlCache`. The chain TTL is
