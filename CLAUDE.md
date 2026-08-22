@@ -829,7 +829,8 @@ is sized as what it is:
 | partner | 2400 | 1,200,000 | per caller, **per replica** |
 
 **Every number in that table is multiplied by the replica count, and
-`railway.json` sets `numReplicas: 3`** (raised from 2 on 2026-08-10). `callers_` is an in-process
+`railway.json` sets `numReplicas: 2`** (lowered from 3 on 2026-08-21 for cost —
+see the memory section above) (raised from 2 on 2026-08-10). `callers_` is an in-process
 `std::unordered_map` behind a process mutex (`quota.cpp:82`), a Meyers singleton
 with no persistence of any kind, so each replica refills its own buckets. The
 effective anonymous ceiling is **18,000 req/min at three replicas**, not 6000,
@@ -1356,6 +1357,113 @@ whole point: it takes the tier from a *verified* identity — Supabase
 proves the anonymous number is the one actually applied. Mutation-checked both
 ways — dropping the marker fails one check, applying it unconditionally fails
 four.
+
+## Memory, and what the Railway bill is actually buying
+
+**94% of the bill is RAM, and Railway's receipt states it in MB-MINUTES.** The
+Jul 21 - Aug 21 2026 invoice read `Memory (per MB / min) Qty 331,691,526` and
+$76.78 of an $81.37 total. That quantity is an integral, not storage:
+`331,691,526 / 60 / 1024 = 5,399 GB-hours`, over 744 hours = **7.26 GB of RAM
+held continuously**, at an effective **$10.58 per GB-month**. `Disk (per GB /
+min)` and `vCPU (per vCPU / min)` are the same shape. Object storage — the line
+that looks like the culprit — was **one cent**. Reading the big number as
+gigabytes sends you at the volumes, which hold 4.3 GB between them and cost 87
+cents.
+
+Get the per-service split from the API, not the dashboard:
+`usage(workspaceId, startDate, endDate, groupBy:[SERVICE_ID,PROJECT_ID],
+measurements:[MEMORY_USAGE_GB,...])` at `backboard.railway.com/graphql/v2` with
+the `accessToken` from `~/.railway/config.json`. **Its `MEMORY_USAGE_GB` is
+GB-MINUTES summed across replicas; the `metrics(...)` query's identically-named
+field is a FRACTION OF `MEMORY_LIMIT_GB` PER INSTANCE** — multiply by the limit
+(32) to get GB. One field name, two meanings; reconcile against the invoice
+total before trusting either.
+
+### Every runtime knob is inert. All of them. Measured.
+
+Boot RSS with both models loaded, before any request reaches the engine:
+
+| arm | boot RSS | 16-way burst |
+| --- | --- | --- |
+| default (concurrency 4, context 4096) | 5,413.4 MB | 8.4 s |
+| `MAX_CONCURRENT` = 2 | 5,413.3 MB | 10.1 s |
+| `MAX_CONCURRENT` = 1 | 5,409.4 MB | 14.0 s |
+| `CONTEXT_TOKENS` = 1024 | 5,419.9 MB | 8.4 s |
+| `INFERENCE_THREADS` = 4 / 2 | 5,419.0 / 5,420.1 MB | 9.5 / 10.5 s |
+| `QUEUE_DEPTH` = 2 | 5,420.4 MB | 3.1 s, **10 errors** |
+| all three at minimum | 5,409.3 MB | 14.1 s |
+| jemalloc tuned (`narenas:2,dirty_decay_ms:0`) | 5,270.5 MB | — |
+
+Halving concurrency saves **0.1 MB** and costs 20% latency; taking it to 1 costs
+66%. Shrinking the context window to a quarter *raises* RSS by 6 MB. **The paged
+KV cache genuinely commits 16-token blocks on demand**, so the arithmetic that
+makes it look enormous — 4096 tokens x 4 slots x 2 assistants — describes a
+ceiling nothing reaches. Real sequences are ~400 tokens. Tuning jemalloc
+recovers 2.6%.
+
+**Do not reach for any of these to save memory.** This is the trap this file
+warns about elsewhere in a different costume: a correct diagnosis of a real
+mechanism that is not the cause of the symptom.
+
+### The memory is the models, and they were held at 4x their own quantization
+
+An engine with **no models loaded is 21.8 MB**. Everything else is the two
+Qwen3-0.6B assistants, and the checkpoint's own tensor table says what they
+should cost:
+
+| tensor group | type | count | params | on disk |
+| --- | --- | --- | --- | --- |
+| `token_embd.weight` | Q8_0 | 1 | 155,582,464 | 157.6 MB |
+| `ffn_gate` / `ffn_down` / `ffn_up` | Q8_0 | 84 | 264,241,152 | 267.6 MB |
+| `attn_q` / `attn_k` / `attn_v` / `attn_output` | Q8_0 | 112 | 176,160,768 | 178.6 MB |
+| norm gains | F32 | 113 | 65,536 | 0.2 MB |
+| **whole checkpoint** | | **310** | **596,049,920** | **604.1 MB** |
+
+**There is no `output.weight` tensor — `lm_head` is TIED.** Which made the boot
+line `[QUANT-LMHEAD] output.weight kept quantized ... 165306368 bytes` a report
+of work that should not have been happening:
+`LlamaModel::try_load_quantized_lm_head` falls back to `token_embd.weight` when
+`output.weight` is absent and then `memcpy`d it into a second buffer. So
+`token_embd` was materialised **twice per model** — once dequantized to FP32 for
+the embedding lookup, once copied as Q8_0 for the output projection:
+
+| per model | was | is |
+| --- | --- | --- |
+| token_embd as FP32 embedding | 593.5 MB | 157.6 MB |
+| token_embd as Q8_0 lm_head copy | 165.3 MB | 0 — shares the buffer |
+| attention + FFN, Q8_0 | 446.2 MB | 446.2 MB |
+| **live weights** | **1,205 MB** | **604 MB** |
+
+Fixed in sensen `604d1d1c` (branch `perf/quantized-resident-embedding`, off the
+pinned `652064bf`): `TokenEmbedding` gained a quantized-resident mode holding
+the GGUF tensor's own bytes and dequantizing a row on first lookup, and the tied
+`lm_head` points at those same bytes. **Boot RSS 5,420.1 -> 4,235.7 MB
+(-1,184 MB, against -1,202 MB predicted from the table above).**
+
+**The gate was byte-identity, not a score.** Dequantizing a Q8_0 row at lookup
+is the same arithmetic through the same `dequantize_dispatch` the load-time
+expansion called, so every logit — and therefore every emitted token — must
+match exactly. 20 utterances across both assistants through the real RPC,
+aggregate SHA `2cccb62e6a410ed9` before and after, **0 of 20 rows differing**.
+A score that merely "held" would have hidden a real numerical change. ctest
+100/100.
+
+Two consequences worth keeping:
+
+- **Measure after an idle soak, never at boot.** jemalloc hands back freed
+  transient buffers on its own decay: the pre-fix engine drifted 2,730.9 ->
+  2,238.2 MB per model over fourteen minutes, and two settled models came to
+  ~4,476 MB — which is where production's measured 4.42 GB came from. A boot
+  reading and a settled reading are different numbers.
+- **`numReplicas` is 2** (from 3, 2026-08-21). Two still survives a single
+  container loss and still clears the `restartPolicyMaxRetries: 3` trap that
+  makes one replica dangerous; the recorded case for three was headroom, not
+  correctness. Every quota number in the tier table below multiplies by 2 now,
+  not 3.
+
+**Do not requantize the checkpoint to save memory.** It is already 604 MB of
+pure Q8_0 with nothing left to squeeze; the fat was entirely in how the weights
+were loaded.
 
 ## Option chain cache
 
