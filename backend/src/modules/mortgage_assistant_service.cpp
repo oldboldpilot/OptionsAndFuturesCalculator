@@ -1153,6 +1153,21 @@ class MortgageAssistantWorker {
         return backend_ != nullptr || admission_ != nullptr;
     }
 
+    /**
+     * Whether THIS process holds the weights, as opposed to being able to
+     * reach something that does.
+     *
+     * Distinct from `available()` on purpose. The startup banner and the
+     * documented cutover check (`grep -c 'model is LOADED'`, one line per
+     * replica per assistant) are asking where the model physically IS -- a
+     * submit-only replica answering "LOADED" would make that count describe a
+     * fleet that does not exist, which is exactly the class of wrong-layer
+     * health signal this project has been bitten by before.
+     */
+    [[nodiscard]] auto local_model_loaded() const noexcept -> bool {
+        return backend_ != nullptr;
+    }
+
     [[nodiscard]] auto submit(std::string prompt) -> std::optional<InferenceOutcome> {
         if (backend_ == nullptr && admission_ == nullptr) {
             // Defense in depth: the RPC handler is expected to check
@@ -2878,10 +2893,15 @@ auto RegisterMortgageAssistantService(grpc::ServerBuilder& builder) -> void {
     // first caller discovers by accident. A failed load is logged and swallowed,
     // never propagated -- a missing or broken model must degrade this ONE
     // service, not take down the three sharing this port.
-    const bool loaded = MortgageAssistantWorker::instance().available();
-    logger::Logger::getInstance().info("Mortgage assistant model is {}",
-                                       loaded ? "LOADED"
-                                              : "UNAVAILABLE (set MORTGAGE_MODEL_PATH to enable)");
+    // See the strategy assistant's identical banner for why LOADED must mean
+    // "the weights are in THIS process" and nothing weaker.
+    const auto& worker = MortgageAssistantWorker::instance();
+    logger::Logger::getInstance().info(
+        "Mortgage assistant model is {}",
+        worker.local_model_loaded() ? "LOADED"
+        : worker.available()
+            ? "NOT LOCAL -- submitting to the shared inference queue (no weights in this replica)"
+            : "UNAVAILABLE (set MORTGAGE_MODEL_PATH to enable)");
 }
 
 auto RegisterMortgageAssistantServiceForTest(grpc::ServerBuilder& builder,

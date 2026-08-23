@@ -1,3 +1,4 @@
+#include <cstdlib> // std::getenv, std::strtol
 #include <iostream>
 #include <memory>
 #include <string>
@@ -29,10 +30,53 @@ namespace {
  */
 constexpr int kMaxRequestBytes = 1 * 1024 * 1024;
 
+/// Listening port when `ENGINE_GRPC_PORT` is unset or unusable. This is the
+/// port `backend/envoy.yaml` proxies to, so the default is load-bearing.
+constexpr int kDefaultPort = 50051;
+
 }  // namespace
 
+/**
+ * The gRPC port to listen on: `ENGINE_GRPC_PORT` if it names a valid one,
+ * else 50051.
+ *
+ * **Deliberately NOT `PORT`.** Railway injects `PORT=8080` into this service,
+ * and 8080 is ENVOY's public listener -- Envoy proxies inbound gRPC-Web to
+ * this engine on 50051 (`backend/envoy.yaml`). Reading `PORT` here would move
+ * the engine onto Envoy's own port: the two would collide, and Envoy would go
+ * on proxying to a 50051 nobody is listening on. That is a full outage for
+ * both live sites, produced by a variable that looks like it means "the port
+ * this program listens on" and does not.
+ *
+ * The variable exists because the address was previously a hardcoded literal,
+ * so two engines started with different ports both bound 50051 -- and because
+ * the listener uses SO_REUSEPORT the kernel silently SPLIT requests between
+ * them instead of failing the second bind. Both processes look healthy, both
+ * log "Server listening", and a caller aiming at one gets answers from
+ * whichever the kernel picked. That is the "several engines each holding a
+ * different model" trap this project has already been bitten by, and it is
+ * what makes a split-fleet test on one host possible to run honestly.
+ *
+ * Out-of-range or non-numeric values fall back to the default rather than
+ * failing the boot, matching how every other optional variable here behaves.
+ */
+[[nodiscard]] auto resolve_port() -> int {
+    const char* raw = std::getenv("ENGINE_GRPC_PORT");
+    if (raw == nullptr || *raw == '\0') {
+        return kDefaultPort;
+    }
+    char* end = nullptr;
+    const long parsed = std::strtol(raw, &end, 10);
+    if (end == raw || *end != '\0' || parsed < 1 || parsed > 65535) {
+        std::cerr << "ENGINE_GRPC_PORT=\"" << raw << "\" is not a valid port; using " << kDefaultPort
+                  << '\n';
+        return kDefaultPort;
+    }
+    return static_cast<int>(parsed);
+}
+
 auto RunServer() -> void {
-    std::string server_address("0.0.0.0:50051");
+    std::string server_address("0.0.0.0:" + std::to_string(resolve_port()));
     grpc::ServerBuilder builder;
     builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
     builder.SetMaxReceiveMessageSize(kMaxRequestBytes);

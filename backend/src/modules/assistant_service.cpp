@@ -1453,13 +1453,28 @@ class AssistantWorker {
         return backend_ != nullptr || admission_ != nullptr;
     }
 
+    /**
+     * Whether THIS process holds the weights, as opposed to being able to
+     * reach something that does.
+     *
+     * Distinct from `available()` on purpose. The startup banner and the
+     * documented cutover check (`grep -c 'model is LOADED'`, one line per
+     * replica per assistant) are asking where the model physically IS -- a
+     * submit-only replica answering "LOADED" would make that count describe a
+     * fleet that does not exist, which is exactly the class of wrong-layer
+     * health signal this project has been bitten by before.
+     */
+    [[nodiscard]] auto local_model_loaded() const noexcept -> bool {
+        return backend_ != nullptr;
+    }
+
     [[nodiscard]] auto submit(std::string prompt) -> std::optional<InferenceOutcome> {
-        if (backend_ == nullptr) {
+        if (backend_ == nullptr && admission_ == nullptr) {
             // Defense in depth: the RPC handler is expected to check
             // available() first, but if this is ever reached anyway there is
-            // no owner thread to fulfil a queued job's promise -- returning a
-            // populated failure here, rather than enqueueing, is what stands
-            // between this and a permanent hang.
+            // no owner thread to fulfil a queued job's promise and no queue to
+            // hand it to -- returning a populated failure here, rather than
+            // enqueueing, is what stands between this and a permanent hang.
             return InferenceOutcome{.ok = false, .text = {}, .error = "model not loaded"};
         }
         // `admission_` is non-null only in INFERENCE_QUEUE=postgres mode, and
@@ -3132,9 +3147,17 @@ auto RegisterAssistantService(grpc::ServerBuilder& builder) -> void {
     // here is logged and swallowed, never propagated -- per the design
     // brief, a missing or broken model must degrade this ONE service, not
     // take down the calculator and finance services sharing this port.
-    const bool loaded = AssistantWorker::instance().available();
+    // Three distinct states, and the banner must not conflate them. The
+    // documented cutover check counts "model is LOADED" lines -- one per
+    // replica per assistant -- so a submit-only replica claiming LOADED would
+    // make that count describe weights the fleet does not hold.
+    const auto& worker = AssistantWorker::instance();
     logger::Logger::getInstance().info(
-        "Strategy assistant model is {}", loaded ? "LOADED" : "UNAVAILABLE (set MODEL_PATH to enable)");
+        "Strategy assistant model is {}",
+        worker.local_model_loaded() ? "LOADED"
+        : worker.available()
+            ? "NOT LOCAL -- submitting to the shared inference queue (no weights in this replica)"
+            : "UNAVAILABLE (set MODEL_PATH to enable)");
 }
 
 auto RegisterAssistantServiceForTest(grpc::ServerBuilder& builder,
