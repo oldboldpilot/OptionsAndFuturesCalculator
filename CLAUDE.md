@@ -94,10 +94,10 @@ device=cpu`, at every boot. `MODEL_URL` / `MORTGAGE_MODEL_URL` point at a
 private artifact host, with `MODEL_SHA256` / `MORTGAGE_MODEL_SHA256` set
 alongside them.
 
-**Those variables are on `assistant-worker`, NOT on
-`options-calculator-backend`, as of 2026-08-22** — the fleet is split, and the
-engine deliberately carries no weights. See "The split fleet" below before
-reading anything else here as describing the engine.
+They are set on `options-calculator-backend` itself. A split fleet that moved
+them to a separate worker was tried on 2026-08-22 and reverted the next day —
+see "The split fleet was tried and REVERTED" below before concluding the
+weights live anywhere else.
 
 The history, which still matters: the private HuggingFace repository the fetch
 originally used was **deleted on 2026-08-05** at the owner's instruction — the
@@ -834,8 +834,7 @@ is sized as what it is:
 | partner | 2400 | 1,200,000 | per caller, **per replica** |
 
 **Every number in that table is multiplied by the ENGINE's replica count, and
-`railway.json` sets `numReplicas: 2`** (`assistant-worker` serves no user
-traffic and has no quota buckets of its own — see "The split fleet" above) (lowered from 3 on 2026-08-21 for cost —
+`railway.json` sets `numReplicas: 2`** (lowered from 3 on 2026-08-21 for cost —
 see the memory section above) (raised from 2 on 2026-08-10). `callers_` is an in-process
 `std::unordered_map` behind a process mutex (`quota.cpp:82`), a Meyers singleton
 with no persistence of any kind, so each replica refills its own buckets. The
@@ -1364,91 +1363,72 @@ proves the anonymous number is the one actually applied. Mutation-checked both
 ways — dropping the marker fails one check, applying it unconditionally fails
 four.
 
-## The split fleet: where the weights are
+## The split fleet was tried and REVERTED — the weights are on the engine
 
-**`options-calculator-backend` carries NO assistant weights.** As of
-2026-08-22 the models live in a separate service, `assistant-worker`, and the
-engine's assistants run SUBMIT-ONLY: they accept the RPC, hand the work to the
-shared inference queue, and a worker that does hold the weights executes it.
+**`options-calculator-backend` carries both models on every replica, and that is
+the intended state.** A split fleet — model-less engine replicas submitting to a
+single `assistant-worker` that held the weights — was built, deployed and
+verified working on 2026-08-22, then **reverted the next day**. The
+`assistant-worker` service is deleted. `MODEL_URL` / `MORTGAGE_MODEL_URL` belong
+on the engine.
 
-| | replicas | weights | role |
-| --- | --- | --- | --- |
-| `options-calculator-backend` | 2 | **none** | serves both sites' calculator + finance RPCs; submits assistant work |
-| `assistant-worker` | 1 | both GGUFs | leases from the queue, decodes, writes back. No domain, no user traffic |
+It worked: the production holdout returned 11/16 on the identical
+`.PPPPP.PP.P.P.PP` pattern from a fleet where no replica held weights, engine
+replicas ran at **0.10 GiB** each, and the fleet was 2.05 GiB = $22/mo against
+2.96 GiB = $31/mo with weights local.
 
-Measured live after the cutover: engine **0.10 GiB per replica**, worker
-**1.85 GiB**, fleet **2.05 GiB — $22/month** against 2 x 1.48 GiB = $31 before
-the split and 3 x 4.35 GiB = $138 at the start of the memory work.
+**It was reverted because it halved parallel execution to buy $10/month.** Two
+model-carrying replicas decode concurrently; one worker does not. Measured on
+the 16-row holdout, concurrent wall time:
 
-**The invariant, and it is the whole thing: exactly one side holds the
-weights.** If both do, the split saves nothing. If neither does, every
-assistant request refuses. The startup banner is the check, and it exists
-precisely because `available()` is true in BOTH states and cannot tell them
-apart:
+| | concurrent (16 requests) |
+| --- | --- |
+| 2 replicas, weights local | 32.0 s |
+| split fleet, 1 worker | **65.7 s** |
+| 2 replicas, weights local (restored) | 38.4 / 37.8 / 35.1 s |
 
-```
-assistant-worker            "Mortgage assistant model is LOADED"
-options-calculator-backend  "Mortgage assistant model is NOT LOCAL -- submitting to the shared inference queue"
-```
+A clean 2x when executors halved, and recovery when restored. **Do not
+re-introduce a single-worker split without a throughput budget that says the
+capacity is spare.**
 
-`local_model_loaded()` (is it in THIS process) is what the banner reads;
-`available()` (can this replica serve the RPC at all) is what the RPC gate
-reads. Conflating them is not hypothetical — the banner DID key on
-`available()` for one build, so a model-less replica logged `LOADED`, and the
-documented cutover check `grep -c 'model is LOADED'` would have reported
-weights the fleet does not hold.
+**The methodology lesson is the more valuable half, and it was paid for twice.**
+The decision to ship the split rested on a "latency cost" computed from ONE
+sequential run before and ONE after (79.7 s -> 113.0 s, reported as ~1.4x). On
+repeated runs the SAME configuration that produced 79.7 s measured 131.4 s,
+138.8 s and 116.9 s — a 22 s spread across three runs, far larger than the
+33 s the queue was being blamed for, and all of it ABOVE the split fleet's own
+113.0 s. The
+sequential figure does not track configuration and never supported the claim.
+Correctness here was gated on repeated byte-identical runs; the performance
+claim was n=1. **Apply the same evidence bar to a throughput number as to a
+correctness one, or do not quote it.**
 
-**Deploy order is worker FIRST, engine second, and it is not cosmetic.** While
-the engine still carries weights it can execute locally, so a worker that is
-not yet leasing costs nothing. Flipping the engine first opens a window where
-nobody holds the models and every assistant request fails.
+What survives and is worth keeping:
 
-**Rollback** is the same order reversed: set `MODEL_URL` /
-`MORTGAGE_MODEL_URL` back on the engine, redeploy, and the queue becomes an
-optimisation again rather than the only path. Both are BUILD-time — the image
-fetches the weights — so a variable change alone does nothing until a redeploy.
-
-**A model-less engine reaches submit-only through a chain worth knowing.** The
-Dockerfile cannot conditionally omit an `ENV`, so a build with no `MODEL_URL`
-sets `MODEL_PATH` to an EMPTY STRING rather than leaving it unset; `start.sh`
-additionally unsets any path naming a file that does not exist; and
-`env_string` treats empty as absent. All three have to hold, and they do — but
-a `MODEL_PATH` that survived as a non-empty dangling path would make the
-engine refuse every request instead of submitting, because a load failure
-returns before `configure_inference_queue()` runs.
-
-**What it costs, measured rather than assumed.** The queue hop roughly doubles
-assistant latency: the 16-row holdout went 80 s -> 113 s sequential and
-32 s -> 66 s concurrent. Assistant capacity is one replica; the calculator and
-finance RPCs keep both, so the sites' main paths are unaffected. A worker
-restart takes the assistants down for its boot; it does not touch the
-calculator.
-
-**Two traps specific to deploying the worker**, both of which cost a build:
-
-- `backend/models/` must EXIST in the upload — `backend/Dockerfile` does
-  `COPY backend/models/ /model-staged/`, which fails outright if the directory
-  is absent. Exclude the `.gguf` files (639 MB each, fetched from `MODEL_URL`),
-  never the directory.
-- `BUCKET_ACCESS_KEY_ID` / `BUCKET_SECRET_ACCESS_KEY` are REQUIRED. The image
-  fetches both GGUFs from the private Railway bucket with SigV4 and, when they
-  are empty, silently falls through to a plain `wget` the bucket rejects — the
-  build then fails minutes later inside a 60-line shell step whose error is
-  about the checksum, not about credentials.
-
-`deploy/assistant-worker/` carries the service's `railway.json`, its deploy
-script and a README; the upload is staged for the same reason the queue nodes'
-is — Railway reads `railway.json` from the ROOT of the upload, and the one at
-the repository root describes the ENGINE.
-
-**`ENGINE_GRPC_PORT`, never `PORT`.** The engine's gRPC listener is
-configurable so two engines can run on one host for a split-fleet test —
-without that they both bind 50051 and `SO_REUSEPORT` makes the kernel SPLIT
-requests between them rather than failing the second bind. But Railway injects
-`PORT=8080` into this service and **8080 is ENVOY's listener**; Envoy proxies
-to the engine on 50051. Reading `PORT` would put the engine on Envoy's own
-port and leave Envoy proxying to nothing — a full outage for both sites, from
-a variable whose name means the opposite of what it looks like here.
+- `NoLocalBackend`, the submit-only paths, and `local_model_loaded()` are still
+  in the tree and still correct — a replica with no weights CAN serve the
+  assistant RPCs through the queue. Nothing enables it today.
+- **`local_model_loaded()` vs `available()` is load-bearing regardless.** The
+  first is "are the weights in THIS process", the second is "can this replica
+  serve the RPC at all". The startup banner must read the first: it keyed on
+  `available()` for one build, so a model-less replica logged `model is LOADED`
+  and the documented cutover check `grep -c 'model is LOADED'` would have
+  reported weights the fleet did not hold.
+- **`ENGINE_GRPC_PORT`, never `PORT`.** The gRPC listener is configurable so two
+  engines can run on one host — without it they both bind 50051 and
+  `SO_REUSEPORT` makes the kernel SPLIT requests between them rather than
+  failing the second bind. But Railway injects `PORT=8080` into this service and
+  **8080 is ENVOY's listener**; Envoy proxies to the engine on 50051. Reading
+  `PORT` would put the engine on Envoy's own port and leave Envoy proxying to
+  nothing — a full outage for both sites, from a variable whose name means the
+  opposite of what it looks like here.
+- `deploy/assistant-worker/` is kept as a working template for a second engine
+  service, with the two traps that each cost a build recorded in it:
+  `backend/models/` must exist in the upload (the Dockerfile `COPY`s it — exclude
+  only the `.gguf` files), and `BUCKET_ACCESS_KEY_ID` /
+  `BUCKET_SECRET_ACCESS_KEY` are required or the image falls through to a
+  `wget` the private bucket rejects and fails minutes later with a checksum
+  error that never mentions credentials.
 
 ## Memory, and what the Railway bill is actually buying
 
