@@ -14,6 +14,19 @@ ENVIRONMENT="273bbc5d-b59f-4d36-9ef4-69b5d79dabaf"      # production
 SERVICE="f3161ac3-7bd4-4582-9e47-3421ad48b5a2"          # assistant-worker
 SERVICE_NAME="assistant-worker"
 
+# Variables this service needs, and the two that are easy to miss:
+#
+#   MODEL_URL / MODEL_SHA256 / MORTGAGE_MODEL_URL / MORTGAGE_MODEL_SHA256
+#   INFERENCE_QUEUE (+ SGEE_PEERS and the three SGEE_TLS_*_B64, or DATABASE_URL)
+#   MORTGAGE_GRAMMAR, SENSEN_QKV_FUSION
+#   BUCKET_ACCESS_KEY_ID / BUCKET_SECRET_ACCESS_KEY   <-- see below
+#
+# The bucket credentials are not optional. backend/Dockerfile fetches both
+# GGUFs from the private Railway bucket with SigV4 and, when they are empty,
+# silently falls through to a plain wget the bucket rejects -- the build then
+# fails MINUTES later inside a 60-line shell step whose error is about the
+# checksum, not about credentials. Copy them from the engine.
+
 DRY_RUN=0
 [[ "${1:-}" == "--dry-run" ]] && DRY_RUN=1
 
@@ -54,7 +67,7 @@ trap 'rm -rf "${STAGE}"' EXIT
 # BUILD_PYTHON_BINDINGS, BUILD_BENCHMARKS and BUILD_EXAMPLES OFF.
 rsync -a --quiet \
     --exclude 'build/' --exclude 'build-*/' --exclude '*.log' \
-    --exclude 'models/' --exclude 'node_modules/' --exclude '__pycache__/' \
+    --exclude 'models/*.gguf' --exclude 'node_modules/' --exclude '__pycache__/' \
     --exclude '.git' --exclude '.venv/' \
     --exclude 'external/SGEE/web-lsp/' --exclude 'external/SGEE/vscode-extension/' \
     --exclude 'BigBrotherAnalytics/' \
@@ -71,7 +84,14 @@ cp "${HERE}/railway.json" "${STAGE}/railway.json"
 pruned=$(find "${STAGE}" -xtype l -print -delete | wc -l)
 [[ "${pruned}" -gt 0 ]] && echo "[deploy] pruned ${pruned} dangling symlink(s)"
 
-for required in backend/Dockerfile backend/src/main.cpp railway.json; do
+# backend/models/ must EXIST in the stage: backend/Dockerfile does
+# `COPY backend/models/ /model-staged/`, which fails the build outright if the
+# directory is absent ("/backend/models: not found", several minutes in, with
+# nothing pointing at the exclusion list that ate it). Only the .gguf files are
+# excluded -- they are 639 MB each and the image fetches the real weights from
+# MODEL_URL at build time; the staging path exists so a LOCAL docker build can
+# use a locally held checkpoint.
+for required in backend/Dockerfile backend/src/main.cpp backend/models railway.json; do
     [[ -e "${STAGE}/${required}" ]] || { echo "ERROR: ${required} missing from stage" >&2; exit 1; }
 done
 grep -q '"numReplicas": 1' "${STAGE}/railway.json" || {
