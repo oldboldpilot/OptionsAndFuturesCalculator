@@ -72,6 +72,7 @@ smoke client.
 ## Session logs
 
 - [2026-08-20 — the mortgage assistant was never broken: three dataset defects, a vocabulary extension that starved the adapters, and three retrains to prove it](session_logs/session_2026-08-20_mortgage_corpus_and_three_retrains.md)
+- [2026-08-25 — stale-branch sweep: the resident-memory work was serving production from an unmerged branch, and `ninja build_tests` never relinked the engine](session_logs/session_2026-08-25_stale_branch_sweep.md)
 - [2026-08-19 — a closing-costs RPC the assistant could not name, the four tables an operation must reach, and a guarded use with an unguarded import](session_logs/session_2026-08-19_closing_costs_rpc.md)
 - [2026-08-17 — the 404 was still serving ads on thirteen words: a denylist cannot protect the one route nobody enumerates, and the tests were written from the same list as the code](session_logs/session_2026-08-17_adsense_404_served_ads.md)
 - [2026-08-16 (second) — mortgagefvcalculator's dark green, panels that were compressing rather than scrolling, and splitting the guides onto their own tab with the ads following the writing](session_logs/session_2026-08-16_theme_layout_and_guides_tab.md)

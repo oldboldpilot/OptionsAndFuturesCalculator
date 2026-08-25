@@ -802,7 +802,7 @@ built objects, not by reading:
 
 ```
 nm -uC calculator_service.cpp.o | grep -c 'pg::'  -> 0
-nm -uC strategy_store.cpp.o     | grep -c 'pg::'  -> 11
+nm -uC strategy_store.cpp.o     | grep -c 'pg::'  -> 13
 nm -uC pg.cppm.o                | grep -c 'PQ'    -> 18
 ```
 
@@ -1685,8 +1685,10 @@ the embedding lookup, once copied as Q8_0 for the output projection:
 | attention + FFN, Q8_0 | 446.2 MB | 446.2 MB |
 | **live weights** | **1,205 MB** | **604 MB** |
 
-Fixed in sensen `604d1d1c` (branch `perf/quantized-resident-embedding`, off the
-pinned `652064bf`): `TokenEmbedding` gained a quantized-resident mode holding
+Fixed in sensen `604d1d1c`, **on master since `7aa1d94e` (2026-08-25)** — it
+shipped from the branch `perf/quantized-resident-embedding` for four days, which
+is why older notes name a branch; that branch is merged and deleted:
+`TokenEmbedding` gained a quantized-resident mode holding
 the GGUF tensor's own bytes and dequantizing a row on first lookup, and the tied
 `lm_head` points at those same bytes. **Boot RSS 5,420.1 -> 4,235.7 MB
 (-1,184 MB, against -1,202 MB predicted from the table above).**
@@ -1766,18 +1768,65 @@ amount but is a behaviour change for long requests: `cfg.max_seq_len` also feeds
 the sequence-length refusal checks and, on a CUDA build, the paged-attention
 partition choice. Sharing has no such coupling.
 
-**Known and NOT fixed: `SENSEN_QKV_FUSION=0` recovers nothing.**
+**`SENSEN_QKV_FUSION=0` recovered nothing, and it is now FIXED.** This section
+read "Known and NOT fixed" until 2026-08-25; the fix is sensen `dc51084b`.
 `build_qkv_decode_plan()` interleaves Q+K+V into `qkv_fused_storage_` — a full
 second copy, 124,780,544 B (119 MiB) per model, with `q_wq_`/`q_wk_`/`q_wv_`
-retained. The env var is checked only at USE (`multi_head_attention.cppm:2533`,
-`:3001`), never at build, so setting it to 0 measured byte-identical memory.
-Honouring it at build is a one-line change worth −119 MB per model, at the cost
-of three matvec dispatches per decode step instead of one. Freeing the
-originals instead (keeping fusion) needs an audit of the non-plan paths that
-still read them.
+retained. `qkv_fusion_enabled()` was consulted only where the plan is USED
+(`multi_head_attention.cppm:2537`, `:3005`), never where it is BUILT, so setting
+the flag to 0 removed the benefit and left the entire cost — byte-identical
+resident memory with the flag set and unset. The fix is one early return at the
+build site (`:3480`). **The default is still ON**, so nothing changes unless an
+operator asks for it.
+
+Measured, both models loaded, three runs each:
+
+| | boot RSS | 20 requests |
+| --- | --- | --- |
+| fusion ON (default) | 2,942 MB | 19.8 / 19.9 / 19.9 s |
+| fusion OFF | **2,703 MB** | 19.8 / 19.9 / 19.9 s |
+
+−239 MB, and **the decode cost this was supposed to trade away did not appear.**
+State the limit rather than the win: that is a SEQUENTIAL harness, and the
+fusion exists to cut per-decode-step dispatch count, whose benefit would show
+under CONCURRENT decode. The expected trade-off did not reproduce; do not read
+the table as proof fusion is worthless.
 
 **The remaining per-model anonymous memory is ~660 MB and is the actual Q8_0
 weights.** It is irreducible without changing quantization.
+
+### Pin the submodule to a BRANCH and master stops describing production
+
+All four memory fixes above shipped to production on 2026-08-21 from
+`perf/quantized-resident-embedding`, and `backend/sensen`'s pointer named that
+branch tip rather than a commit on master. Nothing was broken by it — a
+submodule pin is a commit id and works the same either way — but the
+consequence is that **sensen's master did not describe what runs**, and a branch
+carrying live code is indistinguishable at a glance from an abandoned
+experiment.
+
+Merged to master as `7aa1d94e` on 2026-08-25 and the branch deleted on both
+remotes. Two things about that merge are worth keeping:
+
+- **It merged with zero conflicts and that proved nothing.** Master had moved
+  six commits, two of them in the same files — `1069a49f`'s paged-int8 KV pool
+  fix and `e2056a3c`'s device-greedy repetition window, both in attention, where
+  `65adac57` and `dc51084b` also live. Git merged them because they touched
+  different LINES. The gate was the parent engine's build plus **100/100 ctest**
+  against the merged tree, not the absence of conflict markers.
+- **`ninja build_tests` does not build `calculator_engine`.** Its dependency
+  sweep matches `^test_` only (`backend/CMakeLists.txt:2176`), which is correct —
+  it exists to build what ctest runs. But it means a green `build_tests && ctest`
+  can sit next to a **deploy binary that predates the change**: measured here,
+  the sensen objects relinked at 07:35 while `calculator_engine` still dated from
+  the previous evening. Run plain `ninja -C backend/build` as well before
+  deploying, and check the binary's mtime rather than trusting "no work to do".
+
+A C++20 module symbol also carries its module in the mangled name —
+`sensen::RotaryEmbedding@sensen.rotary_embedding::shared(...)` — so
+`nm | grep 'Class::method'` reports MISSING for every module-owned entity in
+this tree. Grep the bare method name, or the count is a lie in the direction
+that looks like a failed link.
 
 **The lesson, since this file has now paid for it twice:** a plausible mechanism
 with the right order of magnitude is not a finding. Seven of them were wrong
