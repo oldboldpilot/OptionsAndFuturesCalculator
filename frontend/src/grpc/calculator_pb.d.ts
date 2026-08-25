@@ -800,3 +800,157 @@ export namespace RiskFreeRateResponse {
   }
 }
 
+export class SavedStrategy extends jspb.Message {
+  getId(): string;
+  setId(value: string): SavedStrategy;
+
+  getName(): string;
+  setName(value: string): SavedStrategy;
+
+  getRequest(): StrategyRequest | undefined;
+  setRequest(value?: StrategyRequest): SavedStrategy;
+  hasRequest(): boolean;
+  clearRequest(): SavedStrategy;
+
+  getCreatedAt(): string;
+  setCreatedAt(value: string): SavedStrategy;
+
+  getUpdatedAt(): string;
+  setUpdatedAt(value: string): SavedStrategy;
+
+  serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): SavedStrategy.AsObject;
+  static toObject(includeInstance: boolean, msg: SavedStrategy): SavedStrategy.AsObject;
+  static serializeBinaryToWriter(message: SavedStrategy, writer: jspb.BinaryWriter): void;
+  static deserializeBinary(bytes: Uint8Array): SavedStrategy;
+  static deserializeBinaryFromReader(message: SavedStrategy, reader: jspb.BinaryReader): SavedStrategy;
+}
+
+export namespace SavedStrategy {
+  export type AsObject = {
+    id: string,
+    name: string,
+    request?: StrategyRequest.AsObject,
+    createdAt: string,
+    updatedAt: string,
+  }
+}
+
+export class SaveStrategyRequest extends jspb.Message {
+  getName(): string;
+  setName(value: string): SaveStrategyRequest;
+
+  getRequest(): StrategyRequest | undefined;
+  setRequest(value?: StrategyRequest): SaveStrategyRequest;
+  hasRequest(): boolean;
+  clearRequest(): SaveStrategyRequest;
+
+  serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): SaveStrategyRequest.AsObject;
+  static toObject(includeInstance: boolean, msg: SaveStrategyRequest): SaveStrategyRequest.AsObject;
+  static serializeBinaryToWriter(message: SaveStrategyRequest, writer: jspb.BinaryWriter): void;
+  static deserializeBinary(bytes: Uint8Array): SaveStrategyRequest;
+  static deserializeBinaryFromReader(message: SaveStrategyRequest, reader: jspb.BinaryReader): SaveStrategyRequest;
+}
+
+export namespace SaveStrategyRequest {
+  export type AsObject = {
+    name: string,
+    request?: StrategyRequest.AsObject,
+  }
+}
+
+export class SaveStrategyResponse extends jspb.Message {
+  getStrategy(): SavedStrategy | undefined;
+  setStrategy(value?: SavedStrategy): SaveStrategyResponse;
+  hasStrategy(): boolean;
+  clearStrategy(): SaveStrategyResponse;
+
+  getReplacedExisting(): boolean;
+  setReplacedExisting(value: boolean): SaveStrategyResponse;
+
+  serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): SaveStrategyResponse.AsObject;
+  static toObject(includeInstance: boolean, msg: SaveStrategyResponse): SaveStrategyResponse.AsObject;
+  static serializeBinaryToWriter(message: SaveStrategyResponse, writer: jspb.BinaryWriter): void;
+  static deserializeBinary(bytes: Uint8Array): SaveStrategyResponse;
+  static deserializeBinaryFromReader(message: SaveStrategyResponse, reader: jspb.BinaryReader): SaveStrategyResponse;
+}
+
+export namespace SaveStrategyResponse {
+  export type AsObject = {
+    strategy?: SavedStrategy.AsObject,
+    replacedExisting: boolean,
+  }
+}
+
+export class ListStrategiesRequest extends jspb.Message {
+  serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): ListStrategiesRequest.AsObject;
+  static toObject(includeInstance: boolean, msg: ListStrategiesRequest): ListStrategiesRequest.AsObject;
+  static serializeBinaryToWriter(message: ListStrategiesRequest, writer: jspb.BinaryWriter): void;
+  static deserializeBinary(bytes: Uint8Array): ListStrategiesRequest;
+  static deserializeBinaryFromReader(message: ListStrategiesRequest, reader: jspb.BinaryReader): ListStrategiesRequest;
+}
+
+export namespace ListStrategiesRequest {
+  export type AsObject = {
+  }
+}
+
+export class ListStrategiesResponse extends jspb.Message {
+  getStrategiesList(): Array<SavedStrategy>;
+  setStrategiesList(value: Array<SavedStrategy>): ListStrategiesResponse;
+  clearStrategiesList(): ListStrategiesResponse;
+  addStrategies(value?: SavedStrategy, index?: number): SavedStrategy;
+
+  serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): ListStrategiesResponse.AsObject;
+  static toObject(includeInstance: boolean, msg: ListStrategiesResponse): ListStrategiesResponse.AsObject;
+  static serializeBinaryToWriter(message: ListStrategiesResponse, writer: jspb.BinaryWriter): void;
+  static deserializeBinary(bytes: Uint8Array): ListStrategiesResponse;
+  static deserializeBinaryFromReader(message: ListStrategiesResponse, reader: jspb.BinaryReader): ListStrategiesResponse;
+}
+
+export namespace ListStrategiesResponse {
+  export type AsObject = {
+    strategiesList: Array<SavedStrategy.AsObject>,
+  }
+}
+
+export class DeleteStrategyRequest extends jspb.Message {
+  getId(): string;
+  setId(value: string): DeleteStrategyRequest;
+
+  serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): DeleteStrategyRequest.AsObject;
+  static toObject(includeInstance: boolean, msg: DeleteStrategyRequest): DeleteStrategyRequest.AsObject;
+  static serializeBinaryToWriter(message: DeleteStrategyRequest, writer: jspb.BinaryWriter): void;
+  static deserializeBinary(bytes: Uint8Array): DeleteStrategyRequest;
+  static deserializeBinaryFromReader(message: DeleteStrategyRequest, reader: jspb.BinaryReader): DeleteStrategyRequest;
+}
+
+export namespace DeleteStrategyRequest {
+  export type AsObject = {
+    id: string,
+  }
+}
+
+export class DeleteStrategyResponse extends jspb.Message {
+  getDeleted(): boolean;
+  setDeleted(value: boolean): DeleteStrategyResponse;
+
+  serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): DeleteStrategyResponse.AsObject;
+  static toObject(includeInstance: boolean, msg: DeleteStrategyResponse): DeleteStrategyResponse.AsObject;
+  static serializeBinaryToWriter(message: DeleteStrategyResponse, writer: jspb.BinaryWriter): void;
+  static deserializeBinary(bytes: Uint8Array): DeleteStrategyResponse;
+  static deserializeBinaryFromReader(message: DeleteStrategyResponse, reader: jspb.BinaryReader): DeleteStrategyResponse;
+}
+
+export namespace DeleteStrategyResponse {
+  export type AsObject = {
+    deleted: boolean,
+  }
+}
+

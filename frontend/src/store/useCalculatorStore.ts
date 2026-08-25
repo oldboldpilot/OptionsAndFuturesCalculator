@@ -439,6 +439,98 @@ let calculationSeq = 0;
  */
 let legSeq = 0;
 
+
+/**
+ * Everything the wire request needs, with no store coupling.
+ *
+ * Passed as one object rather than seven positional arguments so a caller
+ * cannot silently transpose `impliedVolatility` and `riskFreeRate` -- two
+ * unrelated decimals that would both look plausible in either slot.
+ */
+export interface StrategyRequestInput {
+  symbol: string;
+  spotPrice: number;
+  impliedVolatility: number;
+  riskFreeRate: number;
+  dividendYield: number;
+  legs: Leg[];
+  /** Fallback expiry for a leg that carries none of its own. */
+  horizonDays: number;
+}
+
+/**
+ * Builds the `StrategyRequest` that goes on the wire.
+ *
+ * EXTRACTED, not duplicated, and that is the point: saving a scenario has to
+ * send exactly what pricing it sends, or a reopened scenario prices differently
+ * from the one the user saved. Two copies of this mapping would agree on the
+ * day they were written and drift on the first field added to `Leg` -- the same
+ * failure this repository has already paid for twice, once with two
+ * incompatible copies of calculator.proto and once with a stale
+ * calculator_pb.js. One definition, two callers.
+ */
+export function buildStrategyRequest(input: StrategyRequestInput): StrategyRequest {
+  const req = new StrategyRequest();
+  req.setUnderlyingSymbol(input.symbol);
+  req.setCurrentPrice(input.spotPrice);
+  req.setImpliedVolatility(input.impliedVolatility);
+  req.setRiskFreeRate(input.riskFreeRate);
+  // Always sent, including zero. Zero is meaningful — it says 'no dividend
+  // modelled' — and the engine's q == 0 path is bit-for-bit plain
+  // Black-Scholes, so this cannot perturb a non-dividend position.
+  req.setDividendYield(input.dividendYield);
+
+  // Averaging style onto the wire enum. Written as an exhaustive record
+  // rather than a chain of ternaries so that adding a style to
+  // `AsianStyle` fails to compile here instead of silently falling
+  // through to NOT_ASIAN -- the one value that means "there is nothing
+  // special about this leg".
+  const WIRE_ASIAN_TYPE: Record<AsianStyle, ProtoLeg.AsianType> = {
+    NOT_ASIAN: ProtoLeg.AsianType.NOT_ASIAN,
+    AVERAGE_PRICE: ProtoLeg.AsianType.AVERAGE_PRICE,
+    AVERAGE_STRIKE: ProtoLeg.AsianType.AVERAGE_STRIKE,
+  };
+
+  const legType = (l: Leg) => {
+    switch (l.option_type) {
+      case 'CALL': return ProtoLeg.Type.CALL;
+      case 'PUT': return ProtoLeg.Type.PUT;
+      case 'FUTURE': return ProtoLeg.Type.FUTURE;
+      default: return ProtoLeg.Type.STOCK;
+    }
+  };
+
+  req.setLegsList(
+    input.legs.map((l) => {
+      const isOption = l.option_type === 'CALL' || l.option_type === 'PUT';
+      const pLeg = new ProtoLeg();
+      pLeg.setAction(l.action === 'BUY' ? ProtoLeg.Action.BUY : ProtoLeg.Action.SELL);
+      pLeg.setType(legType(l));
+      pLeg.setStrike(l.strike_price);
+      pLeg.setExpirationDays(l.expiration_days ?? input.horizonDays);
+      pLeg.setQuantity(l.quantity);
+      // The entry price and per-leg IV had no field on the old proto, so
+      // every leg reached the engine priced at zero with no volatility.
+      pLeg.setPremium(l.premium);
+      pLeg.setImpliedVolatility(l.implied_volatility ?? 0);
+      pLeg.setContractMultiplier(isOption ? 100 : 1);
+      // Sent for EVERY leg, not only option legs. A futures or stock leg
+      // has no averaging window, so nothing in this client ever marks one
+      // Asian -- but suppressing the field here on a leg that did carry a
+      // style would drop it silently, and the engine is the side that gets
+      // to say a leg is malformed. `averaging_states` is deliberately not
+      // sent: zero means "engine default", and this UI has no control for
+      // it, so sending a client-chosen grid size would be an assumption
+      // the trader never made.
+      pLeg.setAsianType(WIRE_ASIAN_TYPE[l.asian_type ?? 'NOT_ASIAN']);
+      return pLeg;
+    }),
+  );
+
+
+  return req;
+}
+
 export const useCalculatorStore = create<CalculatorState>((set, get) => ({
   symbol: 'SPY',
   assetClass: 'EQUITY',
@@ -929,63 +1021,15 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
     try {
       const backendUrl = process.env.NEXT_PUBLIC_API_URL || 'https://api.optionsandfuturescalculator.com';
       const client = new OptionsCalculatorClient(backendUrl);
-      const req = new StrategyRequest();
-      req.setUnderlyingSymbol(symbol);
-      req.setCurrentPrice(spotPrice);
-      req.setImpliedVolatility(iv);
-      req.setRiskFreeRate(rate);
-      // Always sent, including zero. Zero is meaningful — it says 'no dividend
-      // modelled' — and the engine's q == 0 path is bit-for-bit plain
-      // Black-Scholes, so this cannot perturb a non-dividend position.
-      req.setDividendYield(get().dividendYield);
-
-      // Averaging style onto the wire enum. Written as an exhaustive record
-      // rather than a chain of ternaries so that adding a style to
-      // `AsianStyle` fails to compile here instead of silently falling
-      // through to NOT_ASIAN -- the one value that means "there is nothing
-      // special about this leg".
-      const WIRE_ASIAN_TYPE: Record<AsianStyle, ProtoLeg.AsianType> = {
-        NOT_ASIAN: ProtoLeg.AsianType.NOT_ASIAN,
-        AVERAGE_PRICE: ProtoLeg.AsianType.AVERAGE_PRICE,
-        AVERAGE_STRIKE: ProtoLeg.AsianType.AVERAGE_STRIKE,
-      };
-
-      const legType = (l: Leg) => {
-        switch (l.option_type) {
-          case 'CALL': return ProtoLeg.Type.CALL;
-          case 'PUT': return ProtoLeg.Type.PUT;
-          case 'FUTURE': return ProtoLeg.Type.FUTURE;
-          default: return ProtoLeg.Type.STOCK;
-        }
-      };
-
-      req.setLegsList(
-        legs.map((l) => {
-          const isOption = l.option_type === 'CALL' || l.option_type === 'PUT';
-          const pLeg = new ProtoLeg();
-          pLeg.setAction(l.action === 'BUY' ? ProtoLeg.Action.BUY : ProtoLeg.Action.SELL);
-          pLeg.setType(legType(l));
-          pLeg.setStrike(l.strike_price);
-          pLeg.setExpirationDays(l.expiration_days ?? days);
-          pLeg.setQuantity(l.quantity);
-          // The entry price and per-leg IV had no field on the old proto, so
-          // every leg reached the engine priced at zero with no volatility.
-          pLeg.setPremium(l.premium);
-          pLeg.setImpliedVolatility(l.implied_volatility ?? 0);
-          pLeg.setContractMultiplier(isOption ? 100 : 1);
-          // Sent for EVERY leg, not only option legs. A futures or stock leg
-          // has no averaging window, so nothing in this client ever marks one
-          // Asian -- but suppressing the field here on a leg that did carry a
-          // style would drop it silently, and the engine is the side that gets
-          // to say a leg is malformed. `averaging_states` is deliberately not
-          // sent: zero means "engine default", and this UI has no control for
-          // it, so sending a client-chosen grid size would be an assumption
-          // the trader never made.
-          pLeg.setAsianType(WIRE_ASIAN_TYPE[l.asian_type ?? 'NOT_ASIAN']);
-          return pLeg;
-        }),
-      );
-
+      const req = buildStrategyRequest({
+        symbol,
+        spotPrice,
+        impliedVolatility: iv,
+        riskFreeRate: rate,
+        dividendYield: get().dividendYield,
+        legs,
+        horizonDays: days,
+      });
       const res = await client.calculateStrategy(req, authMetadata());
 
       // The answer arrived, but it is only THIS position's answer if no newer

@@ -16,9 +16,14 @@ module;
 #include <string>
 #include <vector>
 
+#include <cstdlib>
+
 #include <grpcpp/grpcpp.h>
 #include "calculator.pb.h"
 #include "calculator.grpc.pb.h"
+// Lossless StrategyRequest <-> JSON, so the stored document IS the wire
+// contract rather than a second hand-written description of it.
+#include <google/protobuf/util/json_util.h>
 
 module calculator_service;
 
@@ -27,6 +32,7 @@ import logger;
 import market_data;
 import api_key;
 import quota;
+import strategy_store;
 
 import sgee.builder.fluent;
 import sgee.runtime.context;
@@ -985,6 +991,16 @@ private:
     // CalculateStrategy below, which is on the hot path and must stay cheap.
     std::uint16_t done_node_id_{0};
 
+    /**
+     * Saved-scenario storage, or null when this deployment has none.
+     *
+     * Null is a SUPPORTED configuration, not a broken one -- a local build with
+     * no DATABASE_URL gets it, and every other RPC in this service is
+     * unaffected. The three saved-scenario RPCs answer FAILED_PRECONDITION;
+     * they never crash and never silently pretend to have saved something.
+     */
+    std::shared_ptr<::options_calculator::store::IStrategyStore> store_;
+
 public:
     /**
      * `bound_action_names` defaults to every action the graph defines, which
@@ -997,8 +1013,9 @@ public:
      * action id) so the postconditions below can be proven to catch it.
      */
     explicit CalculatorServiceImpl(
-        std::span<const std::string_view> bound_action_names = kAllActionNames)
-        : actions_{std::make_shared<ActionRegistry>()} {
+        std::span<const std::string_view> bound_action_names = kAllActionNames,
+        std::shared_ptr<::options_calculator::store::IStrategyStore> store = nullptr)
+        : actions_{std::make_shared<ActionRegistry>()}, store_{std::move(store)} {
         auto& log = logger::Logger::getInstance();
 
         auto graph_result = sgee::Builder<Ctx>("OptionsWorkflow")
@@ -1610,19 +1627,236 @@ public:
                  res.option_strikes_size(), res.available_expirations_size());
         return Status::OK;
     }
+
+    // ----------------------------------------------------------------------
+    // Saved scenarios
+    //
+    // Every one of the three follows the same order, and the order is the
+    // point: resolve identity -> entitlement (which also proves a per-user
+    // subject exists) -> availability -> do the work. Nothing touches storage
+    // before a verified subject is in hand, so there is no path that can write
+    // a row without knowing whose it is.
+    // ----------------------------------------------------------------------
+
+    auto SaveStrategy(ServerContext* context, const calculator::SaveStrategyRequest* request,
+                      calculator::SaveStrategyResponse* response) -> Status override {
+        if (request == nullptr || response == nullptr) {
+            return Status(grpc::StatusCode::INTERNAL, "null request or response");
+        }
+
+        ::options_calculator::auth::Identity identity;
+        if (auto s = resolve_identity(context, "SaveStrategy", identity); !s.ok()) return s;
+        if (auto s = ::options_calculator::auth::check_saved_scenarios_entitlement(identity,
+                                                                                   "SaveStrategy");
+            !s.ok()) {
+            return s;
+        }
+        if (auto s = require_store(); !s.ok()) return s;
+
+        // Trimmed before length-checking, so a name of only spaces is refused
+        // as empty rather than stored as a blank label the list cannot show.
+        const std::string name = trimmed(request->name());
+        if (name.empty()) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT, "A scenario needs a name.");
+        }
+        if (name.size() > ::options_calculator::store::kMaxNameBytes) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          std::format("A scenario name may be at most {} characters.",
+                                      ::options_calculator::store::kMaxNameBytes));
+        }
+        // Refused rather than stored: a scenario with no legs cannot be priced
+        // when reopened, so accepting it would trade an error now for a
+        // confusing one later.
+        if (request->request().legs_size() == 0) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "A scenario needs at least one leg.");
+        }
+
+        std::string payload_json;
+        google::protobuf::json::PrintOptions print_opts;
+        // Zeros are written explicitly. Proto3 would reconstruct them on read
+        // either way, so this is not needed for correctness -- it is so that a
+        // stored document read in psql shows every field it was saved with,
+        // rather than only the ones that happened to be non-default.
+        print_opts.always_print_primitive_fields = true;
+        if (const auto st = google::protobuf::json::MessageToJsonString(
+                request->request(), &payload_json, print_opts);
+            !st.ok()) {
+            logger::Logger::getInstance().error("SaveStrategy: serialize failed: {}",
+                                                std::string{st.message()});
+            return Status(grpc::StatusCode::INTERNAL, "Could not encode this scenario.");
+        }
+
+        auto saved = store_->save(identity.subject, name, request->request().underlying_symbol(),
+                                  payload_json);
+        if (!saved) return store_error_status(saved.error(), "save");
+
+        if (!to_proto(saved->row, response->mutable_strategy())) {
+            return Status(grpc::StatusCode::INTERNAL, "Could not decode the stored scenario.");
+        }
+        response->set_replaced_existing(saved->replaced_existing);
+
+        logger::Logger::getInstance().info("SaveStrategy: user={} name=\"{}\" replaced={}",
+                                           identity.subject, name, saved->replaced_existing);
+        return Status::OK;
+    }
+
+    auto ListStrategies(ServerContext* context, const calculator::ListStrategiesRequest* request,
+                        calculator::ListStrategiesResponse* response) -> Status override {
+        (void)request;  // deliberately empty -- the caller is their token, not a field
+        if (response == nullptr) return Status(grpc::StatusCode::INTERNAL, "null response");
+
+        ::options_calculator::auth::Identity identity;
+        if (auto s = resolve_identity(context, "ListStrategies", identity); !s.ok()) return s;
+        if (auto s = ::options_calculator::auth::check_saved_scenarios_entitlement(
+                identity, "ListStrategies");
+            !s.ok()) {
+            return s;
+        }
+        if (auto s = require_store(); !s.ok()) return s;
+
+        auto rows = store_->list(identity.subject);
+        if (!rows) return store_error_status(rows.error(), "list");
+
+        for (const auto& row : *rows) {
+            // A row whose stored JSON no longer parses is SKIPPED, not fatal.
+            // One unreadable scenario must not make the whole list unopenable;
+            // it is logged so it can be found, and the user sees the rest.
+            if (!to_proto(row, response->add_strategies())) {
+                response->mutable_strategies()->RemoveLast();
+                logger::Logger::getInstance().error(
+                    "ListStrategies: skipping unreadable row id={} user={}", row.id,
+                    identity.subject);
+            }
+        }
+        return Status::OK;
+    }
+
+    auto DeleteStrategy(ServerContext* context, const calculator::DeleteStrategyRequest* request,
+                        calculator::DeleteStrategyResponse* response) -> Status override {
+        if (request == nullptr || response == nullptr) {
+            return Status(grpc::StatusCode::INTERNAL, "null request or response");
+        }
+
+        ::options_calculator::auth::Identity identity;
+        if (auto s = resolve_identity(context, "DeleteStrategy", identity); !s.ok()) return s;
+        if (auto s = ::options_calculator::auth::check_saved_scenarios_entitlement(
+                identity, "DeleteStrategy");
+            !s.ok()) {
+            return s;
+        }
+        if (auto s = require_store(); !s.ok()) return s;
+
+        auto removed = store_->remove(identity.subject, request->id());
+        if (!removed) return store_error_status(removed.error(), "delete");
+
+        // A miss is OK with deleted=false, not NOT_FOUND. Delete is idempotent
+        // from the client's side, and returning an error for "already gone"
+        // would make a retried delete look like a failure.
+        response->set_deleted(*removed);
+        return Status::OK;
+    }
+
+private:
+    /** Shared prologue: the same authenticate() call every other RPC makes. */
+    [[nodiscard]] static auto resolve_identity(ServerContext* context, std::string_view rpc,
+                                               ::options_calculator::auth::Identity& out)
+        -> Status {
+        if (context == nullptr) return Status::OK;
+        return ::options_calculator::auth::KeyRegistry::instance().authenticate(
+            *context, "calculator", rpc, out);
+    }
+
+    [[nodiscard]] auto require_store() const -> Status {
+        if (store_ != nullptr) return Status::OK;
+        // FAILED_PRECONDITION, not INTERNAL: nothing is broken and nothing the
+        // caller sends will help. This deployment simply has no database.
+        return Status(grpc::StatusCode::FAILED_PRECONDITION,
+                      "Saved scenarios are not available on this deployment.");
+    }
+
+    /** Maps a storage failure to the status that describes it to a caller. */
+    [[nodiscard]] static auto store_error_status(::options_calculator::store::StoreError err,
+                                                 std::string_view op) -> Status {
+        using ::options_calculator::store::StoreError;
+        switch (err) {
+            case StoreError::AtCapacity:
+                return Status(grpc::StatusCode::RESOURCE_EXHAUSTED,
+                              std::format("You have reached the limit of {} saved scenarios. "
+                                          "Delete one to save another.",
+                                          ::options_calculator::store::kMaxPerUser));
+            case StoreError::Invalid:
+                return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                              "That scenario request was not valid.");
+            case StoreError::Unavailable:
+                return Status(grpc::StatusCode::UNAVAILABLE,
+                              "Saved scenarios are temporarily unavailable. Try again shortly.");
+            case StoreError::Internal:
+                break;
+        }
+        logger::Logger::getInstance().error("saved-scenarios {}: {}", op,
+                                            ::options_calculator::store::to_string(err));
+        return Status(grpc::StatusCode::INTERNAL, "Saved scenarios failed unexpectedly.");
+    }
+
+    /** Stored row -> wire message. False when the stored JSON no longer parses. */
+    [[nodiscard]] static auto to_proto(const ::options_calculator::store::SavedRow& row,
+                                       calculator::SavedStrategy* out) -> bool {
+        out->set_id(row.id);
+        out->set_name(row.name);
+        out->set_created_at(row.created_at);
+        out->set_updated_at(row.updated_at);
+
+        google::protobuf::json::ParseOptions parse_opts;
+        // A document written by a LATER build that added a field must still
+        // load on THIS one. Failing instead would make every rollback of a
+        // proto change silently unopen a user's saved scenarios.
+        parse_opts.ignore_unknown_fields = true;
+        const auto st = google::protobuf::json::JsonStringToMessage(
+            row.payload_json, out->mutable_request(), parse_opts);
+        return st.ok();
+    }
+
+    [[nodiscard]] static auto trimmed(std::string_view s) -> std::string {
+        constexpr std::string_view kWs = " \t\n\r\f\v";
+        const auto begin = s.find_first_not_of(kWs);
+        if (begin == std::string_view::npos) return {};
+        const auto end = s.find_last_not_of(kWs);
+        return std::string{s.substr(begin, end - begin + 1)};
+    }
 };
 
 auto RegisterCalculatorService(grpc::ServerBuilder& builder) -> void {
+    // DATABASE_URL unset is a SUPPORTED configuration, not a failure: the
+    // factory returns null, the three saved-scenario RPCs answer
+    // FAILED_PRECONDITION, and every other RPC in this service is untouched.
+    // A local build with no database therefore still serves the calculator.
+    //
+    // Construction does not connect -- pg::Pool opens lazily -- so a database
+    // that happens to be down at boot cannot stop the engine from starting.
+    const char* const database_url = std::getenv("DATABASE_URL");
+    auto store = ::options_calculator::store::make_pg_strategy_store(
+        database_url != nullptr ? std::string_view{database_url} : std::string_view{});
+
+    auto& log = logger::Logger::getInstance();
+    if (store == nullptr) {
+        log.warn(
+            "DATABASE_URL is unset -- saved scenarios are disabled on this engine. Every other "
+            "calculator RPC is unaffected.");
+    } else {
+        log.info("Saved scenarios enabled (Postgres).");
+    }
+
     // Static storage duration so the service outlives the builder and the
     // server without either owning it. RegisterService takes the address by
     // gRPC's own contract; ownership stays here.
-    static CalculatorServiceImpl service;
+    static CalculatorServiceImpl service{kAllActionNames, std::move(store)};
     builder.RegisterService(&service);
 }
 
 auto RegisterCalculatorServiceForTest(grpc::ServerBuilder& builder,
-                                      std::span<const std::string_view> bound_action_names)
-    -> void {
+                                      std::span<const std::string_view> bound_action_names,
+                                      std::shared_ptr<store::IStrategyStore> store) -> void {
     // Deliberately leaked, unlike the function-local static above. A static
     // here would fix the bound action set at the FIRST call for the rest of
     // the process, which is wrong for this hook: a discriminating test needs
@@ -1634,7 +1868,7 @@ auto RegisterCalculatorServiceForTest(grpc::ServerBuilder& builder,
     // file's test siblings (ServiceFixture in test_option_pricing_service.cpp
     // and test_finance_service_validation.cpp) make implicitly by never
     // tearing down what BuildAndStart() allocates.
-    auto* service = new CalculatorServiceImpl(bound_action_names);  // NOLINT(cppcoreguidelines-owning-memory) -- see comment above: gRPC's RegisterService does NOT take ownership and the service must outlive the server, while a function-local static would freeze the bound action set at the first call and break the discriminating tests that register different action subsets in one binary.
+    auto* service = new CalculatorServiceImpl(bound_action_names, std::move(store));  // NOLINT(cppcoreguidelines-owning-memory) -- see comment above: gRPC's RegisterService does NOT take ownership and the service must outlive the server, while a function-local static would freeze the bound action set at the first call and break the discriminating tests that register different action subsets in one binary.
     builder.RegisterService(service);
 }
 

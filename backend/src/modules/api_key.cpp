@@ -319,8 +319,20 @@ auto verify_supabase_jwt(std::string_view token, Identity& out) -> bool {
         }
     }
 
-    out.id = (obj.contains("sub") && obj["sub"].is_string()) ? std::string{obj["sub"].as_string()}
-                                                             : std::string{"supabase-user"};
+    // `subject` and `id` are deliberately NOT the same assignment.
+    //
+    // `id` keeps its placeholder fallback because it is a LOG LABEL, and a
+    // blank one reads as a bug in the logging rather than as a token without a
+    // `sub`. `subject` gets no fallback at all: it keys per-user storage, and
+    // "supabase-user" is a value every such token would share -- one bucket
+    // holding several people's saved scenarios, each able to read the others'.
+    //
+    // A token Supabase issued always carries `sub`. This branch is for the one
+    // it did not, and the safe answer there is "no subject", not a shared one.
+    const bool has_sub = obj.contains("sub") && obj["sub"].is_string() &&
+                         !obj["sub"].as_string().empty();
+    out.subject = has_sub ? std::string{obj["sub"].as_string()} : std::string{};
+    out.id = has_sub ? out.subject : std::string{"supabase-user"};
     out.type = KeyType::Publishable;
     out.authenticated = true;
     return true;
@@ -463,6 +475,41 @@ auto check_strategy_entitlement(const Identity& identity, int leg_count) -> grpc
         grpc::StatusCode::PERMISSION_DENIED,
         std::string{strategy_outcome_clause(identity.outcome)} + " This position has " +
             std::to_string(leg_count) + " legs.");
+}
+
+auto check_saved_scenarios_entitlement(const Identity& identity, std::string_view rpc)
+    -> grpc::Status {
+    auto& log = logger::Logger::getInstance();
+
+    // Checked FIRST, and deliberately before pro_gate_mode() is even consulted
+    // -- see the declaration's doc for why this one refusal is not a policy the
+    // gate mode is allowed to switch off.
+    if (identity.subject.empty()) {
+        log.info("saved-scenarios deny: rpc={} reason=no-subject auth={}", rpc,
+                 to_string(identity.outcome));
+        return grpc::Status(grpc::StatusCode::UNAUTHENTICATED,
+                            "Saved scenarios belong to an account. Sign in to save, list or "
+                            "delete them.");
+    }
+
+    const auto mode = pro_gate_mode();
+    if (mode == GateMode::Off) return grpc::Status::OK;
+    if (is_pro(identity)) return grpc::Status::OK;
+
+    if (mode == GateMode::Warn) {
+        log.error("pro-gate would-deny: user={} rpc={} tier={} auth={}", identity.subject, rpc,
+                  identity.tier.empty() ? "free" : identity.tier, to_string(identity.outcome));
+        return grpc::Status::OK;
+    }
+
+    log.info("pro-gate deny: user={} rpc={} tier={} auth={}", identity.subject, rpc,
+             identity.tier.empty() ? "free" : identity.tier, to_string(identity.outcome));
+    // No `strategy_outcome_clause` here: that helper distinguishes a malformed
+    // or revoked KEY, and a caller who reached this line already presented a
+    // token that verified. Their key is not the problem; their tier is.
+    return grpc::Status(grpc::StatusCode::PERMISSION_DENIED,
+                        "Saving scenarios is a Pro feature. Upgrade to save this position and "
+                        "reopen it later.");
 }
 
 namespace {

@@ -14,6 +14,7 @@ import PnLSurface from './PnLSurface';
 import TermStructure from './TermStructure';
 import { StrategySelector } from './StrategySelector';
 import AssistantPanel from './AssistantPanel';
+import { SavedScenarios } from './SavedScenarios';
 import { useCalculatorStore } from '../store/useCalculatorStore';
 
 /**
@@ -207,6 +208,18 @@ export function StrategyWorkspace({
           </div>
           <div style={{ flexShrink: 0, display: 'flex' }}>
             <ExerciseStylePanel />
+          </div>
+          {/*
+            Saved scenarios sit at the BOTTOM of the build column, below the
+            controls that produce a position rather than above them: you name a
+            position after building it. `flexShrink: 0` for the same reason
+            every other panel in this column carries it -- this column sets
+            `overflowY: auto` and the browser would otherwise compress the
+            panel to fit instead of letting the column scroll, silently cutting
+            the list rather than scrolling it.
+          */}
+          <div style={{ flexShrink: 0, display: 'flex' }}>
+            <SavedScenarios />
           </div>
         </div>
 
