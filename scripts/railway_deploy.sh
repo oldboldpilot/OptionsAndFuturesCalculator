@@ -249,13 +249,23 @@ print(d['id'], d['status'], b)
             # while a new build is running is the PREVIOUS one -- so it prints
             # "[3/3] Healthcheck succeeded!" describing the deploy you are
             # replacing. It looks exactly like success.
-            echo "  Then confirm the CUTOVER, which the build log cannot tell you:"
-            echo "      railway logs --service ${LINKED_NAME} | grep -c 'model is LOADED'"
+            # Derive the expected count from railway.json rather than stating a
+            # number here. This line said "numReplicas 3 => 3 mortgage + 3
+            # strategy" for four days after numReplicas dropped to 2, which
+            # makes the gate pass at 4 while telling the reader to expect 6.
+            _replicas="$(sed -n 's/.*"numReplicas"[[:space:]]*:[[:space:]]*\([0-9]\+\).*/\1/p' \
+                          "${REPO_ROOT}/railway.json" 2>/dev/null | head -1)"
+            _replicas="${_replicas:-1}"
+            echo "  Then confirm the CUTOVER, which the build log cannot tell you."
+            echo "  Name the deployment -- 'railway logs --service' REPLAYS THE LAST"
+            echo "  DEAD SESSION'S SCROLLBACK when nothing is running, so grepping it"
+            echo "  passes against the container you are replacing:"
+            echo "      railway logs --deployment ${DEPLOY_ID} | grep -c 'model is LOADED'"
             echo ""
             echo "  A green healthcheck is not evidence the new image is serving."
             echo "  A fresh boot sequence is. Expect one 'model is LOADED' line per"
-            echo "  replica per assistant (numReplicas 3 => 3 mortgage + 3 strategy),"
-            echo "  timestamped after this upload."
+            echo "  replica per assistant -- numReplicas ${_replicas} => $((_replicas * 2)) lines"
+            echo "  (${_replicas} mortgage + ${_replicas} strategy) -- timestamped after this upload."
             exit 0 ;;
     esac
     sleep 10

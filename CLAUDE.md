@@ -2213,6 +2213,17 @@ chain. Measured after: chain body 204 → **462px**, probability distribution
   before the next"* while every deployment was still BUILDING and the two before
   them had FAILED their healthcheck. Nothing was proven.
 
+  **`scripts/railway_deploy.sh` was itself recommending the broken command**
+  until 2026-08-25 — its closing instructions said
+  `railway logs --service <svc> | grep -c 'model is LOADED'` for the cutover
+  check, which is exactly the replay described above. It now names the
+  deployment it just created. A script that prints the wrong verification step
+  is worse than one that prints none, because the reader has no reason to doubt
+  it. The same block also hardcoded "numReplicas 3 => 3 mortgage + 3 strategy"
+  for four days after `numReplicas` dropped to 2, so the honest gate of 4 lines
+  read as a shortfall against a stated 6; the count is now derived from
+  `railway.json`.
+
   **Gate on `railway deployment list --service <svc>`** — the first data row is
   the newest deployment and its status (BUILDING / DEPLOYING / SUCCESS / FAILED /
   CRASHED) is Railway's own answer about *this* rollout. Read logs only with an
