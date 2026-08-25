@@ -31,6 +31,15 @@ export const metadata: Metadata = {
     description:
       'Construction, payoff identities, Greeks and failure modes for twenty-six options and futures strategies.',
     url: `${branding.canonicalUrl}/guides`,
+    siteName: branding.companyName,
+    type: 'website',
+    images: [branding.ogImageUrl],
+  },
+  twitter: {
+    card: 'summary_large_image',
+    title: `Strategy Guides | ${branding.appName}`,
+    description:
+      'Construction, payoff identities, Greeks and failure modes for twenty-six options and futures strategies.',
     images: [branding.ogImageUrl],
   },
 };

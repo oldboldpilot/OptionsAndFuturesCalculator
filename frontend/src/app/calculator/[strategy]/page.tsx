@@ -24,10 +24,13 @@ export function generateStaticParams() {
 export async function generateMetadata({ params }: Props): Promise<Metadata> {
   const resolvedParams = await params;
   const slug = resolvedParams.strategy;
-  const strategyName = slug
-    .split('-')
-    .map(word => word.charAt(0).toUpperCase() + word.slice(1))
-    .join(' ');
+  const guide = getStrategyGuide(slug);
+  const strategyName =
+    guide?.name ??
+    slug
+      .split('-')
+      .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+      .join(' ');
 
   // "for a Iron Condor" appeared verbatim in search results. The article has to
   // agree with the sound of the next word, and these names are fixed and known.
@@ -42,9 +45,14 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
   // where the name does not already say it.
   const instrument = /futures/i.test(strategyName) ? '' : isFutures ? 'Futures ' : 'Options ';
 
+  const title = `${strategyName} ${instrument}Calculator & Profit Visualizer`;
+  const description = `Calculate maximum profit, loss, probability of profit and the full Greek profile for ${article} ${strategyName}, priced from live ${isFutures ? 'futures' : 'option chain'} quotes.`;
+  const ogTitle = `${strategyName} Calculator | ${branding.appName}`;
+  const ogDescription = `Model the P&L and probability distribution of ${article} ${strategyName} strategy.`;
+
   return {
-    title: `${strategyName} ${instrument}Calculator & Profit Visualizer`,
-    description: `Calculate maximum profit, loss, probability of profit and the full Greek profile for ${article} ${strategyName}, priced from live ${isFutures ? 'futures' : 'option chain'} quotes.`,
+    title,
+    description,
     // Its OWN url. Inherited from the root layout, every one of these pages
     // declared the HOMEPAGE as its canonical -- telling Google that all 26 are
     // duplicates of `/` and that none should be indexed in its own right, which
@@ -53,12 +61,20 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
       canonical: `${branding.canonicalUrl}/calculator/${slug}`,
     },
     openGraph: {
-      title: `${strategyName} Calculator | ${branding.appName}`,
-      description: `Model the P&L and probability distribution of ${article} ${strategyName} strategy.`,
+      title: ogTitle,
+      description: ogDescription,
       url: `${branding.canonicalUrl}/calculator/${slug}`,
+      siteName: branding.companyName,
+      type: 'website',
       // A STATIC image. This pointed at /api/og?strategy=..., a route handler --
       // and `output: "export"` disables API routes, so every share and every
       // crawl of these pages fetched a 404 for its preview image.
+      images: [branding.ogImageUrl],
+    },
+    twitter: {
+      card: 'summary_large_image',
+      title: ogTitle,
+      description: ogDescription,
       images: [branding.ogImageUrl],
     },
   };
@@ -81,21 +97,25 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
  */
 export default async function StrategyCalculatorPage({ params }: Props) {
   const resolvedParams = await params;
-  const strategyName = resolvedParams.strategy
-    .split('-')
-    .map(word => word.charAt(0).toUpperCase() + word.slice(1))
-    .join(' ');
+  const slug = resolvedParams.strategy;
+  const guide = getStrategyGuide(slug);
+  const strategyName =
+    guide?.name ??
+    slug
+      .split('-')
+      .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+      .join(' ');
 
   const isFutures =
-    resolvedParams.strategy.startsWith('futures-') ||
-    resolvedParams.strategy === 'covered-futures-call';
+    slug.startsWith('futures-') ||
+    slug === 'covered-futures-call';
 
-  const hasGuide = Boolean(getStrategyGuide(resolvedParams.strategy));
+  const hasGuide = Boolean(guide);
 
   return (
     <>
       <StrategyStructuredData
-        slug={resolvedParams.strategy}
+        slug={slug}
         name={`${strategyName}${/futures/i.test(strategyName) ? '' : isFutures ? ' Futures' : ' Options'} Calculator`}
         description={`Model the profit, loss and Greeks of ${/^[aeiou]/i.test(strategyName) ? 'an' : 'a'} ${strategyName} strategy on live market data.`}
       />
@@ -104,7 +124,7 @@ export default async function StrategyCalculatorPage({ params }: Props) {
         // A real URL now, not the `#guide` anchor: the article moved to its own
         // page, so this is the crawlable link between the two intents rather
         // than a jump down the same document.
-        guideHref={hasGuide ? `/guides/${resolvedParams.strategy}` : undefined}
+        guideHref={hasGuide ? `/guides/${slug}` : undefined}
       />
     </>
   );

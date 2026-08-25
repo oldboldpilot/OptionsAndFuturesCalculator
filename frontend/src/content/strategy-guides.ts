@@ -60,6 +60,7 @@ export interface StrategyGuide {
   risks: string[];
   example: GuideExample;
   faqs: StrategyFaq[];
+  related?: readonly string[];
 }
 
 const FEES =
@@ -116,6 +117,7 @@ export const STRATEGY_GUIDES: Record<string, StrategyGuide> = {
         a: 'That is a trade-off, not a rule. A lower strike costs more but has a higher delta and a nearer breakeven; a higher strike is cheaper and needs a bigger move to pay. Price both here and compare the breakeven against the move you actually expect.',
       },
     ],
+    related: ['call-spread', 'covered-call', 'protective-put', 'straddle'],
   },
 
   'long-put': {
@@ -160,6 +162,7 @@ export const STRATEGY_GUIDES: Record<string, StrategyGuide> = {
         a: 'Longer expiries cost more in absolute terms but less per day, because time value decays fastest at the end. If the protection is meant to be permanent, longer-dated puts rolled less often usually cost less per unit of cover than short-dated ones rolled constantly.',
       },
     ],
+    related: ['put-spread', 'protective-put', 'cash-secured-put', 'straddle'],
   },
 
   /* ============================ Vertical spreads ========================= */
@@ -210,6 +213,7 @@ export const STRATEGY_GUIDES: Record<string, StrategyGuide> = {
         a: 'They offset. The long call is exercised and the short is assigned, netting the full width of the spread, which is the maximum profit. Most brokers handle this automatically, but check the assignment policy — some will not auto-exercise if the account cannot support the intermediate stock position.',
       },
     ],
+    related: ['long-call', 'bull-put-spread', 'calendar-spread', 'risk-reversal'],
   },
 
   'put-spread': {
@@ -253,6 +257,7 @@ export const STRATEGY_GUIDES: Record<string, StrategyGuide> = {
         a: 'Cost and volatility exposure. The short leg cuts the debit and largely neutralises vega, so you are not relying on implied volatility staying elevated. You give up everything below the lower strike to get that.',
       },
     ],
+    related: ['long-put', 'bear-call-spread', 'collar', 'strangle'],
   },
 
   'bull-put-spread': {
@@ -300,6 +305,7 @@ export const STRATEGY_GUIDES: Record<string, StrategyGuide> = {
         a: 'Many traders close at a set fraction of the credit, commonly half to three-quarters, rather than holding to expiry. The remaining premium is the smallest part of the reward and it is collected during the window where gamma risk is highest.',
       },
     ],
+    related: ['call-spread', 'bear-call-spread', 'iron-condor', 'cash-secured-put'],
   },
 
   'bear-call-spread': {
@@ -343,6 +349,7 @@ export const STRATEGY_GUIDES: Record<string, StrategyGuide> = {
         a: 'You end up short 100 shares per contract at the strike. The long call still caps the loss above it, but you now carry a stock position with borrow costs and dividend liability. Exercising the long call closes it out; so does buying the shares back.',
       },
     ],
+    related: ['put-spread', 'bull-put-spread', 'iron-condor', 'covered-call'],
   },
 
   /* ============================== Volatility ============================= */
@@ -394,6 +401,7 @@ export const STRATEGY_GUIDES: Record<string, StrategyGuide> = {
         a: 'It is cheaper and needs a larger move. A strangle uses out-of-the-money strikes, so it costs less and has wider breakevens. Price both on the same expiry here and compare the breakevens against the move you expect.',
       },
     ],
+    related: ['strangle', 'iron-butterfly', 'long-call', 'long-put'],
   },
 
   strangle: {
@@ -438,6 +446,7 @@ export const STRATEGY_GUIDES: Record<string, StrategyGuide> = {
         a: 'By delta rather than by distance. Matching the call and put deltas — 20-delta against 20-delta, say — gives a position that is genuinely direction-neutral, which equal strike distances will not on a skewed underlying.',
       },
     ],
+    related: ['straddle', 'iron-condor', 'risk-reversal', 'calendar-spread'],
   },
 
   /* ========================== Defined-risk neutral ======================== */
@@ -497,6 +506,7 @@ export const STRATEGY_GUIDES: Record<string, StrategyGuide> = {
         a: 'Decide before entering. The common approaches are rolling the untested side closer to collect more credit, or closing the whole position at a set multiple of the credit received. Adjusting improvised under pressure usually adds risk to a position that is already losing.',
       },
     ],
+    related: ['iron-butterfly', 'strangle', 'bull-put-spread', 'condor'],
   },
 
   'iron-butterfly': {
@@ -542,6 +552,7 @@ export const STRATEGY_GUIDES: Record<string, StrategyGuide> = {
         a: 'The butterfly collects more and wins less often; the condor collects less and wins more often. Neither is structurally better — they sit at different points on the same trade-off, and the choice should follow how confident you are about the level rather than the range.',
       },
     ],
+    related: ['iron-condor', 'butterfly', 'straddle', 'bull-put-spread'],
   },
 
   butterfly: {
@@ -586,6 +597,7 @@ export const STRATEGY_GUIDES: Record<string, StrategyGuide> = {
         a: 'At the same strikes the two are equivalent by put-call parity and should price identically. In practice pick whichever side is out of the money, because out-of-the-money options are more liquid and the spreads are tighter.',
       },
     ],
+    related: ['condor', 'iron-butterfly', 'calendar-spread', 'call-spread'],
   },
 
   condor: {
@@ -630,6 +642,7 @@ export const STRATEGY_GUIDES: Record<string, StrategyGuide> = {
         a: 'Mostly in financing. The all-call condor is opened for a debit and the iron condor for a credit, but at the same strikes and expiry put-call parity makes the payoffs essentially identical. Choose on which legs are in the money and where the tighter markets are.',
       },
     ],
+    related: ['butterfly', 'iron-condor', 'calendar-spread', 'diagonal-spread'],
   },
 
   'jade-lizard': {
@@ -679,6 +692,7 @@ export const STRATEGY_GUIDES: Record<string, StrategyGuide> = {
         a: 'If the underlying finishes above the long call, the call spread loses exactly its width. When the credit collected is at least that width, the loss is fully paid for in advance and the worst upside outcome is breakeven or better.',
       },
     ],
+    related: ['bear-call-spread', 'cash-secured-put', 'iron-condor', 'bull-put-spread'],
   },
 
   /* =========================== Stock combinations ======================== */
@@ -729,6 +743,7 @@ export const STRATEGY_GUIDES: Record<string, StrategyGuide> = {
         a: 'Lower strikes pay more premium and cap the upside sooner; higher strikes pay less and leave more room. There is no free lunch in the choice — the premium is compensation for exactly the upside you surrender.',
       },
     ],
+    related: ['cash-secured-put', 'collar', 'covered-futures-call', 'bear-call-spread'],
   },
 
   'cash-secured-put': {
@@ -772,6 +787,7 @@ export const STRATEGY_GUIDES: Record<string, StrategyGuide> = {
         a: 'Slightly, and only by the premium. Below the strike you carry essentially the same downside as the shares, less the credit; above it you forgo the upside entirely. It is a different distribution, not a smaller risk.',
       },
     ],
+    related: ['covered-call', 'bull-put-spread', 'protective-put', 'jade-lizard'],
   },
 
   'protective-put': {
@@ -815,6 +831,7 @@ export const STRATEGY_GUIDES: Record<string, StrategyGuide> = {
         a: 'Selling realises a taxable gain, forfeits dividends and the upside, and requires deciding when to buy back. The put keeps all of that intact for a known fee. If none of those apply to you, selling is usually cheaper.',
       },
     ],
+    related: ['collar', 'long-put', 'covered-call', 'long-call'],
   },
 
   collar: {
@@ -859,6 +876,7 @@ export const STRATEGY_GUIDES: Record<string, StrategyGuide> = {
         a: 'One where the call premium exactly funds the put, so no cash changes hands. The cost is real but paid in forgone upside rather than in cash, which is why the label is more flattering than the trade.',
       },
     ],
+    related: ['protective-put', 'covered-call', 'risk-reversal', 'bull-put-spread'],
   },
 
   'risk-reversal': {
@@ -903,6 +921,7 @@ export const STRATEGY_GUIDES: Record<string, StrategyGuide> = {
         a: 'Between the strikes it does nothing, so it needs a real move to pay. Outside them it behaves similarly but with far less capital committed, which means the leverage — and the margin call risk — is much higher.',
       },
     ],
+    related: ['collar', 'long-call', 'strangle', 'call-spread'],
   },
 
   /* ============================ Time spreads ============================= */
@@ -954,6 +973,7 @@ export const STRATEGY_GUIDES: Record<string, StrategyGuide> = {
         a: 'At the same strike they behave almost identically. Choose the out-of-the-money side for tighter markets and to reduce the chance of early assignment on the short leg.',
       },
     ],
+    related: ['diagonal-spread', 'butterfly', 'straddle', 'iron-condor'],
   },
 
   'diagonal-spread': {
@@ -999,6 +1019,7 @@ export const STRATEGY_GUIDES: Record<string, StrategyGuide> = {
         a: 'A diagonal where the long leg is a deep in-the-money, long-dated call standing in for the 100 shares, with a short-dated out-of-the-money call sold against it. It replicates a covered call for far less capital, and adds the risk that the long call decays where shares would not.',
       },
     ],
+    related: ['calendar-spread', 'call-spread', 'covered-call', 'condor'],
   },
 
   /* ================================ Futures ============================== */
@@ -1048,6 +1069,7 @@ export const STRATEGY_GUIDES: Record<string, StrategyGuide> = {
         a: 'Yes. Margin is a performance bond, not the maximum loss. A large gap can produce a loss exceeding the account balance, and the deficit is a debt.',
       },
     ],
+    related: ['futures-spread', 'futures-calendar-spread', 'covered-futures-call', 'futures-basis-arbitrage'],
   },
 
   'futures-spread': {
@@ -1093,6 +1115,7 @@ export const STRATEGY_GUIDES: Record<string, StrategyGuide> = {
         a: 'Because the exchange recognises the offsetting risk between the legs. The common market factor largely cancels, so the residual volatility of the spread is a small fraction of either leg — and margin is sized to that residual.',
       },
     ],
+    related: ['futures-calendar-spread', 'futures-intercommodity-spread', 'futures-outright', 'futures-basis-arbitrage'],
   },
 
   'futures-calendar-spread': {
@@ -1138,6 +1161,7 @@ export const STRATEGY_GUIDES: Record<string, StrategyGuide> = {
         a: 'Contango is later months priced above nearer ones, the normal state for a storable commodity where carry costs money. Backwardation is the reverse, and it signals that having the physical goods now is worth paying for — usually a sign of scarcity.',
       },
     ],
+    related: ['futures-spread', 'futures-intercommodity-spread', 'futures-basis-arbitrage', 'calendar-spread'],
   },
 
   'futures-intercommodity-spread': {
@@ -1185,6 +1209,7 @@ export const STRATEGY_GUIDES: Record<string, StrategyGuide> = {
         a: 'It approximates the yield of a typical refinery: three barrels of crude produce roughly two of gasoline and one of distillate. The ratio is a rough industry convention, not a physical constant, and other ratios such as 5:3:2 are used where the yield differs.',
       },
     ],
+    related: ['futures-spread', 'futures-calendar-spread', 'futures-outright', 'futures-basis-arbitrage'],
   },
 
   'futures-basis-arbitrage': {
@@ -1232,6 +1257,7 @@ export const STRATEGY_GUIDES: Record<string, StrategyGuide> = {
         a: 'No. The price risk is hedged, but funding, margin and operational risks are not. The 2020 Treasury basis episode is the standard illustration: a hedged, leveraged position forced to unwind by margin demands rather than by any view on direction.',
       },
     ],
+    related: ['futures-outright', 'futures-calendar-spread', 'futures-spread', 'covered-futures-call'],
   },
 
   'covered-futures-call': {
@@ -1277,6 +1303,7 @@ export const STRATEGY_GUIDES: Record<string, StrategyGuide> = {
         a: 'The payoff shape is the same; the funding is not. Equity shares are paid for in full, so the worst case is the capital you committed. A futures contract is margined, so the loss can exceed what you posted and arrives as a daily cash demand.',
       },
     ],
+    related: ['covered-call', 'futures-outright', 'futures-basis-arbitrage', 'bear-call-spread'],
   },
 };
 

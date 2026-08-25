@@ -80,7 +80,7 @@ export function SiteGuide() {
         lineHeight: 1.7,
       }}
     >
-      <h2 style={h2}>Pricing options and futures strategies on live market data</h2>
+      <h1 style={h1}>Pricing options and futures strategies on live market data</h1>
 
       <p style={p}>
         This is a modelling tool for multi-leg options and futures positions. You build a position
@@ -90,7 +90,7 @@ export function SiteGuide() {
         assumptions.
       </p>
 
-      <h3 style={h3}>What the numbers come from</h3>
+      <h2 style={h2}>What the numbers come from</h2>
       <p style={p}>
         Quotes, strikes, implied volatilities and open interest come from a live option chain, and
         every chain carries the time it was fetched. The freshness chip beside it reads{' '}
@@ -105,7 +105,7 @@ export function SiteGuide() {
         are computed from the term structure of the contract you select, not from a flat rate.
       </p>
 
-      <h3 style={h3}>How to read the outputs</h3>
+      <h2 style={h2}>How to read the outputs</h2>
       <ul style={list}>
         <li style={li}>
           <strong>Payoff at expiry</strong> is the arithmetic result — the straight-line diagram
@@ -129,7 +129,7 @@ export function SiteGuide() {
         </li>
       </ul>
 
-      <h3 style={h3}>What it does not model</h3>
+      <h2 style={h2}>What it does not model</h2>
       <p style={p}>
         Commissions, exchange fees, financing and the bid/ask spread are excluded from every figure.
         On a four-legged position crossed twice, the spread is normally the largest cost in the
@@ -138,7 +138,7 @@ export function SiteGuide() {
         margin figures are indicative — your broker&rsquo;s requirement is the one that matters.
       </p>
 
-      <h2 style={{ ...h2, fontSize: 'clamp(1.375rem, 3vw, 1.75rem)', marginTop: '3rem' }}>
+      <h2 style={{ ...h1, fontSize: 'clamp(1.375rem, 3vw, 1.75rem)', marginTop: '3rem' }}>
         Strategy guides
       </h2>
       <p style={p}>
@@ -150,7 +150,7 @@ export function SiteGuide() {
 
       {GROUPS.map((group) => (
         <section key={group.title} style={{ marginBottom: '2rem' }}>
-          <h3 style={{ ...h3, marginTop: '1.5rem' }}>{group.title}</h3>
+          <h3 style={{ ...h2, marginTop: '1.5rem' }}>{group.title}</h3>
           <p style={{ ...p, marginBottom: '0.75rem', color: 'var(--color-ink-300)' }}>
             {group.blurb}
           </p>
@@ -225,7 +225,7 @@ export function SiteGuide() {
   );
 }
 
-const h2: React.CSSProperties = {
+const h1: React.CSSProperties = {
   fontFamily: 'var(--font-fraunces), Georgia, serif',
   fontSize: 'clamp(1.5rem, 3.5vw, 2rem)',
   lineHeight: 1.2,
@@ -233,7 +233,7 @@ const h2: React.CSSProperties = {
   color: 'var(--color-ink-100)',
 };
 
-const h3: React.CSSProperties = {
+const h2: React.CSSProperties = {
   fontSize: '1.0625rem',
   fontWeight: 600,
   color: 'var(--color-ink-100)',

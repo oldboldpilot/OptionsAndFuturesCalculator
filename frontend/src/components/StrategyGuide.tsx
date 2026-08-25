@@ -1,5 +1,6 @@
 import React from 'react';
-import type { StrategyGuide as Guide } from '@/content/strategy-guides';
+import Link from 'next/link';
+import { STRATEGY_GUIDES, type StrategyGuide as Guide } from '@/content/strategy-guides';
 
 /**
  * The written guide that sits below the calculator on each strategy page.
@@ -29,7 +30,7 @@ export function StrategyGuide({ guide }: { guide: Guide }) {
       }}
     >
       <header>
-        <h2 style={h2}>{guide.name}: how the position works</h2>
+        <h1 style={h1}>{guide.name}: how the position works</h1>
         <p style={{ margin: '0 0 1.5rem', fontSize: '1.0625rem', lineHeight: 1.65 }}>
           {guide.lede}
         </p>
@@ -51,7 +52,7 @@ export function StrategyGuide({ guide }: { guide: Guide }) {
         <Row term="Breakeven" def={guide.breakeven} />
       </dl>
 
-      <h3 style={h3}>How it is built</h3>
+      <h2 style={h2}>How it is built</h2>
       <ul style={list}>
         {guide.construction.map((leg) => (
           <li key={leg} style={li}>{leg}</li>
@@ -62,20 +63,20 @@ export function StrategyGuide({ guide }: { guide: Guide }) {
         equity option covers 100 shares, so multiply by 100 for a single contract.
       </p>
 
-      <h3 style={h3}>Before expiry: the Greeks</h3>
+      <h2 style={h2}>Before expiry: the Greeks</h2>
       <p style={p}>{guide.greeks}</p>
 
-      <h3 style={h3}>When to use it</h3>
+      <h2 style={h2}>When to use it</h2>
       <p style={p}>{guide.whenToUse}</p>
 
-      <h3 style={h3}>What goes wrong</h3>
+      <h2 style={h2}>What goes wrong</h2>
       <ul style={list}>
         {guide.risks.map((risk) => (
           <li key={risk} style={li}>{risk}</li>
         ))}
       </ul>
 
-      <h3 style={h3}>A worked example</h3>
+      <h2 style={h2}>A worked example</h2>
       <p style={{ ...p, fontStyle: 'italic', color: 'var(--color-ink-300)' }}>
         {guide.example.setup}
       </p>
@@ -88,22 +89,67 @@ export function StrategyGuide({ guide }: { guide: Guide }) {
         {guide.example.note}
       </p>
 
-      <h3 style={h3}>Common questions</h3>
+      <h2 style={h2}>Common questions</h2>
       {guide.faqs.map((faq) => (
         <div key={faq.q} style={{ marginBottom: '1.25rem' }}>
-          <h4
-            style={{
-              fontSize: '0.9375rem',
-              fontWeight: 600,
-              color: 'var(--color-ink-100)',
-              margin: '0 0 0.375rem',
-            }}
-          >
+          <h3 style={h3}>
             {faq.q}
-          </h4>
+          </h3>
           <p style={{ margin: 0 }}>{faq.a}</p>
         </div>
       ))}
+
+      {guide.related && guide.related.length > 0 && (
+        <>
+          <h2 style={h2}>Related strategies</h2>
+          <ul
+            style={{
+              listStyle: 'none',
+              margin: '0 0 1.5rem',
+              padding: 0,
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fill, minmax(13rem, 1fr))',
+              gap: '0.5rem',
+            }}
+          >
+            {guide.related.map((slug) => {
+              const relGuide = STRATEGY_GUIDES[slug];
+              if (!relGuide) return null;
+              return (
+                <li key={slug}>
+                  <Link
+                    href={`/guides/${slug}`}
+                    style={{
+                      display: 'block',
+                      padding: '0.625rem 0.75rem',
+                      border: '1px solid var(--color-line)',
+                      borderRadius: 'var(--radius-sm)',
+                      background: 'var(--color-base-700)',
+                      textDecoration: 'none',
+                      color: 'var(--color-ink-100)',
+                      fontSize: '0.875rem',
+                      fontWeight: 600,
+                    }}
+                  >
+                    {relGuide.name}
+                    <span
+                      style={{
+                        display: 'block',
+                        fontSize: '0.75rem',
+                        fontWeight: 400,
+                        color: 'var(--color-ink-400)',
+                        marginTop: '0.125rem',
+                      }}
+                    >
+                      {relGuide.outlook}
+                    </span>
+                  </Link>
+                </li>
+              );
+            })}
+          </ul>
+        </>
+      )}
 
       {/*
         Restated here rather than left to the site footer. Somebody who lands on
@@ -163,7 +209,7 @@ function Row({ term, def, mono }: { term: string; def: string; mono?: boolean })
   );
 }
 
-const h2: React.CSSProperties = {
+const h1: React.CSSProperties = {
   fontFamily: 'var(--font-fraunces), Georgia, serif',
   fontSize: 'clamp(1.5rem, 3.5vw, 2rem)',
   lineHeight: 1.2,
@@ -171,11 +217,18 @@ const h2: React.CSSProperties = {
   color: 'var(--color-ink-100)',
 };
 
-const h3: React.CSSProperties = {
+const h2: React.CSSProperties = {
   fontSize: '1.0625rem',
   fontWeight: 600,
   color: 'var(--color-ink-100)',
   margin: '2rem 0 0.625rem',
+};
+
+const h3: React.CSSProperties = {
+  fontSize: '0.9375rem',
+  fontWeight: 600,
+  color: 'var(--color-ink-100)',
+  margin: '0 0 0.375rem',
 };
 
 // The bordered block the identity rows and the worked example sit in. Shared so

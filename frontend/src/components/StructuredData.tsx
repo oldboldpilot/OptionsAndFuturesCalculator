@@ -109,12 +109,15 @@ export function StrategyStructuredData({
   slug,
   name,
   description,
+  basePath = 'calculator',
 }: {
   slug: string;
   name: string;
   description: string;
+  basePath?: 'calculator' | 'guides';
 }) {
-  const url = `${branding.canonicalUrl}/calculator/${slug}`;
+  const isGuide = basePath === 'guides';
+  const url = `${branding.canonicalUrl}/${basePath}/${slug}`;
   const data = {
     '@context': 'https://schema.org',
     '@graph': [
@@ -133,12 +136,24 @@ export function StrategyStructuredData({
           {
             '@type': 'ListItem',
             position: 2,
-            name: 'Strategy calculators',
-            item: `${branding.canonicalUrl}/calculator/long-call`,
+            name: isGuide ? 'Guides' : 'Calculator',
+            item: isGuide ? `${branding.canonicalUrl}/guides` : branding.canonicalUrl,
           },
           { '@type': 'ListItem', position: 3, name, item: url },
         ],
       },
+      ...(isGuide
+        ? [
+            {
+              '@type': 'Article',
+              '@id': `${url}#article`,
+              headline: name,
+              description,
+              mainEntityOfPage: url,
+              publisher: { '@id': `${branding.canonicalUrl}/#org` },
+            },
+          ]
+        : []),
     ],
   };
 

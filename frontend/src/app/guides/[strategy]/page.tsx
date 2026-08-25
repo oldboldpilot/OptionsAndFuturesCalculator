@@ -38,17 +38,30 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
     guide?.name ??
     slug.split('-').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
 
+  const title = `${name}: Payoff, Breakeven and Greeks Explained`;
+  const description =
+    guide
+      ? `${name} explained: how it is built, maximum profit and loss, breakeven, the Greeks before expiry, and what goes wrong. ${guide.outlook}.`
+      : `How the ${name} strategy works.`;
+  const ogTitle = `${name} explained | ${branding.appName}`;
+  const ogDescription = guide?.lede.slice(0, 200) ?? `How the ${name} strategy works.`;
+
   return {
-    title: `${name}: Payoff, Breakeven and Greeks Explained`,
-    description:
-      guide
-        ? `${name} explained: how it is built, maximum profit and loss, breakeven, the Greeks before expiry, and what goes wrong. ${guide.outlook}.`
-        : `How the ${name} strategy works.`,
+    title,
+    description,
     alternates: { canonical: `${branding.canonicalUrl}/guides/${slug}` },
     openGraph: {
-      title: `${name} explained | ${branding.appName}`,
-      description: guide?.lede.slice(0, 200) ?? `How the ${name} strategy works.`,
+      title: ogTitle,
+      description: ogDescription,
       url: `${branding.canonicalUrl}/guides/${slug}`,
+      siteName: branding.companyName,
+      type: 'article',
+      images: [branding.ogImageUrl],
+    },
+    twitter: {
+      card: 'summary_large_image',
+      title: ogTitle,
+      description: ogDescription,
       images: [branding.ogImageUrl],
     },
   };
@@ -80,6 +93,7 @@ export default async function StrategyGuidePage({ params }: Props) {
         slug={slug}
         name={`${guide.name}: payoff, breakeven and Greeks`}
         description={guide.lede.slice(0, 200)}
+        basePath="guides"
       />
       <FaqStructuredData faqs={guide.faqs} />
 

@@ -37,10 +37,51 @@ const fraunces = Fraunces({
   display: "swap",
 });
 
+import Link from "next/link";
 import { branding } from "@/config/branding";
 import { SiteStructuredData } from "@/components/StructuredData";
 import SiteNav from "@/components/SiteNav";
 import SponsoredBrokers from "@/components/SponsoredBrokers";
+import { getStrategyGuide } from "@/content/strategy-guides";
+
+const CALCULATOR_GROUPS: Array<{ title: string; slugs: readonly string[] }> = [
+  {
+    title: "Options Strategy Calculators",
+    slugs: [
+      "long-call",
+      "long-put",
+      "call-spread",
+      "put-spread",
+      "bull-put-spread",
+      "bear-call-spread",
+      "straddle",
+      "strangle",
+      "iron-condor",
+      "iron-butterfly",
+      "butterfly",
+      "condor",
+      "collar",
+      "covered-call",
+      "cash-secured-put",
+      "protective-put",
+      "jade-lizard",
+      "calendar-spread",
+      "diagonal-spread",
+      "risk-reversal",
+    ],
+  },
+  {
+    title: "Futures Strategy Calculators",
+    slugs: [
+      "futures-outright",
+      "futures-spread",
+      "futures-calendar-spread",
+      "futures-intercommodity-spread",
+      "covered-futures-call",
+      "futures-basis-arbitrage",
+    ],
+  },
+];
 
 export async function generateMetadata(): Promise<Metadata> {
   return {
@@ -225,6 +266,74 @@ export default function RootLayout({
             color: 'var(--color-ink-400)',
           }}
         >
+          {/*
+            All Strategy Calculators directory.
+
+            Links all 26 /calculator/<slug> pages sitewide so crawlers and
+            visitors can navigate directly to any strategy calculator from any
+            page, establishing crawl depth and link equity across the catalogue.
+          */}
+          <div
+            style={{
+              maxWidth: '60rem',
+              margin: '0 auto 1.5rem',
+              paddingBottom: '1.25rem',
+              borderBottom: '1px solid var(--color-line)',
+            }}
+          >
+            <div
+              style={{
+                fontSize: '0.8125rem',
+                fontWeight: 600,
+                color: 'var(--color-ink-200)',
+                marginBottom: '0.75rem',
+              }}
+            >
+              All Strategy Calculators
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+              {CALCULATOR_GROUPS.map((group) => (
+                <div key={group.title}>
+                  <div
+                    style={{
+                      fontSize: '0.6875rem',
+                      fontWeight: 600,
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.05em',
+                      color: 'var(--color-ink-300)',
+                      marginBottom: '0.375rem',
+                    }}
+                  >
+                    {group.title}
+                  </div>
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexWrap: 'wrap',
+                      gap: '0.375rem 0.875rem',
+                    }}
+                  >
+                    {group.slugs.map((slug) => {
+                      const guide = getStrategyGuide(slug);
+                      return (
+                        <Link
+                          key={slug}
+                          href={`/calculator/${slug}`}
+                          style={{
+                            color: 'inherit',
+                            textDecoration: 'none',
+                          }}
+                        >
+                          {guide?.name ?? slug}
+                        </Link>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
           <div
             style={{
               maxWidth: '60rem',

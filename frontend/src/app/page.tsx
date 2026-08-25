@@ -1,5 +1,13 @@
+import type { Metadata } from 'next';
 import StrategyWorkspace from '../components/StrategyWorkspace';
 
+export const metadata: Metadata = {
+  title: {
+    absolute: 'Options & Futures Profit Calculator - Free Payoff, Greeks & Probability Tool',
+  },
+  description:
+    'Free options profit calculator & futures analysis tool. Visualize multi-leg payoff diagrams, calculate real-time Greeks, profit probabilities & P&L grids.',
+};
 /**
  * The home page: the calculator, and only the calculator.
  *

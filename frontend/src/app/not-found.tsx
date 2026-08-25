@@ -1,3 +1,4 @@
+import type { Metadata } from 'next';
 import Link from 'next/link';
 import { STRATEGY_SLUGS } from '@/config/strategies';
 import { getStrategyGuide } from '@/content/strategy-guides';
@@ -31,12 +32,13 @@ import { getStrategyGuide } from '@/content/strategy-guides';
  * is for.
  */
 
-export const metadata = {
+export const metadata: Metadata = {
   title: 'Page not found',
   // A 404 that gets indexed is a 404 that competes with the real pages. The
   // status code already says this to a well-behaved crawler; this says it to
   // the rest.
   robots: { index: false, follow: true },
+  alternates: { canonical: null },
 };
 
 /** A short, stable sample — the structures most people arrive looking for. */
