@@ -58,11 +58,20 @@
 #include <utility>
 #include <vector>
 
+#include <cstdlib>
+#include <expected>
+#include <map>
+#include <optional>
+
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
+
 #include <grpcpp/grpcpp.h>
 #include "calculator.pb.h"
 #include "calculator.grpc.pb.h"
 
 import calculator_service;
+import strategy_store;
 
 namespace {
 
@@ -189,6 +198,204 @@ auto call_strategy(OptionsCalculator::Stub& stub, const StrategyRequest& req)
     const auto ctx = make_context();
     const auto status = stub.CalculateStrategy(ctx.get(), req, &resp);
     return {status, resp};
+}
+
+
+// ---------------------------------------------------------------------------
+// Saved-scenario support: an in-memory store and a real signed JWT
+// ---------------------------------------------------------------------------
+
+namespace store = options_calculator::store;
+
+/**
+ * An in-memory IStrategyStore that reproduces the Postgres implementation's
+ * OBSERVABLE contract -- per-user scoping, upsert-by-name, the per-user cap,
+ * newest-first ordering -- and nothing else.
+ *
+ * The point is to test the RPC layer's own behaviour (auth, entitlement,
+ * validation, JSON round-trip, error mapping) without a database. It is NOT a
+ * substitute for exercising the real SQL: that is what
+ * tests/test_strategy_store_pg.cpp does, against a live Postgres.
+ */
+class FakeStore final : public store::IStrategyStore {
+  public:
+    [[nodiscard]] auto save(std::string_view subject, std::string_view name,
+                            std::string_view symbol, std::string_view payload_json)
+        -> std::expected<store::SaveOutcome, store::StoreError> override {
+        if (subject.empty() || name.empty()) return std::unexpected(store::StoreError::Invalid);
+        auto& rows = by_user_[std::string{subject}];
+
+        const auto it = std::find_if(rows.begin(), rows.end(),
+                                     [&](const store::SavedRow& r) { return r.name == name; });
+        if (it != rows.end()) {
+            it->symbol = std::string{symbol};
+            it->payload_json = std::string{payload_json};
+            it->updated_at = stamp(++clock_);
+            // Newest-first: move the touched row to the front, mirroring the
+            // real store's ORDER BY updated_at DESC.
+            store::SavedRow moved = *it;
+            rows.erase(it);
+            rows.insert(rows.begin(), moved);
+            return store::SaveOutcome{.row = moved, .replaced_existing = true};
+        }
+
+        if (rows.size() >= store::kMaxPerUser) {
+            return std::unexpected(store::StoreError::AtCapacity);
+        }
+        store::SavedRow row{
+            .id = std::format("00000000-0000-4000-8000-{:012}", ++id_seq_),
+            .name = std::string{name},
+            .symbol = std::string{symbol},
+            .payload_json = std::string{payload_json},
+            .created_at = stamp(++clock_),
+            .updated_at = stamp(clock_),
+        };
+        rows.insert(rows.begin(), row);
+        return store::SaveOutcome{.row = row, .replaced_existing = false};
+    }
+
+    [[nodiscard]] auto list(std::string_view subject)
+        -> std::expected<std::vector<store::SavedRow>, store::StoreError> override {
+        if (subject.empty()) return std::unexpected(store::StoreError::Invalid);
+        const auto it = by_user_.find(std::string{subject});
+        if (it == by_user_.end()) return std::vector<store::SavedRow>{};
+        return it->second;
+    }
+
+    [[nodiscard]] auto remove(std::string_view subject, std::string_view id)
+        -> std::expected<bool, store::StoreError> override {
+        if (subject.empty()) return std::unexpected(store::StoreError::Invalid);
+        const auto it = by_user_.find(std::string{subject});
+        if (it == by_user_.end()) return false;
+        auto& rows = it->second;
+        const auto row = std::find_if(rows.begin(), rows.end(),
+                                      [&](const store::SavedRow& r) { return r.id == id; });
+        if (row == rows.end()) return false;
+        rows.erase(row);
+        return true;
+    }
+
+    /** Direct read, for assertions that must not go through the RPC. */
+    [[nodiscard]] auto count_for(std::string_view subject) const -> std::size_t {
+        const auto it = by_user_.find(std::string{subject});
+        return it == by_user_.end() ? 0U : it->second.size();
+    }
+
+  private:
+    [[nodiscard]] static auto stamp(int tick) -> std::string {
+        return std::format("2026-01-01T00:00:{:02}Z", tick % 60);
+    }
+
+    std::map<std::string, std::vector<store::SavedRow>> by_user_;
+    int id_seq_ = 0;
+    int clock_ = 0;
+};
+
+/** Unpadded base64url -- must match api_key.cpp's own b64url_encode exactly. */
+auto b64url(std::string_view raw) -> std::string {
+    static constexpr std::string_view kA =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    std::string out;
+    std::size_t i = 0;
+    for (; i + 2 < raw.size(); i += 3) {
+        const std::uint32_t c = (static_cast<unsigned char>(raw[i]) << 16) |
+                                (static_cast<unsigned char>(raw[i + 1]) << 8) |
+                                static_cast<unsigned char>(raw[i + 2]);
+        out.push_back(kA[(c >> 18) & 0x3F]);
+        out.push_back(kA[(c >> 12) & 0x3F]);
+        out.push_back(kA[(c >> 6) & 0x3F]);
+        out.push_back(kA[c & 0x3F]);
+    }
+    if (i + 1 == raw.size()) {
+        const std::uint32_t c = static_cast<unsigned char>(raw[i]) << 16;
+        out.push_back(kA[(c >> 18) & 0x3F]);
+        out.push_back(kA[(c >> 12) & 0x3F]);
+    } else if (i + 2 == raw.size()) {
+        const std::uint32_t c = (static_cast<unsigned char>(raw[i]) << 16) |
+                                (static_cast<unsigned char>(raw[i + 1]) << 8);
+        out.push_back(kA[(c >> 18) & 0x3F]);
+        out.push_back(kA[(c >> 12) & 0x3F]);
+        out.push_back(kA[(c >> 6) & 0x3F]);
+    }
+    return out;
+}
+
+constexpr std::string_view kJwtSecret = "test-only-jwt-secret-not-a-real-one";
+
+/**
+ * Mints a REAL HS256 token that api_key.cpp's verify_supabase_jwt actually
+ * verifies -- not a stub identity injected past the auth layer.
+ *
+ * That distinction is the whole value of these sections: the property under
+ * test is "a verified subject scopes storage", and asserting it against a
+ * hand-built Identity would prove nothing about the code path a browser takes.
+ */
+auto mint_jwt(std::string_view sub, std::string_view tier) -> std::string {
+    const auto exp = std::chrono::duration_cast<std::chrono::seconds>(
+                         std::chrono::system_clock::now().time_since_epoch())
+                         .count() +
+                     3600;
+    const std::string header = R"({"alg":"HS256","typ":"JWT"})";
+    const std::string payload =
+        std::format(R"({{"sub":"{}","exp":{},"app_metadata":{{"tier":"{}"}}}})", sub, exp, tier);
+    const std::string signing_input = b64url(header) + "." + b64url(payload);
+
+    std::array<unsigned char, EVP_MAX_MD_SIZE> mac{};
+    unsigned int mac_len = 0;
+    HMAC(EVP_sha256(), kJwtSecret.data(), static_cast<int>(kJwtSecret.size()),
+         reinterpret_cast<const unsigned char*>(signing_input.data()), signing_input.size(),
+         mac.data(), &mac_len);
+    return signing_input + "." +
+           b64url(std::string_view{reinterpret_cast<const char*>(mac.data()), mac_len});
+}
+
+/** A fixture whose service is backed by a caller-supplied store. */
+struct SavedFixture {
+    std::unique_ptr<grpc::Server> server;
+    std::unique_ptr<OptionsCalculator::Stub> stub;
+
+    explicit SavedFixture(std::shared_ptr<store::IStrategyStore> injected) {
+        grpc::ServerBuilder builder;
+        int selected_port = 0;
+        builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &selected_port);
+        options_calculator::service::RegisterCalculatorServiceForTest(
+            builder, kAllActions, std::move(injected));
+        server = builder.BuildAndStart();
+        if (!server || selected_port == 0) {
+            std::fprintf(stderr, "FATAL: could not start the saved-scenario fixture\n");
+            std::exit(2);
+        }
+        auto channel = grpc::CreateChannel("127.0.0.1:" + std::to_string(selected_port),
+                                           grpc::InsecureChannelCredentials());
+        stub = OptionsCalculator::NewStub(channel);
+    }
+
+    ~SavedFixture() {
+        if (server) server->Shutdown();
+    }
+
+    static constexpr std::array<std::string_view, 5> kAllActions{
+        "Initialize", "ComputeExpiryCurve", "ComputeMatrix", "ComputeGreeks",
+        "ComputeProbabilities"};
+};
+
+/** A context carrying a bearer token, the way the browser sends one. */
+auto auth_context(std::string_view jwt) -> std::unique_ptr<grpc::ClientContext> {
+    auto ctx = make_context();
+    if (!jwt.empty()) ctx->AddMetadata("authorization", std::string{"Bearer "} + std::string{jwt});
+    return ctx;
+}
+
+/** A minimal but valid two-leg scenario to save. */
+auto sample_scenario() -> StrategyRequest {
+    StrategyRequest req;
+    req.set_underlying_symbol("SPY");
+    req.set_current_price(585.0);
+    req.set_implied_volatility(0.18);
+    req.set_risk_free_rate(0.043);
+    add_leg(req, Leg::BUY, Leg::CALL, 580.0, 30.0, 12.50, 0.19);
+    add_leg(req, Leg::SELL, Leg::CALL, 600.0, 30.0, 5.25, 0.17);
+    return req;
 }
 
 }  // namespace
@@ -500,6 +707,225 @@ auto main() -> int {
         check(o_status.error_code() == grpc::StatusCode::FAILED_PRECONDITION,
               "...while a VALID averaging_states still reaches the Asian refusal, so the "
               "bounds check is not standing in for it");
+    }
+
+
+    // =======================================================================
+    // 5. SAVED SCENARIOS
+    //
+    // The property that matters most here is not "save works" -- it is that a
+    // scenario is reachable ONLY by the verified user who saved it. Section 5c
+    // is the one that proves it; everything before it establishes that the
+    // happy path is real enough for 5c to mean something.
+    // =======================================================================
+    {
+        section("5. Saved scenarios");
+
+        // Set BEFORE any RPC: both are read per-call, so this is the
+        // configuration every request below sees.
+        ::setenv("SUPABASE_JWT_SECRET", std::string{kJwtSecret}.c_str(), 1);
+        ::setenv("PRO_GATE_MODE", "enforce", 1);
+
+        constexpr std::string_view kAlice = "11111111-1111-4111-8111-111111111111";
+        constexpr std::string_view kBob = "22222222-2222-4222-8222-222222222222";
+        const auto alice_pro = mint_jwt(kAlice, "pro");
+        const auto bob_pro = mint_jwt(kBob, "pro");
+        const auto alice_free = mint_jwt(kAlice, "free");
+
+        auto fake = std::make_shared<FakeStore>();
+        SavedFixture fx{fake};
+        auto& s = *fx.stub;
+
+        // ------------------------------------------------------------------
+        // 5a. Refusals
+        // ------------------------------------------------------------------
+        {
+            calculator::SaveStrategyRequest req;
+            req.set_name("Anonymous attempt");
+            *req.mutable_request() = sample_scenario();
+            calculator::SaveStrategyResponse resp;
+            const auto ctx = auth_context("");
+            const auto st = s.SaveStrategy(ctx.get(), req, &resp);
+            check(st.error_code() == grpc::StatusCode::UNAUTHENTICATED,
+                  "anonymous SaveStrategy is UNAUTHENTICATED (got " +
+                      std::to_string(static_cast<int>(st.error_code())) + ")");
+            check(fake->count_for(kAlice) == 0 && fake->count_for(kBob) == 0,
+                  "anonymous SaveStrategy wrote nothing");
+        }
+        {
+            // The security-critical variant: with the Pro gate OFF, an
+            // anonymous caller must STILL be refused. If this ever returns OK,
+            // every anonymous visitor shares one storage bucket.
+            ::setenv("PRO_GATE_MODE", "off", 1);
+            calculator::ListStrategiesRequest req;
+            calculator::ListStrategiesResponse resp;
+            const auto ctx = auth_context("");
+            const auto st = s.ListStrategies(ctx.get(), req, &resp);
+            check(st.error_code() == grpc::StatusCode::UNAUTHENTICATED,
+                  "anonymous ListStrategies is UNAUTHENTICATED even with PRO_GATE_MODE=off");
+            ::setenv("PRO_GATE_MODE", "enforce", 1);
+        }
+        {
+            calculator::SaveStrategyRequest req;
+            req.set_name("Free tier attempt");
+            *req.mutable_request() = sample_scenario();
+            calculator::SaveStrategyResponse resp;
+            const auto ctx = auth_context(alice_free);
+            const auto st = s.SaveStrategy(ctx.get(), req, &resp);
+            check(st.error_code() == grpc::StatusCode::PERMISSION_DENIED,
+                  "signed-in free tier SaveStrategy is PERMISSION_DENIED (got " +
+                      std::to_string(static_cast<int>(st.error_code())) + ")");
+            check(fake->count_for(kAlice) == 0, "free-tier SaveStrategy wrote nothing");
+        }
+
+        // ------------------------------------------------------------------
+        // 5b. Round trip
+        // ------------------------------------------------------------------
+        std::string alice_id;
+        {
+            calculator::SaveStrategyRequest req;
+            req.set_name("  Earnings play  ");  // whitespace is trimmed, not stored
+            *req.mutable_request() = sample_scenario();
+            calculator::SaveStrategyResponse resp;
+            const auto ctx = auth_context(alice_pro);
+            const auto st = s.SaveStrategy(ctx.get(), req, &resp);
+            check(st.ok(), "Pro SaveStrategy succeeds (got " + st.error_message() + ")");
+            check(resp.strategy().name() == "Earnings play",
+                  "the stored name is trimmed (got \"" + resp.strategy().name() + "\")");
+            check(!resp.strategy().id().empty(), "the response carries a server-assigned id");
+            check(!resp.strategy().created_at().empty(), "the response carries created_at");
+            check(!resp.replaced_existing(), "a first save is not a replacement");
+            alice_id = resp.strategy().id();
+        }
+        {
+            calculator::ListStrategiesRequest req;
+            calculator::ListStrategiesResponse resp;
+            const auto ctx = auth_context(alice_pro);
+            const auto st = s.ListStrategies(ctx.get(), req, &resp);
+            check(st.ok(), "Pro ListStrategies succeeds");
+            check(resp.strategies_size() == 1, "Alice sees exactly her one scenario");
+            if (resp.strategies_size() == 1) {
+                const auto& got = resp.strategies(0).request();
+                // The JSON round trip is the part that could silently lose
+                // data, so it is asserted field by field rather than by count.
+                check(got.underlying_symbol() == "SPY", "round trip preserves the symbol");
+                check(got.legs_size() == 2, "round trip preserves both legs");
+                check(std::abs(got.current_price() - 585.0) < 1e-9,
+                      "round trip preserves the spot price");
+                if (got.legs_size() == 2) {
+                    check(got.legs(0).action() == Leg::BUY && got.legs(0).type() == Leg::CALL,
+                          "round trip preserves leg 0's action and type");
+                    check(std::abs(got.legs(1).strike() - 600.0) < 1e-9,
+                          "round trip preserves leg 1's strike");
+                    check(std::abs(got.legs(1).premium() - 5.25) < 1e-9,
+                          "round trip preserves leg 1's premium");
+                }
+            }
+        }
+        {
+            // Same name again: an update, not a second row.
+            calculator::SaveStrategyRequest req;
+            req.set_name("Earnings play");
+            auto scenario = sample_scenario();
+            scenario.set_current_price(590.0);
+            *req.mutable_request() = scenario;
+            calculator::SaveStrategyResponse resp;
+            const auto ctx = auth_context(alice_pro);
+            const auto st = s.SaveStrategy(ctx.get(), req, &resp);
+            check(st.ok(), "re-saving under the same name succeeds");
+            check(resp.replaced_existing(), "re-saving under the same name reports a replacement");
+            check(fake->count_for(kAlice) == 1,
+                  "re-saving under the same name leaves ONE row, not two");
+        }
+
+        // ------------------------------------------------------------------
+        // 5c. Cross-user isolation -- the section this feature exists to get right
+        // ------------------------------------------------------------------
+        {
+            calculator::ListStrategiesRequest req;
+            calculator::ListStrategiesResponse resp;
+            const auto ctx = auth_context(bob_pro);
+            const auto st = s.ListStrategies(ctx.get(), req, &resp);
+            check(st.ok(), "Bob's ListStrategies succeeds");
+            check(resp.strategies_size() == 0, "Bob does NOT see Alice's scenario");
+        }
+        {
+            // Bob holds Alice's real id and is Pro. He must still not be able
+            // to delete it -- authorisation is by subject, not by knowing an id.
+            calculator::DeleteStrategyRequest req;
+            req.set_id(alice_id);
+            calculator::DeleteStrategyResponse resp;
+            const auto ctx = auth_context(bob_pro);
+            const auto st = s.DeleteStrategy(ctx.get(), req, &resp);
+            check(st.ok(), "Bob's DeleteStrategy of Alice's id returns OK, not an error");
+            check(!resp.deleted(), "Bob does NOT delete Alice's scenario");
+            check(fake->count_for(kAlice) == 1, "Alice's scenario survives Bob's delete");
+        }
+
+        // ------------------------------------------------------------------
+        // 5d. Validation and delete
+        // ------------------------------------------------------------------
+        {
+            calculator::SaveStrategyRequest req;
+            req.set_name("   ");
+            *req.mutable_request() = sample_scenario();
+            calculator::SaveStrategyResponse resp;
+            const auto ctx = auth_context(alice_pro);
+            const auto st = s.SaveStrategy(ctx.get(), req, &resp);
+            check(st.error_code() == grpc::StatusCode::INVALID_ARGUMENT,
+                  "a whitespace-only name is INVALID_ARGUMENT");
+        }
+        {
+            calculator::SaveStrategyRequest req;
+            req.set_name("No legs");
+            req.mutable_request()->set_underlying_symbol("SPY");
+            calculator::SaveStrategyResponse resp;
+            const auto ctx = auth_context(alice_pro);
+            const auto st = s.SaveStrategy(ctx.get(), req, &resp);
+            check(st.error_code() == grpc::StatusCode::INVALID_ARGUMENT,
+                  "a scenario with no legs is INVALID_ARGUMENT");
+        }
+        {
+            calculator::DeleteStrategyRequest req;
+            req.set_id("not-a-uuid");
+            calculator::DeleteStrategyResponse resp;
+            const auto ctx = auth_context(alice_pro);
+            const auto st = s.DeleteStrategy(ctx.get(), req, &resp);
+            check(st.ok() && !resp.deleted(),
+                  "deleting a malformed id is OK with deleted=false, not an error");
+        }
+        {
+            calculator::DeleteStrategyRequest req;
+            req.set_id(alice_id);
+            calculator::DeleteStrategyResponse resp;
+            const auto ctx = auth_context(alice_pro);
+            const auto st = s.DeleteStrategy(ctx.get(), req, &resp);
+            check(st.ok() && resp.deleted(), "Alice deletes her own scenario");
+            check(fake->count_for(kAlice) == 0, "Alice's scenario is gone");
+
+            // Idempotent: deleting it again is not an error.
+            calculator::DeleteStrategyResponse again;
+            const auto ctx2 = auth_context(alice_pro);
+            const auto st2 = s.DeleteStrategy(ctx2.get(), req, &again);
+            check(st2.ok() && !again.deleted(), "deleting the same id twice is OK, deleted=false");
+        }
+
+        // ------------------------------------------------------------------
+        // 5e. No database configured
+        // ------------------------------------------------------------------
+        {
+            SavedFixture none{nullptr};
+            calculator::ListStrategiesRequest req;
+            calculator::ListStrategiesResponse resp;
+            const auto ctx = auth_context(alice_pro);
+            const auto st = none.stub->ListStrategies(ctx.get(), req, &resp);
+            check(st.error_code() == grpc::StatusCode::FAILED_PRECONDITION,
+                  "with no store configured the RPC is FAILED_PRECONDITION, not a crash (got " +
+                      std::to_string(static_cast<int>(st.error_code())) + ")");
+        }
+
+        ::unsetenv("PRO_GATE_MODE");
+        ::unsetenv("SUPABASE_JWT_SECRET");
     }
 
     // -----------------------------------------------------------------

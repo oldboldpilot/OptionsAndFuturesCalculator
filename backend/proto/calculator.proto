@@ -21,6 +21,17 @@ service OptionsCalculator {
   // per-symbol response would refetch a global datum on every symbol change
   // and attribute its provenance to whichever ticker happened to ask.
   rpc GetRiskFreeRate (RiskFreeRateRequest) returns (RiskFreeRateResponse);
+
+  // Saved scenarios. Pro-only, and keyed on the `sub` claim of a
+  // signature-verified Supabase access token -- never on an API key, which
+  // identifies a SITE rather than a person and would put every visitor's
+  // scenarios in one shared bucket.
+  //
+  // Three calls rather than one CRUD blob because they have three different
+  // entitlement and failure shapes, and collapsing them would hide that.
+  rpc SaveStrategy (SaveStrategyRequest) returns (SaveStrategyResponse);
+  rpc ListStrategies (ListStrategiesRequest) returns (ListStrategiesResponse);
+  rpc DeleteStrategy (DeleteStrategyRequest) returns (DeleteStrategyResponse);
 }
 
 message Leg {
@@ -311,4 +322,73 @@ message RiskFreeRateResponse {
   string source = 5;           // provider dataset id, e.g. "us_treasury_par_yield"
   repeated RatePoint curve = 6; // short end, ascending — allows expiry interpolation later
   string fetched_at = 7;       // RFC3339, when the backend obtained it
+}
+
+// ---------------------------------------------------------------------------
+// Saved scenarios
+// ---------------------------------------------------------------------------
+
+// One stored scenario.
+//
+// The scenario IS a StrategyRequest, reused rather than re-described. A parallel
+// "SavedLeg"/"SavedScenario" shape would be a second definition of the same
+// thing, and the two would drift the first time a field was added to one of
+// them -- which is exactly how this repository ended up with two incompatible
+// copies of this whole file once before (see the banner at the top).
+message SavedStrategy {
+  // Server-assigned. Opaque to the client; pass it back verbatim to update or
+  // delete. A client must not construct one.
+  string id = 1;
+  // The user's own label. Unique per user: saving twice under one name updates
+  // the existing row rather than accumulating duplicates the list cannot tell
+  // apart.
+  string name = 2;
+  StrategyRequest request = 3;
+  // RFC3339, UTC. Strings rather than an epoch number for the same reason
+  // ChainResponse.fetched_at is a string: JavaScript's number is a float64, and
+  // the browser is a first-class client here.
+  string created_at = 4;
+  string updated_at = 5;
+}
+
+message SaveStrategyRequest {
+  // Required, 1..120 characters after trimming. An empty name is refused rather
+  // than defaulted, because a generated default would collide under the
+  // (user, name) uniqueness rule and silently overwrite the previous save.
+  string name = 1;
+  StrategyRequest request = 2;
+}
+
+message SaveStrategyResponse {
+  // The stored row as the server actually recorded it -- including the id and
+  // timestamps the client did not have. Returned in full so the client never
+  // has to re-list to learn what it just wrote.
+  SavedStrategy strategy = 1;
+  // True when this call updated an existing row rather than creating one.
+  // The client shows a different confirmation for each, so it must not have to
+  // infer this by diffing its own cache.
+  bool replaced_existing = 2;
+}
+
+// Deliberately empty. The caller is identified by their verified token, never
+// by a field -- a user_id on the request would be a value the client controls,
+// and honouring it would let anyone read anyone's scenarios.
+message ListStrategiesRequest {}
+
+message ListStrategiesResponse {
+  // Newest first.
+  repeated SavedStrategy strategies = 1;
+}
+
+message DeleteStrategyRequest {
+  string id = 1;
+}
+
+message DeleteStrategyResponse {
+  // False when no row with that id belonged to this caller.
+  //
+  // NOT_FOUND and "belongs to someone else" are deliberately the same answer:
+  // distinguishing them would turn this call into an oracle for whether an id
+  // exists at all.
+  bool deleted = 1;
 }

@@ -64,6 +64,34 @@ struct Identity {
     bool authenticated = false;
 
     /**
+     * The signed-in PERSON, or empty.
+     *
+     * Set only from the `sub` claim of a Supabase access token whose signature
+     * this process verified. Empty for every other caller -- anonymous, API
+     * key, or licence.
+     *
+     * This exists because `id` cannot be used to key per-user data, and the
+     * reason is not obvious from reading it:
+     *
+     *   * `id` falls back to the literal "supabase-user" when a token verifies
+     *     but carries no `sub`, and to "licence" on the licence path. Two
+     *     different people can therefore share one `id`. Storing rows under it
+     *     would let them read each other's data.
+     *   * `id` is also the KEY LABEL on the API-key path ("acme-risk"), which
+     *     identifies a site, not a person.
+     *   * `type` cannot tell those apart either: a Supabase user and a
+     *     publishable API key are both `KeyType::Publishable`.
+     *
+     * So the distinction had to become its own field rather than a rule
+     * reconstructed at each call site -- a rule that has to be re-derived is a
+     * rule that will eventually be derived wrong somewhere.
+     *
+     * A call site storing or retrieving anything user-owned MUST gate on this
+     * being non-empty, and refuse otherwise. Never substitute `id`.
+     */
+    std::string subject;
+
+    /**
      * WHY authentication did not produce a Pro identity -- distinct from
      * `authenticated`/`tier`, which only say WHAT the caller ended up as.
      *
@@ -296,6 +324,35 @@ enum class GateMode : std::uint8_t { Off, Warn, Enforce };
  */
 [[nodiscard]] auto check_strategy_entitlement(const Identity& identity, int leg_count)
     -> grpc::Status;
+
+/**
+ * Gates the saved-scenario RPCs (SaveStrategy / ListStrategies /
+ * DeleteStrategy) behind BOTH a verified signed-in user and Pro.
+ *
+ * Two refusals, not one, and the order matters:
+ *
+ *   1. NO VERIFIED SUBJECT -> UNAUTHENTICATED, and this check is NOT subject to
+ *      `PRO_GATE_MODE`. Every other gate in this file is a commercial policy
+ *      that Off/Warn may legitimately switch off. This one is not: without a
+ *      subject there is no per-user key to store a row under, and proceeding
+ *      would mean writing every caller's scenarios into one shared bucket that
+ *      they could all read back. Honouring Off here would turn an entitlement
+ *      switch into a data-leak switch, so it does not apply.
+ *
+ *      Reached by an anonymous caller, and also by an API-key-only caller: a
+ *      publishable key identifies the SITE, not the person holding it.
+ *
+ *   2. VERIFIED, BUT NOT PRO -> PERMISSION_DENIED under Enforce, logged-only
+ *      under Warn, OK under Off -- the same three-mode shape as every other
+ *      gate here, because this half genuinely is commercial policy.
+ *
+ * `rpc` names the call for the log line only. The three RPCs share one refusal
+ * message because they share one story ("saving scenarios is a Pro feature");
+ * they do not share a log line, because "which call was refused" is exactly
+ * what an operator reading the log needs.
+ */
+[[nodiscard]] auto check_saved_scenarios_entitlement(const Identity& identity,
+                                                     std::string_view rpc) -> grpc::Status;
 
 /**
  * Gates `calculator.assistant.StrategyAssistant/ParseStrategy` behind Pro,

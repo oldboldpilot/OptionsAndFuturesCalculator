@@ -3,8 +3,15 @@ module;
 
 export module calculator_service;
 import std;
+// Names IStrategyStore in RegisterCalculatorServiceForTest's signature below.
+// strategy_store's own interface imports only `std`, so this adds no libpq
+// reachability here -- see that module's banner.
+import strategy_store;
 
 export namespace options_calculator::service {
+
+namespace store = ::options_calculator::store;
+
 
 /**
  * Registers the calculator service on a gRPC server builder.
@@ -38,7 +45,8 @@ auto RegisterCalculatorService(grpc::ServerBuilder& builder) -> void;
  * one in-process grpc::Server per test case and exit soon after.
  */
 auto RegisterCalculatorServiceForTest(grpc::ServerBuilder& builder,
-                                      std::span<const std::string_view> bound_action_names)
+                                      std::span<const std::string_view> bound_action_names,
+                                      std::shared_ptr<store::IStrategyStore> store = nullptr)
     -> void;
 
 }  // namespace options_calculator::service

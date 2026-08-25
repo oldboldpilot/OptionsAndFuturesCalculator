@@ -211,5 +211,134 @@ export class OptionsCalculatorClient {
     this.methodDescriptorGetRiskFreeRate);
   }
 
+  methodDescriptorSaveStrategy = new grpcWeb.MethodDescriptor(
+    '/calculator.OptionsCalculator/SaveStrategy',
+    grpcWeb.MethodType.UNARY,
+    calculator_pb.SaveStrategyRequest,
+    calculator_pb.SaveStrategyResponse,
+    (request: calculator_pb.SaveStrategyRequest) => {
+      return request.serializeBinary();
+    },
+    calculator_pb.SaveStrategyResponse.deserializeBinary
+  );
+
+  saveStrategy(
+    request: calculator_pb.SaveStrategyRequest,
+    metadata?: grpcWeb.Metadata | null): Promise<calculator_pb.SaveStrategyResponse>;
+
+  saveStrategy(
+    request: calculator_pb.SaveStrategyRequest,
+    metadata: grpcWeb.Metadata | null,
+    callback: (err: grpcWeb.RpcError,
+               response: calculator_pb.SaveStrategyResponse) => void): grpcWeb.ClientReadableStream<calculator_pb.SaveStrategyResponse>;
+
+  saveStrategy(
+    request: calculator_pb.SaveStrategyRequest,
+    metadata?: grpcWeb.Metadata | null,
+    callback?: (err: grpcWeb.RpcError,
+               response: calculator_pb.SaveStrategyResponse) => void) {
+    if (callback !== undefined) {
+      return this.client_.rpcCall(
+        this.hostname_ +
+          '/calculator.OptionsCalculator/SaveStrategy',
+        request,
+        metadata || {},
+        this.methodDescriptorSaveStrategy,
+        callback);
+    }
+    return this.client_.unaryCall(
+    this.hostname_ +
+      '/calculator.OptionsCalculator/SaveStrategy',
+    request,
+    metadata || {},
+    this.methodDescriptorSaveStrategy);
+  }
+
+  methodDescriptorListStrategies = new grpcWeb.MethodDescriptor(
+    '/calculator.OptionsCalculator/ListStrategies',
+    grpcWeb.MethodType.UNARY,
+    calculator_pb.ListStrategiesRequest,
+    calculator_pb.ListStrategiesResponse,
+    (request: calculator_pb.ListStrategiesRequest) => {
+      return request.serializeBinary();
+    },
+    calculator_pb.ListStrategiesResponse.deserializeBinary
+  );
+
+  listStrategies(
+    request: calculator_pb.ListStrategiesRequest,
+    metadata?: grpcWeb.Metadata | null): Promise<calculator_pb.ListStrategiesResponse>;
+
+  listStrategies(
+    request: calculator_pb.ListStrategiesRequest,
+    metadata: grpcWeb.Metadata | null,
+    callback: (err: grpcWeb.RpcError,
+               response: calculator_pb.ListStrategiesResponse) => void): grpcWeb.ClientReadableStream<calculator_pb.ListStrategiesResponse>;
+
+  listStrategies(
+    request: calculator_pb.ListStrategiesRequest,
+    metadata?: grpcWeb.Metadata | null,
+    callback?: (err: grpcWeb.RpcError,
+               response: calculator_pb.ListStrategiesResponse) => void) {
+    if (callback !== undefined) {
+      return this.client_.rpcCall(
+        this.hostname_ +
+          '/calculator.OptionsCalculator/ListStrategies',
+        request,
+        metadata || {},
+        this.methodDescriptorListStrategies,
+        callback);
+    }
+    return this.client_.unaryCall(
+    this.hostname_ +
+      '/calculator.OptionsCalculator/ListStrategies',
+    request,
+    metadata || {},
+    this.methodDescriptorListStrategies);
+  }
+
+  methodDescriptorDeleteStrategy = new grpcWeb.MethodDescriptor(
+    '/calculator.OptionsCalculator/DeleteStrategy',
+    grpcWeb.MethodType.UNARY,
+    calculator_pb.DeleteStrategyRequest,
+    calculator_pb.DeleteStrategyResponse,
+    (request: calculator_pb.DeleteStrategyRequest) => {
+      return request.serializeBinary();
+    },
+    calculator_pb.DeleteStrategyResponse.deserializeBinary
+  );
+
+  deleteStrategy(
+    request: calculator_pb.DeleteStrategyRequest,
+    metadata?: grpcWeb.Metadata | null): Promise<calculator_pb.DeleteStrategyResponse>;
+
+  deleteStrategy(
+    request: calculator_pb.DeleteStrategyRequest,
+    metadata: grpcWeb.Metadata | null,
+    callback: (err: grpcWeb.RpcError,
+               response: calculator_pb.DeleteStrategyResponse) => void): grpcWeb.ClientReadableStream<calculator_pb.DeleteStrategyResponse>;
+
+  deleteStrategy(
+    request: calculator_pb.DeleteStrategyRequest,
+    metadata?: grpcWeb.Metadata | null,
+    callback?: (err: grpcWeb.RpcError,
+               response: calculator_pb.DeleteStrategyResponse) => void) {
+    if (callback !== undefined) {
+      return this.client_.rpcCall(
+        this.hostname_ +
+          '/calculator.OptionsCalculator/DeleteStrategy',
+        request,
+        metadata || {},
+        this.methodDescriptorDeleteStrategy,
+        callback);
+    }
+    return this.client_.unaryCall(
+    this.hostname_ +
+      '/calculator.OptionsCalculator/DeleteStrategy',
+    request,
+    metadata || {},
+    this.methodDescriptorDeleteStrategy);
+  }
+
 }
 

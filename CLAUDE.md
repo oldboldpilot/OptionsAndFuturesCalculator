@@ -768,6 +768,141 @@ established here is narrower and completely certain: **routing model inference
 through it costs 45% of the answers and all of the reproducibility**, and
 Postgres was always the documented system of record and degrade target.
 
+## Saved scenarios, and the row-level security under them
+
+`SaveStrategy` / `ListStrategies` / `DeleteStrategy` on
+`calculator.OptionsCalculator` let a Pro user name a position and reopen it
+later. The stored unit IS a `StrategyRequest`, held as JSONB via protobuf's
+`MessageToJsonString`/`JsonStringToMessage`, so the stored shape is the wire
+contract and a field added to `StrategyRequest` needs no schema change.
+
+**`Identity.id` could not be used to key the rows, and the reason is not
+visible from reading it.** It falls back to the literal `"supabase-user"` when a
+token verifies but carries no `sub`, and to `"licence"` on the licence path — so
+two different people can share one `id`. It is also the KEY LABEL on the
+API-key path (`acme-risk`), which names a site rather than a person, and
+`KeyType` cannot separate those: a Supabase user and a publishable key are both
+`Publishable`. Hence `Identity.subject`, set ONLY from a verified `sub`, empty
+otherwise. Anything user-owned gates on it being non-empty.
+
+**The subject check is NOT subject to `PRO_GATE_MODE`.** Every other gate in
+`api_key.cpp` is commercial policy that Off/Warn may switch off; this one is
+not. Without a subject there is no per-user key, and proceeding would write
+every caller's scenarios into one shared bucket they could all read. Honouring
+`Off` here would turn an entitlement switch into a data-leak switch. Gated by a
+test that asserts UNAUTHENTICATED *with `PRO_GATE_MODE=off`*, mutation-checked.
+
+**`calculator_service.cpp` still has ZERO reachable libpq symbols, and
+`strategy_store` is split into two units to keep it that way.** The interface
+(`strategy_store.cppm`) names no pg type and imports only `std`; `import pg;`
+lives solely in `strategy_store.cpp`, whose imports are not re-exported. A
+single-file module would have satisfied the compiler and silently destroyed
+that invariant for every RPC in the file, pricing included. Verified on the
+built objects, not by reading:
+
+```
+nm -uC calculator_service.cpp.o | grep -c 'pg::'  -> 0
+nm -uC strategy_store.cpp.o     | grep -c 'pg::'  -> 11
+nm -uC pg.cppm.o                | grep -c 'PQ'    -> 18
+```
+
+### The FK to `public.users` was impossible, not merely unfinished
+
+`01_init.sql` created `saved_strategies.user_id` as `UUID REFERENCES
+public.users(id)` and its own banner says these should be "repointed at
+`auth.users(id)`". That repoint **cannot be done**: `auth.users` is in
+SUPABASE's Postgres and this table is in RAILWAY's, and a foreign key cannot
+cross a database. The choice was mirroring Supabase's whole user directory
+locally, or storing the verified subject as text. Migration `03` takes the
+second: `user_id` is TEXT holding the JWT `sub`. Known cost, stated rather than
+hidden: **deleting a Supabase user no longer cascades here**; that needs a
+deletion webhook or a sweep, and neither exists yet.
+
+### RLS: `ENABLE ROW LEVEL SECURITY` alone would have been inert
+
+The engine connects as `postgres`, and measured on the live database:
+
+```
+SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user;
+-> t | t
+```
+
+**Postgres always bypasses row security for a superuser or a BYPASSRLS role.**
+`FORCE ROW LEVEL SECURITY` does not help — it only removes the TABLE OWNER's
+exemption, never a superuser's. So enabling RLS and writing a policy would have
+produced something `\d` displays and that filters nothing: worse than no RLS,
+because it reads as protection.
+
+Migration `04` instead creates **`ofc_app`, a NOLOGIN, NOSUPERUSER, NOBYPASSRLS
+role**, and the store drops into it **per transaction** with `SET LOCAL ROLE`.
+A superuser may `SET ROLE` to anything; inside that transaction `current_user`
+IS the unprivileged role, so the bypass no longer applies and the policy
+genuinely filters. It reverts at COMMIT/ROLLBACK, so a pooled connection is
+never handed on with reduced privilege.
+
+NOLOGIN is load-bearing: nothing ever connects AS `ofc_app`, so it needs no
+password. That is what makes this work with **no new secret, no second
+connection string, and no Railway env change** — the two alternatives (repoint
+`DATABASE_URL`, or give the store its own URL) both need a password this
+repository must not carry, and the first also serves the inference queue, so a
+missed grant would take the assistants down rather than one feature.
+
+The subject travels as a transaction-local GUC:
+
+```
+BEGIN;
+SELECT set_config('app.current_user_id', $1, true);   -- bound param, is_local
+SET LOCAL ROLE ofc_app;                               -- constant, no params
+<the query>
+COMMIT;
+```
+
+Three details are load-bearing. `set_config` runs BEFORE the role drop, so the
+GUC is written by the privileged role. `is_local => true` makes the setting die
+with the transaction — a session-level setting here would be a cross-user leak
+with a very long fuse across a connection pool. And `SET LOCAL ROLE` cannot take
+a parameter, which is exactly why the role is a compile-time constant while the
+subject is bound.
+
+The policy fails CLOSED: `current_setting(..., true)` is NULL when unset, and
+`nullif(..., '')` collapses an empty subject to NULL too, so forgetting to set
+it yields nothing rather than everything. `WITH CHECK` is present as well as
+`USING` — `USING` alone would let a caller INSERT a row under someone else's
+`user_id` and merely be unable to see it.
+
+**Proven to be real defence in depth, not decoration.** Deleting the
+application's own `WHERE user_id = $1` from `list` and `remove` and re-running
+`test_strategy_store_pg`: **before RLS that mutation failed 3 and 6 checks; with
+RLS all 27 still pass**, cross-user isolation included. The database alone
+carries the guarantee.
+
+`test_strategy_store_pg` section 0 asserts the POSTURE directly — `relrowsecurity`,
+`relforcerowsecurity`, the policy's existence, and that `ofc_app` is neither
+superuser nor BYPASSRLS — because behaviour cannot see it: the application's own
+WHERE clause produces identical results whether or not RLS exists, so dropping
+the policy would leave every other check green. Same lesson as the AdSense
+denylist: assert what is in force, not what the code intends.
+
+**`inference_jobs` is deliberately untouched** — a shared work queue, not
+per-user data; RLS there would break both assistants for no confidentiality
+gain. `public.users`/`public.profiles` likewise: both empty and unread, and
+enabling RLS on a table with no policy denies ALL access, which would sit
+dormant and then break whatever first used them.
+
+Gates: `test_calculator_service` (62 checks, in-memory fake store, no libpq),
+`test_strategy_store_pg` (31 checks, real Postgres, NOT registered with
+`add_test` — returns 77 when `DATABASE_URL` is unset rather than passing
+vacuously), and `saved-scenarios.test.ts` (12 checks). The frontend routes the
+two refusals by gRPC STATUS CODE — UNAUTHENTICATED offers sign-in,
+PERMISSION_DENIED offers checkout — never by message text, and the test varies
+the wording while holding the code fixed, mutation-checked by transposing the
+two codes.
+
+**`buildStrategyRequest` is EXTRACTED, not duplicated.** Saving has to send
+exactly what pricing sends or a reopened scenario prices differently from the
+one saved; two copies would agree the day they were written and drift on the
+first field added to `Leg`.
+
 ## Pro tier and quota
 
 Entitlement flows through Supabase `auth.users.app_metadata.tier` (never

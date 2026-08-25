@@ -1105,8 +1105,8 @@ endif()
 # add_subdirectory(cpp23-logger EXCLUDE_FROM_ALL)
 
 # Core engine binary
-add_executable(calculator_engine src/main.cpp src/issue_key.cpp src/modules/calculator_service.cpp src/modules/finance_service.cpp src/modules/quota.cpp src/modules/api_key.cpp src/modules/assistant_service.cpp src/modules/mortgage_assistant_service.cpp src/modules/inference_queue.cpp src/modules/inference_admission.cpp src/modules/sgee_queue_client.cpp)
-target_sources(calculator_engine PUBLIC FILE_SET CXX_MODULES FILES src/modules/calculator_service.cppm src/modules/market_data.cppm src/modules/finance_service.cppm src/modules/quota.cppm src/modules/api_key.cppm src/modules/strategy_catalogue.cppm src/modules/assistant_verification.cppm src/modules/assistant_service.cppm src/modules/mortgage_verification.cppm src/modules/mortgage_grammar.cppm src/modules/mortgage_assistant_service.cppm src/modules/pg.cppm src/modules/inference_queue.cppm src/modules/sgee_queue_client.cppm src/modules/inference_admission.cppm)
+add_executable(calculator_engine src/main.cpp src/issue_key.cpp src/modules/calculator_service.cpp src/modules/finance_service.cpp src/modules/quota.cpp src/modules/api_key.cpp src/modules/assistant_service.cpp src/modules/mortgage_assistant_service.cpp src/modules/inference_queue.cpp src/modules/inference_admission.cpp src/modules/sgee_queue_client.cpp src/modules/strategy_store.cpp)
+target_sources(calculator_engine PUBLIC FILE_SET CXX_MODULES FILES src/modules/calculator_service.cppm src/modules/market_data.cppm src/modules/finance_service.cppm src/modules/quota.cppm src/modules/api_key.cppm src/modules/strategy_catalogue.cppm src/modules/assistant_verification.cppm src/modules/assistant_service.cppm src/modules/mortgage_verification.cppm src/modules/mortgage_grammar.cppm src/modules/mortgage_assistant_service.cppm src/modules/pg.cppm src/modules/inference_queue.cppm src/modules/sgee_queue_client.cppm src/modules/inference_admission.cppm src/modules/strategy_store.cppm)
 target_link_libraries(calculator_engine PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto sgee)
 # PostgreSQL::PostgreSQL is linked into calculator_engine further down, right
 # after find_package(PostgreSQL REQUIRED) runs (see that comment block) --
@@ -1435,8 +1435,19 @@ add_test(NAME FinanceServiceValidationTest COMMAND test_finance_service_validati
 # actually catch a partial action registry, not just assert they exist.
 # Needs market_data.cppm in addition to quota/api_key (unlike the finance
 # tests) because calculator_service.cpp imports it directly for live quotes.
+# strategy_store: this test compiles the INTERFACE unit plus
+# tests/strategy_store_stub.cpp -- a test-only module implementation unit whose
+# make_pg_strategy_store returns nullptr (see that file's own banner for why the
+# stub cannot live in the test .cpp). src/modules/strategy_store.cpp, the
+# pg-backed implementation, is
+# deliberately NOT listed, which is what keeps this target free of
+# PostgreSQL::PostgreSQL, exactly as the invariant block further down claims.
+# The saved-scenario RPCs are exercised here against an in-memory fake store
+# injected through RegisterCalculatorServiceForTest, so they get real coverage
+# with no database and no libpq.
 add_executable(test_calculator_service
     tests/test_calculator_service.cpp
+    tests/strategy_store_stub.cpp
     src/modules/calculator_service.cpp
     src/modules/quota.cpp
     src/modules/api_key.cpp
@@ -1448,6 +1459,7 @@ target_sources(test_calculator_service
         src/modules/market_data.cppm
         src/modules/quota.cppm
         src/modules/api_key.cppm
+        src/modules/strategy_store.cppm
 )
 target_link_libraries(test_calculator_service PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto sgee)
 
@@ -1521,8 +1533,26 @@ add_test(NAME QuotaTierLabelTest COMMAND test_quota_tier_label)
 # WHAT STILL HOLDS, UNCHANGED: finance_service.cpp/finance_service.cppm and
 # calculator_service.cpp/calculator_service.cppm still do not, and must not,
 # `import pg;`/`import inference_queue;`/`import inference_admission;`,
-# directly or transitively -- grep confirms it (see this task's own report
-# for the exact command), and neither file is listed in ANY of
+# directly or transitively.
+#
+# calculator_service.cpp DOES now `import strategy_store;`, for the
+# SaveStrategy/ListStrategies/DeleteStrategy RPCs, and that does NOT weaken the
+# claim -- it is the reason strategy_store is split into two units at all.
+# strategy_store.cppm (the INTERFACE) names no pg type and imports only `std`;
+# `import pg;` appears solely in strategy_store.cpp (the module IMPLEMENTATION
+# unit), whose imports are not re-exported. A naive single-file module would
+# have put pg in the interface and silently destroyed this invariant for every
+# RPC in calculator_service.cpp, pricing ones included.
+#
+# Verified mechanically rather than by reading, on the built objects:
+#   nm -uC calculator_service.cpp.o | grep -c 'pg::'   -> 0
+#   nm -uC strategy_store.cpp.o     | grep -c 'pg::'   -> 11
+#   nm -uC pg.cppm.o                | grep -c 'PQ'     -> 18
+# That is the boundary, and it is where it is supposed to be. Re-run those
+# three commands if this ever needs re-proving; a change that moves the first
+# number off zero has broken the invariant regardless of what any comment says.
+#
+# Neither file is listed in ANY of
 # test_finance_service_validation's, test_option_pricing_service's or
 # test_calculator_service's sources/FILE_SETs below, none of which gained
 # PostgreSQL::PostgreSQL either. That is what makes "the Finance/Calculator
@@ -1637,6 +1667,24 @@ add_test(NAME MortgageAssistantServiceTest COMMAND test_mortgage_assistant_servi
 # it above: the only sensen-family module this needs is
 # sgee.runtime.resilience::CircuitBreaker, which is part of the standalone
 # SGEE library target, not the 271-module sensen closure.
+# Real-Postgres gate for the saved-scenario SQL. NOT registered via add_test()
+# -- like test_inference_queue_pg below, it needs a live database, and a test
+# that passes vacuously when one is absent is worse than no test. It returns 77
+# (ctest's "skipped") when DATABASE_URL is unset. Run it explicitly:
+#   DATABASE_URL="postgresql://postgres@127.0.0.1:55432/postgres" \
+#     ./test_strategy_store_pg
+add_executable(test_strategy_store_pg
+    tests/test_strategy_store_pg.cpp
+    src/modules/strategy_store.cpp
+)
+target_sources(test_strategy_store_pg
+    PRIVATE
+    FILE_SET CXX_MODULES FILES
+        src/modules/pg.cppm
+        src/modules/strategy_store.cppm
+)
+target_link_libraries(test_strategy_store_pg PRIVATE PostgreSQL::PostgreSQL logger sgee)
+
 add_executable(test_inference_queue_pg
     tests/test_inference_queue_pg.cpp
     src/modules/inference_queue.cpp
