@@ -30,12 +30,14 @@
 // It refuses to run without DATABASE_URL rather than passing vacuously, and it
 // deletes only rows whose user_id carries its own test prefix.
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 import strategy_store;
@@ -256,6 +258,117 @@ auto main() -> int {
         auto update_at_cap = s->save(kBob, "Earnings play", "DIA", payload_for("DIA"));
         check(update_at_cap.has_value() && update_at_cap->replaced_existing,
               "an at-cap user can still UPDATE a scenario they already have");
+    }
+
+    // ---------------------------------------------------------------
+    // The transaction is not decoration: it is what makes SET LOCAL ROLE and
+    // the transaction-local GUC possible, and a bug in it would show up here
+    // and nowhere else. Both sections below target the pool specifically,
+    // because pool_size is 4 and a connection is therefore reused across
+    // DIFFERENT subjects constantly.
+    section("6. A failed statement must not poison the pooled connection");
+    {
+        // `payload_json` reaches SQL as $4::jsonb. Text that is not JSON makes
+        // Postgres raise inside the transaction, which aborts it. If the RAII
+        // rollback did not run, that connection would go back to the pool in a
+        // failed-transaction state and the NEXT borrower -- any user -- would
+        // get "current transaction is aborted" on a perfectly good query.
+        //
+        // Repeated more times than the pool is wide, so every connection in it
+        // is poisoned at least once if the guard is broken.
+        // Start from a known-empty state for Alice. Earlier sections leave her
+        // holding a row, and asserting "exactly one row" against an assumed
+        // starting count is how a test ends up encoding a previous section's
+        // bookkeeping instead of the property under test.
+        if (auto pre = s->list(kAlice); pre) {
+            for (const auto& row : *pre) (void)s->remove(kAlice, row.id);
+        }
+
+        // More failures than the pool is wide, so every connection in it is
+        // poisoned at least once if the RAII rollback is broken. Counted rather
+        // than checked per iteration -- twelve identical PASS lines say nothing
+        // eleven of them did not already say.
+        int refused = 0;
+        for (int i = 0; i < 12; ++i) {
+            if (!s->save(kAlice, "bad payload", "SPY", "this is not json")) ++refused;
+        }
+        check(refused == 12, "all 12 malformed payloads are refused, not stored");
+
+        auto after = s->save(kAlice, "still works", "SPY", payload_for("SPY"));
+        check(after.has_value(),
+              "a good save still succeeds after 12 failed ones (the pool is not poisoned)");
+        auto rows = s->list(kAlice);
+        check(rows.has_value() && rows->size() == 1,
+              "and the failed saves wrote nothing (rolled back, not committed)");
+        if (rows) {
+            for (const auto& r : *rows) (void)s->remove(kAlice, r.id);
+        }
+    }
+
+    // ---------------------------------------------------------------
+    section("7. Concurrent subjects sharing one connection pool");
+    {
+        // THE test for this design. `app.current_user_id` is set per
+        // transaction with is_local => true; if that were ever session-level,
+        // or if a transaction were left open, one thread's subject would leak
+        // onto a connection another thread then borrows -- and that is a
+        // cross-user data leak, not a crash. It would be invisible in the
+        // single-threaded sections above, all of which run one operation at a
+        // time.
+        //
+        // 8 threads against a pool of 4 guarantees reuse across subjects.
+        constexpr int kThreads = 8;
+        constexpr int kRounds = 25;
+        std::atomic<int> leaks{0};
+        std::atomic<int> errors{0};
+
+        std::vector<std::thread> workers;
+        workers.reserve(kThreads);
+        for (int t = 0; t < kThreads; ++t) {
+            workers.emplace_back([&, t] {
+                const std::string subject = "test-store-pg-conc-" + std::to_string(t);
+                for (int r = 0; r < kRounds; ++r) {
+                    auto saved = s->save(subject, "scenario-" + std::to_string(r), "SPY",
+                                         payload_for("SPY"));
+                    if (!saved) { ++errors; continue; }
+
+                    auto rows = s->list(subject);
+                    if (!rows) { ++errors; continue; }
+                    // Every row this subject can see must be its own. A leaked
+                    // GUC would show another thread's rows here.
+                    for (const auto& row : *rows) {
+                        if (row.name.rfind("scenario-", 0) != 0) ++leaks;
+                    }
+                    if (rows->size() > static_cast<std::size_t>(r + 1)) ++leaks;
+
+                    auto gone = s->remove(subject, saved->row.id);
+                    if (!gone || !*gone) ++errors;
+                }
+            });
+        }
+        for (auto& w : workers) w.join();
+
+        check(errors.load() == 0,
+              "8 threads x 25 rounds complete with no errors (got " +
+                  std::to_string(errors.load()) + ")");
+        check(leaks.load() == 0,
+              "no thread ever saw another subject's rows -- the subject does not leak "
+              "across pooled connections (got " + std::to_string(leaks.load()) + ")");
+
+        // Whatever each thread left behind (its last round's rows) is cleaned
+        // up here, and the count doubles as an isolation check of its own.
+        std::size_t residual = 0;
+        for (int t = 0; t < kThreads; ++t) {
+            const std::string subject = "test-store-pg-conc-" + std::to_string(t);
+            auto rows = s->list(subject);
+            if (rows) {
+                residual += rows->size();
+                for (const auto& row : *rows) (void)s->remove(subject, row.id);
+            }
+        }
+        check(residual == 0,
+              "every concurrent subject ends with its own rows already deleted (got " +
+                  std::to_string(residual) + " left)");
     }
 
     // Cleanup: only ever rows carrying this file's own subjects.
