@@ -4,6 +4,25 @@
 --
 -- Makes public.saved_strategies actually writable by the engine.
 --
+-- ############################################################################
+-- CORRECTED BY 05_saved_strategies_auth_fk.sql. READ THIS FIRST.
+--
+-- The banner below argues at length that a foreign key to auth.users is
+-- IMPOSSIBLE because auth.users lives in "SUPABASE's Postgres" and this table
+-- lives in "RAILWAY's". That is wrong. Auth for this site is self-hosted GoTrue
+-- running on Railway against THIS database -- `SELECT to_regclass('auth.users')`
+-- returns a table, and the role list here contains supabase_auth_admin. There
+-- is no database boundary.
+--
+-- Migration 05 restores the foreign key with ON DELETE CASCADE. The "known gap"
+-- this file records at the bottom -- deleting a user not reaping their rows --
+-- is closed, and was never a necessary cost.
+--
+-- The rest of the banner is left as written rather than edited, because the
+-- mistake is instructive: it reasoned from the PRODUCT'S NAME instead of from
+-- the connection string, and wrote the conclusion down as settled fact.
+-- ############################################################################
+--
 -- WHY THIS MIGRATION EXISTS AT ALL
 --
 -- 01_init.sql created the table with

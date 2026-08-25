@@ -806,17 +806,61 @@ nm -uC strategy_store.cpp.o     | grep -c 'pg::'  -> 11
 nm -uC pg.cppm.o                | grep -c 'PQ'    -> 18
 ```
 
-### The FK to `public.users` was impossible, not merely unfinished
+### The FK: migration 03 said "impossible", was WRONG, and 05 restores it
 
 `01_init.sql` created `saved_strategies.user_id` as `UUID REFERENCES
-public.users(id)` and its own banner says these should be "repointed at
-`auth.users(id)`". That repoint **cannot be done**: `auth.users` is in
-SUPABASE's Postgres and this table is in RAILWAY's, and a foreign key cannot
-cross a database. The choice was mirroring Supabase's whole user directory
-locally, or storing the verified subject as text. Migration `03` takes the
-second: `user_id` is TEXT holding the JWT `sub`. Known cost, stated rather than
-hidden: **deleting a Supabase user no longer cascades here**; that needs a
-deletion webhook or a sweep, and neither exists yet.
+public.users(id)` and asked for it to be "repointed at `auth.users(id)`".
+Migration `03` argued that repoint was impossible because `auth.users` is in
+Supabase's Postgres while this table is in Railway's, and a foreign key cannot
+cross a database — so it made `user_id` TEXT and accepted "deleting a user no
+longer cascades" as a necessary cost.
+
+**The premise was false.** Auth here is SELF-HOSTED GoTrue on Railway
+(`supabase-auth-production-c656.up.railway.app`, which the production frontend
+is built against) running against **this** database. Measured:
+
+```
+SELECT nspname FROM pg_namespace ...   -> auth, public
+SELECT to_regclass('auth.users')       -> auth.users
+```
+
+— and that is also why the role list contains `supabase_auth_admin` and
+`authenticator`. There was never a boundary to cross. Migration `03` reasoned
+from the PRODUCT'S NAME rather than from the connection string and wrote the
+conclusion down as settled; its banner now carries a correction pointer rather
+than being quietly edited, because the mistake is the instructive part.
+
+Migration `05` converts `user_id` back to `uuid` and restores
+`REFERENCES auth.users(id) ON DELETE CASCADE`. Deleting an account now reaps its
+scenarios, with no webhook and no sweep — gated by
+`test_strategy_store_pg` section 8, which saves two scenarios, deletes the auth
+user, and asserts both are gone; mutation-checked by dropping the constraint.
+
+Three consequences worth holding on to:
+
+- **The `::uuid` cast in the policy RAISES on a malformed value** rather than
+  matching nothing, so a non-uuid subject would surface as a database error
+  instead of a fail-closed empty. `strategy_store.cpp` therefore validates the
+  subject is a uuid BEFORE any statement runs — the cast is safe by
+  construction, not by hope.
+- **RLS refuses a foreign `user_id` before the FK ever sees it.** Rehearsed on
+  the live database: inserting another user's row as `ofc_app` fails with "new
+  row violates row-level security policy", and only bypassing RLS reaches the
+  FK's own refusal. Outer guard first.
+- **A deleted account with a still-valid token is a real state**, not a
+  theoretical one — an access token outlives the account by up to an hour. That
+  FK violation is mapped to `StoreError::UnknownUser` → `UNAUTHENTICATED`
+  ("This account no longer exists. Sign in again."), because "temporarily
+  unavailable, try again shortly" is the opposite of true for an account that is
+  gone.
+
+Migration 05 is guarded on `auth.users` existing, so a bare local database with
+no GoTrue still applies cleanly. That guard is a place a control could silently
+go missing, so section 0 of the test asserts the constraint EXISTS wherever
+`auth.users` does. Its orphan cleanup runs UNCONDITIONALLY rather than only
+inside the type-conversion branch — scoping it to the conversion made the
+migration succeed once and fail every time after, which is the worst shape a
+migration can have.
 
 ### RLS: `ENABLE ROW LEVEL SECURITY` alone would have been inert
 

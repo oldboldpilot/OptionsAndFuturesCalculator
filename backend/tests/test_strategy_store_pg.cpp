@@ -62,9 +62,17 @@ auto check(bool condition, const std::string& what) -> void {
 
 auto section(const char* title) -> void { std::printf("\n=== %s ===\n", title); }
 
-// Distinctive so the cleanup below can never match a real user's rows.
-constexpr std::string_view kAlice = "test-store-pg-alice";
-constexpr std::string_view kBob = "test-store-pg-bob";
+// Real uuids, because user_id is a uuid with a foreign key to auth.users since
+// migration 05. The 5th group spells the owner so a stray row is still
+// identifiable by eye in psql, and the addresses are far outside anything
+// GoTrue would mint for a real signup.
+constexpr std::string_view kAlice = "aaaaaaaa-0000-4000-8000-0000000a11ce";
+constexpr std::string_view kBob = "bbbbbbbb-0000-4000-8000-00000000b0b0";
+
+/** Per-thread subject for the concurrency section. */
+auto conc_subject(int i) -> std::string {
+    return std::format("cccccccc-0000-4000-8000-{:012}", i);
+}
 
 /** How many rows a subject currently holds, straight from the store. */
 auto count_for(store::IStrategyStore& s, std::string_view subject) -> std::size_t {
@@ -117,20 +125,44 @@ auto main() -> int {
     //
     // Same lesson this repository already paid for with the AdSense denylist:
     // assert the state that is actually in force, not the one the code intends.
+    namespace pg = options_calculator::pg;
+    auto conn = pg::Connection::connect(url, std::chrono::milliseconds{2000},
+                                        std::chrono::milliseconds{2000});
+    if (!conn) {
+        std::fprintf(stderr, "could not open a direct connection\n");
+        return 2;
+    }
+    auto q = [&](const std::string& sql) -> std::string {
+        auto r = conn->exec(sql);
+        if (!r || r->rows() == 0) return {};
+        return std::string{r->text(0, 0)};
+    };
+
+    // Since migration 05, user_id is a uuid with a foreign key to auth.users.
+    // These subjects therefore have to be REAL auth users -- which is an
+    // improvement, not an inconvenience: it means every section below now
+    // exercises the foreign key too, and section 8 can prove the cascade.
+    const bool has_auth = !q("SELECT to_regclass('auth.users')::text").empty();
+    auto make_user = [&](std::string_view id) {
+        if (!has_auth) return;
+        (void)conn->exec(std::format(
+            "INSERT INTO auth.users (id, instance_id, aud, role, email, encrypted_password, "
+            "created_at, updated_at) VALUES ('{}', "
+            "'00000000-0000-0000-0000-000000000000','authenticated','authenticated', "
+            "'{}@test-store-pg.invalid','x', now(), now()) ON CONFLICT (id) DO NOTHING",
+            id, id));
+    };
+    auto drop_user = [&](std::string_view id) {
+        if (!has_auth) return;
+        // CASCADE reaps this subject's saved_strategies rows with it.
+        (void)conn->exec(std::format("DELETE FROM auth.users WHERE id = '{}'", id));
+    };
+
+    make_user(kAlice);
+    make_user(kBob);
+
     section("0. RLS is actually configured");
     {
-        namespace pg = options_calculator::pg;
-        auto conn = pg::Connection::connect(url, std::chrono::milliseconds{2000},
-                                            std::chrono::milliseconds{2000});
-        if (!conn) {
-            std::fprintf(stderr, "could not open a direct connection for the RLS probe\n");
-            return 2;
-        }
-        auto q = [&](const char* sql) -> std::string {
-            auto r = conn->exec(sql);
-            if (!r || r->rows() == 0) return {};
-            return std::string{r->text(0, 0)};
-        };
 
         check(q("SELECT relrowsecurity FROM pg_class WHERE relname = 'saved_strategies'") == "t",
               "row-level security is ENABLED on saved_strategies");
@@ -146,6 +178,26 @@ auto main() -> int {
         check(q("SELECT (rolsuper OR rolbypassrls)::text FROM pg_roles WHERE rolname = 'ofc_app'")
                   == "false",
               "ofc_app is neither superuser nor BYPASSRLS, so the policy is not inert");
+
+        // Migration 05 skips the foreign key when auth.users is absent, which
+        // is correct for a bare local database and WRONG anywhere real. The
+        // guard is therefore asserted rather than trusted: wherever auth.users
+        // exists, the constraint must exist too.
+        if (has_auth) {
+            check(q("SELECT count(*) FROM pg_constraint "
+                    "WHERE conname = 'saved_strategies_user_id_fkey' "
+                    "  AND conrelid = 'public.saved_strategies'::regclass") == "1",
+                  "the foreign key to auth.users exists");
+            check(q("SELECT confdeltype::text FROM pg_constraint "
+                    "WHERE conname = 'saved_strategies_user_id_fkey'") == "c",
+                  "and it is ON DELETE CASCADE (confdeltype 'c')");
+            check(q("SELECT format_type(atttypid, atttypmod) FROM pg_attribute "
+                    "WHERE attrelid = 'public.saved_strategies'::regclass "
+                    "  AND attname = 'user_id'") == "uuid",
+                  "user_id is a uuid, so the policy compares uuid to uuid");
+        } else {
+            std::printf("  SKIP: no auth.users on this database -- FK checks not applicable\n");
+        }
     }
 
     // ---------------------------------------------------------------
@@ -237,6 +289,14 @@ auto main() -> int {
         check(gone.has_value() && *gone, "Alice deletes her own row");
         auto twice = s->remove(kAlice, alice_id);
         check(twice.has_value() && !*twice, "deleting the same row twice reports false");
+
+        // A subject that is not a uuid is refused BEFORE any statement runs.
+        // That guard is what makes migration 05's `::uuid` cast in the policy
+        // safe: without it a malformed subject would raise a Postgres cast
+        // error instead of failing closed.
+        auto bad_subject = s->list("not-a-uuid");
+        check(!bad_subject.has_value() && bad_subject.error() == store::StoreError::Invalid,
+              "a non-uuid subject is refused as Invalid, not sent to the database");
     }
 
     // ---------------------------------------------------------------
@@ -322,11 +382,13 @@ auto main() -> int {
         std::atomic<int> leaks{0};
         std::atomic<int> errors{0};
 
+        for (int t = 0; t < kThreads; ++t) make_user(conc_subject(t));
+
         std::vector<std::thread> workers;
         workers.reserve(kThreads);
         for (int t = 0; t < kThreads; ++t) {
             workers.emplace_back([&, t] {
-                const std::string subject = "test-store-pg-conc-" + std::to_string(t);
+                const std::string subject = conc_subject(t);
                 for (int r = 0; r < kRounds; ++r) {
                     auto saved = s->save(subject, "scenario-" + std::to_string(r), "SPY",
                                          payload_for("SPY"));
@@ -359,7 +421,7 @@ auto main() -> int {
         // up here, and the count doubles as an isolation check of its own.
         std::size_t residual = 0;
         for (int t = 0; t < kThreads; ++t) {
-            const std::string subject = "test-store-pg-conc-" + std::to_string(t);
+            const std::string subject = conc_subject(t);
             auto rows = s->list(subject);
             if (rows) {
                 residual += rows->size();
@@ -369,6 +431,36 @@ auto main() -> int {
         check(residual == 0,
               "every concurrent subject ends with its own rows already deleted (got " +
                   std::to_string(residual) + " left)");
+    }
+
+    // ---------------------------------------------------------------
+    section("8. Deleting the account reaps its scenarios (ON DELETE CASCADE)");
+    {
+        // The gap migration 03 accepted and 05 closed. Before the foreign key,
+        // deleting a user left their saved scenarios behind forever, with no
+        // sweep and no webhook to collect them.
+        const std::string doomed = "dddddddd-0000-4000-8000-00000000d00d";
+        make_user(doomed);
+        auto a = s->save(doomed, "one", "SPY", payload_for("SPY"));
+        auto b = s->save(doomed, "two", "QQQ", payload_for("QQQ"));
+        check(a.has_value() && b.has_value(), "a doomed user saves two scenarios");
+        auto before = s->list(doomed);
+        check(before.has_value() && before->size() == 2, "and holds both");
+
+        drop_user(doomed);
+
+        auto after = s->list(doomed);
+        if (has_auth) {
+            check(after.has_value() && after->empty(),
+                  "deleting the auth user reaps both scenarios -- no orphans left behind");
+        } else {
+            // Without auth.users there is no FK to cascade, so clean up by hand
+            // and say so rather than reporting a pass this database cannot give.
+            if (after) {
+                for (const auto& row : *after) (void)s->remove(doomed, row.id);
+            }
+            std::printf("  SKIP: no auth.users -- cascade not applicable on this database\n");
+        }
     }
 
     // Cleanup: only ever rows carrying this file's own subjects.
@@ -381,6 +473,9 @@ auto main() -> int {
         check(left.has_value() && left->empty(),
               std::string{"cleanup leaves no rows for "} + std::string{subject});
     }
+    for (int t = 0; t < 8; ++t) drop_user(conc_subject(t));
+    drop_user(kAlice);
+    drop_user(kBob);
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

@@ -45,10 +45,19 @@ export const SavedScenarios: React.FC = () => {
 
   const body = () => {
     if (failure?.needsSignIn) {
+      // The server's own sentence, not a fixed one. UNAUTHENTICATED covers two
+      // different situations that want different words -- never signed in
+      // ("Saved scenarios belong to an account...") and an account that has
+      // since been deleted while its token is still valid ("This account no
+      // longer exists. Sign in again."). Hardcoding the first tells the second
+      // group something untrue.
       return (
         <div className="empty-state">
           <span className="empty-state-title">Sign in to save</span>
-          <span>Saved scenarios belong to an account, so they follow you between devices.</span>
+          <span>
+            {failure.message ||
+              'Saved scenarios belong to an account, so they follow you between devices.'}
+          </span>
         </div>
       );
     }

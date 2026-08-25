@@ -74,6 +74,17 @@ enum class StoreError : std::uint8_t {
     Unavailable,  // no database configured, or it could not be reached
     AtCapacity,   // this user already holds the maximum number of scenarios
     Invalid,      // malformed argument that never reached the database
+    /**
+     * The subject verified, but no such user exists any more.
+     *
+     * Reachable and NOT theoretical: an access token stays valid for up to an
+     * hour after the account it names is deleted, so a request can legitimately
+     * arrive carrying a signature-valid token for a user the foreign key can no
+     * longer find. Distinguished from `Unavailable` because the caller's
+     * options differ completely -- "try again shortly" is exactly the wrong
+     * advice for an account that is gone for good.
+     */
+    UnknownUser,
     Internal,     // the query ran and the answer made no sense
 };
 
@@ -82,6 +93,7 @@ enum class StoreError : std::uint8_t {
         case StoreError::Unavailable: return "unavailable";
         case StoreError::AtCapacity: return "at-capacity";
         case StoreError::Invalid: return "invalid";
+        case StoreError::UnknownUser: return "unknown-user";
         case StoreError::Internal: return "internal";
     }
     return "unknown";

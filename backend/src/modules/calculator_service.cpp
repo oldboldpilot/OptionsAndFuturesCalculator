@@ -1788,6 +1788,13 @@ private:
             case StoreError::Invalid:
                 return Status(grpc::StatusCode::INVALID_ARGUMENT,
                               "That scenario request was not valid.");
+            case StoreError::UnknownUser:
+                // UNAUTHENTICATED, not NOT_FOUND: the token is genuinely valid
+                // and the account behind it is not. Signing in again is the
+                // only thing that resolves it, and that is what this code tells
+                // a client to do.
+                return Status(grpc::StatusCode::UNAUTHENTICATED,
+                              "This account no longer exists. Sign in again.");
             case StoreError::Unavailable:
                 return Status(grpc::StatusCode::UNAVAILABLE,
                               "Saved scenarios are temporarily unavailable. Try again shortly.");

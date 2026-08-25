@@ -71,6 +71,21 @@ namespace {
  * more thing to get wrong.
  */
 [[nodiscard]] auto unavailable(std::string_view what, const pg::Error& err) -> StoreError {
+    // A foreign-key violation on saved_strategies_user_id_fkey means the
+    // subject verified but auth.users no longer holds that id -- a deleted
+    // account whose access token has not expired yet. Reported as its own
+    // error, because "temporarily unavailable, try again shortly" is the
+    // opposite of true for an account that is gone.
+    //
+    // Matched on the constraint NAME, which migration 05 fixes, rather than on
+    // SQLSTATE alone: this table has exactly one foreign key, so the name is
+    // the precise signal and cannot be confused with some future constraint.
+    if (err.message.find("saved_strategies_user_id_fkey") != std::string::npos) {
+        logger::Logger::getInstance().info(
+            "strategy_store: {} refused -- no such auth user (deleted account with a "
+            "still-valid token)", what);
+        return StoreError::UnknownUser;
+    }
     logger::Logger::getInstance().warn("strategy_store: {} failed ({}): {}", what,
                                        pg::to_string(err.code), err.message);
     return StoreError::Unavailable;
@@ -117,6 +132,15 @@ class Transaction {
 
     /** BEGIN, bind the subject, drop privilege. Any failure leaves it unopened. */
     [[nodiscard]] auto begin(std::string_view subject) -> std::optional<StoreError> {
+        // Checked BEFORE anything is sent. Migration 05's policy compares
+        // `user_id = nullif(current_setting(...), '')::uuid`, and that cast
+        // RAISES on a malformed value rather than matching nothing -- so a
+        // non-uuid subject would surface as a database error instead of a
+        // fail-closed empty result. Refusing here makes the cast safe by
+        // construction. Every real subject is a Supabase `sub`, which is a
+        // uuid, so this rejects nothing legitimate.
+        if (!is_uuid(subject)) return StoreError::Invalid;
+
         if (auto r = conn_.exec("BEGIN"); !r) return unavailable("begin", r.error());
         open_ = true;
 
