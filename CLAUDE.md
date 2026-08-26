@@ -2394,13 +2394,27 @@ than skipping (`test_lowbit_flash_{cutile,cublas,graph}`,
 `test_linear_attention_distributed`) — they build, so that is a runtime guard
 still to be added.
 
-**Known and NOT fixed: `tests/CMakeLists.txt` has 32 `if(SENSEN_HAS_CUDA)`
-blocks, and `SENSEN_HAS_CUDA` is not a CMake variable anywhere** — it is only
-ever an `add_compile_definitions()` token. Those conditions are ALWAYS FALSE,
-including on a GPU host, so none of the `CUDA::cudart` / `CUDA::cublas` link
-lines or CUDA include directories they guard has ever applied. The correct
-spelling is `ENABLE_CUDA`. Flipping it changes what a CUDA host links, so it
-needs the GPU server to verify — see "CUDA lives on the GPU server".
+**A plain `cmake -B build -S .` now does the right thing on a CPU-only host.**
+Until sensen `ea8222fb` (2026-08-26) the auto-detector was dead code: the file
+opened with `option(ENABLE_CUDA ... ON)`, which writes a cache entry, so the
+detector 470 lines later asking `if(NOT DEFINED ENABLE_CUDA)` was always
+answered "defined" and took the `else()` branch. `ENABLE_CUDA` was hardcoded ON
+everywhere, and a toolkit-less host died with `No CMAKE_CUDA_COMPILER could be
+found` — the exact failure the dead code existed to prevent. The probe also now
+asks for a **compiler** rather than a GPU: `project(... LANGUAGES CUDA)` needs
+nvcc, not a device, so `nvidia-smi -L` was the wrong question. Verified here:
+
+```
+-- ENABLE_CUDA default: OFF (no CUDA compiler found)
+--   ENABLE_CUDA:     OFF
+```
+
+The five tests that ABORTED rather than skipping on a CPU host
+(`test_lowbit_flash_{gpu,cutile,cublas,graph}`, `test_qwen3_14b_flash_attn_smoke`)
+are guarded at the source and carry `SKIP_RETURN_CODE 77` in the same commit.
+Their old comment claimed a CPU-only build "falls back to CPU and the comparison
+is trivially exact"; it does not — each names its backend explicitly and
+`LowBitFlashAttention` throws on a GPU request without CUDA.
 
 ## Build Commands
 - **Frontend Production Build:** `cd frontend && npm run build`
