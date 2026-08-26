@@ -743,6 +743,11 @@ target_sources(sensen_slim
             "${SENSEN_SRC}/intrinsics.cppm"
             "${SENSEN_SRC}/k_quant_dequant.cppm"
             "${SENSEN_SRC}/kv_half.cppm"
+            # kv_cache.cppm imports sensen.kv_lowbit as of the sub-8-bit KV work.
+            # Missing here, sensen_slim fails with "module 'sensen.kv_lowbit' not
+            # found" -- the slim list is hand-maintained, so every new module a
+            # listed one imports has to be added with it.
+            "${SENSEN_SRC}/kv_lowbit.cppm"
             "${SENSEN_SRC}/kv_q8.cppm"
             "${SENSEN_SRC}/kv_cache.cppm"
             "${SENSEN_SRC}/linear_algebra.cppm"

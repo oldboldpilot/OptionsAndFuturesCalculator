@@ -2361,6 +2361,47 @@ The 2026-07-30 investigation abandoned this because sensen's working tree had no
 library here, so all three terms of its gate hold. See
 `docs/session_logs/2026-07-30_libcxx_std_module_investigation.md`.
 
+## sensen builds without CUDA, and the slim list is hand-maintained
+
+As of 2026-08-25 sensen configures, compiles, links and tests on a host with no
+NVIDIA GPU and no CUDA toolkit — `ninja -k 0` exits 0 with 368/368 targets on
+`oluwasanmi-fedora-server`. It did not before: four separate stages failed
+(CMake generate, dependency scan, compile, link), each from CUDA-only code
+reachable from code that is not, and the fifteen CUDA-only tests and examples
+are now guarded so ctest reports **Skipped (77)** rather than the target being
+absent.
+
+**This project never saw any of it, and that is the trap.** `backend/` builds
+`sensen_slim`, whose module list is written out by hand in
+`backend/CMakeLists.txt` and excludes every qwen38 module — which is where most
+of the CUDA leakage lives. A defect can therefore make sensen unbuildable
+standalone while this repository stays green for weeks.
+
+**The hand-maintained list cuts the other way too.** `kv_cache.cppm` began
+importing `sensen.kv_lowbit` with the sub-8-bit KV work, and `sensen_slim` failed
+with `module 'sensen.kv_lowbit' not found` the moment the submodule pointer moved
+— its two dependencies were already listed, only the new module was missing.
+Every new module that a listed module imports has to be added alongside it;
+nothing derives this.
+
+**A CUDA-only test must SKIP, not vanish and not crash.** Guarding the source
+with `#ifdef SENSEN_HAS_CUDA` and giving it `int main() { return 77; }` keeps the
+target present and reports Skipped, which is the convention
+`tests/CMakeLists.txt` already documents for "missing model / no CUDA device". A
+test that disappears from the list is indistinguishable from one that was never
+written. Four tests from the same upstream work still ABORT or SEGFAULT rather
+than skipping (`test_lowbit_flash_{cutile,cublas,graph}`,
+`test_linear_attention_distributed`) — they build, so that is a runtime guard
+still to be added.
+
+**Known and NOT fixed: `tests/CMakeLists.txt` has 32 `if(SENSEN_HAS_CUDA)`
+blocks, and `SENSEN_HAS_CUDA` is not a CMake variable anywhere** — it is only
+ever an `add_compile_definitions()` token. Those conditions are ALWAYS FALSE,
+including on a GPU host, so none of the `CUDA::cudart` / `CUDA::cublas` link
+lines or CUDA include directories they guard has ever applied. The correct
+spelling is `ENABLE_CUDA`. Flipping it changes what a CUDA host links, so it
+needs the GPU server to verify — see "CUDA lives on the GPU server".
+
 ## Build Commands
 - **Frontend Production Build:** `cd frontend && npm run build`
 - **Frontend Dev Server:** `cd frontend && npm run dev`
