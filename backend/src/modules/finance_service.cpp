@@ -2408,10 +2408,10 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         if (request == nullptr || response == nullptr) {
             return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
         }
-        // The engine loops `years` iterations (financial.cppm:2144) -- a
-        // trivial double loop, bounded to <=100 by the validation below, so
-        // cost_default() prices it honestly rather than reaching for a new
-        // helper for an O(<=100) walk.
+        // The engine loops `years*12` iterations (financial.cppm:2352-2465) in
+        // the amortising model or `years` in legacy -- bounded to <=100 by the
+        // validation below, so cost_default() prices it honestly rather than
+        // reaching for a new helper for an O(<=1200) walk.
         CHARGE("ComputeRentVsBuy", quota::cost_default());
         if (request->years() <= 0 || request->years() > 100) {
             return Status(grpc::StatusCode::INVALID_ARGUMENT,
@@ -2419,8 +2419,6 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         }
         REQUIRE_DECIMAL_SAFE(price, request->property_price(), "property_price");
         REQUIRE_DECIMAL_SAFE(down, request->down_payment(), "down_payment");
-        REQUIRE_DECIMAL_SAFE(piti, request->monthly_piti_and_maintenance(),
-                             "monthly_piti_and_maintenance");
         REQUIRE_DECIMAL_SAFE(appreciation, request->annual_home_appreciation(),
                              "annual_home_appreciation");
         REQUIRE_DECIMAL_SAFE(rent, request->current_monthly_rent(), "current_monthly_rent");
@@ -2429,17 +2427,142 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         REQUIRE_DECIMAL_SAFE(investment_return, request->annual_investment_return(),
                              "annual_investment_return");
 
-        const auto s = sensen::calculate_rent_vs_buy(price, down, piti, appreciation, rent,
-                                                      rent_increase, investment_return,
-                                                      request->years());
-        // All doubles: the rent escalation, appreciation and investment legs
-        // are all computed in double (financial.cppm:2135-2153), and the
-        // buy/rent figures are only meaningful against each other -- quoting
-        // one side to 18 places would misstate which digits are real.
-        response->set_total_cost_of_buying(s.total_cost_of_buying.to_double());
-        response->set_total_cost_of_renting(s.total_cost_of_renting.to_double());
-        response->set_is_buying_better(s.is_buying_better);
-        response->set_buying_advantage(s.buying_advantage.to_double());
+        // Dispatch rule: choose the AMORTISING model if the request supplies EITHER
+        // monthly_taxes_ins_maintenance (field 12) OR loan_annual_rate (field 9)
+        // as a non-empty string. Otherwise choose LEGACY.
+        //
+        // Rationale: a caller that sends only the legacy aggregate
+        // (monthly_piti_and_maintenance) cannot be served by the amortising model
+        // at all -- the P&I split is not recoverable from one composite number -- so
+        // the presence of the new granular inputs IS the opt-in signal. Never guess
+        // the split.
+        // Dispatch on the LEGACY signal, not the new one. The assistant's
+        // convention values let a model omit the seven new fields, and an
+        // omitted field arrives as "0" rather than empty -- so keying on "did a
+        // new field arrive" would route a legacy caller into the amortising
+        // model with a zero loan rate and zero carrying costs, silently
+        // answering a different question. The presence of the composite
+        // monthly_piti_and_maintenance is unambiguous: only a legacy caller
+        // sends it, and it is the one field the amortising model cannot use.
+        // LEGACY iff the composite is present AND POSITIVE.
+        //
+        // Emptiness alone is the wrong test once the assistant is in the picture:
+        // G2 requires every declared field to be emitted, so a full-shape parse
+        // still sends monthly_piti_and_maintenance -- as the convention value "0".
+        // Keying on non-empty would route it to the legacy model with a zero
+        // carrying cost and answer a different question. A caller who genuinely
+        // has the composite always has a positive one; nobody pays zero PITI.
+        bool legacy_composite_supplied = false;
+        if (!request->monthly_piti_and_maintenance().empty()) {
+            BigDecimal composite{};
+            if (parse_decimal(request->monthly_piti_and_maintenance(), composite) &&
+                composite.is_positive()) {
+                legacy_composite_supplied = true;
+            }
+        }
+        const bool use_amortising = !legacy_composite_supplied;
+
+        if (!use_amortising) {
+            // Legacy path: requires the composite monthly_piti_and_maintenance field.
+            REQUIRE_DECIMAL_SAFE(piti, request->monthly_piti_and_maintenance(),
+                                 "monthly_piti_and_maintenance");
+
+            const auto s = sensen::calculate_rent_vs_buy(price, down, piti, appreciation, rent,
+                                                          rent_increase, investment_return,
+                                                          request->years());
+            // All doubles: the legacy model computes in double (financial.cppm:2275-2305).
+            // Set ONLY the four original fields (1,2,3,4) from the legacy summary,
+            // exactly as before. Leave every string field EMPTY -- do not render the
+            // double to a decimal string, as eighteen decimal places would invent digits
+            // the double never had.
+            response->set_total_cost_of_buying(s.total_cost_of_buying.to_double());
+            response->set_total_cost_of_renting(s.total_cost_of_renting.to_double());
+            response->set_is_buying_better(s.is_buying_better);
+            response->set_buying_advantage(s.buying_advantage.to_double());
+            return Status::OK;
+        }
+
+        // Amortising path: granular debt and carrying inputs.
+        READ_DECIMAL_SAFE(loan_rate, request->loan_annual_rate(), "loan_annual_rate");
+        READ_DECIMAL_SAFE(loan_amt, request->loan_amount(), "loan_amount");
+        READ_DECIMAL_SAFE(taxes_ins_maint, request->monthly_taxes_ins_maintenance(),
+                          "monthly_taxes_ins_maintenance");
+        READ_DECIMAL_SAFE(closing_costs, request->closing_costs_buy(), "closing_costs_buy");
+        READ_DECIMAL_SAFE(inflation_rate, request->annual_inflation_rate(),
+                          "annual_inflation_rate");
+
+        BigDecimal sell_pct = BigDecimal(0.06);
+        if (!request->selling_cost_percent().empty()) {
+            READ_DECIMAL_SAFE(parsed_sell_pct, request->selling_cost_percent(),
+                              "selling_cost_percent");
+            sell_pct = parsed_sell_pct;
+        }
+
+        int loan_term_years = request->loan_term_years();
+        if (loan_term_years == 0) {
+            // Optional; default is 30 years when omitted.
+            loan_term_years = 30;
+        } else if (loan_term_years < 0 || loan_term_years > 100) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "loan_term_years must be positive and at most 100");
+        }
+
+        // loan_annual_rate feeds pmt()'s BigDecimal pow(loan_term_years*12)
+        // -- capped at 100 years, but extreme rates can still wrap __int128.
+        if (auto s = check_compound_growth_safe(loan_rate.to_double(), 12,
+                                                loan_term_years * 12,
+                                                "loan_annual_rate");
+            !s.ok()) {
+            return s;
+        }
+
+        sensen::RentVsBuyInput input{};
+        input.property_price = price;
+        input.down_payment = down;
+        input.annual_home_appreciation = appreciation;
+        input.current_monthly_rent = rent;
+        input.annual_rent_increase = rent_increase;
+        input.annual_investment_return = investment_return;
+        input.years = request->years();
+        input.loan_annual_rate = loan_rate;
+        input.loan_term_years = loan_term_years;
+        input.loan_amount = loan_amt;
+        input.monthly_taxes_ins_maintenance = taxes_ins_maint;
+        input.closing_costs_buy = closing_costs;
+        input.selling_cost_percent = sell_pct;
+        input.annual_inflation_rate = inflation_rate;
+
+        const auto r = sensen::calculate_rent_vs_buy(input);
+        if (!r) {
+            // Map engine validation failure to INVALID_ARGUMENT rather than letting
+            // fail() turn it into FAILED_PRECONDITION (matching the closing-costs precedent).
+            return Status(grpc::StatusCode::INVALID_ARGUMENT, r.error());
+        }
+
+        // Four original double fields populated from the new summary (caller opted in):
+        response->set_total_cost_of_buying(r->total_cost_of_buying.to_double());
+        response->set_total_cost_of_renting(r->total_cost_of_renting.to_double());
+        response->set_is_buying_better(r->is_buying_better);
+        response->set_buying_advantage(r->buying_advantage.to_double());
+
+        // Exact decimal companions populated on the amortising path:
+        response->set_total_cost_of_buying_exact(r->total_cost_of_buying.to_string());
+        response->set_total_cost_of_renting_exact(r->total_cost_of_renting.to_string());
+        response->set_buying_advantage_exact(r->buying_advantage.to_string());
+        response->set_owner_terminal_wealth(r->owner_terminal_wealth.to_string());
+        response->set_renter_terminal_wealth(r->renter_terminal_wealth.to_string());
+        response->set_final_loan_balance(r->final_loan_balance.to_string());
+        response->set_home_sale_price(r->home_sale_price.to_string());
+        response->set_selling_costs(r->selling_costs.to_string());
+        response->set_total_principal_paid(r->total_principal_paid.to_string());
+        response->set_total_interest_paid(r->total_interest_paid.to_string());
+        response->set_total_rent_paid(r->total_rent_paid.to_string());
+
+        // Real companions (terminal wealth quantities deflated by (1 + annual_inflation_rate)^years):
+        response->set_real_buying_advantage(r->real_buying_advantage.to_string());
+        response->set_real_owner_terminal_wealth(r->real_owner_terminal_wealth.to_string());
+        response->set_real_renter_terminal_wealth(r->real_renter_terminal_wealth.to_string());
+
         return Status::OK;
     }
 
@@ -2481,6 +2604,17 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         REQUIRE_DECIMAL_SAFE(rent_increase, request->annual_rent_increase(),
                              "annual_rent_increase");
         REQUIRE_DECIMAL_SAFE(discount, request->annual_discount_rate(), "annual_discount_rate");
+        READ_DECIMAL_SAFE(inflation_rate, request->annual_inflation_rate(),
+                          "annual_inflation_rate");
+
+        if (inflation_rate <= BigDecimal(-1)) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "annual_inflation_rate must be greater than -1.0");
+        }
+        if (sell_pct >= BigDecimal(1)) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "selling_closing_cost_percent must be less than 1.0");
+        }
 
         // loan_annual_rate feeds pmt()'s BigDecimal pow(loan_term_years*12)
         // -- loan_term_years is already capped at 100 (1200 months), but an
@@ -2507,21 +2641,38 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         input.annual_rent_increase = rent_increase;
         input.annual_discount_rate = discount;
         input.holding_period_years = request->holding_period_years();
+        input.annual_inflation_rate = inflation_rate;
 
         // calculate_home_npv returns std::expected<HomeNPVSummary,
-        // std::string> (sensen commit 4d4b4cbd): an xnpv/xirr failure inside
+        // std::string> (sensen commit 4d4b4cbd): an xnpv/xirr solver failure inside
         // the model is refused rather than silently reported as NPV 0.0 or
-        // IRR 0.0, either of which is indistinguishable from a genuine
-        // breakeven. Residual: xirr non-convergence that sensen's own solver
-        // does not detect as failure is outside what this wrapper can catch
-        // -- see docs/superpowers/specs/2026-08-05-finance-proto-extension.md
-        // open item 3.
+        // IRR 0.0. Argument errors are mapped to INVALID_ARGUMENT rather than
+        // letting fail() turn everything into FAILED_PRECONDITION.
         const auto r = sensen::calculate_home_npv(input);
-        if (!r) return fail(r);
+        if (!r) {
+            if (r.error().find("annual_inflation_rate") != std::string::npos ||
+                r.error().find("selling") != std::string::npos) {
+                return Status(grpc::StatusCode::INVALID_ARGUMENT, r.error());
+            }
+            return fail(r);
+        }
+
+        // All doubles: this RPC is a cash-flow model over xnpv/xirr, which
+        // compute in double natively.
+        //
+        // No "real NPV" field is emitted: a nominal NPV discounted at a nominal discount
+        // rate is ALREADY in time-0 dollars. A correctly-constructed real NPV (real cash
+        // flows discounted at the Fisher real discount rate) is IDENTICAL term-by-term:
+        //   PV_nominal = CF_t / (1+i)^t = (CF_t / (1+pi)^t) / ((1+i)/(1+pi))^t
+        //              = CF_real_t / (1+r)^t = PV_real.
+        // Any differing number would be an economically meaningless double-count.
         response->set_net_present_value(r->net_present_value.to_double());
         response->set_internal_rate_of_return(r->internal_rate_of_return.to_double());
         response->set_future_sale_price(r->future_sale_price.to_double());
         response->set_future_equity(r->future_equity.to_double());
+        response->set_real_internal_rate_of_return(r->real_internal_rate_of_return.to_double());
+        response->set_real_future_sale_price(r->real_future_sale_price.to_double());
+        response->set_real_future_equity(r->real_future_equity.to_double());
         return Status::OK;
     }
 

@@ -943,40 +943,134 @@ def make_home_future_value_extraction(rng: random.Random) -> dict:
 
 # -- ComputeRentVsBuy: the other question this whole domain gets asked
 # constantly, now backed by a real RPC instead of the speculative stand-in
-# this file used before the proto grew one.
+# this file used before the proto grew one. Emits all 15 fields declared by
+# RentVsBuyRequest across two shapes (legacy composite PITI vs full loan/carrying
+# cost breakdown).
 def make_rent_vs_buy_extraction(rng: random.Random) -> dict:
     op = "ComputeRentVsBuy"
-    price = round_money(rng.triangular(150_000, 1_200_000, 400_000))
-    down_payment = round_money(price * rng.uniform(0.05, 0.25))
-    piti = round_money(rng.triangular(1_200, 7_000, 2_600))
-    appreciation = round(rng.uniform(0.02, 0.05), 4)
-    rent = round_money(rng.triangular(1_000, 5_500, 2_200))
-    rent_increase = round(rng.uniform(0.02, 0.05), 4)
-    invest_return = round(rng.uniform(0.04, 0.09), 4)
-    years = rng.randint(3, 15)
+    shape = "legacy" if rng.random() < 0.5 else "full"
 
-    user = rng.choice([
-        f"Should I rent at {phrase_money(rent)}/month (rising {phrase_pct(rent_increase)} "
-        f"a year) or buy a {phrase_money(price)} house with {phrase_money(down_payment)} "
-        f"down, {phrase_money(piti)}/month PITI and maintenance, appreciating "
-        f"{phrase_pct(appreciation)} a year? I'd otherwise invest the down payment "
-        f"at {phrase_pct(invest_return)}. I'm staying {years} years.",
-        f"Rent vs. buy over {years} years: renting is {phrase_money(rent)}/month "
-        f"(+{phrase_pct(rent_increase)}/year), or buying at {phrase_money(price)} "
-        f"with {phrase_money(down_payment)} down, {phrase_money(piti)}/month, "
-        f"{phrase_pct(appreciation)} appreciation, {phrase_pct(invest_return)} "
-        f"on the down payment invested instead.",
-    ])
-    obj = {"property_price": money_str(price), "down_payment": money_str(down_payment),
-           "monthly_piti_and_maintenance": money_str(piti),
-           "annual_home_appreciation": rate_str(appreciation, 4),
-           "current_monthly_rent": money_str(rent), "annual_rent_increase": rate_str(rent_increase, 4),
-           "annual_investment_return": rate_str(invest_return, 4), "years": years}
+    if shape == "legacy":
+        price = round_money(rng.triangular(150_000, 1_200_000, 400_000))
+        down_payment = round_money(price * rng.uniform(0.05, 0.25))
+        piti = round_money(rng.triangular(1_200, 7_000, 2_600))
+        appreciation = round(rng.uniform(0.02, 0.05), 4)
+        rent = round_money(rng.triangular(1_000, 5_500, 2_200))
+        rent_increase = round(rng.uniform(0.02, 0.05), 4)
+        invest_return = round(rng.uniform(0.04, 0.09), 4)
+        years = rng.randint(3, 15)
+
+        user = rng.choice([
+            f"Should I rent at {phrase_money(rent)}/month (rising {phrase_pct(rent_increase)} "
+            f"a year) or buy a {phrase_money(price)} house with {phrase_money(down_payment)} "
+            f"down, {phrase_money(piti)}/month PITI and maintenance, appreciating "
+            f"{phrase_pct(appreciation)} a year? I'd otherwise invest the down payment "
+            f"at {phrase_pct(invest_return)}. I'm staying {years} years.",
+            f"Rent vs. buy over {years} years: renting is {phrase_money(rent)}/month "
+            f"(+{phrase_pct(rent_increase)}/year), or buying at {phrase_money(price)} "
+            f"with {phrase_money(down_payment)} down, {phrase_money(piti)}/month, "
+            f"{phrase_pct(appreciation)} appreciation, {phrase_pct(invest_return)} "
+            f"on the down payment invested instead.",
+            f"Compare renting vs buying: rent is {phrase_money(rent)}/month escalating at "
+            f"{phrase_pct(rent_increase)}/year. Buying is {phrase_money(price)} with "
+            f"{phrase_money(down_payment)} down payment, monthly PITI and upkeep of {phrase_money(piti)}, "
+            f"appreciating at {phrase_pct(appreciation)} annually. Alternative investment return is "
+            f"{phrase_pct(invest_return)}. Horizon is {years} years.",
+            f"Is it better to rent or buy over {years} years? Rent: {phrase_money(rent)}/month with "
+            f"{phrase_pct(rent_increase)} annual increase. Buy: {phrase_money(price)} purchase price, "
+            f"{phrase_money(down_payment)} down, {phrase_money(piti)}/month total carrying cost "
+            f"(PITI + maintenance), {phrase_pct(appreciation)} home growth, {phrase_pct(invest_return)} "
+            f"return if investing the down payment.",
+            f"Rent vs buy comparison for {years} years. Renting costs {phrase_money(rent)} a month rising "
+            f"{phrase_pct(rent_increase)} each year. Buying a {phrase_money(price)} property with "
+            f"{phrase_money(down_payment)} down, {phrase_money(piti)} monthly PITI and maintenance, "
+            f"{phrase_pct(appreciation)} yearly appreciation, and {phrase_pct(invest_return)} investment return on cash.",
+        ])
+        obj = {"property_price": money_str(price), "down_payment": money_str(down_payment),
+               "monthly_piti_and_maintenance": money_str(piti),
+               "annual_home_appreciation": rate_str(appreciation, 4),
+               "current_monthly_rent": money_str(rent), "annual_rent_increase": rate_str(rent_increase, 4),
+               "annual_investment_return": rate_str(invest_return, 4), "years": years,
+               "loan_annual_rate": rate_str(0, 4), "loan_term_years": 0,
+               "loan_amount": money_str(0), "monthly_taxes_ins_maintenance": money_str(0),
+               "closing_costs_buy": money_str(0), "selling_cost_percent": rate_str(0, 4),
+               "annual_inflation_rate": rate_str(0, 4)}
+    else:
+        price = round_money(rng.triangular(150_000, 1_200_000, 400_000))
+        down_payment = round_money(price * rng.uniform(0.05, 0.25))
+        loan_amount = round_money(price - down_payment)
+        loan_rate = round(rng.uniform(0.045, 0.085), 4)
+        loan_term_years = rng.choice([15, 20, 30])
+        taxes_ins_maint = round_money(rng.triangular(300, 2_000, 700))
+        appreciation = round(rng.uniform(0.02, 0.05), 4)
+        rent = round_money(rng.triangular(1_000, 5_500, 2_200))
+        rent_increase = round(rng.uniform(0.02, 0.05), 4)
+        invest_return = round(rng.uniform(0.04, 0.09), 4)
+        years = rng.randint(3, 15)
+
+        mention_loan_amount = rng.random() < 0.4
+        emitted_loan_amount = loan_amount if mention_loan_amount else 0.0
+
+        mention_closing = rng.random() < 0.4
+        closing_costs = round_money(price * rng.uniform(0.015, 0.04)) if mention_closing else 0.0
+
+        mention_selling = rng.random() < 0.35
+        selling_cost_pct = round(rng.uniform(0.05, 0.08), 4) if mention_selling else 0.0
+
+        mention_inflation = rng.random() < 0.35
+        inflation = round(rng.uniform(0.02, 0.04), 4) if mention_inflation else 0.0
+
+        loan_desc = f" ({phrase_money(loan_amount)} loan)" if mention_loan_amount else ""
+        extra_bits = []
+        if mention_closing:
+            extra_bits.append(f"{phrase_money(closing_costs)} closing costs")
+        if mention_selling:
+            extra_bits.append(f"{phrase_pct(selling_cost_pct)} selling costs")
+        if mention_inflation:
+            extra_bits.append(f"{phrase_pct(inflation)} inflation")
+        extras = (", " + ", ".join(extra_bits)) if extra_bits else ""
+
+        user = rng.choice([
+            f"Rent vs buy over {years} years: rent is {phrase_money(rent)}/month rising {phrase_pct(rent_increase)}/year. "
+            f"Buying is {phrase_money(price)} with {phrase_money(down_payment)} down{loan_desc}, a {loan_term_years}-year loan "
+            f"at {phrase_pct(loan_rate)}, and {phrase_money(taxes_ins_maint)}/month in property taxes, insurance and maintenance. "
+            f"Home appreciates at {phrase_pct(appreciation)}/year, and down payment would earn {phrase_pct(invest_return)} invested{extras}.",
+            f"Should I rent for {phrase_money(rent)}/month (+{phrase_pct(rent_increase)} annually) or purchase a {phrase_money(price)} "
+            f"home? Financing: {phrase_money(down_payment)} down{loan_desc}, {phrase_pct(loan_rate)} mortgage over {loan_term_years} "
+            f"years, monthly taxes/insurance/upkeep {phrase_money(taxes_ins_maint)}. Appreciation {phrase_pct(appreciation)}/year, "
+            f"investment return {phrase_pct(invest_return)}, staying {years} years{extras}.",
+            f"Evaluate rent vs. buy for a {years}-year horizon. Renting: {phrase_money(rent)} a month with {phrase_pct(rent_increase)} "
+            f"yearly increases. Buying: {phrase_money(price)} price, {phrase_money(down_payment)} down payment{loan_desc}, "
+            f"{loan_term_years}-year fixed at {phrase_pct(loan_rate)}, plus {phrase_money(taxes_ins_maint)}/month non-debt carrying "
+            f"costs (taxes, insurance, maintenance). Expected home appreciation is {phrase_pct(appreciation)}, alternative investment "
+            f"yield {phrase_pct(invest_return)}{extras}.",
+            f"Compare renting at {phrase_money(rent)}/month (escalating {phrase_pct(rent_increase)}/year) versus buying a "
+            f"{phrase_money(price)} property with {phrase_money(down_payment)} down{loan_desc}. Loan rate {phrase_pct(loan_rate)} "
+            f"over {loan_term_years} years, monthly taxes/insurance/maintenance {phrase_money(taxes_ins_maint)}, appreciation "
+            f"{phrase_pct(appreciation)}/year, investment return {phrase_pct(invest_return)} on down payment, holding for "
+            f"{years} years{extras}.",
+            f"Rent vs buy analysis for {years} years. Renting costs {phrase_money(rent)}/month (+{phrase_pct(rent_increase)}/yr). "
+            f"Buying: {phrase_money(price)} home, {phrase_money(down_payment)} down{loan_desc}, borrowing at {phrase_pct(loan_rate)} "
+            f"for {loan_term_years} years with {phrase_money(taxes_ins_maint)}/month in taxes, insurance, and maintenance. Home growth "
+            f"{phrase_pct(appreciation)}, investment return {phrase_pct(invest_return)}{extras}.",
+        ])
+        obj = {"property_price": money_str(price), "down_payment": money_str(down_payment),
+               "monthly_piti_and_maintenance": money_str(0),
+               "annual_home_appreciation": rate_str(appreciation, 4),
+               "current_monthly_rent": money_str(rent), "annual_rent_increase": rate_str(rent_increase, 4),
+               "annual_investment_return": rate_str(invest_return, 4), "years": years,
+               "loan_annual_rate": rate_str(loan_rate, 4), "loan_term_years": loan_term_years,
+               "loan_amount": money_str(emitted_loan_amount),
+               "monthly_taxes_ins_maintenance": money_str(taxes_ins_maint),
+               "closing_costs_buy": money_str(closing_costs),
+               "selling_cost_percent": rate_str(selling_cost_pct, 4),
+               "annual_inflation_rate": rate_str(inflation, 4)}
+
     return convo(("system", SYSTEM), ("user", user),
                  ("assistant", params_block(op, obj)))
 
 
-# -- ComputeHomeNpv: buying a home evaluated as an investment (14 fields:
+# -- ComputeHomeNpv: buying a home evaluated as an investment (15 fields:
 # purchase + carrying costs vs. imputed rent saved and eventual sale).
 def make_home_npv_extraction(rng: random.Random) -> dict:
     op = "ComputeHomeNpv"
@@ -994,6 +1088,8 @@ def make_home_npv_extraction(rng: random.Random) -> dict:
     rent_increase = round(rng.uniform(0.02, 0.05), 4)
     discount_rate = round(rng.uniform(0.04, 0.09), 4)
     holding_years = rng.randint(3, 15)
+    mention_inflation = rng.random() < 0.4
+    inflation = round(rng.uniform(0.02, 0.04), 4) if mention_inflation else 0.0
 
     user = rng.choice([
         f"Is buying a {phrase_money(price)} house a good investment? "
@@ -1004,7 +1100,35 @@ def make_home_npv_extraction(rng: random.Random) -> dict:
         f"{phrase_pct(appreciation)} appreciation, {phrase_pct(selling_cost_pct)} "
         f"selling costs. It saves me {phrase_money(rent_saved)}/month in rent "
         f"(rising {phrase_pct(rent_increase)}/year). Discount at {phrase_pct(discount_rate)}, "
-        f"holding {holding_years} years -- what's the NPV?",
+        f"holding {holding_years} years"
+        + (f", {phrase_pct(inflation)} inflation" if mention_inflation else "")
+        + " -- what's the NPV?",
+        f"Calculate home NPV: purchase price {phrase_money(price)}, {phrase_money(down_payment)} down, "
+        f"{phrase_money(closing_costs_buy)} closing costs. Borrowing {phrase_money(loan_amount)} at "
+        f"{phrase_pct(loan_rate)} for {loan_term_years} years. Monthly taxes/insurance/HOA is {phrase_money(taxes_ins_hoa)}, "
+        f"maintenance {phrase_money(maintenance)}/month. Expected appreciation {phrase_pct(appreciation)}/year, "
+        f"selling costs {phrase_pct(selling_cost_pct)}. Displaces {phrase_money(rent_saved)}/month rent "
+        f"(growing {phrase_pct(rent_increase)}/year). Discount rate {phrase_pct(discount_rate)}, "
+        f"{holding_years}-year holding period"
+        + (f", adjusting for {phrase_pct(inflation)} annual inflation" if mention_inflation else "")
+        + ".",
+        f"Home investment NPV analysis over {holding_years} years: {phrase_money(price)} home, "
+        f"{phrase_money(down_payment)} down payment, {phrase_money(closing_costs_buy)} closing costs, "
+        f"{phrase_money(loan_amount)} mortgage at {phrase_pct(loan_rate)} ({loan_term_years} years). "
+        f"Carrying costs: {phrase_money(taxes_ins_hoa)}/month taxes/insurance/HOA, {phrase_money(maintenance)}/month upkeep. "
+        f"Appreciation {phrase_pct(appreciation)}, selling fees {phrase_pct(selling_cost_pct)}. "
+        f"Rent saved: {phrase_money(rent_saved)}/month (+{phrase_pct(rent_increase)}/year). "
+        f"Discount rate is {phrase_pct(discount_rate)}"
+        + (f" and inflation is {phrase_pct(inflation)}" if mention_inflation else "")
+        + ". What is the net present value?",
+        f"Should I buy this property as an investment? Price {phrase_money(price)}, {phrase_money(down_payment)} down, "
+        f"{phrase_money(closing_costs_buy)} in closing costs, {phrase_money(loan_amount)} loan at {phrase_pct(loan_rate)} "
+        f"over {phrase_years(loan_term_years * 12)}. Monthly HOA/taxes/insurance {phrase_money(taxes_ins_hoa)}, "
+        f"maintenance {phrase_money(maintenance)}/month. Appreciation {phrase_pct(appreciation)} annually, "
+        f"{phrase_pct(selling_cost_pct)} selling costs at end. Saves {phrase_money(rent_saved)}/month rent "
+        f"rising {phrase_pct(rent_increase)}/year. Discount at {phrase_pct(discount_rate)} over a {holding_years}-year horizon"
+        + (f" with {phrase_pct(inflation)} inflation" if mention_inflation else "")
+        + ".",
     ])
     obj = {"property_price": money_str(price), "down_payment": money_str(down_payment),
            "closing_costs_buy": money_str(closing_costs_buy), "loan_amount": money_str(loan_amount),
@@ -1013,7 +1137,8 @@ def make_home_npv_extraction(rng: random.Random) -> dict:
            "annual_appreciation_rate": rate_str(appreciation, 4),
            "selling_closing_cost_percent": rate_str(selling_cost_pct, 4),
            "monthly_rent_saved": money_str(rent_saved), "annual_rent_increase": rate_str(rent_increase, 4),
-           "annual_discount_rate": rate_str(discount_rate, 4), "holding_period_years": holding_years}
+           "annual_discount_rate": rate_str(discount_rate, 4), "holding_period_years": holding_years,
+           "annual_inflation_rate": rate_str(inflation, 4)}
     return convo(("system", SYSTEM), ("user", user),
                  ("assistant", params_block(op, obj)))
 

@@ -653,6 +653,15 @@ message HomeFutureValueResponse {
 message RentVsBuyRequest {
   string property_price = 1;
   string down_payment = 2;
+  // LEGACY aggregate: P&I plus taxes/insurance/maintenance in one number.
+  //
+  // Kept and still honoured. The split it lacks is what makes amortisation
+  // impossible, so a request carrying only this field is served by the ORIGINAL
+  // model and returns exactly what it always returned. Supply
+  // monthly_taxes_ins_maintenance (12) and loan_annual_rate (9) instead to reach
+  // the amortising model. Reserving this field would have broken every existing
+  // caller — including the deployed mortgage assistant, whose label space emits
+  // it — to improve an answer they did not ask to have improved.
   string monthly_piti_and_maintenance = 3;
   string annual_home_appreciation = 4;
   string current_monthly_rent = 5;
@@ -661,17 +670,70 @@ message RentVsBuyRequest {
   // opportunity cost side of the comparison.
   string annual_investment_return = 7;
   int32 years = 8;
+  // Nominal annual mortgage interest rate as a decimal (e.g. "0.065" for 6.5%/yr,
+  // compounded monthly as rate/12). Optional; default is "0" when empty.
+  string loan_annual_rate = 9;
+  // Mortgage loan amortization term in years (e.g. 30).
+  // Optional; default is 0 (defaults to years / 30).
+  int32 loan_term_years = 10;
+  // Initial loan amount in currency units. Optional; default when empty is
+  // property_price - down_payment.
+  string loan_amount = 11;
+  // Monthly non-debt carrying costs (property taxes, insurance, HOA, maintenance)
+  // in currency units per month (everything EXCEPT P&I debt service).
+  // Optional; default is "0" when empty.
+  string monthly_taxes_ins_maintenance = 12;
+  // Buyer upfront closing costs and fees in currency units.
+  // Optional; default is "0" when empty.
+  string closing_costs_buy = 13;
+  // Selling costs as a decimal fraction of final home sale price (e.g. "0.06"
+  // for 6% broker and transfer fees). Optional; default is "0.06" when empty.
+  string selling_cost_percent = 14;
+  // Annual inflation rate as a decimal (e.g. "0.025" for 2.5%/yr).
+  // Optional; default is "0" when empty.
+  string annual_inflation_rate = 15;
 }
 
-// All doubles: the rent escalation, appreciation and investment legs are all
-// computed in double, and the buy/rent figures are only meaningful against
-// each other -- quoting one side to 18 places would misstate which digits
-// are real.
 message RentVsBuyResponse {
+  // Fields 1, 2 and 4 KEEP their double type and their numbers. Replacing a
+  // double with a string at the same field number is wire-breaking: an old
+  // client decodes the new bytes as garbage rather than raising a clean error.
+  // They are always populated.
+  //
+  // WHICH MODEL FILLS THEM depends on the request. A request carrying only the
+  // legacy monthly_piti_and_maintenance gets the original model and therefore
+  // the numbers it has always received. A request supplying the amortising
+  // inputs gets the corrected model in these same fields — that caller opted in
+  // by sending them.
   double total_cost_of_buying = 1;
   double total_cost_of_renting = 2;
   bool is_buying_better = 3;
   double buying_advantage = 4;          // rent cost minus buy cost
+
+  // Exact decimal companions of the three figures above. Populated ONLY on the
+  // amortising path; empty on the legacy path, because the legacy model computes
+  // in double and rendering it to eighteen places would invent digits that are
+  // not real. Money is a decimal string here for the reason the file header
+  // gives: this service is reachable from browsers, where JavaScript's number IS
+  // a float64 and a double money field is lossy before anyone writes a line.
+  string total_cost_of_buying_exact = 5;
+  string total_cost_of_renting_exact = 6;
+  string buying_advantage_exact = 7;
+  string owner_terminal_wealth = 8;
+  string renter_terminal_wealth = 9;
+  string final_loan_balance = 10;
+  string home_sale_price = 11;
+  string selling_costs = 12;
+  string total_principal_paid = 13;
+  string total_interest_paid = 14;
+  string total_rent_paid = 15;
+
+  // Real (inflation-deflated) companions exist ONLY for terminal quantities,
+  // because total_cost_of_* are sums of cash flows occurring at different dates
+  // and no single deflator is meaningful.
+  string real_buying_advantage = 16;
+  string real_owner_terminal_wealth = 17;
+  string real_renter_terminal_wealth = 18;
 }
 
 message HomeNpvRequest {
@@ -687,18 +749,28 @@ message HomeNpvRequest {
   string selling_closing_cost_percent = 10;  // 0.06 for 6% of the sale price
   string monthly_rent_saved = 11;            // imputed rent the purchase displaces
   string annual_rent_increase = 12;
+  // NOMINAL annual discount rate (the modeled cash flows are nominal).
   string annual_discount_rate = 13;
   int32 holding_period_years = 14;
+  // Annual inflation rate as a decimal (e.g. "0.025" for 2.5%/yr).
+  // Optional; default is "0" when empty.
+  string annual_inflation_rate = 15;
 }
 
 // All doubles, matching ComputeXnpv/ComputeXirr above: this RPC is a cash-flow
 // model over the same xnpv/xirr primitives, which this service already serves
 // as doubles because that is what they compute in.
 message HomeNpvResponse {
+  // A real NPV is not provided because a nominal NPV discounted at a nominal rate
+  // is already in time-0 dollars, and a correctly built real NPV is identical
+  // term-by-term by Fisher.
   double net_present_value = 1;
   double internal_rate_of_return = 2;
   double future_sale_price = 3;
   double future_equity = 4;
+  double real_internal_rate_of_return = 5;
+  double real_future_sale_price = 6;
+  double real_future_equity = 7;
 }
 
 // ============================================================================

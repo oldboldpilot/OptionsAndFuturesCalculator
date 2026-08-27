@@ -747,6 +747,29 @@ target_sources(sensen_slim
             # Missing here, sensen_slim fails with "module 'sensen.kv_lowbit' not
             # found" -- the slim list is hand-maintained, so every new module a
             # listed one imports has to be added with it.
+            # Added 2026-08-27 from `scripts/sensen_module_closure.py --check`,
+            # which is the authority here rather than hand-tracing imports. The
+            # 90-commit upstream merge pulled the qwen38 serving modules into the
+            # closure transitively -- CLAUDE.md's note that sensen_slim "excludes
+            # every qwen38 module" predates that and is no longer true.
+            "${SENSEN_SRC}/cpu_frozen_lowbit.cppm"
+            "${SENSEN_SRC}/cuda_pinned_staging.cppm"
+            "${SENSEN_SRC}/dispatch_ledger.cppm"
+            "${SENSEN_SRC}/lowbit_tc_dispatch.cppm"
+            "${SENSEN_SRC}/qwen38.cppm"
+            "${SENSEN_SRC}/qwen38_gdn_state.cppm"
+            "${SENSEN_SRC}/qwen38_kv_attn.cppm"
+            "${SENSEN_SRC}/qwen38_mtp.cppm"
+            "${SENSEN_SRC}/qwen38_serving_model.cppm"
+            "${SENSEN_SRC}/speculative_decode.cppm"
+            "${SENSEN_SRC}/utils/logger.cppm"
+            # kv_half.cppm imports sensen.paged_kv_dispatch, which imports
+            # sensen.dispatch_contract. Both are new with the paged-KV dispatch
+            # work. Same hand-maintained-list trap as kv_lowbit above: nothing
+            # derives this, so each new module a listed one imports must be added
+            # alongside it, and the failure only appears when the pointer moves.
+            "${SENSEN_SRC}/dispatch_contract.cppm"
+            "${SENSEN_SRC}/paged_kv_dispatch.cppm"
             "${SENSEN_SRC}/kv_lowbit.cppm"
             "${SENSEN_SRC}/kv_q8.cppm"
             "${SENSEN_SRC}/kv_cache.cppm"
@@ -838,6 +861,15 @@ target_sources(sensen_slim
         "${SENSEN_SRC}/llama_model.cpp"
         "${SENSEN_SRC}/tokenizer_gpu.cpp"
         "${SENSEN_SRC}/training_moe_impl.cpp"
+        # numa_bind.cpp is reported EXTRA by scripts/sensen_module_closure.py and
+        # is NOT extra. It defines the extern "C" symbols
+        # sensen_available_cpu_count and sensen_numa_bind_local_node, which
+        # gemm_kernels, parallel and llama_model call directly. The closure tool
+        # parses module IMPORTS only, so a C-ABI implementation unit is invisible
+        # to it -- dropping this on its advice fails at LINK, not at compile, and
+        # the error names the symbol rather than the file that was removed.
+        "${SENSEN_SRC}/paged_kv_dispatch_pool.cpp"
+        "${SENSEN_SRC}/numa_bind.cpp"
         # numa_bind.cpp is not the implementation unit of any module, which is
         # why the closure script does not report it: it defines two plain
         # `extern "C"` helpers (sensen_available_cpu_count,
@@ -846,7 +878,6 @@ target_sources(sensen_slim
         # module-graph walk cannot see that edge, so the omission surfaces only
         # at link time as two undefined references, well after everything has
         # compiled cleanly.
-        "${SENSEN_SRC}/numa_bind.cpp"
 )
 
 set_target_properties(sensen_slim PROPERTIES

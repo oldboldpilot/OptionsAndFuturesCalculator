@@ -283,7 +283,19 @@ auto control_rent_vs_buy() -> Control {
                                         {"current_monthly_rent", "2200.00"},
                                         {"annual_rent_increase", "0.0300"},
                                         {"annual_investment_return", "0.0600"},
-                                        {"years", "7"}})};
+                                        {"years", "7"},
+                                        // The seven amortising inputs, at their
+                                        // convention values: G2 requires every
+                                        // declared field to be emitted, and these
+                                        // are exempt from grounding precisely so a
+                                        // legacy-shape utterance stays parseable.
+                                        {"loan_annual_rate", "0"},
+                                        {"loan_term_years", "0"},
+                                        {"loan_amount", "0"},
+                                        {"monthly_taxes_ins_maintenance", "0"},
+                                        {"closing_costs_buy", "0"},
+                                        {"selling_cost_percent", "0"},
+                                        {"annual_inflation_rate", "0"}})};
 }
 
 auto control_payoff_timing() -> Control {

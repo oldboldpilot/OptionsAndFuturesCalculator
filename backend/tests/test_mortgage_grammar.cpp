@@ -12,7 +12,7 @@
 // structural -- but "structural" is a claim, and this file checks it against
 // a FRESH parse of backend/proto/finance.proto with the same section banners
 // and the same two exclusions build_mortgage_dataset.py uses. 27 operations,
-// 176 fields, in declaration order, and it fails loudly on drift in either
+// 184 fields, in declaration order, and it fails loudly on drift in either
 // direction. The one table the module cannot derive (the enum constants,
 // which mortgage_verification keeps unexported) is checked BOTH against the
 // .proto and against `verify_mortgage_params` itself.
@@ -543,8 +543,8 @@ auto main() -> int {
                                 : ("validate_label_space FAILED: " + valid.error()));
         check(schema.operation_count() == 27,
               "27 operations (schema has " + std::to_string(schema.operation_count()) + ")");
-        check(schema.field_count() == 176,
-              "176 fields (schema has " + std::to_string(schema.field_count()) + ")");
+        check(schema.field_count() == 184,
+              "184 fields (schema has " + std::to_string(schema.field_count()) + ")");
     }
 
     // ---------------------------------------------------------------------

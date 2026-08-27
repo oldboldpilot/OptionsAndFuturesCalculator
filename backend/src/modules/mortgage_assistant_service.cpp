@@ -1668,7 +1668,7 @@ constexpr std::array<Field, 7> kFields_ComputeHomeFutureValue{{
     {"payments_per_year", Kind::Int, {}},
 }};
 
-constexpr std::array<Field, 14> kFields_ComputeHomeNpv{{
+constexpr std::array<Field, 15> kFields_ComputeHomeNpv{{
     {"property_price", Kind::Decimal, {}},
     {"down_payment", Kind::Decimal, {}},
     {"closing_costs_buy", Kind::Decimal, {}},
@@ -1683,6 +1683,7 @@ constexpr std::array<Field, 14> kFields_ComputeHomeNpv{{
     {"annual_rent_increase", Kind::Decimal, {}},
     {"annual_discount_rate", Kind::Decimal, {}},
     {"holding_period_years", Kind::Int, {}},
+    {"annual_inflation_rate", Kind::Decimal, {}},
 }};
 
 constexpr std::array<Field, 6> kFields_ComputeInterestPayment{{
@@ -1786,15 +1787,25 @@ constexpr std::array<Field, 14> kFields_ComputeRefinance{{
     {"payments_per_year", Kind::Int, {}},
 }};
 
-constexpr std::array<Field, 8> kFields_ComputeRentVsBuy{{
+constexpr std::array<Field, 15> kFields_ComputeRentVsBuy{{
     {"property_price", Kind::Decimal, {}},
     {"down_payment", Kind::Decimal, {}},
+    // Retained: a caller with only this composite still reaches the original
+    // model. The amortising model needs monthly_taxes_ins_maintenance instead,
+    // because the P&I split is not recoverable from one number.
     {"monthly_piti_and_maintenance", Kind::Decimal, {}},
     {"annual_home_appreciation", Kind::Decimal, {}},
     {"current_monthly_rent", Kind::Decimal, {}},
     {"annual_rent_increase", Kind::Decimal, {}},
     {"annual_investment_return", Kind::Decimal, {}},
     {"years", Kind::Int, {}},
+    {"loan_annual_rate", Kind::Decimal, {}},
+    {"loan_term_years", Kind::Int, {}},
+    {"loan_amount", Kind::Decimal, {}},
+    {"monthly_taxes_ins_maintenance", Kind::Decimal, {}},
+    {"closing_costs_buy", Kind::Decimal, {}},
+    {"selling_cost_percent", Kind::Decimal, {}},
+    {"annual_inflation_rate", Kind::Decimal, {}},
 }};
 
 constexpr std::array<Field, 6> kFields_ComputeRentalRoi{{

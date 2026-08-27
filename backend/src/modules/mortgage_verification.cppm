@@ -194,7 +194,7 @@ namespace detail {
 // its own OPERATIONS dict (parse_finance_proto + build_operations, the
 // same IN_SCOPE_SECTIONS and EXCLUDE_RPCS). The test re-parses the .proto
 // and fails if this table has drifted from it in either direction.
-constexpr std::array<FieldSpec, 176> kLabelSpace{{
+constexpr std::array<FieldSpec, 184> kLabelSpace{{
     {.operation = "ComputeAmortization", .field = "loan_amount", .proto_type = "string", .repeated = false},
     {.operation = "ComputeAmortization", .field = "annual_rate", .proto_type = "string", .repeated = false},
     {.operation = "ComputeAmortization", .field = "term_months", .proto_type = "int32", .repeated = false},
@@ -284,6 +284,7 @@ constexpr std::array<FieldSpec, 176> kLabelSpace{{
     {.operation = "ComputeHomeNpv", .field = "annual_rent_increase", .proto_type = "string", .repeated = false},
     {.operation = "ComputeHomeNpv", .field = "annual_discount_rate", .proto_type = "string", .repeated = false},
     {.operation = "ComputeHomeNpv", .field = "holding_period_years", .proto_type = "int32", .repeated = false},
+    {.operation = "ComputeHomeNpv", .field = "annual_inflation_rate", .proto_type = "string", .repeated = false},
     {.operation = "ComputeInterestPayment", .field = "rate", .proto_type = "string", .repeated = false},
     {.operation = "ComputeInterestPayment", .field = "period", .proto_type = "int32", .repeated = false},
     {.operation = "ComputeInterestPayment", .field = "periods", .proto_type = "int32", .repeated = false},
@@ -357,6 +358,13 @@ constexpr std::array<FieldSpec, 176> kLabelSpace{{
     {.operation = "ComputeRentVsBuy", .field = "annual_rent_increase", .proto_type = "string", .repeated = false},
     {.operation = "ComputeRentVsBuy", .field = "annual_investment_return", .proto_type = "string", .repeated = false},
     {.operation = "ComputeRentVsBuy", .field = "years", .proto_type = "int32", .repeated = false},
+    {.operation = "ComputeRentVsBuy", .field = "loan_annual_rate", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeRentVsBuy", .field = "loan_term_years", .proto_type = "int32", .repeated = false},
+    {.operation = "ComputeRentVsBuy", .field = "loan_amount", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeRentVsBuy", .field = "monthly_taxes_ins_maintenance", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeRentVsBuy", .field = "closing_costs_buy", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeRentVsBuy", .field = "selling_cost_percent", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeRentVsBuy", .field = "annual_inflation_rate", .proto_type = "string", .repeated = false},
     {.operation = "ComputeRentalRoi", .field = "property_value", .proto_type = "string", .repeated = false},
     {.operation = "ComputeRentalRoi", .field = "total_cash_invested", .proto_type = "string", .repeated = false},
     {.operation = "ComputeRentalRoi", .field = "periodic_gross_rent", .proto_type = "string", .repeated = false},
@@ -1094,7 +1102,31 @@ struct ConventionValue {
     std::string_view field;
     std::string_view value;
 };
-constexpr std::array<ConventionValue, 28> kConventionValues{{
+constexpr std::array<ConventionValue, 37> kConventionValues{{
+    // ComputeRentVsBuy / ComputeHomeNpv: the optional inputs added with the
+    // amortising model. An utterance that never mentions closing costs, selling
+    // costs or inflation grounds none of them, and without an exemption the
+    // whole parse is refused rather than read as "the caller did not say" --
+    // the same failure the closing-cost fields hit when sixteen slots all had
+    // to be filled.
+    // EVERY new field needs one. translate() requires each declared field to be
+    // emitted, so a model trained on the eight legacy fields is refused on the
+    // first of the seven it has never heard of -- exactly the failure the
+    // sixteen closing-cost fields hit. These exemptions are what let the
+    // DEPLOYED model keep parsing rent-vs-buy unchanged, with no retrain: it
+    // omits all seven, they default, and the service takes the legacy path.
+    // The legacy composite is exempt at 0 for the mirror-image reason: a
+    // full-shape request states the P&I split instead and has nothing to put
+    // here, yet G2 still demands the field.
+    {.field = "monthly_piti_and_maintenance", .value = "0"},
+    {.field = "loan_annual_rate", .value = "0"},
+    {.field = "loan_term_years", .value = "0"},
+    {.field = "loan_amount", .value = "0"},
+    {.field = "monthly_taxes_ins_maintenance", .value = "0"},
+    {.field = "closing_costs_buy", .value = "0"},
+    {.field = "selling_cost_percent", .value = "0.06"},
+    {.field = "selling_cost_percent", .value = "0"},
+    {.field = "annual_inflation_rate", .value = "0"},
     // ComputeClosingCosts: the lines a closing may genuinely not have.
     // Sixteen fields must all be emitted, so without these a request
     // that never mentions an inspection is refused rather than read as
@@ -1369,7 +1401,8 @@ auto classify_slot(std::string_view f) -> SlotKind {
     // is deliberately last; a name the rules above do not reach and that is
     // not a money field would be an unclassified slot, which the test's
     // totality assertion is what actually rules out.
-    static constexpr std::array<std::string_view, 47> kMoneyFields{
+    static constexpr std::array<std::string_view, 48> kMoneyFields{
+        "monthly_taxes_ins_maintenance",
         // ComputeClosingCosts. Absent, these classify Unclassified ->
         // Indeterminate and every closing-cost parse is refused.
         "appraisal_fee", "home_price", "homeowners_insurance_annual", "inspection_fee", "other_lender_fees", "property_tax_annual", "recording_fees", "seller_lender_credits",
@@ -1852,7 +1885,22 @@ namespace detail {
             }
             return too_big(kMaxMonthUnits, "term");
         case SlotKind::YearCount:
-            if (v.units() <= 0) return std::string{field} + " = " + v.to_string() + " is not positive";
+            // `loan_term_years` is carved out of the positivity rule the same way
+            // `tax_escrow_months` is carved out above, and for the same structural
+            // reason spelled out there: bounds run in translate() (G5) BEFORE
+            // ground_emitted_values (G3) consults kConventionValues, so its
+            // convention entry of 0 would never be reached and every legacy-shape
+            // ComputeRentVsBuy parse would be refused on a field the utterance
+            // never mentions.
+            //
+            // Zero here means "this request does not describe a loan" -- the
+            // all-cash purchase and the legacy composite shape both need it. The
+            // engine already refuses a zero term on the amortising path, so this
+            // does not make the verifier looser than the RPC it guards; it stops
+            // it being STRICTER, which is the failure mode this file warns about.
+            if (v.units() < 0 || (v.units() == 0 && field != "loan_term_years")) {
+                return std::string{field} + " = " + v.to_string() + " is not positive";
+            }
             return too_big(kMaxYearUnits, "horizon");
         case SlotKind::PeriodIndex:
             if (v.units() <= 0) return std::string{field} + " = " + v.to_string() + " is not a 1-based period";
