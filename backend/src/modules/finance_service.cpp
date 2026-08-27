@@ -2444,21 +2444,99 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         // answering a different question. The presence of the composite
         // monthly_piti_and_maintenance is unambiguous: only a legacy caller
         // sends it, and it is the one field the amortising model cannot use.
-        // LEGACY iff the composite is present AND POSITIVE.
+        // LEGACY iff the composite is present AND POSITIVE -- but a malformed
+        // composite is still an ERROR, and a request carrying BOTH shapes is
+        // refused rather than silently served by one of them.
         //
-        // Emptiness alone is the wrong test once the assistant is in the picture:
-        // G2 requires every declared field to be emitted, so a full-shape parse
-        // still sends monthly_piti_and_maintenance -- as the convention value "0".
-        // Keying on non-empty would route it to the legacy model with a zero
-        // carrying cost and answer a different question. A caller who genuinely
-        // has the composite always has a positive one; nobody pays zero PITI.
+        // An adversarial review found three ways the simpler test misbehaved,
+        // all of which broke the backward compatibility this change exists to
+        // preserve:
+        //
+        //   ""     -> was INVALID_ARGUMENT "missing field"; would have become a
+        //            200 from the amortising model with a zero rate, zero
+        //            carrying cost, a derived loan and a 6% selling cost.
+        //   "abc"  -> was bad_decimal -> INVALID_ARGUMENT; would have parsed,
+        //            been discarded, and returned 200 with nothing reading it.
+        //   "2500" plus the seven new fields -> would have taken the legacy path
+        //            and discarded all seven with no diagnostic, the only signal
+        //            being that response fields 5-18 came back empty.
+        //
+        // Emptiness alone is also the wrong test in the other direction, because
+        // G2 makes the assistant emit every declared field: a full-shape parse
+        // still sends monthly_piti_and_maintenance, as the convention value "0".
         bool legacy_composite_supplied = false;
         if (!request->monthly_piti_and_maintenance().empty()) {
-            BigDecimal composite{};
-            if (parse_decimal(request->monthly_piti_and_maintenance(), composite) &&
-                composite.is_positive()) {
-                legacy_composite_supplied = true;
+            // Parse errors stay errors. This is the guard the field had before
+            // the dispatch was introduced, and removing it made a malformed
+            // decimal produce no error at all.
+            REQUIRE_DECIMAL_SAFE(composite, request->monthly_piti_and_maintenance(),
+                                 "monthly_piti_and_maintenance");
+            legacy_composite_supplied = composite.is_positive();
+        }
+
+        // EVERY compounding rate is bounded, not just the loan rate.
+        //
+        // annual_home_appreciation compounds over `years`, annual_rent_increase
+        // over years-1, annual_investment_return over years*12 and
+        // annual_inflation_rate over `years` -- all four reach BigDecimal::pow,
+        // which wraps __int128 SILENTLY by design. An adversarial review showed
+        // the percent-vs-fraction typo is enough: annual_home_appreciation="10"
+        // over 20 years gives 11^20 = 6.7e20, whose raw fixed-point value is
+        // 6.7e38 against kI128Max 1.7e38, so home_sale_price, the terminal
+        // wealths, buying_advantage and the is_buying_better SIGN all become
+        // garbage -- returned as 200 OK with eighteen exact-looking decimals.
+        //
+        // The collapse-theorem test cannot catch this: it is built only from
+        // add/subtract, and mod-2^128 wrapping is a ring homomorphism, so the
+        // identity still holds between two corrupted numbers.
+        {
+            const int horizon = request->years();
+            READ_DECIMAL_SAFE(appr_chk, request->annual_home_appreciation(),
+                              "annual_home_appreciation");
+            if (auto st = check_compound_growth_safe(appr_chk.to_double(), 1, horizon,
+                                                     "annual_home_appreciation");
+                !st.ok()) {
+                return st;
             }
+            READ_DECIMAL_SAFE(rentinc_chk, request->annual_rent_increase(),
+                              "annual_rent_increase");
+            if (auto st = check_compound_growth_safe(rentinc_chk.to_double(), 1, horizon,
+                                                     "annual_rent_increase");
+                !st.ok()) {
+                return st;
+            }
+            READ_DECIMAL_SAFE(inv_chk, request->annual_investment_return(),
+                              "annual_investment_return");
+            if (auto st = check_compound_growth_safe(inv_chk.to_double(), 12, horizon * 12,
+                                                     "annual_investment_return");
+                !st.ok()) {
+                return st;
+            }
+            READ_DECIMAL_SAFE(infl_chk, request->annual_inflation_rate(),
+                              "annual_inflation_rate");
+            if (auto st = check_compound_growth_safe(infl_chk.to_double(), 1, horizon,
+                                                     "annual_inflation_rate");
+                !st.ok()) {
+                return st;
+            }
+        }
+
+        // A request cannot describe both shapes. The composite conflates debt
+        // service with carrying costs; monthly_taxes_ins_maintenance separates
+        // them. Honouring one and dropping the other silently is how a caller
+        // gets a confident answer to a question they did not ask.
+        const bool amortising_inputs_supplied =
+            !request->loan_annual_rate().empty() ||
+            !request->monthly_taxes_ins_maintenance().empty() ||
+            !request->closing_costs_buy().empty() ||
+            request->loan_term_years() != 0;
+        if (legacy_composite_supplied && amortising_inputs_supplied) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "monthly_piti_and_maintenance is a single composite of debt service "
+                          "and carrying costs and cannot be combined with the amortising "
+                          "inputs (loan_annual_rate, loan_term_years, "
+                          "monthly_taxes_ins_maintenance, closing_costs_buy). Send one shape "
+                          "or the other.");
         }
         const bool use_amortising = !legacy_composite_supplied;
 
@@ -2491,7 +2569,17 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         READ_DECIMAL_SAFE(inflation_rate, request->annual_inflation_rate(),
                           "annual_inflation_rate");
 
-        BigDecimal sell_pct = BigDecimal(0.06);
+        // "" and "0" must mean the SAME thing, because kConventionValues exempts
+        // BOTH for an utterance that never mentions selling costs -- so the
+        // assistant may legitimately emit either. Treating "" as 6% and "0" as 0%
+        // made two encodings of one missing input differ by $32k of terminal
+        // wealth on the test suite's own base case, with no error either way.
+        //
+        // Zero is therefore the documented default for both. A caller who
+        // genuinely sells for free is indistinguishable from one who said
+        // nothing, and that is the safe direction: it never invents a cost the
+        // caller did not state.
+        BigDecimal sell_pct{};
         if (!request->selling_cost_percent().empty()) {
             READ_DECIMAL_SAFE(parsed_sell_pct, request->selling_cost_percent(),
                               "selling_cost_percent");
