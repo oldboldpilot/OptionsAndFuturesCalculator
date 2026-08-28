@@ -118,7 +118,9 @@ So today, sending the key changes *nothing you can see* — and that is exactly 
 you should send it from your first commit. Two reasons:
 
 1. **Quota isolation, immediately.** Every unkeyed caller collapses into **one
-   shared site-wide `~anonymous` bucket** — not per-user, not per-site. Unkeyed,
+   shared `~anonymous` bucket **per replica** — not per-user, not per-site, and
+   `railway.json` sets `numReplicas: 2`, so the ceiling is twice the table value
+   and which replica you land on decides whether you are refused. Unkeyed,
    your traffic competes with anonymous visitors of
    optionsandfuturescalculator.com and with any third party pointing at this host.
    A recognised key gets a bucket keyed to *its own* id at the `partner` tier.
@@ -307,6 +309,43 @@ negative, positive, malformed) with a fixed precedence — malformed outranks
 negative outranks both-shapes outranks a shape — and all twenty cells of its
 input space are asserted by name in section 24 of
 `backend/tests/test_finance_service_validation.cpp`.
+
+**The RESPONSE differs by shape too, and the difference is deliberate.** Fields
+1–4 are always populated and keep their `double` type and field numbers, because
+replacing a double with a string at the same number is wire-breaking — an old
+client decodes the new bytes as garbage rather than raising. Everything else is
+populated **only on the amortising path**:
+
+| field | type | legacy | amortising |
+| --- | --- | --- | --- |
+| `totalCostOfBuying` / `totalCostOfRenting` | `double` | ✓ | ✓ |
+| `isBuyingBetter` | `bool` | ✓ | ✓ |
+| `buyingAdvantage` | `double` | ✓ | ✓ |
+| `totalCostOfBuyingExact` / `totalCostOfRentingExact` / `buyingAdvantageExact` | `string` | **empty** | ✓ |
+| `ownerTerminalWealth` / `renterTerminalWealth` | `string` | **empty** | ✓ |
+| `finalLoanBalance` / `homeSalePrice` / `sellingCosts` | `string` | **empty** | ✓ |
+| `totalPrincipalPaid` / `totalInterestPaid` / `totalRentPaid` | `string` | **empty** | ✓ |
+| `realBuyingAdvantage` / `realOwnerTerminalWealth` / `realRenterTerminalWealth` | `string` | **empty** | ✓ (zero inflation ⇒ equals the nominal) |
+
+The legacy model computes in `double`, so rendering it to eighteen places would
+invent digits it never had. **An empty `_exact` string is the honest statement
+that this path has no exact companion — not a missing value.** Branch on
+`buyingAdvantageExact !== ""` if you need to know which model answered; do not
+branch on the status, which is 200 either way.
+
+Verified live on 2026-08-28, both shapes through the public ingress:
+
+```
+amortising  buyingAdvantage 70977.1811034778
+            buyingAdvantageExact "70977.181103477791935949"
+legacy      buyingAdvantage  9132.293106093437
+            buyingAdvantageExact ""
+```
+
+The `real*` fields are the inflation-adjusted companions, deflated by
+`(1 + annual_inflation_rate) ^ years`. Send `annual_inflation_rate` as `"0"` (or
+omit it) and they equal their nominal counterparts; that is why they are safe to
+read unconditionally on the amortising path.
 
 Two refusals worth knowing: a request whose every field is the convention zero
 gets `carries neither` rather than an answer computed from a loan the service
@@ -622,6 +661,27 @@ Adapted from [`docs/API_USAGE.md`](API_USAGE.md) §8 for this site:
    and check that the backend logs attribute them to different buckets. In Observe
    mode both succeed, so this is the *only* way to catch a key that is silently
    not being sent — and catching it now is the whole point of §2.
+
+7. **Rent-vs-buy: assert the SHAPE you get back, not just a 200.** Send the same
+   scenario twice — once as the legacy composite, once as the amortising inputs —
+   and assert that the first returns an empty `buyingAdvantageExact` and the
+   second a non-empty one. Both are 200, so a status check cannot tell them
+   apart, and silently getting the legacy model when you asked for the
+   amortising one means your loan is not being amortised at all: the composite
+   is treated as the entire monthly cost of owning, which understates it by the
+   whole P&I payment.
+
+   Then assert the refusals, because they are the ones that will bite:
+
+   ```
+   both shapes   -> grpc-status 3, "cannot be combined"
+   neither shape -> grpc-status 3, "carries neither"
+   ```
+
+   Sending a zeroed field expecting it to select a shape lands on the second of
+   those. **A zero and an absent field mean the same thing here** (§4.4), so a
+   request whose every field is a convention zero is refused rather than answered
+   from a loan the service invented for you.
 
 There is also a standing gate you can borrow rather than reinvent:
 
