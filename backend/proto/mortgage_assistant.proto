@@ -100,6 +100,67 @@ message ParseRequest {
   // prompt builder was written from that conclusion rather than rediscovering
   // it.
   string prior_clarification = 2;
+
+  // The question THIS SERVICE ASKED that `prior_clarification` answers.
+  //
+  // Optional and backward-compatible: absent, the prompt builder falls back to
+  // the neutral placeholder it has always used, and every existing client is
+  // unaffected. A client already holds this string -- it is the
+  // `clarification.question` this same RPC returned a moment earlier -- so
+  // echoing it back costs nothing.
+  //
+  // It exists because the placeholder was NOT harmless, and the comment above
+  // `build_prompt` said it was: "its wording is not load-bearing ... what the
+  // placeholder buys is ROLE and POSITION, not content". Measured, that is
+  // false for any operation whose reply is UNTYPED.
+  //
+  // `ComputeRentalRoi` is the case that proves it. Its clarification asks "What
+  // do operating expenses run per month?" and the user answers with a bare
+  // money figure. The request message has FIVE money slots, and the question
+  // was the only thing binding that figure to `periodic_operating_expenses`.
+  // Replaced by "Could you clarify?" -- a string that appears ZERO times in the
+  // training corpus -- the binding is gone, and six models across three ranks
+  // and three corpora failed the IDENTICAL 17 rows while passing all 16
+  // single-turn rows. In 102 of 102 emissions the slot was filled with the
+  // mortgage figure instead, and the reply figure appeared nowhere.
+  //
+  // Two of those models then DUPLICATED the mortgage figure into both slots and
+  // the verifier served it: both figures ground, so grounding cannot catch it.
+  // That is the documented slot-assignment limit, reached by a defect in the
+  // prompt rather than in the model.
+  //
+  // Operations whose reply is TYPED ("39 years", "6.5%", "80%") were unharmed,
+  // because only one slot can accept them. That contrast is why this went
+  // unnoticed.
+  //
+  // *** MEASURED AND FALSIFIED. NOTHING SENDS THIS TODAY, DELIBERATELY. ***
+  //
+  // The diagnosis above is correct about the placeholder being
+  // out-of-distribution. The REMEDY does not follow from it. Sending the real
+  // question back made things WORSE, measured on the same 543-row holdout with
+  // the same GGUF, one variable, both directions:
+  //
+  //            served exact   params   refusals
+  //   without      352/508      408       103
+  //   with         340/508      400       111
+  //
+  // And it did not fix what it was built to fix: ComputeRentalRoi stayed at
+  // exactly 16/33. The damage landed on the clarification-heavy operations that
+  // were previously FINE -- ComputePayment 19/23 -> 14/23, ComputeHeloc
+  // 30/30 -> 27/30, ComputeAmortization 77/98 -> 74/98.
+  //
+  // The likely reason, INFERRED: the question echoed back is the model's OWN
+  // generated wording, which varies, where the corpus taught a small fixed set
+  // of phrasings. A CONSISTENT out-of-distribution placeholder the model learns
+  // to ignore beats a VARIABLE one it tries to read. Consistency was doing work
+  // that "wrong content" was being blamed for.
+  //
+  // Kept in the contract rather than deleted, because the field is the record.
+  // The remaining path is the corpus one: ADD clarification rows whose
+  // assistant turn is the literal serving placeholder, so the shape the service
+  // actually emits is in distribution -- then this field is unnecessary. Do not
+  // wire this up again without re-running the table above.
+  string prior_question = 3;
 }
 
 message ParseResponse {

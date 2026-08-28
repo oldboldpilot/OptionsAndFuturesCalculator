@@ -299,8 +299,8 @@ constexpr double kMaxAbsMagnitude = 1e15;
  * exactly the three-turn system/user/assistant prompt the non-clarification
  * training rows use.
  */
-[[nodiscard]] auto build_prompt(std::string_view utterance, std::string_view prior_clarification)
-    -> std::string {
+[[nodiscard]] auto build_prompt(std::string_view utterance, std::string_view prior_clarification,
+                                std::string_view prior_question = {}) -> std::string {
     std::string prompt;
     prompt += "<|im_start|>system\n";
     prompt += kSystemPrompt;
@@ -309,7 +309,17 @@ constexpr double kMaxAbsMagnitude = 1e15;
     prompt += utterance;
     prompt += "<|im_end|>\n";
     if (!prior_clarification.empty()) {
-        prompt += "<|im_start|>assistant\nCould you clarify?<|im_end|>\n";
+        // The REAL question when the client echoed it back, the neutral
+        // placeholder otherwise. The placeholder was believed harmless -- see
+        // this function's comment above, and `prior_question` in
+        // mortgage_assistant.proto for the measurement that falsified it: for
+        // an operation whose reply is untyped, the question text is the only
+        // thing that binds the reply to a slot, and six models failed the same
+        // 17 ComputeRentalRoi rows because of it. The string "Could you
+        // clarify?" occurs ZERO times in the training corpus.
+        prompt += "<|im_start|>assistant\n";
+        prompt += prior_question.empty() ? std::string_view{"Could you clarify?"} : prior_question;
+        prompt += "<|im_end|>\n";
         prompt += "<|im_start|>user\n";
         prompt += prior_clarification;
         prompt += "<|im_end|>\n";
@@ -2315,6 +2325,244 @@ namespace mv = ::mortgage_calculator::assistant::verify;
  * grounding a value needs the utterance the value was supposed to come from, and
  * this is the first point in the pipeline where both exist at once.
  */
+// ---------------------------------------------------------------------------
+// Graph A: the FV-family operation choice, as a TOTAL function
+//
+// The deployed model gets ComputeFutureValueDetailed wrong 16 times out of 31
+// on the held-out set, and ALL SIXTEEN are one class: it emits plain
+// `ComputeFutureValue` with essentially correct extraction in the wrong
+// schema -- `payment` carrying the annual contribution and `present_value`
+// carrying the principal, on an utterance that says "compounded quarterly".
+// The two request messages have disjoint field sets, so the verifier's G2
+// catches it and refuses; the caller gets an honest refusal to a question the
+// model very nearly answered.
+//
+// This is OPERATION CHOICE, which mortgage_verification.cppm documents as
+// something it cannot decide ("G1 proves the operation EXISTS; nothing here
+// proves it is the one the user meant"). It is decidable LEXICALLY, though,
+// and measured over the whole corpus the cue is exact within this family:
+//
+//   gold ComputeFutureValueDetailed   738 rows   trigger fires 738  (recall 1.000)
+//   gold ComputeFutureValue (plain)   189 rows   trigger fires   0  (specificity 1.000)
+//
+// The trigger is DISQUALIFIED as a general operation chooser -- it fires on
+// ComputeClosingCosts 542/542 ("homeowners insurance at $1,200 a year") and
+// ComputePaybackPeriod 350/350 ("saves me about $1,900 a year") -- so it is
+// consulted ONLY when the model has already named an FV-family operation.
+// That scoping is what makes it safe, and it is why this function returns
+// nullopt for every other operation before it looks at the text at all.
+//
+// SHAPE OF THE FIX, and the part that keeps it honest: this produces a
+// REPLACEMENT JSON STRING and nothing else. The remapped object then re-enters
+// the same validation, the same G2/G3 grounding and the same refusal paths as
+// any model output -- there is no privileged path for a rewritten answer. Any
+// resolver that cannot decide returns nullopt, the remap is abandoned, and the
+// caller gets exactly the refusal it gets today. Refusal is the fallback;
+// fabrication never is.
+//
+// Every value written is MOVED or ADOPTED FROM THE UTTERANCE, never computed:
+// `annual_contribution` and `current_principal` are the model's own literals,
+// `annual_rate` and `years` are stated figures the model rescaled, and the two
+// conventions are the ones kConventionValues already exempts.
+[[nodiscard]] auto fv_detailed_cue(std::string_view text) -> bool {
+    std::string lower;
+    lower.reserve(text.size());
+    for (const char c : text) {
+        lower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    }
+    if (lower.find("compound") != std::string::npos) {
+        return true;
+    }
+    // A money literal followed by an annual cadence. Checked as a phrase list
+    // rather than by re-lexing: the cadence words are what carry the meaning.
+    for (const std::string_view cadence : {"/year", "/yr", " a year", " per year",
+                                           " each year", " every year", " annually"}) {
+        std::size_t at = lower.find(cadence);
+        while (at != std::string::npos) {
+            // Require a currency mark somewhere in the 24 characters before it,
+            // so "for 19 years" and "3% annually" do not qualify.
+            const std::size_t from = at >= 24 ? at - 24 : 0;
+            if (lower.substr(from, at - from).find('$') != std::string::npos) {
+                return true;
+            }
+            at = lower.find(cadence, at + 1);
+        }
+    }
+    return false;
+}
+
+/** Percent literals in the text, excluding any adjacent to the word "inflation". */
+[[nodiscard]] auto stated_rates(std::string_view text)
+    -> std::pair<std::vector<mv::NumericLiteral>, std::optional<mv::NumericLiteral>> {
+    std::string lower;
+    lower.reserve(text.size());
+    for (const char c : text) {
+        lower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    }
+    std::vector<mv::NumericLiteral> rates;
+    std::optional<mv::NumericLiteral> inflation;
+    for (const auto& lit : mv::lex_numeric_literals(text)) {
+        if (lit.tag != mv::LiteralTag::Percent) {
+            continue;
+        }
+        // "inflation" within 24 characters either side tags it as the inflation
+        // rate. Without this exclusion a "...at 8.4% ... 3% inflation" row has
+        // two candidates and the unique-adoption rule cannot fire.
+        const std::size_t lo = lit.offset >= 24 ? lit.offset - 24 : 0;
+        const std::size_t hi = std::min(lower.size(), lit.offset + 24);
+        if (lower.substr(lo, hi - lo).find("inflation") != std::string::npos) {
+            inflation = lit;
+            continue;
+        }
+        rates.push_back(lit);
+    }
+    return {rates, inflation};
+}
+
+/**
+ * Renders a Percent-tagged literal as the FRACTION the contract wants.
+ *
+ * `lex_numeric_literals` keeps a percent at FACE value -- "7.37%" lexes to
+ * 7.37, not 0.0737 -- so emitting `lit.text` produced `annual_rate = 7.37` and
+ * the bounds gate refused it as "outside this assistant's interest-rate range".
+ * That refusal was correct and the input was mine.
+ *
+ * Four decimal places is the corpus convention for an annual rate
+ * (`rate_str(x, 4)`), and matching it exactly is what lets G3 ground the value
+ * against the stated literal.
+ */
+[[nodiscard]] auto percent_as_rate_string(const mv::NumericLiteral& lit) -> std::string {
+    // Decimal is __int128 scaled by kScale. /100 converts percent to fraction;
+    // the second divide reduces to 1e-4 units, rounding half-up.
+    constexpr __int128 kPerTenThousand = mv::Decimal::kScale / 10'000;
+    const __int128 fraction_units = lit.value.units() / 100;
+    __int128 ten_thousandths = fraction_units / kPerTenThousand;
+    if ((fraction_units % kPerTenThousand) * 2 >= kPerTenThousand) {
+        ++ten_thousandths;
+    }
+    const auto whole = static_cast<std::int64_t>(ten_thousandths / 10'000);
+    auto frac = static_cast<std::int64_t>(ten_thousandths % 10'000);
+    if (frac < 0) {
+        frac = -frac;
+    }
+    std::string out = std::to_string(whole) + ".";
+    const std::string digits = std::to_string(frac);
+    out += std::string(4 - digits.size(), '0') + digits;
+    return out;
+}
+
+[[nodiscard]] auto remap_future_value_to_detailed(const fastjson::json_value& obj,
+                                                  std::string_view operation,
+                                                  std::string_view user_text)
+    -> std::optional<std::string> {
+    if (operation != "ComputeFutureValue" || !fv_detailed_cue(user_text)) {
+        return std::nullopt;  // cells A2/A3/A4: identity
+    }
+    const auto str_of = [&obj](const char* key) -> std::optional<std::string> {
+        if (!obj.contains(key)) return std::nullopt;
+        const auto& v = obj[key];
+        if (v.is_string()) return std::string{v.as_string()};
+        if (is_numeric(v)) {
+            return std::to_string(v.as_int64());
+        }
+        return std::nullopt;
+    };
+    const auto payment = str_of("payment");
+    const auto present_value = str_of("present_value");
+    const auto rate = str_of("rate");
+    if (!payment || !present_value || !rate || !obj.contains("periods")) {
+        return std::nullopt;
+    }
+
+    const auto [rates, inflation] = stated_rates(user_text);
+
+    // annual_rate: the model divided a STATED annual rate by a cadence. Recover
+    // the stated one rather than multiplying back, so the emitted value is a
+    // literal from the text and grounds exactly.
+    const auto emitted_rate = mv::parse_strict_decimal(*rate);
+    if (!emitted_rate.has_value()) {
+        return std::nullopt;
+    }
+    std::optional<std::string> annual_rate;
+    for (const std::int64_t f : {1, 2, 4, 12, 26, 52}) {
+        for (const auto& cand : rates) {
+            // cand ~= emitted * f, compared at the rate precision the contract
+            // uses. Exact fixed-point compare -- no float tolerance.
+            // Exact fixed-point compare on the raw units -- no float, no
+            // tolerance. `Decimal` is __int128 scaled by 1e15, so multiplying
+            // by a small integer cadence cannot overflow at rate magnitudes.
+            if (cand.value.units() == emitted_rate->units() * static_cast<__int128>(f)) {
+                annual_rate = percent_as_rate_string(cand);
+                break;
+            }
+        }
+        if (annual_rate.has_value()) break;
+    }
+    if (!annual_rate.has_value() && rates.size() == 1) {
+        annual_rate = percent_as_rate_string(rates.front());  // UniqueAdopted
+    }
+    if (!annual_rate.has_value()) {
+        return std::nullopt;  // Unresolvable -> keep -> existing refusal
+    }
+
+    // years: the model emitted a period count. Adopt a STATED years literal.
+    std::vector<std::int64_t> year_literals;
+    for (const auto& lit : mv::lex_numeric_literals(user_text)) {
+        if (lit.tag == mv::LiteralTag::Years) {
+            // Years are whole numbers in this contract; anything with a
+        // fractional part is not a horizon and is skipped.
+        if (lit.value.units() % mv::Decimal::kScale != 0) {
+            continue;
+        }
+        year_literals.push_back(static_cast<std::int64_t>(lit.value.units() / mv::Decimal::kScale));
+        }
+    }
+    const std::int64_t periods =
+        is_numeric(obj["periods"]) ? obj["periods"].as_int64() : 0;
+    std::optional<std::int64_t> years;
+    if (std::ranges::find(year_literals, periods) != year_literals.end()) {
+        years = periods;  // Identity
+    } else if (periods % 12 == 0 &&
+               std::ranges::find(year_literals, periods / 12) != year_literals.end()) {
+        years = periods / 12;  // Div12
+    } else if (year_literals.size() == 1) {
+        years = year_literals.front();  // UniqueAdopted
+    }
+    if (!years.has_value()) {
+        return std::nullopt;
+    }
+
+    // compound_frequency: stated, else the corpus convention of 12.
+    std::string lower;
+    lower.reserve(user_text.size());
+    for (const char c : user_text) {
+        lower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    }
+    int frequency = 12;
+    if (lower.find("quarterly") != std::string::npos) {
+        frequency = 4;
+    } else if (lower.find("semi-annual") != std::string::npos ||
+               lower.find("semiannual") != std::string::npos) {
+        frequency = 2;
+    } else if (lower.find("annually") != std::string::npos ||
+               lower.find("once a year") != std::string::npos) {
+        frequency = 1;
+    }
+
+    const std::string inflation_rate =
+        inflation.has_value() ? percent_as_rate_string(*inflation) : std::string{"0.0000"};
+
+    std::string out = R"({"operation":"ComputeFutureValueDetailed",)";
+    out += R"("annual_rate":")" + *annual_rate + R"(",)";
+    out += R"("years":)" + std::to_string(*years) + ",";
+    out += R"("annual_contribution":")" + *payment + R"(",)";
+    out += R"("current_principal":")" + *present_value + R"(",)";
+    out += R"("annual_inflation_rate":")" + inflation_rate + R"(",)";
+    out += R"("compound_frequency":)" + std::to_string(frequency);
+    out += "}";
+    return out;
+}
+
 auto validate_and_populate_params(std::string_view json_text, std::string_view user_text,
                                   ::mortgage::assistant::ParseResponse& response)
     -> ModelOutputOutcome {
@@ -2332,6 +2580,18 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
         return ModelOutputOutcome::Refused;
     }
     const std::string operation{obj["operation"].as_string()};
+
+    // Graph A, cell A1. Runs BEFORE the operation is looked up and before any
+    // field is read, so the remapped object is validated by the identical path
+    // -- there is no privileged route for a rewritten answer. A single level of
+    // recursion, guarded by the operation test inside the remap: the result is
+    // always ComputeFutureValueDetailed, which the remap declines, so it cannot
+    // recurse twice.
+    if (auto remapped = remap_future_value_to_detailed(obj, operation, user_text);
+        remapped.has_value()) {
+        return validate_and_populate_params(*remapped, user_text, response);
+    }
+
     const Operation* op = find_operation(operation);
     if (op == nullptr) {
         // Deliberately NOT normalised to a nearest match. Among these
@@ -2691,6 +2951,7 @@ auto interpret_model_output(const std::string& raw_text, std::string_view uttera
 struct MortgageCtx {
     std::string utterance;
     std::string prior_clarification;
+    std::string prior_question;
 
     // Non-owning; safe for the same reason AssistantCtx::context is in
     // assistant_service.cpp -- this graph runs synchronously, entirely
@@ -2801,7 +3062,8 @@ inline constexpr std::array<std::string_view, 4> kAllActionNames{
 /** Builds the prompt and submits it to the worker -- mirrors
  * assistant_service.cpp's action_generate exactly. */
 [[nodiscard]] auto action_generate(Ctx& ctx) -> ExecutionResult<> {
-    const std::string prompt = build_prompt(ctx->utterance, ctx->prior_clarification);
+    const std::string prompt =
+        build_prompt(ctx->utterance, ctx->prior_clarification, ctx->prior_question);
 
     auto outcome = MortgageAssistantWorker::instance().submit(prompt);
     if (!outcome.has_value()) {
@@ -2935,6 +3197,7 @@ class MortgageAssistantImpl final : public ::mortgage::assistant::MortgageAssist
         auto ctx = std::make_shared<MortgageCtx>();
         ctx->utterance = request->utterance();
         ctx->prior_clarification = request->prior_clarification();
+        ctx->prior_question = request->prior_question();
         ctx->context = context;
 
         sgee::runtime::EngineContext<Ctx> engine;

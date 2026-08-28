@@ -260,9 +260,22 @@ def gold_as_served(gold: dict) -> dict:
 # ---------------------------------------------------------------------------
 # The RPC
 # ---------------------------------------------------------------------------
-def call(stub, utterance: str, prior: str, timeout: float) -> tuple[str, dict | None, str, int]:
-    """One ParseOperation. Returns (which, served_flat_or_None, text, reason)."""
-    req = mortgage_assistant_pb2.ParseRequest(utterance=utterance, prior_clarification=prior)
+def call(stub, utterance: str, prior: str, timeout: float,
+         prior_question: str = "") -> tuple[str, dict | None, str, int]:
+    """One ParseOperation. Returns (which, served_flat_or_None, text, reason).
+
+    `prior_question` is the question THIS SERVICE asked on the previous turn,
+    echoed back. A real client already holds it -- it is the
+    `clarification.question` the first call returned -- and the harness must
+    send it for the same reason: without it the service substitutes a neutral
+    placeholder that appears ZERO times in the training corpus, and for an
+    operation whose reply is untyped the question text is the only thing
+    binding that reply to a slot. Measured: six models across three ranks and
+    three corpora failed the identical 17 ComputeRentalRoi rows -- every one a
+    clarification row -- while passing all 16 single-turn rows.
+    """
+    req = mortgage_assistant_pb2.ParseRequest(
+        utterance=utterance, prior_clarification=prior, prior_question=prior_question)
     resp = stub.ParseOperation(req, timeout=timeout)
     which = resp.WhichOneof("outcome")
     if which == "params":
@@ -337,6 +350,7 @@ def evaluate(rows: list[dict], stub, tail: RawOutputTail, timeout: float,
         want = parse_params_text(target)
 
         try:
+            question1 = ""   # bound on every path: the single-turn branch never asks
             if len(convo) == 2:
                 utterance, reply = convo[0]["content"], ""
             elif len(convo) == 4:
@@ -346,7 +360,7 @@ def evaluate(rows: list[dict], stub, tail: RawOutputTail, timeout: float,
                 # that says, and scoring the wrong one inverts the pass
                 # condition.
                 is_modification = parse_params_text(convo[1]["content"]) is not None
-                which1, _, _, _ = call(stub, utterance, "", timeout)
+                which1, _, question1, _ = call(stub, utterance, "", timeout)
                 raws1 = tail.drain()
                 # The RAW view of the same question, for the same reason the
                 # headline accuracy is measured raw: `which1` is the model plus
@@ -369,6 +383,11 @@ def evaluate(rows: list[dict], stub, tail: RawOutputTail, timeout: float,
                         asked_raw_ok[0] += 1
             else:
                 continue
+            # Echo the service's OWN question back on the second call, exactly
+            # as a real client does -- `call` returns it as `text` on a
+            # clarification outcome. Sending "" makes the service substitute a
+            # placeholder that is out-of-distribution for every model trained on
+            # this corpus; see call()'s docstring.
             which, served, text, reason = call(stub, utterance, reply, timeout)
             raws = tail.drain()
         except grpc.RpcError as e:

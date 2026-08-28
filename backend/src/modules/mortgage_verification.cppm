@@ -1749,6 +1749,64 @@ namespace detail {
     return std::nullopt;
 }
 
+/**
+ * A CADENCE stated as a WORD grounds its numeric equivalent.
+ *
+ * `compound_frequency` and `payments_per_year` are counts per year, and a
+ * person states them in English -- "compounded quarterly", "bi-weekly" -- never
+ * as the digit. G3 grounds numerals against numerals, so "compounded quarterly"
+ * with `compound_frequency: 4` was refused with the self-contradicting message
+ * `"compound_frequency" = 4 does not correspond to anything in the request (the
+ * nearest figure you gave is 7.37)` -- the nearest figure being the interest
+ * rate, which is not a cadence at all.
+ *
+ * This is the SAME shape as the `dates[0] = 0` epoch defect and as the
+ * `periods` grounding that was fixed by inferring the cadence from the emitted
+ * rate: a field whose value is implied by words rather than written as digits.
+ *
+ * Deliberately NOT a blanket convention whitelist. `compound_frequency: 12` is
+ * already exempt as the absent-case convention; adding 1, 2, 4, 26 and 52
+ * unconditionally would let a model answer "quarterly" on a monthly utterance
+ * and be believed. The WORD has to be there, so the gate still discriminates.
+ */
+[[nodiscard]] inline auto cadence_word_grounds(std::string_view field, const Decimal& value,
+                                               std::string_view text) -> bool {
+    if (field != "compound_frequency" && field != "payments_per_year") {
+        return false;
+    }
+    struct Cadence {
+        std::string_view word;
+        std::int64_t per_year;
+    };
+    // Longest-first where one word contains another: "semi-annual" must be
+    // tested before "annual", or a semi-annual schedule grounds as 1.
+    static constexpr std::array<Cadence, 9> kCadences{{
+        {.word = "semi-annual", .per_year = 2},  {.word = "semiannual", .per_year = 2},
+        {.word = "bi-weekly", .per_year = 26},   {.word = "biweekly", .per_year = 26},
+        {.word = "quarterly", .per_year = 4},    {.word = "monthly", .per_year = 12},
+        {.word = "annually", .per_year = 1},     {.word = "annual", .per_year = 1},
+        {.word = "weekly", .per_year = 52},
+    }};
+    std::string lower;
+    lower.reserve(text.size());
+    for (const char c : text) {
+        lower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    }
+    for (const auto& c : kCadences) {
+        if (lower.find(c.word) == std::string::npos) {
+            continue;
+        }
+        if (value == Decimal::from_integer(c.per_year)) {
+            return true;
+        }
+        // A cadence word IS present and names a different count. Stop rather
+        // than fall through to a later, shorter word: "semi-annually" contains
+        // "annual", and letting that match would ground 1 for a 2 schedule.
+        return false;
+    }
+    return false;
+}
+
 [[nodiscard]] inline auto is_convention_value(std::string_view field, const Decimal& value) -> bool {
     for (const auto& c : kConventionValues) {
         if (c.field != field) continue;
@@ -2267,6 +2325,10 @@ auto ground_emitted_values(const MortgageParamsInput& input, std::string_view us
             }
 
             if (detail::is_convention_value(emitted.name, *parsed)) continue;
+            // A cadence stated as a WORD ("compounded quarterly") grounds its
+            // count. See cadence_word_grounds for why this is not folded into
+            // kConventionValues.
+            if (detail::cadence_word_grounds(emitted.name, *parsed, user_text)) continue;
 
             bool grounded = false;
             for (const auto& lit : literals) {

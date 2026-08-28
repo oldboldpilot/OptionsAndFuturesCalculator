@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x18mortgage_assistant.proto\x12\x12mortgage.assistant\">\n\x0cParseRequest\x12\x11\n\tutterance\x18\x01 \x01(\t\x12\x1b\n\x13prior_clarification\x18\x02 \x01(\t\"\xbb\x01\n\rParseResponse\x12\x33\n\x06params\x18\x01 \x01(\x0b\x32!.mortgage.assistant.FinanceParamsH\x00\x12:\n\rclarification\x18\x02 \x01(\x0b\x32!.mortgage.assistant.ClarificationH\x00\x12.\n\x07refusal\x18\x03 \x01(\x0b\x32\x1b.mortgage.assistant.RefusalH\x00\x42\t\n\x07outcome\"\x90\x01\n\rFinanceParams\x12\x11\n\toperation\x18\x01 \x01(\t\x12=\n\x06params\x18\x02 \x03(\x0b\x32-.mortgage.assistant.FinanceParams.ParamsEntry\x1a-\n\x0bParamsEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"!\n\rClarification\x12\x10\n\x08question\x18\x01 \x01(\t\"\xcc\x01\n\x07Refusal\x12\x32\n\x06reason\x18\x01 \x01(\x0e\x32\".mortgage.assistant.Refusal.Reason\x12\x0f\n\x07message\x18\x02 \x01(\t\"|\n\x06Reason\x12\x16\n\x12REASON_UNSPECIFIED\x10\x00\x12\x19\n\x15UNSUPPORTED_OPERATION\x10\x01\x12\x16\n\x12INVALID_PARAMETERS\x10\x02\x12\x10\n\x0cOUT_OF_SCOPE\x10\x03\x12\x15\n\x11MODEL_UNAVAILABLE\x10\x04\x32j\n\x11MortgageAssistant\x12U\n\x0eParseOperation\x12 .mortgage.assistant.ParseRequest\x1a!.mortgage.assistant.ParseResponseb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x18mortgage_assistant.proto\x12\x12mortgage.assistant\"V\n\x0cParseRequest\x12\x11\n\tutterance\x18\x01 \x01(\t\x12\x1b\n\x13prior_clarification\x18\x02 \x01(\t\x12\x16\n\x0eprior_question\x18\x03 \x01(\t\"\xbb\x01\n\rParseResponse\x12\x33\n\x06params\x18\x01 \x01(\x0b\x32!.mortgage.assistant.FinanceParamsH\x00\x12:\n\rclarification\x18\x02 \x01(\x0b\x32!.mortgage.assistant.ClarificationH\x00\x12.\n\x07refusal\x18\x03 \x01(\x0b\x32\x1b.mortgage.assistant.RefusalH\x00\x42\t\n\x07outcome\"\x90\x01\n\rFinanceParams\x12\x11\n\toperation\x18\x01 \x01(\t\x12=\n\x06params\x18\x02 \x03(\x0b\x32-.mortgage.assistant.FinanceParams.ParamsEntry\x1a-\n\x0bParamsEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"!\n\rClarification\x12\x10\n\x08question\x18\x01 \x01(\t\"\xcc\x01\n\x07Refusal\x12\x32\n\x06reason\x18\x01 \x01(\x0e\x32\".mortgage.assistant.Refusal.Reason\x12\x0f\n\x07message\x18\x02 \x01(\t\"|\n\x06Reason\x12\x16\n\x12REASON_UNSPECIFIED\x10\x00\x12\x19\n\x15UNSUPPORTED_OPERATION\x10\x01\x12\x16\n\x12INVALID_PARAMETERS\x10\x02\x12\x10\n\x0cOUT_OF_SCOPE\x10\x03\x12\x15\n\x11MODEL_UNAVAILABLE\x10\x04\x32j\n\x11MortgageAssistant\x12U\n\x0eParseOperation\x12 .mortgage.assistant.ParseRequest\x1a!.mortgage.assistant.ParseResponseb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -34,19 +34,19 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_FINANCEPARAMS_PARAMSENTRY']._loaded_options = None
   _globals['_FINANCEPARAMS_PARAMSENTRY']._serialized_options = b'8\001'
   _globals['_PARSEREQUEST']._serialized_start=48
-  _globals['_PARSEREQUEST']._serialized_end=110
-  _globals['_PARSERESPONSE']._serialized_start=113
-  _globals['_PARSERESPONSE']._serialized_end=300
-  _globals['_FINANCEPARAMS']._serialized_start=303
-  _globals['_FINANCEPARAMS']._serialized_end=447
-  _globals['_FINANCEPARAMS_PARAMSENTRY']._serialized_start=402
-  _globals['_FINANCEPARAMS_PARAMSENTRY']._serialized_end=447
-  _globals['_CLARIFICATION']._serialized_start=449
-  _globals['_CLARIFICATION']._serialized_end=482
-  _globals['_REFUSAL']._serialized_start=485
-  _globals['_REFUSAL']._serialized_end=689
-  _globals['_REFUSAL_REASON']._serialized_start=565
-  _globals['_REFUSAL_REASON']._serialized_end=689
-  _globals['_MORTGAGEASSISTANT']._serialized_start=691
-  _globals['_MORTGAGEASSISTANT']._serialized_end=797
+  _globals['_PARSEREQUEST']._serialized_end=134
+  _globals['_PARSERESPONSE']._serialized_start=137
+  _globals['_PARSERESPONSE']._serialized_end=324
+  _globals['_FINANCEPARAMS']._serialized_start=327
+  _globals['_FINANCEPARAMS']._serialized_end=471
+  _globals['_FINANCEPARAMS_PARAMSENTRY']._serialized_start=426
+  _globals['_FINANCEPARAMS_PARAMSENTRY']._serialized_end=471
+  _globals['_CLARIFICATION']._serialized_start=473
+  _globals['_CLARIFICATION']._serialized_end=506
+  _globals['_REFUSAL']._serialized_start=509
+  _globals['_REFUSAL']._serialized_end=713
+  _globals['_REFUSAL_REASON']._serialized_start=589
+  _globals['_REFUSAL_REASON']._serialized_end=713
+  _globals['_MORTGAGEASSISTANT']._serialized_start=715
+  _globals['_MORTGAGEASSISTANT']._serialized_end=821
 # @@protoc_insertion_point(module_scope)
