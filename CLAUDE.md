@@ -295,7 +295,49 @@ neither is a supported image.
 
 Two things to hold on to before trusting its output:
 
-- **It measures 62.5% params exact-match (325/520) through the real RPC**, on a
+- **THE MODEL OF RECORD IS v12 as of 2026-08-28** — QLoRA rank **64**, alpha 64,
+  4 epochs, on the grounded corpus. It measures **400/508 = 78.7% raw params
+  exact-match** on a 543-row holdout proven disjoint from every training set
+  involved. It replaced v6 (`22c182e8…`), which measured **276/508 = 54.3%** on
+  that same holdout: paired, v12 fixes **135** rows and breaks **11**.
+  `ComputeRefinance` 9/38 → **38/38**, `ComputeDetailedAmortization` 23/48 →
+  **48/48**, `ComputeHeloc` 27/30 → **30/30**, and `ComputeRentVsBuy` **0/18 →
+  8/18** — the previous model could not serve that operation at all. Sole
+  regression: `ComputeDepreciation` −1.
+
+  **RANK 16 WAS THE CEILING, and every earlier score in this file was measured
+  against it.** Holding the corpus fixed and varying only the adapter:
+
+  | r16 | r32 | r64 | r16 + grounded corpus | **r64 + grounded** |
+  | --- | --- | --- | --- | --- |
+  | 297/508 | 338/508 | 386/508 | 308/508 | **400/508** |
+
+  Rank is worth roughly **eight times** what the corpus fix is worth, and it is
+  not memorisation: `ComputePresentValue` goes **0/11 → 11/11** on nothing but
+  adapter rank, with no convention involved and no corpus change. At r16 the
+  adapter could not represent that distinction AT ALL. The "trade" recorded
+  further down this file — gaining one operation while losing two — was one
+  capability displacing another inside a saturated budget, and both recover
+  with rank.
+
+  **Two external reviews rejected this and were wrong.** The strongest
+  objection — "emitting a static minus sign is rank-1, so forgetting a
+  100%-consistent constant is not dimensional exhaustion" — is locally true and
+  globally wrong, because the adapter budget is SHARED across all 27
+  operations. A nine-minute retrain settled what an hour of reasoning did not.
+  **Measure before arguing; the retrain is cheaper than the debate.**
+
+  **EVERY COMPARISON ON THIS HOLDOUT FAMILY BEFORE 2026-08-28 IS SUSPECT.**
+  Each corpus revision shuffles and splits independently, so a row that is val
+  in one is TRAIN in another: **304 of 600** rows in the corpus-B holdout were
+  byte-identical members of the older model's train split. That contamination
+  SUBSIDISED THE OLDER MODEL — on the full set the newer one looked like a wash
+  (p = 0.17); on the 277 clean rows it was ahead 45 to 21, p = 0.0043.
+  `eval_grpc_mortgage.py --assert-disjoint-from` is repeatable, once per model
+  being compared, and REFUSES by default rather than warning.
+
+- **The legacy figure, kept for the history:** it measured 62.5% params
+  exact-match (325/520) through the real RPC, on a
   holdout whose labels are POSSIBLE. **Quote that number, not the 27.8% this
   line carried until 2026-08-20, and not `evaluate.py`'s.**
 
