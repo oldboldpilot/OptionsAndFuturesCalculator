@@ -503,6 +503,12 @@ def main() -> None:
     ap.add_argument("--json-out", help="write the full result, failures included, here")
     ap.add_argument("--show-failures", type=int, default=8)
     ap.add_argument("-v", "--verbose", action="store_true")
+    ap.add_argument("--assert-disjoint-from", action="append", default=[],
+                    metavar="TRAIN.JSONL",
+                    help="a train.jsonl the holdout MUST NOT overlap. Repeatable -- "
+                         "pass one per model being compared, not one per run.")
+    ap.add_argument("--allow-contamination", action="store_true",
+                    help="report the overlap and score anyway (default: refuse)")
     args = ap.parse_args()
 
     if not args.val and not args.file:
@@ -516,6 +522,46 @@ def main() -> None:
     rows = [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
     if args.n:
         rows = rows[:args.n]
+
+    # ---- the holdout must be held out FOR EVERY MODEL BEING COMPARED ----
+    #
+    # Each corpus revision shuffles and splits independently, so a row that is
+    # val in corpus B can be TRAIN in corpus A. Comparing a model trained on A
+    # against one trained on B, using B's val set, then scores one of them on
+    # rows it memorised.
+    #
+    # This is not hypothetical and it inverted a real conclusion. 304 of 600
+    # rows in the corpus-B holdout were byte-identical members of corpus A's
+    # train split. On the full set the newer model looked like a wash (+16 net,
+    # McNemar p = 0.17); on the 277 rows neither model had seen it was ahead by
+    # 45 gained against 21 lost, p = 0.0043. The contamination was subsidising
+    # the OLDER model and hiding a real improvement.
+    #
+    # Refuses by default rather than warning: a warning printed above a score
+    # table is read as a caveat, and the number is quoted anyway.
+    if args.assert_disjoint_from:
+        def _key(row: dict) -> str:
+            return json.dumps(row.get("conversations", row), sort_keys=True,
+                              separators=(",", ":"))
+
+        holdout = {_key(r) for r in rows}
+        for train_path in args.assert_disjoint_from:
+            tp = Path(train_path)
+            train = {_key(json.loads(l))
+                     for l in tp.read_text().splitlines() if l.strip()}
+            overlap = holdout & train
+            if overlap:
+                msg = (f"CONTAMINATION: {len(overlap)}/{len(rows)} holdout rows "
+                       f"({100 * len(overlap) / max(len(rows), 1):.1f}%) are also in "
+                       f"{tp}. A model trained on that corpus is being scored on rows "
+                       f"it memorised, which subsidises it against any model that was "
+                       f"not.")
+                if not args.allow_contamination:
+                    raise SystemExit(msg + "\n  Re-run with a disjoint holdout, or pass "
+                                           "--allow-contamination to score anyway.")
+                print(f"[WARNING] {msg}")
+            else:
+                print(f"[ok] holdout is disjoint from {tp} ({len(train)} train rows)")
 
     t0 = time.time()
     res = evaluate(rows, stub, tail, args.timeout, args.verbose)

@@ -224,8 +224,36 @@ OPERATIONS = build_operations(_PARSED)
 ENUMS = _PARSED["enums"]
 
 
+# Fields a SHARED request message declares that a PARTICULAR operation does not
+# use. finance.proto states each in a COMMENT on the field -- "XNPV only;
+# ignored by XIRR", "XIRR only", "omit for the engine's own starting guess" --
+# and parse_finance_proto reads the message, not the comments. So every
+# consumer that derives its field list from the proto flattens the shared
+# message and asks for a field the operation ignores.
+#
+# Labelling them anyway is the defect this file's phrase_money docstring
+# describes, in its purest form. ComputeXirr's `rate` is the value XIRR
+# COMPUTES: the label carried the ANSWER, in a field the engine discards, on an
+# utterance that never states it. Measured through the real ParseOperation RPC:
+# 9 of 9 held-out ComputeXirr rows failed on that field. ComputeRate's `guess`
+# is a solver seed; 11 of 11 rows differed on it ALONE with every other field
+# exact -- the model was right about the entire question and wrong about a
+# number nobody asked for.
+#
+# mortgage_verification.cppm's kOperationExcludedFields is the mirror of this
+# table and must be kept in step: it stops G2b REQUIRING these fields while
+# leaving G2a accepting them, so the model deployed today -- which does emit
+# `guess` -- keeps parsing unchanged.
+OP_EXCLUDED_FIELDS: dict[str, set[str]] = {
+    "ComputeXirr": {"rate"},   # DatedCashFlowRequest.rate  -- "ignored by XIRR"
+    "ComputeXnpv": {"guess"},  # DatedCashFlowRequest.guess -- "XIRR only"
+    "ComputeRate": {"guess"},  # RateRequest.guess -- "omit for the engine's own starting guess"
+}
+
+
 def op_field_names(op: str) -> set[str]:
-    return {f["name"] for f in OPERATIONS[op]["fields"]}
+    return ({f["name"] for f in OPERATIONS[op]["fields"]}
+            - OP_EXCLUDED_FIELDS.get(op, set()))
 
 
 # ============================================================================
@@ -361,7 +389,8 @@ def params_block(op: str, obj: dict) -> str:
     # Omission is not the same as a zero and is the only way to say "use the
     # convention" -- see _FIELD_RE for why this parser has to know the
     # difference at all.
-    required = {f["name"] for f in OPERATIONS[op]["fields"] if not f.get("optional")}
+    required = ({f["name"] for f in OPERATIONS[op]["fields"] if not f.get("optional")}
+                - OP_EXCLUDED_FIELDS.get(op, set()))
     emitted = set(obj.keys())
     assert emitted <= known, (
         f"{op}: emitted {sorted(emitted - known)} which the proto does not declare"
@@ -463,8 +492,8 @@ def make_tvm_solver_extraction(rng: random.Random) -> dict:
 
     obj = {k: v for k, v in vals.items() if k in op_field_names(op)}
     obj["timing"] = "END_OF_PERIOD"
-    if op == "ComputeRate":
-        obj["guess"] = rate_str(0.005)
+    # No `guess`: finance.proto says "omit for the engine's own starting guess",
+    # and a solver seed is not something the user stated. See OP_EXCLUDED_FIELDS.
     return convo(("system", SYSTEM), ("user", user),
                  ("assistant", params_block(op, obj)))
 
@@ -734,7 +763,33 @@ def make_payback_extraction(rng: random.Random) -> dict:
     thing = rng.choice(["solar panels", "a heat pump", "new windows",
                          "an energy retrofit", "equipment for my rental"])
 
-    user = (f"I'm putting {phrase_money(outlay)} into {thing} that saves me about "
+    # GROUND THE OUTLAY'S ROLE, in half the rows.
+    #
+    # `values[0]` is the outlay as a NEGATIVE number, and the minus sign is a
+    # cash-flow convention the utterance never states. Both corpora taught it
+    # perfectly consistently -- 344/344 and 328/328 rows -- and a model trained
+    # on the second one still dropped it on 14 of 20 held-out rows, emitting
+    # `[14900, 4800, ...]` for `[-14900, 4800, ...]`.
+    #
+    # It is not forgetting and it is not rank. Commit 96decdb deliberately
+    # taught the model to stop answering from a prior and start reading the
+    # utterance; the fields that lost are exactly those whose gold is NOT
+    # derivable from the utterance, and this is one of them. The measured
+    # signature is the same shift elsewhere in the corpus: `new_pmi_monthly`
+    # came back as the stated monthly payment, `pmi_drop_off_ltv` as 0.30
+    # scraped from "30 years". The model is doing what it was retrained to do.
+    #
+    # So the fix is to make the sign READABLE rather than to demand it be
+    # remembered -- the same move that took closing costs 15/42 to 39/42. Half
+    # the rows keep the original phrasing so the convention still has to
+    # survive an utterance that does not mark it.
+    spend = rng.choice([
+        f"I'm putting {phrase_money(outlay)} into {thing}",
+        f"{phrase_money(outlay)} out of pocket for {thing}",
+        f"I'm spending {phrase_money(outlay)} up front on {thing}",
+        f"An upfront cost of {phrase_money(outlay)} for {thing}",
+    ]) if rng.random() < 0.5 else f"I'm putting {phrase_money(outlay)} into {thing}"
+    user = (f"{spend} that saves me about "
             f"{phrase_money(annual_saving)} a year." +
             (f" Using a {phrase_pct(rate)} discount rate, " if discounted else " ") +
             "how many years until it pays for itself?")
@@ -869,6 +924,29 @@ def make_refinance_extraction(rng: random.Random) -> dict:
     if mention_pmi:
         base += (f" (I currently pay {phrase_money(current_pmi)}/month PMI, "
                   f"{phrase_money(new_pmi)}/month after)")
+    elif rng.random() < 0.5:
+        # GROUND "no PMI", in half the rows that do not mention it.
+        #
+        # Without this the label carries `current_pmi_monthly: "0.00"` and
+        # `new_pmi_monthly: "0.00"` on an utterance that never says the word
+        # PMI. Measured on a model retrained to read the utterance rather than
+        # answer from a prior: `new_pmi_monthly` came back as **4286.79** --
+        # the stated monthly payment, scraped into the nearest money-shaped
+        # empty slot. The model was not forgetting the convention; it had been
+        # taught to stop inventing numbers, and this slot demands one.
+        base += rng.choice([
+            ", and there's no PMI on either loan",
+            " with no mortgage insurance either way",
+            ", neither loan carries PMI",
+        ])
+    if rng.random() < 0.5:
+        # And ground the drop-off LTV, which is ALWAYS 0.80 and NEVER stated.
+        # Measured failure: 0.30, scraped out of "over 30 years".
+        base += rng.choice([
+            "; assume PMI drops at the standard 80% LTV",
+            " (PMI comes off at 80% loan-to-value)",
+            ", with PMI removed once I'm at 80% LTV",
+        ])
     base += ", what's my new payment and break-even?"
 
     obj = {"current_loan_balance": money_str(balance), "current_monthly_payment": money_str(payment),

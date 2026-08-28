@@ -1102,7 +1102,53 @@ struct ConventionValue {
     std::string_view field;
     std::string_view value;
 };
-constexpr std::array<ConventionValue, 37> kConventionValues{{
+// Fields a SHARED request message declares that a PARTICULAR operation does
+// not use. finance.proto states each of these in a comment on the field --
+// "XNPV only; ignored by XIRR", "XIRR only", "omit for the engine's own
+// starting guess" -- and a comment is invisible to every consumer that parses
+// the message. Four of them do: this file's kDeclaredFields, this file's
+// convention list, build_mortgage_dataset.py's OPERATIONS, and
+// mortgage_assistant_service.cpp's own label space. All four flattened the
+// shared message and required a field the operation ignores.
+//
+// The cost is measured, not theoretical. ComputeXirr's `rate` is the value
+// XIRR COMPUTES: the corpus wrote the answer into a field the engine ignores,
+// on an utterance that never states it, and 9 of 9 held-out rows failed on it
+// -- unlearnable by any model. ComputeRate's `guess` is a solver seed the
+// proto explicitly says to omit; 11 of 11 rows differed on that field ALONE,
+// every other field exact.
+//
+// These stay DECLARED rather than being deleted from kDeclaredFields, and
+// both halves of that matter:
+//   - the label-space drift test re-parses finance.proto, so a missing row is
+//     a failure, correctly -- the field IS on the message;
+//   - G2a refuses an emitted field that is not declared, and the DEPLOYED
+//     model emits `guess`. Deleting the row would refuse every ComputeRate
+//     parse from the model currently in production.
+// So the field may be emitted and is no longer REQUIRED. Absence becomes the
+// contract's own "omit for the engine's default", which is what it always
+// said.
+struct ExcludedField {
+    std::string_view operation;
+    std::string_view field;
+};
+constexpr std::array<ExcludedField, 3> kOperationExcludedFields{{
+    {.operation = "ComputeXirr", .field = "rate"},   // "ignored by XIRR"
+    {.operation = "ComputeXnpv", .field = "guess"},  // "XIRR only"
+    {.operation = "ComputeRate", .field = "guess"},  // "omit for the engine's own starting guess"
+}};
+
+[[nodiscard]] constexpr auto is_excluded_field(std::string_view operation,
+                                               std::string_view field) -> bool {
+    for (const auto& e : kOperationExcludedFields) {
+        if (e.operation == operation && e.field == field) {
+            return true;
+        }
+    }
+    return false;
+}
+
+constexpr std::array<ConventionValue, 38> kConventionValues{{
     // ComputeRentVsBuy / ComputeHomeNpv: the optional inputs added with the
     // amortising model. An utterance that never mentions closing costs, selling
     // costs or inflation grounds none of them, and without an exemption the
@@ -1148,6 +1194,15 @@ constexpr std::array<ConventionValue, 37> kConventionValues{{
     // "closing on the last day of the month, none owed".
     {.field = "prepaid_interest_days", .value = "15"},
     {.field = "prepaid_interest_days", .value = "0"},
+    // XNPV/XIRR `dates` are day offsets from an arbitrary common epoch, and the
+    // first flow is the outlay, so dates[0] is ALWAYS 0. The utterance says
+    // "I invest $243,800 TODAY" -- it says today, it does not say zero, so
+    // grounding refused every dated-cash-flow parse on the epoch itself.
+    // Found by the excluded-field test below: removing the `guess`/`rate`
+    // MissingField refusal simply revealed the next refusal underneath it,
+    // which is the whole reason that test asserts Proven rather than
+    // "not MissingField".
+    {.field = "dates", .value = "0"},
 
     // The monthly cadence, when the user said nothing about frequency.
     {.field = "payments_per_year", .value = "12"},
@@ -1995,6 +2050,13 @@ auto MortgageParamsDomain::translate(const MortgageParamsInput& in) const -> Ver
     // a service filling `annual_rate` with a proto zero and pricing an
     // interest-free mortgage.
     for (const auto& spec : declared) {
+        // A field this operation's own contract excludes is not required.
+        // It may still be EMITTED -- G2a keeps accepting it, which is what
+        // lets the deployed model keep parsing unchanged -- it simply no
+        // longer has to be. See kOperationExcludedFields.
+        if (detail::is_excluded_field(in.operation, spec.field)) {
+            continue;
+        }
         bool present = false;
         for (const auto& emitted : in.fields) {
             if (emitted.name == spec.field) {

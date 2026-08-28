@@ -1051,6 +1051,84 @@ auto main() -> int {
     }
 
     // -----------------------------------------------------------------
+    // Per-operation excluded fields: NOT REQUIRED, but still ACCEPTED.
+    //
+    // finance.proto declares `rate` and `guess` on request messages SHARED by
+    // more than one operation, and restricts them per-operation in a COMMENT:
+    // "XNPV only; ignored by XIRR", "XIRR only", "omit for the engine's own
+    // starting guess". Nothing that parses the message can see a comment, so
+    // G2b required a field the operation ignores.
+    //
+    // What that cost, measured through the real ParseOperation RPC on the
+    // Q8_0 GGUF: ComputeXirr's `rate` is the value XIRR COMPUTES -- the corpus
+    // wrote the ANSWER into a discarded field on an utterance that never
+    // states it, and 9 of 9 held-out rows failed on it. ComputeRate's `guess`
+    // is a solver seed: 11 of 11 rows differed on that field ALONE, every
+    // other field exact.
+    //
+    // BOTH directions are asserted, and the second is the one that protects
+    // production. The field stays DECLARED, so G2a keeps accepting it -- the
+    // model deployed today emits `guess`, and deleting the declaration would
+    // refuse every ComputeRate parse coming from it. Absence is now what the
+    // proto always said it was: "use the engine's default".
+    {
+        // ComputeRate. The utterance states loan, payment and term; it does
+        // not state a Newton seed, because no user has ever stated one.
+        const std::string rate_text =
+            "$731,800 loan, $5,083.69/month, 20-year -- back out the interest rate.";
+        const auto rate_without = params("ComputeRate", {{"periods", "240"},
+                                                         {"payment", "5083.69"},
+                                                         {"present_value", "731800.00"},
+                                                         {"future_value", "0.00"},
+                                                         {"timing", "END_OF_PERIOD"}});
+        expect_pass(rate_without, rate_text,
+                    "excluded: ComputeRate WITHOUT `guess` is Proven (was MissingField -- the "
+                    "proto says omit it, and 11/11 held-out rows failed on this field alone)");
+
+        auto rate_with = rate_without;
+        rate_with.fields.push_back(mv::EmittedField{.name = "guess", .values = {"0.005000"}, .repeated = false});
+        expect_pass(rate_with, rate_text,
+                    "excluded: ComputeRate WITH `guess` is STILL Proven -- the deployed model "
+                    "emits it, and refusing it would break production");
+    }
+    {
+        // ComputeXirr. `rate` is ignored by XIRR and is the answer it returns.
+        const std::string xirr_text =
+            "I invest $168,100 today and expect back $127,237.88 after 349 days; "
+            "$88,963.55 after 736 days.";
+        mv::MortgageParamsInput xirr_without;
+        xirr_without.params_emitted = true;
+        xirr_without.operation = "ComputeXirr";
+        xirr_without.fields.push_back(mv::EmittedField{
+            .name = "values", .values = {"-168100", "127237.88", "88963.55"}, .repeated = true});
+        xirr_without.fields.push_back(mv::EmittedField{
+            .name = "dates", .values = {"0.0", "349.0", "736.0"}, .repeated = true});
+        xirr_without.fields.push_back(mv::EmittedField{
+            .name = "guess", .values = {"0.1"}, .repeated = false});
+        expect_pass(xirr_without, xirr_text,
+                    "excluded: ComputeXirr WITHOUT `rate` is Proven -- `rate` is the value XIRR "
+                    "COMPUTES and the engine ignores it");
+    }
+    {
+        // ComputeXnpv. `guess` is XIRR-only; XNPV takes a stated discount rate.
+        const std::string xnpv_text =
+            "I invest $243,800 today and expect back $77,840.61 after 331 days. "
+            "What's the NPV at a 4.63% discount rate?";
+        mv::MortgageParamsInput xnpv_without;
+        xnpv_without.params_emitted = true;
+        xnpv_without.operation = "ComputeXnpv";
+        xnpv_without.fields.push_back(mv::EmittedField{
+            .name = "rate", .values = {"0.0463"}, .repeated = false});
+        xnpv_without.fields.push_back(mv::EmittedField{
+            .name = "values", .values = {"-243800", "77840.61"}, .repeated = true});
+        xnpv_without.fields.push_back(mv::EmittedField{
+            .name = "dates", .values = {"0.0", "331.0"}, .repeated = true});
+        expect_pass(xnpv_without, xnpv_text,
+                    "excluded: ComputeXnpv WITHOUT `guess` is Proven -- the proto says the field "
+                    "is XIRR only");
+    }
+
+    // -----------------------------------------------------------------
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }
