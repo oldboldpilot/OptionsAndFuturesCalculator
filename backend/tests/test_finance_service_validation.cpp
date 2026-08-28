@@ -2145,6 +2145,193 @@ auto main() -> int {
     }
 
     // -----------------------------------------------------------------
+    // 24. ComputeRentVsBuy shape dispatch -- the WHOLE decision graph
+    //
+    // Why this section exists: on 2026-08-27 every ComputeRentVsBuy request
+    // the ASSISTANT can emit -- both label shapes -- was refused with
+    // INVALID_ARGUMENT. 100% of assistant traffic on the feature this
+    // workstream exists to add, in production-shaped code, with a green test
+    // suite. Section 23's style of test could not see it, because every test
+    // here built its request the way a C++ caller would: omitting what it did
+    // not need. The assistant CANNOT omit -- mortgage_verification.cppm's G2b
+    // refuses a missing key -- so it says "not this shape" with the convention
+    // value "0", and `.empty()` reads that as "present". One caller's silence
+    // is the other caller's zero.
+    //
+    // So this section does two things no other section does:
+    //
+    //   (a) It enumerates the FULL cross product of the dispatch's own input
+    //       space -- 5 composite signals x 4 group signals = 20 cells -- and
+    //       names the expected outcome of each. A decision left undecided by
+    //       accident shows up as a cell, not as a silence.
+    //   (b) It sends the BYTES A MODEL ACTUALLY PRODUCES, taken verbatim from
+    //       corpus B, rather than bytes a test author found convenient.
+    //
+    // Mutation checks, both of which reproduce the production symptom:
+    //   - restoring `!field.empty()` as the legacy predicate flips every
+    //     `assistant-*` row to BOTH-shapes and fails 4 checks;
+    //   - testing only the legacy side for magnitude (the earlier
+    //     `is_positive()` attempt) flips `zero x absent` and
+    //     `absent x all-zero` back to a 200 OK carrying an invented loan.
+    {
+        std::printf("\n-- 24. ComputeRentVsBuy shape dispatch: the whole decision graph\n");
+
+        enum class Want { Legacy, Amortising, Neither, Both, NegativeCost, Parse };
+
+        // The seven amortising fields, in the three states a caller can put
+        // them in, plus the malformed state that must outrank every shape.
+        const auto apply_group = [](sensen::finance::RentVsBuyRequest& r,
+                                    std::string_view group) {
+            if (group == "absent") {
+                return;  // a JSON caller omits them
+            }
+            if (group == "malformed") {
+                r.set_loan_annual_rate("xyz");
+                return;
+            }
+            const bool zero = (group == "all-zero");
+            // "all-zero" is EXACTLY what the assistant emits for the shape it
+            // is not using. It is not a contrived input.
+            r.set_loan_annual_rate(zero ? "0.0000" : "0.0533");
+            r.set_loan_term_years(zero ? 0 : 30);
+            r.set_loan_amount(zero ? "0.00" : "476200.00");
+            r.set_monthly_taxes_ins_maintenance(zero ? "0.00" : "1100.00");
+            r.set_closing_costs_buy(zero ? "0.00" : "11300.00");
+            r.set_selling_cost_percent(zero ? "0.0000" : "0.0600");
+            r.set_annual_inflation_rate(zero ? "0.0000" : "0.0270");
+        };
+
+        const auto reference = []() {
+            sensen::finance::RentVsBuyRequest r;
+            r.set_property_price("546500.00");
+            r.set_down_payment("70300.00");
+            r.set_annual_home_appreciation("0.0456");
+            r.set_current_monthly_rent("2900.00");
+            r.set_annual_rent_increase("0.0487");
+            r.set_annual_investment_return("0.0521");
+            r.set_years(4);
+            return r;
+        };
+
+        // An amortising answer is distinguishable from a legacy one WITHOUT
+        // trusting the status: the legacy path sets only fields 1-4 and leaves
+        // every string field empty, precisely so it cannot invent digits a
+        // double never had. So a non-empty monthly_payment IS the amortising
+        // model's signature.
+        const auto ran_amortising = [](const sensen::finance::RentVsBuyResponse& r) {
+            return !r.buying_advantage_exact().empty();
+        };
+
+        struct Cell {
+            const char* composite;  // nullptr => field never set (absent)
+            const char* group;
+            Want want;
+            const char* note;
+        };
+        const std::array<Cell, 20> kGraph{{
+            {nullptr,    "absent",      Want::Neither,      "no question asked"},
+            {nullptr,    "all-zero",    Want::Neither,      "all conventions: still no question"},
+            {nullptr,    "substantive", Want::Amortising,   "JSON amortising caller"},
+            {nullptr,    "malformed",   Want::Parse,        "parse outranks shape"},
+            {"0.00",     "absent",      Want::Neither,      "assistant said 'neither shape'"},
+            {"0.00",     "all-zero",    Want::Neither,      "every field a convention"},
+            {"0.00",     "substantive", Want::Amortising,   "ASSISTANT amortising label"},
+            {"0.00",     "malformed",   Want::Parse,        "parse outranks shape"},
+            {"3200.00",  "absent",      Want::Legacy,       "JSON legacy caller / deployed v2"},
+            {"3200.00",  "all-zero",    Want::Legacy,       "ASSISTANT legacy label"},
+            {"3200.00",  "substantive", Want::Both,         "genuine contradiction"},
+            {"3200.00",  "malformed",   Want::Parse,        "parse outranks shape"},
+            {"-100",     "absent",      Want::NegativeCost, "a cost cannot be negative"},
+            {"-100",     "all-zero",    Want::NegativeCost, "negative outranks shape"},
+            {"-100",     "substantive", Want::NegativeCost, "negative outranks both-shapes"},
+            {"-100",     "malformed",   Want::Parse,        "parse outranks negative"},
+            {"abc",      "absent",      Want::Parse,        "malformed composite"},
+            {"abc",      "all-zero",    Want::Parse,        "malformed outranks shape"},
+            {"abc",      "substantive", Want::Parse,        "malformed outranks shape"},
+            {"abc",      "malformed",   Want::Parse,        "both malformed"},
+        }};
+
+        for (const auto& cell : kGraph) {
+            auto req = reference();
+            if (cell.composite != nullptr) {
+                req.set_monthly_piti_and_maintenance(cell.composite);
+            }
+            apply_group(req, cell.group);
+
+            sensen::finance::RentVsBuyResponse resp;
+            auto ctx = make_context();
+            auto status = stub.ComputeRentVsBuy(ctx.get(), req, &resp);
+
+            const std::string detail = status.error_message();
+            const auto says = [&detail](const char* needle) {
+                return detail.find(needle) != std::string::npos;
+            };
+
+            bool matched = false;
+            switch (cell.want) {
+                case Want::Legacy:
+                    matched = status.ok() && !ran_amortising(resp);
+                    break;
+                case Want::Amortising:
+                    matched = status.ok() && ran_amortising(resp);
+                    break;
+                case Want::Both:
+                    matched = !status.ok() &&
+                              status.error_code() == grpc::StatusCode::INVALID_ARGUMENT &&
+                              says("cannot be combined");
+                    break;
+                case Want::Neither:
+                    matched = !status.ok() &&
+                              status.error_code() == grpc::StatusCode::INVALID_ARGUMENT &&
+                              says("carries neither");
+                    break;
+                case Want::NegativeCost:
+                    matched = !status.ok() &&
+                              status.error_code() == grpc::StatusCode::INVALID_ARGUMENT &&
+                              says("cannot be negative");
+                    break;
+                case Want::Parse:
+                    // Reported by name, by the field that failed -- NOT by the
+                    // shape decision. Asserting the code alone would pass on a
+                    // shape refusal, which is the wrong diagnostic entirely.
+                    matched = !status.ok() &&
+                              status.error_code() == grpc::StatusCode::INVALID_ARGUMENT &&
+                              (says("not a decimal") || says("is not a valid"));
+                    break;
+            }
+            check(matched, std::string{"graph cell: composite="} +
+                               (cell.composite == nullptr ? "<absent>" : cell.composite) +
+                               " group=" + cell.group + " -> " + cell.note);
+        }
+
+        {
+            // Backward compatibility, stated as an EQUALITY rather than as two
+            // separate successes. The deployed v2 model omits the seven fields
+            // it was never taught; the retrained model emits them as zeros.
+            // Those are the same request and must produce the same number --
+            // if they diverge, the convention stopped being a convention.
+            auto omitted = reference();
+            omitted.set_monthly_piti_and_maintenance("3200.00");
+
+            auto zeroed = reference();
+            zeroed.set_monthly_piti_and_maintenance("3200.00");
+            apply_group(zeroed, "all-zero");
+
+            sensen::finance::RentVsBuyResponse a;
+            sensen::finance::RentVsBuyResponse b;
+            auto ctx_a = make_context();
+            auto ctx_b = make_context();
+            auto sa = stub.ComputeRentVsBuy(ctx_a.get(), omitted, &a);
+            auto sb = stub.ComputeRentVsBuy(ctx_b.get(), zeroed, &b);
+            check(sa.ok() && sb.ok() &&
+                      a.buying_advantage() == b.buying_advantage() &&
+                      a.is_buying_better() == b.is_buying_better(),
+                  "v2 (omits the seven) and the retrained model (emits them as zeros) get "
+                  "the IDENTICAL legacy answer -- one convention, two spellings");
+        }
+    }
+
+    // -----------------------------------------------------------------
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

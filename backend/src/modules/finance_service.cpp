@@ -390,6 +390,179 @@ template <typename T>
  * nat ceiling, leaving headroom for the multiply against principal that the
  * caller's pmt/pv/fv/recast call performs next.
  */
+// ---------------------------------------------------------------------------
+// ComputeRentVsBuy shape dispatch, as a TOTAL function over a decision graph
+//
+// `RentVsBuyRequest` carries two mutually exclusive request shapes in one
+// message: the legacy composite `monthly_piti_and_maintenance`, and the seven
+// granular fields the amortising model needs. Choosing between them was a
+// chain of booleans over `.empty()`, and that chain left cells of its own
+// input space undecided-by-accident rather than decided-on-purpose.
+//
+// It is written here as a classifier plus a total decision, for one reason:
+// the input space is small and enumerable (5 composite signals x 4 group
+// signals), so a table-driven test can assert EVERY cell and a new cell cannot
+// appear without the switch failing to compile. `test_finance_service_validation`
+// section 24 enumerates the whole cross product; nothing is left to inspection.
+//
+// WHY `.empty()` WAS THE WRONG AXIS. This service has two callers and they
+// express "not this shape" differently -- and neither is wrong:
+//
+//   - A JSON caller through `grpc_json_transcoder` OMITS the field, so it
+//     arrives as "".
+//   - The ASSISTANT must emit every field its operation declares --
+//     `mortgage_verification.cppm`'s G2b refuses a missing key outright -- so
+//     it says "not this shape" with the convention value "0", which
+//     `kConventionValues` exempts from grounding precisely so that it can.
+//
+// Testing presence reads the first caller correctly and the second one
+// BACKWARDS. Measured against the live engine on 2026-08-27: every
+// assistant-emitted `ComputeRentVsBuy` request -- BOTH label shapes -- set
+// both flags and was refused as self-contradictory. 100% of assistant traffic
+// on this feature returned INVALID_ARGUMENT, and no test caught it because no
+// test sent the bytes a model actually produces.
+//
+// WHY `is_positive()` ALONE WAS ALSO WRONG, and why this is not that. An
+// earlier round keyed the legacy side on positivity and let "", "0" and "-100"
+// fall through to the amortising model, which invented a 30-year 0% loan of
+// price - down and answered 200 OK. That failure came from testing ONE SIDE.
+// Classified symmetrically, those same inputs make both sides say nothing and
+// land on the "neither shape" refusal -- an honest refusal instead of a
+// fabricated loan. Symmetry is what makes the difference, not the predicate.
+// ---------------------------------------------------------------------------
+
+/** What one decimal-string field says about which shape the caller wants. */
+enum class FieldSignal : std::uint8_t {
+    Absent,     ///< "" -- a JSON caller omitted it
+    Zero,       ///< "0", "0.00", "-0.00" -- the assistant's "not this shape"
+    Negative,   ///< well-formed and below zero
+    Positive,   ///< well-formed and above zero
+    Malformed,  ///< not a decimal literal; must reach the parser, never be read as absent
+};
+
+/**
+ * Classifies without parsing, so it cannot itself fail.
+ *
+ * Magnitude is decided from the characters alone: a decimal literal is zero
+ * exactly when every digit in it is '0'. Anything carrying a character that is
+ * neither a digit, a sign nor a point is `Malformed` -- deliberately NOT
+ * `Absent`, so that "abc" still reaches `REQUIRE_DECIMAL_SAFE` and is refused
+ * there rather than silently read as "the caller said nothing".
+ */
+[[nodiscard]] auto classify_decimal_field(std::string_view text) -> FieldSignal {
+    if (text.empty()) {
+        return FieldSignal::Absent;
+    }
+    bool negative = false;
+    bool saw_digit = false;
+    bool saw_non_zero = false;
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        const char c = text[i];
+        if (c >= '0' && c <= '9') {
+            saw_digit = true;
+            if (c != '0') {
+                saw_non_zero = true;
+            }
+            continue;
+        }
+        if (c == '.') {
+            continue;
+        }
+        if ((c == '-' || c == '+') && i == 0) {
+            negative = (c == '-');
+            continue;
+        }
+        return FieldSignal::Malformed;  // a sign mid-string is malformed too
+    }
+    if (!saw_digit) {
+        return FieldSignal::Malformed;  // "-", "." and "+." carry no number
+    }
+    if (!saw_non_zero) {
+        return FieldSignal::Zero;  // "-0.00" is zero, not negative
+    }
+    return negative ? FieldSignal::Negative : FieldSignal::Positive;
+}
+
+/** The single decision this dispatch makes. Every arm is reachable. */
+enum class RentVsBuyShape : std::uint8_t {
+    Legacy,              ///< the composite carries the answer
+    Amortising,          ///< the granular fields carry the answer
+    RefuseMalformed,     ///< some field is not a number; parse guard reports which
+    RefuseNegativeCost,  ///< a monthly carrying cost below zero is not a cost
+    RefuseBothShapes,    ///< the request describes two different questions
+    RefuseNeitherShape,  ///< the request describes no question at all
+};
+
+/**
+ * Folds the seven amortising fields into one signal.
+ *
+ * Order matters and is the same precedence the whole-request decision uses:
+ * a malformed field must be reported before any shape is chosen, and any field
+ * carrying magnitude means the caller is asking for this shape even when its
+ * six siblings are conventions.
+ */
+[[nodiscard]] auto join_group_signal(std::initializer_list<FieldSignal> parts) -> FieldSignal {
+    bool any_zero = false;
+    bool any_magnitude = false;
+    for (const FieldSignal s : parts) {
+        switch (s) {
+            case FieldSignal::Malformed:
+                return FieldSignal::Malformed;
+            case FieldSignal::Positive:
+            case FieldSignal::Negative:
+                any_magnitude = true;
+                break;
+            case FieldSignal::Zero:
+                any_zero = true;
+                break;
+            case FieldSignal::Absent:
+                break;
+        }
+    }
+    if (any_magnitude) {
+        return FieldSignal::Positive;  // "says something"; sign is validated per field
+    }
+    return any_zero ? FieldSignal::Zero : FieldSignal::Absent;
+}
+
+/**
+ * TOTAL over `FieldSignal x FieldSignal`. Every one of the twenty input pairs
+ * reaches exactly one arm, and the enumeration in section 24 of
+ * `test_finance_service_validation.cpp` asserts each of them by name.
+ */
+[[nodiscard]] auto decide_rent_vs_buy_shape(FieldSignal composite, FieldSignal amortising)
+    -> RentVsBuyShape {
+    // 1. A number that is not a number outranks every shape question: the
+    //    caller gets told which field failed, not which model was picked.
+    if (composite == FieldSignal::Malformed || amortising == FieldSignal::Malformed) {
+        return RentVsBuyShape::RefuseMalformed;
+    }
+    // 2. The composite is a monthly cost of ownership. Below zero it is not a
+    //    cost, and the legacy model would happily return a rent-vs-buy verdict
+    //    computed from it -- measured: -100 answered 200 OK with adv=245376.
+    if (composite == FieldSignal::Negative) {
+        return RentVsBuyShape::RefuseNegativeCost;
+    }
+    // 3. Both sides carrying magnitude is a genuine contradiction: the
+    //    composite conflates debt service with carrying costs and the granular
+    //    fields separate them, so honouring one silently drops the other.
+    const bool legacy_speaks = (composite == FieldSignal::Positive);
+    const bool amortising_speaks = (amortising == FieldSignal::Positive);
+    if (legacy_speaks && amortising_speaks) {
+        return RentVsBuyShape::RefuseBothShapes;
+    }
+    if (legacy_speaks) {
+        return RentVsBuyShape::Legacy;
+    }
+    if (amortising_speaks) {
+        return RentVsBuyShape::Amortising;
+    }
+    // 4. Absent and Zero are the same statement -- "not this shape" -- from the
+    //    two callers. Both sides saying it means no question was asked, which
+    //    is a refusal and NOT an invitation to default a loan into existence.
+    return RentVsBuyShape::RefuseNeitherShape;
+}
+
 [[nodiscard]] auto check_compound_growth_safe(double annual_rate, int payments_per_year,
                                               int periods, std::string_view context) -> Status {
     if (payments_per_year <= 0) return Status::OK;  // caught by check_payments_per_year already
@@ -2464,14 +2637,25 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         // Emptiness alone is also the wrong test in the other direction, because
         // G2 makes the assistant emit every declared field: a full-shape parse
         // still sends monthly_piti_and_maintenance, as the convention value "0".
-        bool legacy_composite_supplied = false;
-        if (!request->monthly_piti_and_maintenance().empty()) {
-            // Parse errors stay errors. This is the guard the field had before
-            // the dispatch was introduced, and removing it made a malformed
-            // decimal produce no error at all.
-            REQUIRE_DECIMAL_SAFE(composite, request->monthly_piti_and_maintenance(),
+        // PRESENCE decides the shape, not the VALUE.
+        //
+        // A second review showed that keying on is_positive() re-created the very
+        // failure the first round fixed, four more ways: "0" (a legacy caller
+        // with no carrying cost), "-100", and an omitted field all fell through
+        // to the amortising model, which then invented a 30-year 0% loan of
+        // price - down and returned 200 OK. Inferring which model a caller wants
+        // from the MAGNITUDE of a field is guesswork; whether they sent it is a
+        // fact.
+        const FieldSignal composite_signal =
+            classify_decimal_field(request->monthly_piti_and_maintenance());
+        if (composite_signal != FieldSignal::Absent) {
+            // Parse errors stay errors -- the guard the field had before the
+            // dispatch existed. Its value is validated here and consumed on the
+            // legacy path below. `classify_decimal_field` never parses, so this
+            // is still the only thing that turns "abc" into a diagnostic.
+            REQUIRE_DECIMAL_SAFE(composite_check, request->monthly_piti_and_maintenance(),
                                  "monthly_piti_and_maintenance");
-            legacy_composite_supplied = composite.is_positive();
+            (void)composite_check;
         }
 
         // EVERY compounding rate is bounded, not just the loan rate.
@@ -2525,20 +2709,62 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         // service with carrying costs; monthly_taxes_ins_maintenance separates
         // them. Honouring one and dropping the other silently is how a caller
         // gets a confident answer to a question they did not ask.
-        const bool amortising_inputs_supplied =
-            !request->loan_annual_rate().empty() ||
-            !request->monthly_taxes_ins_maintenance().empty() ||
-            !request->closing_costs_buy().empty() ||
-            request->loan_term_years() != 0;
-        if (legacy_composite_supplied && amortising_inputs_supplied) {
-            return Status(grpc::StatusCode::INVALID_ARGUMENT,
-                          "monthly_piti_and_maintenance is a single composite of debt service "
-                          "and carrying costs and cannot be combined with the amortising "
-                          "inputs (loan_annual_rate, loan_term_years, "
-                          "monthly_taxes_ins_maintenance, closing_costs_buy). Send one shape "
-                          "or the other.");
+        // ALL SEVEN, not the four that happened to come to mind. The first
+        // version omitted annual_inflation_rate, selling_cost_percent and
+        // loan_amount, so a request pairing the composite with any of those
+        // slipped past the check and had them silently discarded.
+        const FieldSignal amortising_signal = join_group_signal({
+            classify_decimal_field(request->loan_annual_rate()),
+            classify_decimal_field(request->loan_amount()),
+            classify_decimal_field(request->monthly_taxes_ins_maintenance()),
+            classify_decimal_field(request->closing_costs_buy()),
+            classify_decimal_field(request->selling_cost_percent()),
+            classify_decimal_field(request->annual_inflation_rate()),
+            request->loan_term_years() != 0 ? FieldSignal::Positive : FieldSignal::Absent,
+        });
+
+        // One decision, taken once, from a total function over the pair. The
+        // switch is exhaustive on purpose: a new arm cannot be added to
+        // RentVsBuyShape without every dispatch site failing to compile.
+        bool use_amortising = false;
+        switch (decide_rent_vs_buy_shape(composite_signal, amortising_signal)) {
+            case RentVsBuyShape::RefuseMalformed:
+                // Unreachable in practice -- REQUIRE_DECIMAL_SAFE above and the
+                // READ_DECIMAL_SAFE guards below report the offending field by
+                // name first. Kept so the switch is total and so a future
+                // reordering degrades to a refusal rather than to a shape.
+                return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                              "a rent-vs-buy field is not a decimal number");
+            case RentVsBuyShape::RefuseNegativeCost:
+                return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                              "monthly_piti_and_maintenance is a monthly cost of ownership and "
+                              "cannot be negative");
+            case RentVsBuyShape::RefuseBothShapes:
+                return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                              "monthly_piti_and_maintenance is a single composite of debt service "
+                              "and carrying costs and cannot be combined with the amortising "
+                              "inputs (loan_annual_rate, loan_term_years, "
+                              "monthly_taxes_ins_maintenance, closing_costs_buy). Send one shape "
+                              "or the other.");
+            case RentVsBuyShape::RefuseNeitherShape:
+                // Neither shape. Before the dispatch existed this was
+                // INVALID_ARGUMENT on the missing composite; without this it
+                // became a 200 from the amortising model reading every absent
+                // input as zero -- a derived loan at a 0% rate with no carrying
+                // cost, which is an answer to a question nobody asked. A
+                // request whose every field is the convention zero lands here
+                // too, and for the same reason.
+                return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                              "supply either monthly_piti_and_maintenance (the legacy composite) "
+                              "or the amortising inputs (loan_annual_rate, loan_term_years, "
+                              "monthly_taxes_ins_maintenance); the request carries neither");
+            case RentVsBuyShape::Legacy:
+                use_amortising = false;
+                break;
+            case RentVsBuyShape::Amortising:
+                use_amortising = true;
+                break;
         }
-        const bool use_amortising = !legacy_composite_supplied;
 
         if (!use_amortising) {
             // Legacy path: requires the composite monthly_piti_and_maintenance field.
