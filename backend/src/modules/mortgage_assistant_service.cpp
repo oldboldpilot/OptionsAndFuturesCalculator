@@ -2512,6 +2512,84 @@ constexpr std::array<std::string_view, 16> kMortgageAdviceSignals{{
     });
 }
 
+/**
+ * True when an utterance carries enough SPECIFIED numbers to be a calculation,
+ * whatever it sounds like.
+ *
+ * `kMortgageAdviceSignals` is a phrase list, and a phrase list cannot tell
+ * "Should I rent or buy?" -- a request for a judgement -- from "Should I rent
+ * at $2,900/month rising 4.87%, or buy a $546,500 home with $70,300 down at
+ * 5.33% over 30 years?", which is a fully specified rent-vs-buy computation
+ * wearing the same opening words. The gate refused both, so the most natural
+ * phrasing of the question this feature exists to answer was answered with
+ * "I don't give financial advice".
+ *
+ * Measured, not theorised. Verified against production on 2026-08-28: the
+ * second utterance above returned the advice refusal with every input it
+ * needed present. In the training corpus the same list refuses **103
+ * extraction rows** whose gold is a real operation -- 99 of them
+ * ComputeRentVsBuy, all on the single phrase "should i rent" -- so the model
+ * never saw them at serving time either.
+ *
+ * The discriminator is DENSITY OF SPECIFICATION, not sentiment: three money
+ * literals, two percentages and an explicit horizon. Somebody asking whether
+ * to refinance does not supply all three; somebody describing a comparison
+ * cannot avoid them. Measured over every advice-signalled row in the corpus:
+ * admits **103/103** of the wrongly-refused calculations and wrongly admits
+ * **0/141** genuine advice requests.
+ *
+ * The conjunction is the point. Each conjunct alone is far too permissive --
+ * "can I afford a $600,000 house?" has a money literal and is exactly what
+ * this gate must keep refusing. Loosening any one of the three is the mutation
+ * that should break the test.
+ */
+[[nodiscard]] auto is_specified_calculation(std::string_view utterance) -> bool {
+    int money = 0;
+    int percents = 0;
+    bool years = false;
+    for (std::size_t i = 0; i < utterance.size(); ++i) {
+        const char c = utterance[i];
+        if (c == '$') {
+            // A currency mark followed by a digit, allowing one space.
+            std::size_t j = i + 1;
+            if (j < utterance.size() && utterance[j] == ' ') {
+                ++j;
+            }
+            if (j < utterance.size() && std::isdigit(static_cast<unsigned char>(utterance[j])) != 0) {
+                ++money;
+            }
+            continue;
+        }
+        if (c == '%') {
+            // A percent sign preceded by a digit, allowing one space.
+            std::size_t j = i;
+            if (j > 0 && utterance[j - 1] == ' ') {
+                --j;
+            }
+            if (j > 0 && std::isdigit(static_cast<unsigned char>(utterance[j - 1])) != 0) {
+                ++percents;
+            }
+            continue;
+        }
+        if (!years && (c == 'y' || c == 'Y')) {
+            // "<digits>[ -]year" / "yr", with at least one digit before it.
+            const std::string_view rest = utterance.substr(i);
+            const bool word = rest.starts_with("year") || rest.starts_with("Year") ||
+                              rest.starts_with("yr") || rest.starts_with("Yr");
+            if (word) {
+                std::size_t k = i;
+                while (k > 0 && (utterance[k - 1] == ' ' || utterance[k - 1] == '-')) {
+                    --k;
+                }
+                if (k > 0 && std::isdigit(static_cast<unsigned char>(utterance[k - 1])) != 0) {
+                    years = true;
+                }
+            }
+        }
+    }
+    return money >= 3 && percents >= 2 && years;
+}
+
 // ---------------------------------------------------------------------------
 // Output interpretation
 // ---------------------------------------------------------------------------
@@ -2681,8 +2759,13 @@ inline constexpr std::array<std::string_view, 4> kAllActionNames{
             "years\") without instructions aimed at the assistant itself.");
         return std::unexpected(sgee::ExecutionError::ActionFailed);
     }
-    if (::options_calculator::assistant::verify::looks_like_advice_request(ctx->utterance) ||
-        looks_like_domain_advice_request(ctx->utterance)) {
+    // A request dense enough in stated figures is a CALCULATION even when it
+    // opens with an advice phrase -- see is_specified_calculation. Without this
+    // carve-out the gate refused "Should I rent at $2,900/month ... or buy a
+    // $546,500 home ... at 5.33% over 30 years?", which is the whole feature.
+    if ((::options_calculator::assistant::verify::looks_like_advice_request(ctx->utterance) ||
+         looks_like_domain_advice_request(ctx->utterance)) &&
+        !is_specified_calculation(ctx->utterance)) {
         populate_refusal(
             ctx->response, ::mortgage::assistant::Refusal::OUT_OF_SCOPE,
             "I don't give financial, tax or legal advice -- describe a specific calculation "

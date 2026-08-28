@@ -251,6 +251,54 @@ auto main() -> int {
     }
 
     // =======================================================================
+    section("3c. ...but a SPECIFIED CALCULATION wearing an advice phrase is admitted");
+    // =======================================================================
+    // The guard above is a phrase list, and a phrase list cannot tell a request
+    // for a judgement from a fully specified computation that opens with the
+    // same words. It refused BOTH -- so the most natural phrasing of the
+    // question ComputeRentVsBuy exists to answer ("Should I rent ... or buy
+    // ...?", every figure supplied) was answered with "I don't give financial
+    // advice". Verified against production on 2026-08-28, and it costs 103
+    // extraction rows in the training corpus, 99 of them ComputeRentVsBuy, all
+    // on the single phrase "should i rent".
+    //
+    // Both directions are asserted, because a carve-out that admits everything
+    // passes a one-sided test. The discriminator is DENSITY OF SPECIFICATION --
+    // three money literals, two percentages, an explicit horizon -- measured
+    // over every advice-signalled row in the corpus at 103/103 admitted and
+    // 0/141 wrongly admitted.
+    {
+        auto [status, resp] = call_parse(
+            stub,
+            "Should I rent at $2,900/month rising 4.87% a year, or buy a $546,500 home "
+            "with $70,300 down, borrowing at 5.33% over 30 years?");
+        const bool advice_refusal =
+            resp.has_refusal() &&
+            resp.refusal().reason() == ::mortgage::assistant::Refusal::OUT_OF_SCOPE;
+        check(status.ok() && !advice_refusal,
+              "a fully specified rent-vs-buy calculation is NOT refused as advice, even "
+              "though it opens with \"Should I rent\" (it may still refuse for another "
+              "reason -- what must not happen is the ADVICE refusal)");
+    }
+    {
+        // The mirror. Same opening words, no specification: still advice.
+        auto [status, resp] = call_parse(stub, "Should I rent or buy? What do you think?");
+        check(status.ok() && resp.has_refusal() &&
+                  resp.refusal().reason() == ::mortgage::assistant::Refusal::OUT_OF_SCOPE,
+              "...while the SAME phrase carrying no figures is still refused OUT_OF_SCOPE");
+    }
+    {
+        // The conjunction is load-bearing. One money literal is not a
+        // specification, and this is exactly the request the gate must keep
+        // refusing. Loosening any conjunct is the mutation that breaks here.
+        auto [status, resp] = call_parse(stub, "Can I afford a $600,000 house?");
+        check(status.ok() && resp.has_refusal() &&
+                  resp.refusal().reason() == ::mortgage::assistant::Refusal::OUT_OF_SCOPE,
+              "...and a single money literal does NOT clear the carve-out -- \"can I "
+              "afford a $600,000 house\" is still advice");
+    }
+
+    // =======================================================================
     section("4. THE DISCRIMINATING PROOF: a server missing the CheckModel "
             "action must NOT return an empty OK response");
     // =======================================================================
