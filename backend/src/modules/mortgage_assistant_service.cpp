@@ -2373,6 +2373,29 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
     verifiable.operation = operation;
     for (const auto& field : op->fields) {
         const std::string key{field.name};
+
+        // A field this OPERATION does not use is dropped, whether or not the
+        // model emitted it, and is never required.
+        //
+        // finance.proto restricts several fields of SHARED request messages
+        // per-operation in a comment, which no consumer that parses the message
+        // can see -- so this table, the verifier's kDeclaredFields, its
+        // convention list and the corpus generator all independently demanded a
+        // field the operation ignores.
+        //
+        // Dropping rather than forwarding matters most for ComputeRate.guess,
+        // which is a Newton STARTING SEED the engine really uses. Removing it
+        // from the training labels did NOT stop the model emitting it -- the
+        // documented prepaid_interest_days result, where 48% of training rows
+        // omitted a field and inference omitted it never -- it only changed
+        // WHAT it emits: measured 0.80 and 0.0000, values scraped from
+        // elsewhere in the utterance. Forwarding that seeds the solver with
+        // garbage. Absent is what the proto asked for, and only this side can
+        // guarantee it.
+        if (mv::operation_excludes_field(operation, key)) {
+            continue;
+        }
+
         if (!obj.contains(key)) {
             populate_refusal(response, ::mortgage::assistant::Refusal::INVALID_PARAMETERS,
                              "The assistant left out \"" + key + "\", which " + operation +

@@ -654,6 +654,35 @@ export enum class ReasonCode {
 /** GP-ARA's LogicalConstraintType for this domain: not an SMT-LIB formula
  * (see the file banner), just the outcome of evaluating every closed-form
  * rule against one `MortgageParamsInput`. */
+/**
+ * True when `field` is declared on `operation`'s request message but that
+ * operation does not use it.
+ *
+ * finance.proto restricts several fields of SHARED request messages
+ * per-operation, in a comment: "XNPV only; ignored by XIRR", "XIRR only",
+ * "omit for the engine's own starting guess". Callers that build a
+ * FinanceParams must consult this and DROP such a field rather than forward it,
+ * for a reason that is not symmetric across the three:
+ *
+ *   - `ComputeXirr.rate` and `ComputeXnpv.guess` are genuinely ignored, so
+ *     forwarding them is merely untidy.
+ *   - `ComputeRate.guess` is a Newton STARTING SEED the engine really uses.
+ *     A model that never learned to omit the field emits a plausible-looking
+ *     number from elsewhere in the utterance -- measured: 0.80 and 0.0000 --
+ *     and a garbage seed makes the solver diverge or converge somewhere else.
+ *     Dropping it is what makes the proto's "omit for the engine's own
+ *     starting guess" actually happen.
+ *
+ * Omission is not something this model learns. That is the documented
+ * `prepaid_interest_days` result -- 48% of training rows omitted the field and
+ * inference omitted it NEVER -- and removing `guess` from the corpus reproduced
+ * it exactly: the retrained model still emits the key, now with a scraped
+ * value. So the drop has to happen on the SERVING side, not in the training
+ * data alone.
+ */
+export [[nodiscard]] auto operation_excludes_field(std::string_view operation,
+                                                   std::string_view field) -> bool;
+
 export struct VerificationFacts {
     bool violated = false;   ///< a definite contradiction -> Unsafe
     bool incomplete = false; ///< a rule could not be evaluated -> Indeterminate
@@ -1351,6 +1380,10 @@ auto Decimal::to_string() const -> std::string {
         out += frac_text;
     }
     return out;
+}
+
+auto operation_excludes_field(std::string_view operation, std::string_view field) -> bool {
+    return detail::is_excluded_field(operation, field);
 }
 
 auto parse_strict_decimal(std::string_view text) -> std::optional<Decimal> {
