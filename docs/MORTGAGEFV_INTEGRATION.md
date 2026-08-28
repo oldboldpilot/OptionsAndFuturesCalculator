@@ -274,8 +274,44 @@ answer, not an error.
 | RPC | Request fields | Returns |
 | --- | --- | --- |
 | `ComputeHomeFutureValue` | `current_property_value` **req** · `annual_appreciation_rate` **req** · `current_loan_balance` **req** · `annual_mortgage_rate` **req** · `current_monthly_payment` **req** (P&I) · `target_years` i32 · `payments_per_year` i32 | `{ future_property_value dbl, future_loan_balance str, future_equity str }` |
-| `ComputeRentVsBuy` | `property_price` **req** · `down_payment` **req** · `monthly_piti_and_maintenance` **req** · `annual_home_appreciation` **req** · `current_monthly_rent` **req** · `annual_rent_increase` **req** · `annual_investment_return` **req** · `years` i32 | `{ total_cost_of_buying dbl, total_cost_of_renting dbl, is_buying_better bool, buying_advantage dbl }` |
+| `ComputeRentVsBuy` | `property_price` **req** · `down_payment` **req** · `annual_home_appreciation` **req** · `current_monthly_rent` **req** · `annual_rent_increase` **req** · `annual_investment_return` **req** · `years` i32 · **plus exactly ONE shape** — see below | `{ total_cost_of_buying dbl, total_cost_of_renting dbl, is_buying_better bool, buying_advantage dbl }` + the `_exact` strings on the amortising shape only |
 | `ComputeHomeNpv` | `property_price` · `down_payment` · `closing_costs_buy` · `loan_amount` · `loan_annual_rate` · `loan_term_years` i32 · `monthly_taxes_ins_hoa` · `monthly_maintenance` · `annual_appreciation_rate` · `selling_closing_cost_percent` (`0.06` = 6% of sale price) · `monthly_rent_saved` · `annual_rent_increase` · `annual_discount_rate` — **all twelve strings required** | `{ net_present_value dbl, internal_rate_of_return dbl, future_sale_price dbl, future_equity dbl }` |
+
+### `ComputeRentVsBuy` carries TWO shapes, and a zero is not a silence
+
+The request message holds both the legacy composite and the amortising inputs,
+and a caller must supply **exactly one** of them:
+
+| shape | fields | model |
+| --- | --- | --- |
+| legacy | `monthly_piti_and_maintenance` (the all-in monthly cost) | the original, computed in `double` |
+| amortising | `loan_annual_rate` · `loan_term_years` · `loan_amount` · `monthly_taxes_ins_maintenance` (non-debt carrying costs only) · `closing_costs_buy` · `selling_cost_percent` · `annual_inflation_rate` | amortises the loan; also fills the `_exact` decimal strings |
+
+**A field is read as "not this shape" when it is absent OR zero, and the two
+are equivalent on purpose.** This service has two kinds of caller and they
+spell the same intent differently:
+
+- a JSON caller through the transcoder OMITS what it does not use, so the field
+  arrives as `""`;
+- the mortgage assistant CANNOT omit — `mortgage_verification.cppm`'s G2b
+  refuses a missing key — so it emits every declared field and says "not this
+  shape" with the value `0`.
+
+Testing presence alone reads the first correctly and the second backwards.
+It did, until 2026-08-27: **every** request the assistant could emit set both
+shape flags and was refused `INVALID_ARGUMENT` as self-contradictory. Send
+either shape; do not send both, and do not expect a zeroed field to select one.
+
+The decision is a total function over five field signals (absent, zero,
+negative, positive, malformed) with a fixed precedence — malformed outranks
+negative outranks both-shapes outranks a shape — and all twenty cells of its
+input space are asserted by name in section 24 of
+`backend/tests/test_finance_service_validation.cpp`.
+
+Two refusals worth knowing: a request whose every field is the convention zero
+gets `carries neither` rather than an answer computed from a loan the service
+invented, and a negative `monthly_piti_and_maintenance` is refused rather than
+priced.
 
 `ComputeHomeNpv` has the strictest input contract on the surface: every one of its
 twelve decimal fields is required, and `loan_term_years` and

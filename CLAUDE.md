@@ -434,6 +434,54 @@ monthly-rate-with-`periods=30` refused, annual-rate-with-`periods=360` refused.
 Mutation-checked — restoring the hardcoded x12 reproduces the production message
 verbatim AND flips the mismatched pair back to `Proven`.
 
+## Rent vs buy, and the zero that was not a silence
+
+`ComputeRentVsBuy` carries TWO mutually exclusive request shapes in one
+message: the legacy composite `monthly_piti_and_maintenance`, and the seven
+granular fields the amortising model needs. On 2026-08-27 it refused **100% of
+assistant traffic** — both label shapes, every request a model can emit —
+while the test suite was green.
+
+**The mechanism is that this service has two callers who spell the same intent
+differently, and neither is wrong.** A JSON caller through
+`grpc_json_transcoder` OMITS what it does not use, so the field arrives as
+`""`. The assistant CANNOT omit: `mortgage_verification.cppm`'s G2b refuses a
+missing key, so a model emits every declared field and says "not this shape"
+with the convention value `0` — which `kConventionValues` exempts from
+grounding *precisely so that it can*. The dispatch tested `.empty()`, which is
+true for the first caller and never true for the second.
+
+Three components said "emit a zero" and the fourth said "omit". The verifier's
+own comment recorded the intent — *"These exemptions are what let the DEPLOYED
+model keep parsing rent-vs-buy unchanged, with no retrain: it omits all seven"*
+— and that is still true of v2. It stopped being true the moment a corpus
+taught all sixteen fields. **The dispatch was built against a model that no
+longer exists.**
+
+The fix is a TOTAL FUNCTION over the decision graph, not another predicate:
+`classify_decimal_field` (five signals, no parsing, so it cannot itself fail),
+`join_group_signal` (malformed > magnitude > convention), and
+`decide_rent_vs_buy_shape`, exhaustive over the pair. **Absent and Zero are the
+same statement.**
+
+**Symmetry is the fix, not the predicate.** An earlier round keyed the legacy
+side on `is_positive()` and was correctly rejected: `""`, `"0"` and `"-100"`
+fell through to the amortising model, which invented a 30-year 0% loan of
+`price - down` and answered 200 OK. Tested symmetrically those same inputs make
+both sides say nothing and reach the "neither shape" refusal. The earlier
+attempt failed because it tested ONE SIDE.
+
+**Why no test caught it: every test built its request the way a C++ caller
+would.** Section 24 of `test_finance_service_validation.cpp` enumerates all 20
+cells of the dispatch's input space and sends bytes taken verbatim from the
+training corpus. It also asserts as an EQUALITY that v2 (which omits the seven)
+and a retrained model (which emits them as zeros) get the identical legacy
+answer — if those diverge, the convention stopped being a convention.
+Mutation-checked twice, each reproducing a different production symptom.
+
+A negative composite is now refused too; `-100` previously returned 200 OK with
+a verdict computed from it.
+
 ## Closing costs (`ComputeClosingCosts`)
 
 mortgagefvcalculator.com grew a standalone, itemised closing-costs screen, and
