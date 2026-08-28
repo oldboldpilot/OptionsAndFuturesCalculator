@@ -674,7 +674,11 @@ message RentVsBuyRequest {
   // compounded monthly as rate/12). Optional; default is "0" when empty.
   string loan_annual_rate = 9;
   // Mortgage loan amortization term in years (e.g. 30).
-  // Optional; default is 0 (defaults to years / 30).
+  // Optional; omitted (0) defaults to 30 YEARS -- not to `years`, and not to
+  // any expression of it. An earlier revision of this comment read "defaults to
+  // years / 30", which is neither what the service does nor a meaningful
+  // quantity; finance_service.cpp has always set 30. Corrected 2026-08-28 after
+  // it was about to be copied into a client integration guide.
   int32 loan_term_years = 10;
   // Initial loan amount in currency units. Optional; default when empty is
   // property_price - down_payment.
@@ -687,7 +691,16 @@ message RentVsBuyRequest {
   // Optional; default is "0" when empty.
   string closing_costs_buy = 13;
   // Selling costs as a decimal fraction of final home sale price (e.g. "0.06"
-  // for 6% broker and transfer fees). Optional; default is "0.06" when empty.
+  // for 6% broker and transfer fees).
+  //
+  // Optional; omitted means "0", NOT "0.06". This comment claimed 0.06 until
+  // 2026-08-28 and the service has always used zero, deliberately: a caller who
+  // genuinely sells for free is indistinguishable from one who said nothing,
+  // and defaulting to zero never INVENTS a cost the caller did not state.
+  // Measured both ways against production -- omitted and explicit "0" both
+  // return selling_costs 0.
+  //
+  // A UI that wants the customary 6% must send it explicitly.
   string selling_cost_percent = 14;
   // Annual inflation rate as a decimal (e.g. "0.025" for 2.5%/yr).
   // Optional; default is "0" when empty.
