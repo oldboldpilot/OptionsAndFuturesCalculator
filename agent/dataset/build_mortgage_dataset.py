@@ -524,8 +524,17 @@ def make_future_value_detailed_extraction(rng: random.Random) -> dict:
 
 # -- ComputeAmortization / ComputeDetailedAmortization: full schedule.
 def make_amortization_extraction(rng: random.Random) -> dict:
+    # 50/50, not 70/30.
+    #
+    # These two operations differ by ONE trailing clause in the utterance and ONE
+    # extra label field (annual_tax_rate); loan, rate, term, overpayment, PMI and
+    # home value are identical. Under a 70/30 prior the cheapest thing a model can
+    # do is ignore the clause and always answer the majority class -- which is
+    # exactly what v7 did: 24 of 24 ComputeDetailedAmortization failures named
+    # ComputeAmortization instead, taking that operation from 33/34 to 10/34.
+    # A thin signal cannot outvote a strong prior, so the prior goes.
     op = rng.choices(["ComputeAmortization", "ComputeDetailedAmortization"],
-                      [0.7, 0.3])[0]
+                      [0.5, 0.5])[0]
     loan, annual_rate, term = sample_loan_scenario(rng)
     overpay = rng.choices([0, 50, 100, 150, 200, 300, 500, 750, 1000],
                            [0.55, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.05, 0.04])[0]
@@ -555,8 +564,19 @@ def make_amortization_extraction(rng: random.Random) -> dict:
                  f"{phrase_pct(pmi)} a year")
     base += "."
     if op == "ComputeDetailedAmortization":
-        base += (f" I'm in the {phrase_pct(tax_rate)} tax bracket -- show the "
-                  f"interest deduction too.")
+        # Vary the cue and let it lead sometimes. A single fixed clause always in
+        # final position is the weakest possible signal for the one thing that
+        # separates these two operations.
+        base += rng.choice([
+            f" I'm in the {phrase_pct(tax_rate)} tax bracket -- show the "
+            f"interest deduction too.",
+            f" Include the mortgage interest tax deduction at my "
+            f"{phrase_pct(tax_rate)} marginal rate.",
+            f" I need the after-tax numbers as well; my marginal rate is "
+            f"{phrase_pct(tax_rate)}.",
+            f" Break out the deductible interest -- {phrase_pct(tax_rate)} "
+            f"bracket.",
+        ])
 
     compact = (f"Show me the full payment schedule on {phrase_money(loan)}, "
                f"{phrase_pct(annual_rate)}, {phrase_years(term)}"
@@ -565,6 +585,10 @@ def make_amortization_extraction(rng: random.Random) -> dict:
                   if mention_pmi else "")
                + (f", tax rate {phrase_pct(tax_rate)}" if op == "ComputeDetailedAmortization" else "")
                + ".")
+    if op == "ComputeDetailedAmortization":
+        # Lead with the deduction in the compact template too, so the cue is not
+        # always the last thing before the full stop.
+        compact = (f"With the interest deduction at {phrase_pct(tax_rate)}: " + compact)
     user = rng.choice([base, compact])
 
     obj = {"loan_amount": money_str(loan), "annual_rate": rate_str(annual_rate, 4),
