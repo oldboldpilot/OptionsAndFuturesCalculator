@@ -107,9 +107,25 @@ downstream lie, which is worse than being visibly stale.
 
 ## 3. `RefreshStateAssumptions` — the trigger
 
-**Requires the partner key.** This is the one write on the finance surface, and
-it is a server-side call. Do not put this key in the browser bundle; route the
-admin button through your own server, which presents the key.
+**Requires the partner key — the one you already hold.** The key issued to
+mortgagefv on 2026-08-10 (`tier partner`, `scopes finance, assistant`) is the
+same credential you send on `ParseOperation`, and it works here unchanged. There
+is no new secret to provision.
+
+This is the one write on the finance surface and it is a server-side call. Do
+not put the key in the browser bundle; route the admin button through your own
+server, which presents it.
+
+Both directions were verified against production on 2026-08-29 — anonymous is
+refused with code 7, and the partner key returns a full dry run. Testing only
+the refuse direction proves nothing: a gate that refuses everyone passes it.
+
+```
+anonymous  → 403  {"code":7,"message":"Refreshing state assumptions requires a
+                   partner credential. Reading them (GetStateAssumptions) does not."}
+partner    → 200  {"ok":true,"dataYear":2024,"statesUpdated":50,
+                   "statesRejected":0,"dataSource":"US Census ACS 5-year 2024"}
+```
 
 ```
 POST /sensen.finance.Finance/RefreshStateAssumptions
@@ -263,6 +279,18 @@ repoints its reads. That is step 1 of the cutover.
 curl -s https://api.optionsandfuturescalculator.com/sensen.finance.Finance/GetStateAssumptions \
   -H 'Content-Type: application/json' -d '{"slug":"texas"}'
 ```
+
+`scripts/probe_finance_service.py` in the backend repo asserts the whole shape
+against the live service — fifty states, the RFC3339-with-Z timestamp, money
+fields still strings, every value inside the plausibility bounds, one vintage
+across all fifty. 34/34 as of 2026-08-29.
+
+**One of those checks is there because it failed.** `refreshed_at` shipped as
+`2026-08-29T12:49:58+00` for a few hours: Postgres's `to_char ... OF` renders
+the shortest offset, which is not valid RFC3339. V8 parses it leniently and
+JavaScriptCore returns `Invalid Date`, so it would have worked in the browser it
+was tested in and produced an empty "last refreshed" on every iPhone. Fixed to
+an explicit `Z`; the probe now pins the shape.
 
 Every RPC on this service is reachable as
 `POST /<package>.<Service>/<Method>` with a JSON body — Envoy's
