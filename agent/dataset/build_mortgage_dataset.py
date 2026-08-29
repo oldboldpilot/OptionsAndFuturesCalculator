@@ -218,7 +218,13 @@ IN_SCOPE_SECTIONS = {
 # backend/tests/test_mortgage_grammar.cpp mirrors this set and FAILED when the
 # batch RPC was added, which is the drift check doing its job -- the label
 # space must never grow silently just because the proto did.
-EXCLUDE_RPCS = {"ConvertInterestRate", "ComputeFisherRate", "ComputeRentVsBuyBatch"}
+#   RefreshStateAssumptions / GetStateAssumptions -- OPERATIONAL, not utterances.
+#     One triggers a weekly Census ACS fetch and rewrites fifty rows of live site
+#     data; the other reads that reference table. Neither is a question a
+#     homeowner asks, and admitting them would give the model a label whose
+#     arguments no utterance grounds.
+EXCLUDE_RPCS = {"ConvertInterestRate", "ComputeFisherRate", "ComputeRentVsBuyBatch",
+                "RefreshStateAssumptions", "GetStateAssumptions"}
 
 
 def build_operations(parsed: dict) -> dict[str, dict]:

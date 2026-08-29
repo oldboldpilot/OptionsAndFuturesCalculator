@@ -246,7 +246,9 @@ auto parse_proto(const std::string& text) -> ProtoView {
     // RPC was added to finance.proto, which is the drift gate working: the
     // assistant's label space must never grow silently because the proto did.
     static const std::set<std::string> kExcluded{"ConvertInterestRate", "ComputeFisherRate",
-                                                 "ComputeRentVsBuyBatch"};
+                                                 "ComputeRentVsBuyBatch",
+                                                 "RefreshStateAssumptions",
+                                                 "GetStateAssumptions"};
 
     ProtoView view;
     const auto svc = text.find("service Finance {");

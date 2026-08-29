@@ -453,7 +453,9 @@ auto proto_label_space(const std::string& text)
     // ComputeRentVsBuyBatch is a bulk API, not an utterance -- see EXCLUDE_RPCS
     // for the reasoning.
     static const std::set<std::string> kExcluded{"ConvertInterestRate", "ComputeFisherRate",
-                                                 "ComputeRentVsBuyBatch"};
+                                                 "ComputeRentVsBuyBatch",
+                                                 "RefreshStateAssumptions",
+                                                 "GetStateAssumptions"};
 
     std::map<std::string, std::vector<std::string>> out;
 

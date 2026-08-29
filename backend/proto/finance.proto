@@ -88,6 +88,8 @@ service Finance {
   rpc ComputeRentVsBuyBatch (RentVsBuyBatchRequest) returns (RentVsBuyBatchResponse);
   rpc ComputeHomeNpv (HomeNpvRequest) returns (HomeNpvResponse);
   rpc ComputeClosingCosts (ClosingCostsRequest) returns (ClosingCostsResponse);
+  rpc RefreshStateAssumptions (RefreshStateAssumptionsRequest) returns (RefreshStateAssumptionsResponse);
+  rpc GetStateAssumptions (GetStateAssumptionsRequest) returns (GetStateAssumptionsResponse);
 
   // -- Options ---------------------------------------------------------------
   rpc PriceOptionTree (OptionTreeRequest) returns (OptionPricingResponse);
@@ -1104,3 +1106,75 @@ message ClosingCostsResponse {
   // display ratio that nothing further is computed from.
   double closing_costs_percent_of_price = 19;
 }
+
+// ---------------------------------------------------------------------------
+// State housing assumptions (US Census ACS)
+// ---------------------------------------------------------------------------
+
+message RefreshStateAssumptionsRequest {
+  // When true, fetches and validates upstream Census data and computes what
+  // would change without writing updates to the database. The refresh job
+  // overwrites 50 rows of live site data from a third-party feed, and a dry run
+  // is how an operator inspects a new ACS vintage before trusting it.
+  bool dry_run = 1;
+
+  // Optional ACS vintage year to pin (e.g. 2023). When 0 (unset), the engine
+  // tries configured years newest-first until finding one with >= 40 usable
+  // rows. Explicit pinning exists so an operator can roll back a problematic
+  // vintage to a known-good one immediately without deploying code.
+  int32 data_year = 2;
+}
+
+message RefreshStateAssumptionsResponse {
+  bool ok = 1;
+  // The ACS vintage year actually selected and applied.
+  int32 data_year = 2;
+  int32 states_updated = 3;
+  // Rows that failed plausibility bounds (e.g. price outside [$50k, $3M], rent
+  // outside [$300, $8k], tax rate outside [0.05%, 4%], or Census sentinel values).
+  // Reported explicitly rather than silently dropped: a run that quietly
+  // updated only 41 of 50 states looks identical to a healthy run otherwise.
+  int32 states_rejected = 4;
+  string data_source = 5;       // e.g. "US Census ACS 5-year 2023"
+  string error = 6;             // empty when ok
+}
+
+message GetStateAssumptionsRequest {
+  // Optional state slug (e.g. "california", "texas"). When empty, all 50
+  // states are returned.
+  string slug = 1;
+}
+
+// One state's housing and tax assumptions.
+//
+// Editorial fields (`insurance_annual`, `state_income_tax`, `note`) are hand-
+// authored and NEVER overwritten by the automated ACS refresh -- the Census
+// Bureau does not publish them, so an update touching them would silently
+// destroy curated content.
+//
+// All monetary amounts and percentage rates are decimal strings, adhering to
+// the file convention: sensen computes exact values in BigDecimal, and string
+// encoding prevents precision loss when consumed by browser JavaScript.
+message StateAssumption {
+  string slug = 1;              // e.g. "texas"
+  string name = 2;              // e.g. "Texas"
+  string abbr = 3;              // e.g. "TX"
+  string median_price = 4;      // owner-occupied median home value, decimal string
+  string property_tax_rate = 5; // effective property tax rate, percent string (e.g. "1.63")
+  string insurance_annual = 6;  // annual homeowner insurance, editorial, may be empty
+  string state_income_tax = 7;  // state income tax rate, percent string, editorial, may be empty
+  string median_rent = 8;       // monthly gross rent, decimal string
+  string note = 9;              // editorial commentary, may be empty
+  string data_source = 10;      // e.g. "US Census ACS 5-year 2023"
+  int32 data_year = 11;         // ACS vintage year
+  // RFC3339 timestamp (UTC) of when the row was refreshed. Carried as a string
+  // rather than a google.protobuf.Timestamp: this mirrors ChainResponse.fetched_at,
+  // which the frontend already derives a freshness badge from, and an absent
+  // value must be distinguishable from the Unix epoch (1970-01-01).
+  string refreshed_at = 12;
+}
+
+message GetStateAssumptionsResponse {
+  repeated StateAssumption states = 1;
+}
+

@@ -1141,8 +1141,8 @@ endif()
 # add_subdirectory(cpp23-logger EXCLUDE_FROM_ALL)
 
 # Core engine binary
-add_executable(calculator_engine src/main.cpp src/issue_key.cpp src/modules/calculator_service.cpp src/modules/finance_service.cpp src/modules/quota.cpp src/modules/api_key.cpp src/modules/assistant_service.cpp src/modules/mortgage_assistant_service.cpp src/modules/inference_queue.cpp src/modules/inference_admission.cpp src/modules/sgee_queue_client.cpp src/modules/strategy_store.cpp)
-target_sources(calculator_engine PUBLIC FILE_SET CXX_MODULES FILES src/modules/calculator_service.cppm src/modules/market_data.cppm src/modules/finance_service.cppm src/modules/quota.cppm src/modules/api_key.cppm src/modules/fips_mode.cppm src/modules/strategy_catalogue.cppm src/modules/assistant_verification.cppm src/modules/assistant_service.cppm src/modules/mortgage_verification.cppm src/modules/mortgage_grammar.cppm src/modules/mortgage_assistant_service.cppm src/modules/pg.cppm src/modules/inference_queue.cppm src/modules/sgee_queue_client.cppm src/modules/inference_admission.cppm src/modules/strategy_store.cppm)
+add_executable(calculator_engine src/main.cpp src/issue_key.cpp src/modules/calculator_service.cpp src/modules/finance_service.cpp src/modules/quota.cpp src/modules/api_key.cpp src/modules/assistant_service.cpp src/modules/mortgage_assistant_service.cpp src/modules/inference_queue.cpp src/modules/inference_admission.cpp src/modules/sgee_queue_client.cpp src/modules/strategy_store.cpp src/modules/state_refresh.cpp)
+target_sources(calculator_engine PUBLIC FILE_SET CXX_MODULES FILES src/modules/calculator_service.cppm src/modules/market_data.cppm src/modules/finance_service.cppm src/modules/quota.cppm src/modules/api_key.cppm src/modules/fips_mode.cppm src/modules/state_refresh.cppm src/modules/strategy_catalogue.cppm src/modules/assistant_verification.cppm src/modules/assistant_service.cppm src/modules/mortgage_verification.cppm src/modules/mortgage_grammar.cppm src/modules/mortgage_assistant_service.cppm src/modules/pg.cppm src/modules/inference_queue.cppm src/modules/sgee_queue_client.cppm src/modules/inference_admission.cppm src/modules/strategy_store.cppm)
 target_link_libraries(calculator_engine PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto sgee)
 # PostgreSQL::PostgreSQL is linked into calculator_engine further down, right
 # after find_package(PostgreSQL REQUIRED) runs (see that comment block) --
@@ -1376,6 +1376,18 @@ add_test(NAME MortgageVerificationTest COMMAND test_mortgage_verification)
 # module implements -- and neither depends on anything beyond std, so both are
 # compiled here as this target's own FILE_SET sources.
 # Pure text comparison of two files -- no engine, no protobuf, no links.
+# Gates the ACS validator directly. No engine, no network, no database -- the
+# validator is split out of the service precisely so it can be tested here.
+# INTERFACE ONLY. The pure validator lives in state_refresh.cppm precisely so
+# this gate needs no libpq, no SGEE and no engine -- see that file's `detail`
+# namespace comment for why the first attempt failed to build.
+add_executable(test_state_refresh tests/test_state_refresh.cpp)
+target_sources(test_state_refresh
+    PRIVATE
+    FILE_SET CXX_MODULES FILES
+        src/modules/state_refresh.cppm)
+add_test(NAME StateRefreshTest COMMAND test_state_refresh)
+
 add_executable(test_vendored_proto_drift tests/test_vendored_proto_drift.cpp)
 target_compile_definitions(test_vendored_proto_drift PRIVATE
     kBackendDir="${CMAKE_CURRENT_SOURCE_DIR}"
@@ -1435,6 +1447,7 @@ add_executable(test_option_pricing_service
 target_sources(test_option_pricing_service
     PRIVATE
     FILE_SET CXX_MODULES FILES
+        src/modules/state_refresh.cppm
         src/modules/finance_service.cppm
         src/modules/quota.cppm
         src/modules/api_key.cppm
@@ -1453,11 +1466,11 @@ add_executable(test_finance_service_validation
     tests/test_finance_service_validation.cpp
     src/modules/finance_service.cpp
     src/modules/quota.cpp
-    src/modules/api_key.cpp
-)
+    src/modules/api_key.cpp)
 target_sources(test_finance_service_validation
     PRIVATE
     FILE_SET CXX_MODULES FILES
+        src/modules/state_refresh.cppm
         src/modules/finance_service.cppm
         src/modules/quota.cppm
         src/modules/api_key.cppm

@@ -24,6 +24,7 @@ import sensen.portfolio;
 import sensen.linear_algebra;
 import logger;
 import quota;
+import state_refresh;
 import api_key;
 
 // SGEE: used ONLY by the four option-pricing RPCs' shared request-lifecycle
@@ -3017,6 +3018,121 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         return Status::OK;
     }
 
+    // -----------------------------------------------------------------------
+    // State assumptions: the weekly Census ACS refresh, and its read side.
+    //
+    // These are OPERATIONAL rather than financial, and they are deliberately
+    // excluded from the mortgage assistant's label space -- a bulk data job is
+    // not something a homeowner asks for in a sentence. See EXCLUDE_RPCS.
+    // -----------------------------------------------------------------------
+
+    auto RefreshStateAssumptions(
+        ServerContext* context,
+        const sensen::finance::RefreshStateAssumptionsRequest* request,
+        sensen::finance::RefreshStateAssumptionsResponse* response) -> Status override {
+        if (request == nullptr || response == nullptr) {
+            return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
+        }
+        // Priced as a default operation rather than by row count: the cost is
+        // dominated by one outbound HTTPS call and a single transaction, and
+        // neither scales with the fifty UPDATEs behind them.
+        CHARGE("RefreshStateAssumptions", quota::cost_default());
+
+        // Called through an INJECTED hook, not directly.
+        //
+        // `state_refresh`'s implementation unit imports `pg`, and this
+        // translation unit is compiled into two pricing test targets that
+        // deliberately carry no libpq -- the same reason `calculator_service`
+        // takes an `IStrategyStore` and its test injects an in-memory fake.
+        // Linking the real implementation in here would drag a database into a
+        // Black-Scholes test, and the alternative (a second stubbed
+        // implementation) is exactly the drift this codebase refuses elsewhere.
+        //
+        // Unset is a SUPPORTED state, not a bug: an engine built without the
+        // refresh wired says so rather than crashing.
+        if (!refresh_hook_) {
+            response->set_ok(false);
+            response->set_error("the state-assumptions refresh is not wired into this build");
+            return Status(grpc::StatusCode::FAILED_PRECONDITION,
+                          "the state-assumptions refresh is not wired into this build");
+        }
+        auto result = refresh_hook_(request->dry_run(), request->data_year());
+
+        if (result.has_value()) {
+            response->set_ok(true);
+            response->set_data_year(result->data_year);
+            response->set_states_updated(result->states_updated);
+            response->set_states_rejected(result->states_rejected);
+            response->set_data_source(std::move(result->data_source));
+            return Status::OK;
+        }
+
+        // A REFUSAL IS AN ANSWER, and it travels as OK with `ok=false` rather
+        // than as a transport error. A caller polling this needs to distinguish
+        // "the site is serving last week's numbers because the ACS was
+        // unusable" from "the RPC did not happen" -- and a gRPC error code
+        // collapses those into one thing. The status codes stay reserved for
+        // what they mean: the entitlement gate and genuine infrastructure
+        // failure, matching the mortgage assistant's Refusal contract.
+        //
+        // NotConfigured is the exception. An engine with no CENSUS_API_KEY is a
+        // supported build, exactly like an empty MODEL_URL, and reporting it as
+        // FAILED_PRECONDITION says "you have not finished setting this up",
+        // which is true and actionable, where ok=false would read as an
+        // upstream problem the operator cannot fix.
+        response->set_ok(false);
+        response->set_error(result.error().message);
+        if (result.error().reason == state_refresh::Abort::NotConfigured) {
+            return Status(grpc::StatusCode::FAILED_PRECONDITION, result.error().message);
+        }
+        if (result.error().reason == state_refresh::Abort::AlreadyRunning) {
+            // ABORTED is the documented code for "retry may succeed at a
+            // higher level" -- another replica is mid-run, and the caller's
+            // request was not served.
+            return Status(grpc::StatusCode::ABORTED, result.error().message);
+        }
+        return Status::OK;
+    }
+
+    auto GetStateAssumptions(ServerContext* context,
+                             const sensen::finance::GetStateAssumptionsRequest* request,
+                             sensen::finance::GetStateAssumptionsResponse* response)
+        -> Status override {
+        if (request == nullptr || response == nullptr) {
+            return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
+        }
+        CHARGE("GetStateAssumptions", quota::cost_default());
+
+        if (!read_hook_) {
+            return Status(grpc::StatusCode::FAILED_PRECONDITION,
+                          "state assumptions are not wired into this build");
+        }
+        auto rows = read_hook_(request->slug());
+        if (!rows.has_value()) {
+            return Status(grpc::StatusCode::UNAVAILABLE, rows.error().message);
+        }
+        response->mutable_states()->Reserve(static_cast<int>(rows->size()));
+        for (auto& r : *rows) {
+            auto* out = response->add_states();
+            // Moved, not copied. The rows were built for this response and are
+            // discarded immediately after; protobuf's setters perfect-forward,
+            // so a prvalue here binds as an rvalue and no string is duplicated.
+            out->set_slug(std::move(r.slug));
+            out->set_name(std::move(r.name));
+            out->set_abbr(std::move(r.abbr));
+            out->set_median_price(std::move(r.median_price));
+            out->set_property_tax_rate(std::move(r.property_tax_rate));
+            out->set_insurance_annual(std::move(r.insurance_annual));
+            out->set_state_income_tax(std::move(r.state_income_tax));
+            out->set_median_rent(std::move(r.median_rent));
+            out->set_note(std::move(r.note));
+            out->set_data_source(std::move(r.data_source));
+            out->set_data_year(r.data_year);
+            out->set_refreshed_at(std::move(r.refreshed_at));
+        }
+        return Status::OK;
+    }
+
     auto ComputeHomeNpv(ServerContext* context, const sensen::finance::HomeNpvRequest* request,
                        sensen::finance::HomeNpvResponse* response) -> Status override {
         if (request == nullptr || response == nullptr) {
@@ -3982,7 +4098,24 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         return Status::OK;
     }
 
+  public:
+    /** Injected by the engine at startup; see the RefreshStateAssumptions body
+     *  for why these are hooks rather than direct calls. */
+    using RefreshHook = std::function<std::expected<state_refresh::Outcome, state_refresh::Refusal>(
+        bool, std::int32_t)>;
+    using ReadHook = std::function<
+        std::expected<std::vector<state_refresh::StoredAssumption>, state_refresh::Refusal>(
+            std::string_view)>;
+
+    auto set_state_hooks(RefreshHook refresh, ReadHook read) -> void {
+        refresh_hook_ = std::move(refresh);
+        read_hook_ = std::move(read);
+    }
+
   private:
+    RefreshHook refresh_hook_;
+    ReadHook read_hook_;
+
     /**
      * Runs one call through the shared FinanceRequestLifecycle graph:
      * validate -> dispatch -> check response -> respond, short-circuiting on
@@ -4180,11 +4313,16 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
 
 }  // namespace
 
-auto RegisterFinanceService(grpc::ServerBuilder& builder) -> void {
+auto RegisterFinanceService(grpc::ServerBuilder& builder, StateRefreshHooks hooks) -> void {
     // Static storage duration for the same reason the calculator service uses
     // it: gRPC's RegisterService takes the address and does not take ownership,
     // so the service must outlive both the builder and the server.
     static FinanceServiceImpl service;
+    // The hooks arrive from the ENGINE, which is the only translation unit that
+    // names state_refresh's implementation. This file must not: it is compiled
+    // into two pricing test targets that carry no libpq, and taking the address
+    // of `run_refresh` here is enough to make them fail to link.
+    service.set_state_hooks(std::move(hooks.refresh), std::move(hooks.read));
     builder.RegisterService(&service);
     logger::Logger::getInstance().info("Registered {} on the same port as the calculator",
                                        sensen::finance::Finance::service_full_name());

@@ -12,6 +12,7 @@ import assistant_service;
 import mortgage_assistant_service;
 import api_key;
 import fips_mode;
+import state_refresh;
 
 namespace {
 
@@ -108,7 +109,9 @@ auto RunServer() -> void {
     // Two services, one process: a caller that wants amortization schedules or
     // bond analytics does not have to know this application exists, and this
     // application does not have to grow a second deployment to offer them.
-    options_calculator::finance::RegisterFinanceService(builder);
+    options_calculator::finance::RegisterFinanceService(builder,
+        // Only the engine names the implementation -- see StateRefreshHooks.
+        {.refresh = &state_refresh::run_refresh, .read = &state_refresh::read_assumptions});
 
     // The strategy assistant, third on the same port. Unlike the two above it
     // is OPTIONAL: it needs a fine-tuned model on disk, named by MODEL_PATH, and
@@ -153,6 +156,13 @@ auto RunServer() -> void {
                   << std::endl;
     }
     std::cout << "Max request size: " << kMaxRequestBytes << " bytes" << std::endl;
+    // Started AFTER the listener binds, so a slow first tick can never delay the
+    // health check Railway gates the deploy cutover on. The scheduler no-ops
+    // when CENSUS_API_KEY or DATABASE_URL is absent, which is what keeps a
+    // local build and a model-only deploy clean.
+    static state_refresh::Scheduler state_scheduler;
+    state_scheduler.start();
+
     std::cout << "Server listening on " << server_address << std::endl;
 
     server->Wait();
