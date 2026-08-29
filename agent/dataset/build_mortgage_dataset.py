@@ -1431,6 +1431,107 @@ def make_closing_costs_extraction(rng: random.Random) -> dict:
 
 
 # ============================================================================
+# 3b. DOWN PAYMENTS -- a price and a deposit, where the LOAN is stated by
+#     neither one.
+#
+#     Added 2026-08-29 after a measured production failure. On
+#     "amortization schedule for a 500000 home with 20% down at 6.5% for 30
+#     years" the deployed model returned `annual_rate = 0.2000` -- it read the
+#     DOWN PAYMENT as the interest rate and dropped the stated 6.5% -- and the
+#     grounding gate returned Proven, because 20 -> 0.20 is an ordinary
+#     candidate for a rate slot. A real field, a parseable value, every bound
+#     satisfied, and a 20% mortgage priced. On other phrasings of the same
+#     request it emitted the FULL PRICE as the loan.
+#
+#     Neither is a decode fault. The corpus contained no utterance in which a
+#     price and a deposit appear together, so "20% down" was out of
+#     distribution and the nearest thing the model had seen was a rate.
+#
+#     THE LABEL IS DERIVABLE, which is the rule every generator in this file
+#     obeys and the rule whose violation cost three retrains (see
+#     phrase_money's docstring). `loan = price - down` does not appear in the
+#     utterance as a literal, and it is admissible ONLY because
+#     mortgage_verification.cppm gained map M9 the same day. Do not add rows of
+#     this shape to a tree whose verifier predates that map: the model would be
+#     trained to emit a figure the serving path then refuses, which is the
+#     "squeezed from both sides" failure this corpus has already produced once.
+#
+#     Both spellings are generated, percent and money, because a model that
+#     learned only one would be a trap rather than a fix -- and M9 admits both.
+# ============================================================================
+
+
+DOWN_PAYMENT_PERCENTS = [0.03, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30]
+
+
+def make_down_payment_extraction(rng: random.Random) -> dict:
+    # Whole thousands, so `price - down` is exact at two places for every
+    # percent in the table above and `phrase_money` renders it without cents.
+    price = round_money(rng.triangular(180_000, 2_000_000, 480_000), 1_000)
+    annual_rate = round(rng.uniform(0.045, 0.085), 4)
+    term = rng.choices(MORTGAGE_TERM_MONTHS, MORTGAGE_TERM_WEIGHTS)[0]
+
+    # Both phrase tables below are NOUN phrases, because every template reads
+    # "with <phrase>". A "putting ... down" variant was generated first and
+    # produced "with putting 20% down", which is not English -- and a corpus of
+    # ungrammatical utterances teaches the model that grammar carries no
+    # information.
+    as_percent = rng.random() < 0.55
+    if as_percent:
+        pct = rng.choice(DOWN_PAYMENT_PERCENTS)
+        down = round_money(price * pct, 1)
+        down_phrase = rng.choice([
+            f"{phrase_pct(pct)} down",
+            f"{phrase_pct(pct)} down payment",
+            f"a {phrase_pct(pct)} deposit",
+        ])
+    else:
+        down = round_money(price * rng.uniform(0.05, 0.35), 1_000)
+        down_phrase = rng.choice([
+            f"{phrase_money(down)} down",
+            f"a {phrase_money(down)} down payment",
+            f"a {phrase_money(down)} deposit",
+        ])
+    loan = price - down
+
+    # Guard rather than assert: a generator that silently emits an underivable
+    # label is the exact defect this section exists to fix.
+    if loan < 40_000 or down <= 0:
+        return make_down_payment_extraction(rng)
+
+    if rng.random() < 0.5:
+        op = "ComputePayment"
+        obj = {"rate": rate_str(annual_rate / 12), "periods": term,
+               "present_value": money_str(loan), "future_value": money_str(0),
+               "timing": "END_OF_PERIOD"}
+        user = rng.choice([
+            f"What's the monthly payment on a {phrase_money(price)} home with "
+            f"{down_phrase} at {phrase_pct(annual_rate)} over {phrase_years(term)}?",
+            f"I'm buying a {phrase_money(price)} house with {down_phrase}. "
+            f"{phrase_pct(annual_rate)}, {phrase_years(term)} fixed -- what's the payment?",
+            f"{phrase_money(price)} purchase, {down_phrase}, {phrase_pct(annual_rate)}, "
+            f"{phrase_years(term)}. Monthly payment?",
+        ])
+    else:
+        op = "ComputeAmortization"
+        obj = {"loan_amount": money_str(loan), "annual_rate": rate_str(annual_rate, 4),
+               "term_months": term, "monthly_overpayment": money_str(0),
+               "pmi_annual_rate": rate_str(0, 4),
+               # The home VALUE is the price, not the loan -- PMI drops off
+               # against it. This is the one field where the gross figure is
+               # correct, and getting it wrong is invisible without PMI.
+               "original_home_value": money_str(price)}
+        user = rng.choice([
+            f"Amortization schedule for a {phrase_money(price)} home with {down_phrase} "
+            f"at {phrase_pct(annual_rate)} for {phrase_years(term)}.",
+            f"Amortize the loan on a {phrase_money(price)} property, {down_phrase}, "
+            f"{phrase_pct(annual_rate)}, {phrase_years(term)}.",
+        ])
+
+    return convo(("system", SYSTEM), ("user", user), ("assistant", params_block(op, obj)))
+
+
+# ============================================================================
 # 4. Clarification: missing information -> ONE question, then the params.
 #    Four-turn shape (user, assistant question, user reply, assistant
 #    params), matched EXACTLY to build_dataset.py's make_clarification() --
@@ -2252,6 +2353,12 @@ def main() -> None:
         (0.0135, make_mortgage_recast_extraction),
         (0.0135, make_home_npv_extraction),
         (0.045, make_closing_costs_extraction),
+        # Down payments carry the SAME weight as closing costs, and for the
+        # same reason that operation was added: the failure was structural
+        # rather than a weak model. "20% down" was out of distribution
+        # entirely, and out-of-distribution here does not produce a refusal --
+        # it produced a 20% interest rate that passed every gate.
+        (0.045, make_down_payment_extraction),
         (0.126, make_clarification),
         (0.090, make_modification),
         (0.07, make_refusal),

@@ -1244,9 +1244,29 @@ auto main() -> int {
                     "the GROSS price still grounds -- M9 widens the candidate set, it does not "
                     "replace M1, and choosing between readings is the model's job not the gate's");
 
-        // A down-payment percent in a RATIO slot is exactly right, and M0 must
-        // not touch it. The same literal is correct in one slot and dangerous
-        // in another, which is why this could never be a magnitude heuristic.
+        // EVERY SPELLING THE CORPUS GENERATES must be one the lexer tags, and
+        // this is the only thing tying the two together. `make_down_payment_
+        // extraction` emits "20% down", "20% down payment" and "a 20% deposit";
+        // the lexer matches "down", "downpayment" and "deposit". Change one
+        // word list without the other and the corpus teaches the model to emit
+        // a figure the serving path refuses -- silently, and only for the
+        // phrasings that drifted.
+        for (const auto* spelling : {"20% down", "20% down payment", "a 20% deposit",
+                                     "100000 down", "a 100000 down payment",
+                                     "a 100000 deposit"}) {
+            const std::string spelt =
+                std::string{"monthly payment on a 500000 home with "} + spelling +
+                " at 6.5% for 360 months";
+            auto netted_spelling = params("ComputePayment", {{"rate", "0.005417"},
+                                                             {"periods", "360"},
+                                                             {"present_value", "400000.00"},
+                                                             {"future_value", "0.00"},
+                                                             {"timing", "END_OF_PERIOD"}});
+            expect_pass(netted_spelling, spelt,
+                        std::string{"corpus spelling \""} + spelling +
+                            "\" grounds the netted loan");
+        }
+
         // A down-payment percent in a RATIO slot is exactly right, and M0 must
         // not touch it -- the same literal is correct in one slot and dangerous
         // in another, which is why this could never be a magnitude heuristic.
