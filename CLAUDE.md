@@ -3007,12 +3007,42 @@ database entries for `FILE_SET CXX_MODULES` sources. That is a generator
 limitation, not a clang-tidy one, and clang 23 does not change it — a wrapper
 passing flags directly is what works today.
 
-**llama.cpp does NOT build against libc++ 23** — 221 errors at pin `b6963`, all
-missing transitive includes (`std::max`, `getenv`, `atoi`, `strtol`) that libc++
-23 stopped providing implicitly. It is `ENABLE_LLAMACPP_BACKEND=OFF` in both
-images so production is unaffected, and this file already records it as "a
-debugging and cross-checking tool only". It is ON in the local dev build, so the
-parity probes need a pin bump or a local OFF.
+**llama.cpp did NOT build against libc++ 23, and is now PATCHED rather than
+bumped.** 221 errors at pin `b6963` reduced to **thirteen sites in seven files**,
+all missing transitive includes (`getenv`, `atoi`, `strtol`, `std::max`) that
+libc++ 23 stopped providing implicitly. Ordinary missing-include bugs that
+libstdc++ and older libc++ were hiding; nothing llama.cpp-specific.
+
+`backend/patches/llamacpp-b6963-libcxx23-includes.patch` adds seven `#include`
+lines and is applied by `FetchContent_Declare`'s `PATCH_COMMAND`. **A patch, not
+a `GIT_TAG` bump, and that is the whole point:** the pin is what makes the parity
+probes meaningful — llama.cpp is here to be an INDEPENDENT implementation, so
+moving it is changing the reference. Seven `#include` lines change no behaviour
+and no number, which a version bump cannot promise. Proven against a pristine
+clone of the pin, and proven idempotent: `git apply` succeeds on a clean tree,
+and the `--reverse --check` fallback succeeds when it is already applied, so a
+re-configure over a populated source is not an error.
+
+**It also now compiles at C++23** (`LLAMACPP_CXX_STANDARD`, default 23, up from
+17). The cost the old C++17 pin existed to avoid is real and was counted rather
+than dismissed: C++23 turns CMake's Ninja module scan on for these sources, and
+`build.ninja`'s llama/ggml scan steps go **1 → 486**, the tree's total **3,639 →
+4,124 (+13%)**, for ~200 translation units containing no `import` and no
+`export module`. Accepted knowingly — it buys one standard across everything
+this repo compiles, the cost lands on configure/scan rather than the deploy
+image, and `-DLLAMACPP_CXX_STANDARD=17` reverts it in one flag.
+
+**What was NOT done, deliberately: llama.cpp's sources are not restyled to this
+repo's house rules** — trailing return types, `[[nodiscard]]`, `std::expected`,
+`import std`, no raw pointers. Those govern code we own. Restyling ~200k lines of
+upstream would erode the independence that justifies vendoring it at all, and
+would have to be redone on every bump. Compiling it at our standard is the part
+of "C++23 compliance" that is both meaningful and free of that cost.
+
+Four arms gated, all **103/103**: clang 23 with llama.cpp off, on at C++17, and
+on at C++23; plus clang 22 with the patch and C++23, because the local toolchain
+is still 22. The whole block sits inside `if(ENABLE_LLAMACPP_BACKEND)` — OFF in
+both images — so none of it reaches the deployed binary.
 
 ### Two latent bugs the second toolchain exposed, both ours
 

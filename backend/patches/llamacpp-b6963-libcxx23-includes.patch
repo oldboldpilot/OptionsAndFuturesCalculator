@@ -1,0 +1,84 @@
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index 2b3936627..feff3fb44 100644
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -8,6 +8,7 @@
+ #include "llama-model.h"
+ 
+ #include <cinttypes>
++#include <cstdlib>
+ #include <cstring>
+ #include <limits>
+ #include <stdexcept>
+diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
+index f9751b318..057398c3b 100644
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -10,6 +10,7 @@
+ #include "llama-memory-recurrent.h"
+ 
+ #include <cassert>
++#include <cstdlib>
+ #include <cmath>
+ #include <cstring>
+ 
+diff --git a/src/llama-graph.h b/src/llama-graph.h
+index d0c3934f6..02800db9c 100644
+--- a/src/llama-graph.h
++++ b/src/llama-graph.h
+@@ -6,6 +6,7 @@
+ #include "llama-adapter.h"
+ 
+ #include <cstdint>
++#include <cstdlib>
+ #include <vector>
+ #include <memory>
+ #include <set>
+diff --git a/src/llama-hparams.cpp b/src/llama-hparams.cpp
+index 514d65384..498be88d0 100644
+--- a/src/llama-hparams.cpp
++++ b/src/llama-hparams.cpp
+@@ -1,6 +1,7 @@
+ #include "llama-hparams.h"
+ 
+ #include "ggml.h"
++#include <algorithm>
+ #include <cassert>
+ 
+ void llama_hparams::set_swa_pattern(uint32_t n_pattern, bool dense_first) {
+diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
+index e26385a1f..65102ed15 100644
+--- a/src/llama-kv-cache.cpp
++++ b/src/llama-kv-cache.cpp
+@@ -8,6 +8,7 @@
+ #include <algorithm>
+ #include <cassert>
+ #include <cmath>
++#include <cstdlib>
+ #include <cstring>
+ #include <limits>
+ #include <map>
+diff --git a/src/llama-model-loader.cpp b/src/llama-model-loader.cpp
+index aa3a65f87..a03d74996 100644
+--- a/src/llama-model-loader.cpp
++++ b/src/llama-model-loader.cpp
+@@ -4,6 +4,7 @@
+ 
+ #include <array>
+ #include <cinttypes>
++#include <cstdlib>
+ #include <cstring>
+ #include <future>
+ 
+diff --git a/src/llama-vocab.cpp b/src/llama-vocab.cpp
+index 735c5d547..274c478d9 100644
+--- a/src/llama-vocab.cpp
++++ b/src/llama-vocab.cpp
+@@ -13,6 +13,7 @@
+ #include <cfloat>
+ #include <cmath>
+ #include <cstdarg>
++#include <cstdlib>
+ #include <cstring>
+ #include <forward_list>
+ #include <limits>

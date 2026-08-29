@@ -1914,12 +1914,66 @@ if(ENABLE_LLAMACPP_BACKEND)
     # alongside the human-readable tag in this comment -- a future re-tag of
     # b6963 upstream cannot silently change what this build fetches, only an
     # edit to this line can.
+    # THE PATCH IS PART OF THE PIN, and it has to be, because libc++ 23 broke
+    # this exact commit.
+    #
+    # libc++ removes transitive includes every release: headers that used to
+    # drag in <cstdlib> and <algorithm> no longer do. Thirteen sites across
+    # seven llama.cpp files then failed with `use of undeclared identifier
+    # 'getenv'`, `'atoi'`, `'strtol'` and `no member named 'max' in namespace
+    # 'std'` -- ordinary missing-include bugs that libstdc++ and older libc++
+    # were hiding. Nothing about them is llama.cpp-specific; they are what a
+    # stricter standard library finds.
+    #
+    # Carried as a patch rather than by bumping GIT_TAG, deliberately: the pin
+    # is what makes the parity probes meaningful (see the strategy-assistant
+    # section of CLAUDE.md -- llama.cpp is here to be an INDEPENDENT
+    # implementation, and moving it is changing the reference). A patch that
+    # only adds seven #include lines changes no behaviour and no number, which
+    # a version bump cannot promise.
+    #
+    # The command is idempotent by construction: `git apply` succeeds on a
+    # clean tree, and the `--reverse --check` fallback succeeds when the patch
+    # is ALREADY applied, so a re-configure over a populated source directory
+    # is not an error. Anything else -- a genuinely conflicting tree -- still
+    # fails the configure, which is the direction to fail in.
+    set(LLAMACPP_PATCH "${CMAKE_CURRENT_SOURCE_DIR}/patches/llamacpp-b6963-libcxx23-includes.patch")
     FetchContent_Declare(
         llamacpp
         GIT_REPOSITORY https://github.com/ggml-org/llama.cpp.git
         GIT_TAG 6db3d1ffe6d34e8becfe95cf2f109198a7154db3 # b6963
+        PATCH_COMMAND git apply --whitespace=nowarn "${LLAMACPP_PATCH}"
+                   || git apply --reverse --check "${LLAMACPP_PATCH}"
     )
 
+    # Build llama.cpp/ggml at C++23 as of 2026-08-29, up from C++17. The
+    # paragraph below is the ORIGINAL reasoning for the C++17 pin; it was right
+    # about the mechanism and is kept because the cost it names is real and was
+    # measured rather than dismissed:
+    #
+    #   C++23 turns CMake's Ninja module dependency scan on for these sources.
+    #   Counted in build.ninja: llama/ggml scan steps go 1 -> 486, and the
+    #   tree's total goes 3,639 -> 4,124 (+13%), for ~200 translation units
+    #   that contain no `import` and no `export module` at all.
+    #
+    # Accepted knowingly. It buys one standard across everything this repo
+    # compiles, which is what cpp_details.txt rule 50 asks for, and the cost
+    # lands on incremental configure/scan rather than on the deploy image --
+    # ENABLE_LLAMACPP_BACKEND is OFF there, so production compiles none of it.
+    # Gated: full tree + ctest 103/103 at C++23 on clang 23, and the knob below
+    # makes reverting a one-flag change rather than an edit.
+    #
+    # WHAT WAS NOT DONE, and deliberately: llama.cpp's SOURCES are not rewritten
+    # to this repo's house rules -- trailing return types, [[nodiscard]],
+    # std::expected, import std, no raw pointers. Those rules govern code we
+    # own. llama.cpp is here to be an INDEPENDENT implementation for the parity
+    # probes, and CLAUDE.md is explicit that "a reference that shared sensen's
+    # code would prove nothing". Restyling ~200k lines of upstream would erode
+    # precisely the independence that justifies vendoring it, and would have to
+    # be redone on every bump. Compiling it at our standard is the part of
+    # "C++23 compliance" that is both meaningful and free of that cost.
+    #
+    # --- original C++17 reasoning, retained ---
     # Build llama.cpp/ggml at C++17, the standard its own CMakeLists.txt pins
     # per-target (src/CMakeLists.txt: target_compile_features(llama PRIVATE
     # cxx_std_17)) rather than at this project's global C++23 -- the same
@@ -1931,8 +1985,14 @@ if(ENABLE_LLAMACPP_BACKEND)
     # module` at all. Saving/restoring around this call keeps ~200
     # llama.cpp/ggml C++ sources -- none of which use C++20 modules -- out of
     # that scan.
+    # The standard is a knob so the choice can be MEASURED rather than argued.
+    # 23 is the default. `-DLLAMACPP_CXX_STANDARD=17` restores upstream's own
+    # pin in one flag, which is what makes the +485-scan-step cost above a
+    # reversible decision rather than an edit somebody has to find.
+    set(LLAMACPP_CXX_STANDARD 23 CACHE STRING
+        "C++ standard for the vendored llama.cpp/ggml sources (23 = this repo's; 17 = upstream's own pin)")
     set(SAVED_CXX_STANDARD ${CMAKE_CXX_STANDARD})
-    set(CMAKE_CXX_STANDARD 17)
+    set(CMAKE_CXX_STANDARD ${LLAMACPP_CXX_STANDARD})
 
     # llama.cpp's own top-level CMakeLists.txt calls `option(BUILD_SHARED_LIBS
     # ...)` with a platform default that is ON on Linux (the non-EMSCRIPTEN,
