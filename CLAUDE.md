@@ -108,6 +108,27 @@ grpc-status: 0                      <- SURVIVES; the HTTP edge strips this
 body: -1798.651575458257198999
 ```
 
+**ALL FOUR SERVICES ARE ON IT, not just Finance.** There is one engine and one
+Envoy, and the native listener routes `domains: ["*"]` / `prefix: "/"` to the
+single `backend_grpc_service` cluster -- so enabling the endpoint once covered
+optionsandfuturescalculator.com's own API as well as mortgagefvcalculator.com's.
+Verified over the TCP proxy on 2026-08-29:
+
+| service | native gRPC | evidence |
+| --- | --- | --- |
+| `sensen.finance.Finance` | ✅ | `ComputePayment` -> `-1798.651575458257198999` |
+| `calculator.OptionsCalculator` | ✅ | `GetRiskFreeRate` 0.038625; `CalculateStrategy` maxProfit 10875, breakEven 587.25 |
+| `mortgage.assistant.MortgageAssistant` | ✅ | reached; `PERMISSION_DENIED` from the Pro gate |
+| `calculator.assistant.StrategyAssistant` | ✅ | reached; `PERMISSION_DENIED` from the Pro gate |
+
+**Those two refusals are the point, not a gap.** A new PUBLIC port is exactly
+where an entitlement gate would be bypassed if the gate lived in the proxy.
+It does not -- `check_assistant_entitlement` and `check_strategy_entitlement`
+run in the ENGINE, so they hold identically on gRPC-Web, on the JSON
+transcoder and on this transport. Measured in both directions: a one-leg
+`CalculateStrategy` is served anonymously and a two-leg one is refused
+`PERMISSION_DENIED`, over the native endpoint.
+
 The full `smoke_client … finance` suite passes against production over it,
 which this file previously recorded as impossible. Run it as:
 
