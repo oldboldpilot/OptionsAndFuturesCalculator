@@ -443,7 +443,17 @@ auto proto_label_space(const std::string& text)
     static const std::set<std::string> kInScope{"Time value of money", "Mortgages, HELOC",
                                                 "Cash-flow analysis", "Depreciation",
                                                 "Real estate"};
-    static const std::set<std::string> kExcluded{"ConvertInterestRate", "ComputeFisherRate"};
+    // THIRD mirror of build_mortgage_dataset.py's EXCLUDE_RPCS -- after the
+    // generator itself and test_mortgage_grammar.cpp. Adding one RPC to
+    // finance.proto failed BOTH of the others before this one, which is the
+    // four-tables lesson this project already paid for: an operation reaches
+    // the generator's label space, this verifier's declared-field table, the
+    // convention list, and the service's own dispatch list, and a change that
+    // stops short of all of them fails somewhere far from where it was made.
+    // ComputeRentVsBuyBatch is a bulk API, not an utterance -- see EXCLUDE_RPCS
+    // for the reasoning.
+    static const std::set<std::string> kExcluded{"ConvertInterestRate", "ComputeFisherRate",
+                                                 "ComputeRentVsBuyBatch"};
 
     std::map<std::string, std::vector<std::string>> out;
 

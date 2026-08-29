@@ -85,6 +85,7 @@ service Finance {
   rpc ComputeRentalRoi (RentalRoiRequest) returns (RentalRoiResponse);
   rpc ComputeHomeFutureValue (HomeFutureValueRequest) returns (HomeFutureValueResponse);
   rpc ComputeRentVsBuy (RentVsBuyRequest) returns (RentVsBuyResponse);
+  rpc ComputeRentVsBuyBatch (RentVsBuyBatchRequest) returns (RentVsBuyBatchResponse);
   rpc ComputeHomeNpv (HomeNpvRequest) returns (HomeNpvResponse);
   rpc ComputeClosingCosts (ClosingCostsRequest) returns (ClosingCostsResponse);
 
@@ -747,6 +748,60 @@ message RentVsBuyResponse {
   string real_buying_advantage = 16;
   string real_owner_terminal_wealth = 17;
   string real_renter_terminal_wealth = 18;
+}
+
+// ---------------------------------------------------------------------------
+// Batched rent-vs-buy.
+//
+// EXISTS FOR THROUGHPUT, and the throughput problem is not the engine. A single
+// ComputeRentVsBuy is an O(years*12) walk bounded at 1200 iterations -- cheap.
+// What bounds a bulk caller is the INGRESS: Envoy's local rate limit is
+// `max_tokens: 100, tokens_per_fill: 10, fill_interval: 1s` (envoy.yaml), so
+// ten requests per second per replica. A caller generating a large corpus of
+// pre-computed scenarios -- static page generation, a research sweep -- spends
+// hours against that ceiling and competes with live traffic for the same
+// tokens the whole time. One request carrying a thousand scenarios does not.
+//
+// It is NOT a quota bypass, and the charge is what makes that true: this RPC
+// charges cost_default() PER SCENARIO, so a batch of 1000 costs exactly what
+// 1000 individual calls cost. It buys freedom from the per-request rate limit
+// and from a thousand round trips; it buys no compute for free.
+//
+// Deliberately `repeated RentVsBuyRequest` rather than the parallel-array shape
+// ComputeAmortizationBatch uses. That message has six columns and its own
+// comment explains that a ragged batch must be refused rather than truncated;
+// RentVsBuyRequest has sixteen fields and two mutually exclusive SHAPES, so
+// sixteen parallel arrays would make raggedness sixteen times likelier and
+// would obscure which shape each row selected. Nesting the existing message
+// also means the shape dispatch, the bounds and the refusals are IDENTICAL to
+// the single-scenario RPC -- one contract, one implementation, no second set of
+// rules to drift.
+message RentVsBuyBatchRequest {
+  // At most 1000. A larger batch is refused rather than truncated: a truncated
+  // batch returns a shorter list that looks like a complete answer, which is
+  // the same failure mode ComputeAmortizationBatch refuses raggedness to avoid.
+  repeated RentVsBuyRequest scenarios = 1;
+}
+
+// One scenario's outcome. Exactly one field is set.
+//
+// A per-scenario outcome, rather than failing the whole batch, is the point of
+// batching for a generation pipeline: one malformed row out of a thousand must
+// not discard the nine hundred and ninety-nine that computed. `error` carries
+// the SAME message the single-scenario RPC would have returned, so a caller
+// debugging one row reads the identical diagnostic either way.
+message RentVsBuyBatchResult {
+  oneof outcome {
+    RentVsBuyResponse result = 1;
+    string error = 2;
+  }
+}
+
+message RentVsBuyBatchResponse {
+  // Same length and same order as `scenarios`. Positional correspondence is the
+  // contract -- a caller matches results to inputs by index, so nothing is ever
+  // filtered out of this list, only marked with an `error`.
+  repeated RentVsBuyBatchResult results = 1;
 }
 
 message HomeNpvRequest {

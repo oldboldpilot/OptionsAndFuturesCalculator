@@ -239,7 +239,14 @@ auto parse_proto(const std::string& text) -> ProtoView {
     static const std::set<std::string> kInScope{"Time value of money", "Mortgages, HELOC",
                                                 "Cash-flow analysis", "Depreciation",
                                                 "Real estate"};
-    static const std::set<std::string> kExcluded{"ConvertInterestRate", "ComputeFisherRate"};
+    // Mirrors build_mortgage_dataset.py's EXCLUDE_RPCS, which carries the
+    // reasoning for each entry. ComputeRentVsBuyBatch is a BULK API rather than
+    // an utterance -- it takes a repeated RentVsBuyRequest, and no single
+    // sentence grounds a thousand scenarios. This check FAILED the moment that
+    // RPC was added to finance.proto, which is the drift gate working: the
+    // assistant's label space must never grow silently because the proto did.
+    static const std::set<std::string> kExcluded{"ConvertInterestRate", "ComputeFisherRate",
+                                                 "ComputeRentVsBuyBatch"};
 
     ProtoView view;
     const auto svc = text.find("service Finance {");

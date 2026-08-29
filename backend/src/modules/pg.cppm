@@ -166,11 +166,33 @@ export class Connection {
      * keyword with expand_dbname=1, which is libpq's own documented
      * mechanism for accepting either a URI (`postgres://...`) or a
      * keyword/value string there and merging in additional keywords
-     * afterwards -- here, `connect_timeout`, which then takes precedence
-     * over anything the same keyword already named inside `conninfo`. This
-     * is what "every connection carries connect_timeout=2" means in
-     * practice: it is enforced by this one call, not by asking every caller
-     * to remember to append it to their DATABASE_URL.
+     * afterwards -- here, `connect_timeout` and `sslmode`, which then take
+     * precedence over anything the same keyword already named inside
+     * `conninfo`. This is what "every connection carries connect_timeout=2"
+     * and "TLS is enforced on every connection" mean in practice: they are
+     * enforced by this one call, not by asking every caller to remember to
+     * append them to their DATABASE_URL.
+     *
+     * TLS enforcement and `sslmode`:
+     *
+     *   libpq's default is `prefer`, which negotiates TLS opportunistically
+     *   and silently falls back to plaintext if TLS negotiation fails --
+     *   so "we observed TLS" in production is not the same as "TLS is
+     *   enforced".
+     *
+     *   Merging `sslmode=require` guarantees that plaintext is rejected.
+     *   `require` encrypts traffic on the wire but does NOT verify the
+     *   server certificate, so it stops passive eavesdropping and not an
+     *   active MITM. The stronger levels (`verify-ca` and `verify-full`)
+     *   are NOT used because no root CA bundle is shipped in the runtime
+     *   image; tested against production, both fail with: "Either provide
+     *   the file or change sslmode to disable server certificate
+     *   verification". `require` is therefore the strongest level that
+     *   works today.
+     *
+     *   An operator can override this default for local socket-only dev
+     *   databases without editing code by setting `PGSSLMODE_OVERRIDE`
+     *   (e.g. to `disable` or `prefer`), but the default remains `require`.
      *
      * `statement_timeout` is a SESSION GUC set via `SET statement_timeout`
      * as this connection's first statement, before the connection is
@@ -384,8 +406,12 @@ auto Connection::connect(std::string_view conninfo, std::chrono::milliseconds co
         1, std::chrono::duration_cast<std::chrono::seconds>(connect_timeout).count());
     const std::string timeout_str = std::to_string(seconds);
 
-    const char* keywords[] = {"dbname", "connect_timeout", nullptr};
-    const char* values[] = {dbname.c_str(), timeout_str.c_str(), nullptr};
+    const char* const sslmode_env = std::getenv("PGSSLMODE_OVERRIDE");
+    const char* const sslmode =
+        (sslmode_env != nullptr && sslmode_env[0] != '\0') ? sslmode_env : "require";
+
+    const char* keywords[] = {"dbname", "connect_timeout", "sslmode", nullptr};
+    const char* values[] = {dbname.c_str(), timeout_str.c_str(), sslmode, nullptr};
 
     ConnHandle handle{PQconnectdbParams(keywords, values, /*expand_dbname=*/1)};
     if (!handle) {

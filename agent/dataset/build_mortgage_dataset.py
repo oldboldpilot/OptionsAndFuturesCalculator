@@ -200,9 +200,25 @@ IN_SCOPE_SECTIONS = {
     "Time value of money", "Mortgages, HELOC", "Cash-flow analysis",
     "Depreciation", "Real estate",
 }
-# Rate-theory utilities under the in-scope "Time value of money" banner that
-# nobody phrases as a mortgage/FV chat message -- see module docstring.
-EXCLUDE_RPCS = {"ConvertInterestRate", "ComputeFisherRate"}
+# In-scope BANNERS carry a few RPCs that are not chat messages. Excluded by
+# hand because the section heuristic cannot see the difference:
+#
+#   ConvertInterestRate / ComputeFisherRate -- rate-theory utilities nobody
+#     phrases as a mortgage/FV request. See the module docstring.
+#
+#   ComputeRentVsBuyBatch -- a BULK API, not an utterance. It takes a repeated
+#     RentVsBuyRequest so a caller can compute up to a thousand scenarios in
+#     one round trip; nobody says "compare a thousand scenarios" and means a
+#     specific thousand. The assistant's job is to name ONE operation and fill
+#     its parameters, and admitting a batch would give the model a label whose
+#     arguments no single utterance can ground -- the exact shape this file's
+#     phrase_money docstring warns about. A caller wanting bulk work calls the
+#     batch RPC directly; the assistant keeps naming ComputeRentVsBuy.
+#
+# backend/tests/test_mortgage_grammar.cpp mirrors this set and FAILED when the
+# batch RPC was added, which is the drift check doing its job -- the label
+# space must never grow silently just because the proto did.
+EXCLUDE_RPCS = {"ConvertInterestRate", "ComputeFisherRate", "ComputeRentVsBuyBatch"}
 
 
 def build_operations(parsed: dict) -> dict[str, dict]:

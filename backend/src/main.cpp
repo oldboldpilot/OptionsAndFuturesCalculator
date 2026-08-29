@@ -11,6 +11,7 @@ import finance_service;
 import assistant_service;
 import mortgage_assistant_service;
 import api_key;
+import fips_mode;
 
 namespace {
 
@@ -78,6 +79,26 @@ constexpr int kDefaultPort = 50051;
 auto RunServer() -> void {
     std::string server_address("0.0.0.0:" + std::to_string(resolve_port()));
     grpc::ServerBuilder builder;
+    // BEFORE the listener binds. Under FIPS_MODE=required a failure must stop
+    // the process, and a process that has already accepted a request cannot
+    // un-accept it -- serving one call with unapproved cryptography and exiting
+    // afterwards is, to the caller holding that answer, the same as no gate.
+    {
+        const auto fips_status = fips::apply_from_environment();
+        std::cout << fips::describe(fips_status) << std::endl;
+        if (fips_status.requested == fips::Mode::Required &&
+            !(fips_status.fips_provider_loaded && fips_status.default_properties_fips)) {
+            std::cerr << "FATAL: FIPS_MODE=required and FIPS is not in force. Refusing to start."
+                      << std::endl;
+            // std::exit, not a return: RunServer() returns void, and this must
+            // stop the PROCESS. Refusing to bind while letting main() carry on
+            // would leave a container that looks alive to Railway's healthcheck
+            // and serves nothing -- the shape this repo has already been bitten
+            // by, where a deployment reported SUCCESS while crash-looping.
+            std::exit(1);
+        }
+    }
+
     builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
     builder.SetMaxReceiveMessageSize(kMaxRequestBytes);
 

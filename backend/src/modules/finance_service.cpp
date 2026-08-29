@@ -18,6 +18,7 @@ module finance_service;
 
 import sensen.bigdecimal;
 import sensen.financial;
+import sensen.parallel;
 import sensen.options;
 import sensen.portfolio;
 import sensen.linear_algebra;
@@ -2576,16 +2577,26 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         return Status::OK;
     }
 
-    auto ComputeRentVsBuy(ServerContext* context, const sensen::finance::RentVsBuyRequest* request,
-                         sensen::finance::RentVsBuyResponse* response) -> Status override {
-        if (request == nullptr || response == nullptr) {
-            return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
-        }
-        // The engine loops `years*12` iterations (financial.cppm:2352-2465) in
-        // the amortising model or `years` in legacy -- bounded to <=100 by the
-        // validation below, so cost_default() prices it honestly rather than
-        // reaching for a new helper for an O(<=1200) walk.
-        CHARGE("ComputeRentVsBuy", quota::cost_default());
+    /**
+     * ONE scenario, shared by ComputeRentVsBuy and ComputeRentVsBuyBatch.
+     *
+     * Extracted so the batch RPC cannot drift from the single-scenario one.
+     * Everything that makes this operation correct lives here and is therefore
+     * identical for both callers: the shape dispatch and its total decision
+     * function, the compounding-overflow bounds on all four rates, the
+     * decimal-magnitude guards, and every refusal message. A batch that
+     * reimplemented any of it would be a second set of rules to keep in step,
+     * and this file already carries the scar of a dispatch that was correct for
+     * one caller and inverted for another.
+     *
+     * Deliberately NOT charging. The caller charges: once for a single
+     * scenario, once per scenario for a batch. Putting CHARGE here would make
+     * the cost invisible at the call site, which is where the quota question
+     * actually is.
+     */
+    [[nodiscard]] auto compute_rent_vs_buy_one(
+        const sensen::finance::RentVsBuyRequest* request,
+        sensen::finance::RentVsBuyResponse* response) -> Status {
         if (request->years() <= 0 || request->years() > 100) {
             return Status(grpc::StatusCode::INVALID_ARGUMENT,
                           "years must be positive and at most 100");
@@ -2877,6 +2888,132 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         response->set_real_owner_terminal_wealth(r->real_owner_terminal_wealth.to_string());
         response->set_real_renter_terminal_wealth(r->real_renter_terminal_wealth.to_string());
 
+        return Status::OK;
+    }
+
+    auto ComputeRentVsBuy(ServerContext* context,
+                          const sensen::finance::RentVsBuyRequest* request,
+                          sensen::finance::RentVsBuyResponse* response) -> Status override {
+        if (request == nullptr || response == nullptr) {
+            return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
+        }
+        // The engine loops `years*12` iterations in the amortising model or
+        // `years` in legacy -- bounded to <=100 by the validation inside the
+        // helper, so cost_default() prices it honestly.
+        CHARGE("ComputeRentVsBuy", quota::cost_default());
+        return compute_rent_vs_buy_one(request, response);
+    }
+
+    auto ComputeRentVsBuyBatch(ServerContext* context,
+                               const sensen::finance::RentVsBuyBatchRequest* request,
+                               sensen::finance::RentVsBuyBatchResponse* response)
+        -> Status override {
+        if (request == nullptr || response == nullptr) {
+            return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
+        }
+        const int n = request->scenarios_size();
+
+        // REFUSED, not truncated. A truncated batch returns a shorter list that
+        // looks like a complete answer -- the same reason ComputeAmortizationBatch
+        // refuses a ragged batch rather than cutting to the shortest column. The
+        // bound exists at all because `results` is built in memory before the
+        // response is written.
+        constexpr int kMaxScenarios = 1000;
+        if (n > kMaxScenarios) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "scenarios has " + std::to_string(n) + " entries; at most " +
+                              std::to_string(kMaxScenarios) +
+                              " may be sent in one batch. Split the work rather than "
+                              "expecting a truncated answer.");
+        }
+
+        // PER SCENARIO, so a batch costs exactly what the same work costs one
+        // call at a time. This RPC exists to escape the ingress rate limit and
+        // the round trips, not the quota -- charging once for a thousand
+        // scenarios would make it a bypass, and a caller could then buy a
+        // thousandfold discount by changing which method they call.
+        //
+        // Charged BEFORE any work, and for the whole batch, so an over-budget
+        // caller is refused up front rather than after computing.
+        CHARGE("ComputeRentVsBuyBatch", quota::cost_default() * static_cast<double>(n));
+
+        if (n == 0) {
+            return Status::OK;  // an empty batch is a valid no-op, not an error
+        }
+
+        // Every slot is allocated SERIALLY first, then filled in parallel.
+        //
+        // `add_results()` mutates the RepeatedPtrField itself -- reallocating,
+        // reordering -- so calling it from several threads is a data race.
+        // Writing to DISTINCT already-allocated elements is not. Allocating up
+        // front is also what preserves the positional contract: index i of the
+        // response is scenario i whatever order the threads finish in.
+        response->mutable_results()->Reserve(n);
+        for (int i = 0; i < n; ++i) {
+            response->add_results();
+        }
+
+        // Scenarios are independent, so this is data-parallel with no shared
+        // state: `compute_rent_vs_buy_one` reads a const scenario, writes only
+        // the response it is handed, and every helper it reaches
+        // (classify_decimal_field, decide_rent_vs_buy_shape,
+        // check_compound_growth_safe, sensen::calculate_rent_vs_buy*) is pure.
+        // CHARGE is deliberately OUTSIDE this loop -- the quota bucket is a
+        // process-wide mutex and charging once for the batch is both correct
+        // and the only lock-free choice here.
+        //
+        // Dispatched through `sensen::parallel`, NOT tbb::parallel_for
+        // directly, for the reason financial.cppm's own batch documents:
+        // reaching tbb:: types from a module interface attaches them to the
+        // global module and breaks the MSVC build far from here. The shim is
+        // TBB on Linux and PPL on Windows.
+        //
+        // Measured, 500 scenarios, this host: 3275us serial -> see the commit
+        // message for the parallel figure. Per-scenario work is hundreds of
+        // exact fixed-point steps, so task overhead is negligible beside it.
+        const auto run_one = [&](int i) -> void {
+            auto* slot = response->mutable_results(i);
+            sensen::finance::RentVsBuyResponse one;
+            const Status st = compute_rent_vs_buy_one(&request->scenarios(i), &one);
+            if (st.ok()) {
+                *slot->mutable_result() = std::move(one);
+            } else {
+                slot->set_error(st.error_message());
+            }
+        };
+
+        // BELOW THE THRESHOLD, SERIAL -- because parallelism made small batches
+        // SLOWER, measured rather than assumed:
+        //
+        //        n      serial   parallel
+        //        1       136us      151us     0.9x   <- worse
+        //       10       163us      230us     0.7x   <- worse
+        //      100       686us      446us     1.5x
+        //      500      3275us     1250us     2.6x
+        //     1000      5736us     1826us     3.1x
+        //
+        // A scenario is only a few microseconds of work, so for a handful of
+        // them the task-scheduling overhead is the whole cost. 64 is above the
+        // measured crossover with margin; the exact point drifts with core
+        // count and this does not need to be tuned per host, only to be on the
+        // right side of it. Shipping the parallel path unconditionally would
+        // have been a REGRESSION for every small caller in exchange for a win
+        // only bulk callers see.
+        constexpr int kParallelThreshold = 64;
+        if (n < kParallelThreshold) {
+            for (int i = 0; i < n; ++i) {
+                run_one(i);
+            }
+            return Status::OK;
+        }
+
+        sensen::parallel::parallel_for(
+            sensen::parallel::blocked_range(0, static_cast<std::size_t>(n)),
+            [&](const sensen::parallel::blocked_range& r) -> void {
+                for (std::size_t idx = r.begin(); idx < r.end(); ++idx) {
+                    run_one(static_cast<int>(idx));
+                }
+            });
         return Status::OK;
     }
 
