@@ -465,7 +465,7 @@ RUN wget -qO /tmp/cmake.tar.gz \
 # class. Legal C++, and Clang 22 compiles it. Pinning the container below the
 # development toolchain means the deploy target keeps diverging from what is
 # tested, so it tracks it instead.
-ARG LLVM_VERSION=22
+ARG LLVM_VERSION=23
 RUN wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh \
     && chmod +x /tmp/llvm.sh \
     && /tmp/llvm.sh ${LLVM_VERSION} \
@@ -530,8 +530,8 @@ COPY backend/ /src/backend/
 #
 # sensen locates libc++'s std.cppm by walking up from the C++ compiler:
 # dirname(dirname(CMAKE_CXX_COMPILER))/share/libc++/v1/std.cppm. apt.llvm.org
-# installs it per-version at /usr/lib/llvm-22/share/libc++/v1/std.cppm, which
-# that walk finds ONLY if the compiler is /usr/lib/llvm-22/bin/clang++. Given
+# installs it per-version at /usr/lib/llvm-23/share/libc++/v1/std.cppm, which
+# that walk finds ONLY if the compiler is /usr/lib/llvm-23/bin/clang++. Given
 # /usr/bin/clang++ the walk lands on /usr/share/libc++/v1, which this image does
 # not have, sensen never declares std_module_precompile, and backend/CMakeLists
 # aborts configure -- correctly, but for a reason that reads as a missing
@@ -553,7 +553,7 @@ RUN cmake -S /src/backend -B /src/build -G Ninja \
 # calculator_engine and smoke_client now link against libc++ instead of
 # libstdc++6, which is a problem the runtime stage below cannot solve out of
 # its own apt sources: Ubuntu 24.04 ships its OWN libc++1 package, and that is
-# LLVM 18 — one major version behind the LLVM 22 this binary is actually
+# LLVM 18 — five major versions behind the LLVM 23 this binary is actually
 # linked against. Installing it would be version skew wearing the same
 # soname, which is worse than installing nothing: the container would start,
 # then fail unpredictably deep inside libc++ instead of refusing to launch.
@@ -561,7 +561,7 @@ RUN cmake -S /src/backend -B /src/build -G Ninja \
 # built it, sitting in this stage's own apt cache.
 #
 # Rather than hardcode a literal path under /usr/lib and hope it matches
-# whatever package layout apt.llvm.org happens to use for LLVM 22 on Ubuntu
+# whatever package layout apt.llvm.org happens to use for LLVM 23 on Ubuntu
 # 24.04, this step asks the freshly linked binaries themselves via `ldd` —
 # the same authority the runtime-stage comment below already treats as the
 # source of truth for the rest of this image's shared-object list — and
@@ -573,7 +573,7 @@ RUN cmake -S /src/backend -B /src/build -G Ninja \
 # is handled correctly without anyone having to notice and update this file.
 #
 # `cp -L` dereferences the symlink chain apt.llvm.org's packages actually use
-# (a versioned compatibility symlink under /usr/lib/llvm-22/lib pointing at an
+# (a versioned compatibility symlink under /usr/lib/llvm-23/lib pointing at an
 # unversioned real file elsewhere) down to a single flat regular file, so what
 # lands in /src/build/lib/ needs no symlink target to also be present
 # alongside it. A missing or unresolved entry FAILS THE BUILD here, loudly,
@@ -668,7 +668,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # as fact: this list has NOT been re-derived from an actual built image as
 # part of this change, because no image was built to check it against. What
 # HAS been independently verified, by extracting apt.llvm.org's actual .deb
-# packages for LLVM 22 on Ubuntu 24.04 (noble) amd64 — the exact combination
+# packages for LLVM 23 on Ubuntu 24.04 (noble) amd64 — the exact combination
 # this Dockerfile's builder stage installs — and reading their ELF dynamic
 # sections directly with `readelf -d`, rather than assuming: libc++.so.1's own
 # NEEDED entries are libc++abi.so.1, libc.so.6, libm.so.6 and libgcc_s.so.1,

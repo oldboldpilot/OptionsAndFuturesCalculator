@@ -2973,6 +2973,91 @@ Their old comment claimed a CPU-only build "falls back to CPU and the comparison
 is trivially exact"; it does not — each names its backend explicitly and
 `LowBitFlashAttention` throws on a GPU request without CUDA.
 
+## The toolchain is clang 23, and what moving to it found
+
+`ARG LLVM_VERSION=23` in `backend/Dockerfile` and `backend/Dockerfile.queue-node`
+as of 2026-08-29, up from 22. `config/cpp_details.txt` rules 50/60 say
+`clang++-23` now.
+
+**Gated on the container, not on the local build**, because the container build
+is what deploys. `podman build --build-arg LLVM_VERSION=23` succeeds, uses
+llvm-23 in 378 places and llvm-22 in **zero**, and the resulting image passes the
+whole `smoke_client … finance` suite in-image — every independent identity, with
+`pmt(300k, 6%, 30y) = -1798.651575` matching the closed form exactly. Locally:
+**ctest 103/103 on clang 23**, identical to clang 22, with **zero** compile
+errors in this tree, sensen, SGEE, gRPC or protobuf.
+
+**The reason to move is clang-tidy, and it is a big one.**
+`backend/CMakeLists.txt` forces `SKIP_CLANG_TIDY ON` "due to c++23 module
+scanning bugs". Measured A/B on one module, each compiler with its OWN
+`std.pcm` (a mismatched BMI makes this comparison meaningless — the first
+attempt scored clang-tidy 22 against clang 23's `std.pcm` and got four bogus
+"module file uses a newer format" errors):
+
+| | diagnostics on the same file |
+| --- | --- |
+| clang-tidy 22 | **11,176** — it walks into libc++'s own `std.cppm` internals |
+| clang-tidy 23 | **5** (4 more correctly suppressed as non-user code) |
+
+It also analyses a real 2,400-line module of ours (`mortgage_verification.cppm`)
+producing 23 actionable diagnostics, no crash, no flood. **That does not
+re-enable `CXX_CLANG_TIDY` on its own**: measured, **0 of our `.cppm` files
+appear in `compile_commands.json`** in either build, because CMake does not emit
+database entries for `FILE_SET CXX_MODULES` sources. That is a generator
+limitation, not a clang-tidy one, and clang 23 does not change it — a wrapper
+passing flags directly is what works today.
+
+**llama.cpp does NOT build against libc++ 23** — 221 errors at pin `b6963`, all
+missing transitive includes (`std::max`, `getenv`, `atoi`, `strtol`) that libc++
+23 stopped providing implicitly. It is `ENABLE_LLAMACPP_BACKEND=OFF` in both
+images so production is unaffected, and this file already records it as "a
+debugging and cross-checking tool only". It is ON in the local dev build, so the
+parity probes need a pin bump or a local OFF.
+
+### Two latent bugs the second toolchain exposed, both ours
+
+**Neither is a clang 23 defect.** A second compiler is a differential test, and
+these are what it found.
+
+**1. libc++ was located by guessing absolute paths.** SGEE and sensen each
+walked a fixed list of directories and fell through to a hardcoded
+`/usr/local/lib/x86_64-unknown-linux-gnu` — a DIFFERENT compiler's runtime. A
+relocatable LLVM release installs its runtimes at `<root>/lib/<target-triple>/`,
+which no entry matched. Objects compiled against libc++ 23 headers then linked
+against libc++ 22 and failed with
+
+```
+undefined reference to `vtable for std::__bad_variant_access_with_msg'
+```
+
+which names an internal new in that release and **reads as a corrupt standard
+library rather than as two of them**. Configure printed a path and no warning,
+and the ENGINE linked fine — only SGEE pins a path, so it surfaced only in
+SGEE's own tests. Both now ask `-print-file-name=libc++.so`, so the libraries
+cannot disagree with the headers that compiled the objects. This is what rule
+114 already required.
+
+**2. The neo4j driver's "auto-registration" was link-order luck.** A
+namespace-scope object registers the driver in its constructor, and no consumer
+names a symbol in that translation unit — **`import` makes declarations visible
+and creates no link-time reference**. In a static archive the linker therefore
+has no reason to extract the member, and an initializer in an unextracted member
+never runs. It worked only while some OTHER symbol there happened to be needed.
+Measured on identical source: `graph_tests` linked with clang 22 carries **15**
+`Neo4jConnection` symbols and passes; with clang 23 it carries **ZERO** and
+`has("neo4j")` is false. **Both compilers emit the initializer** — `.init_array`
+is present in both object files — so this is archive-member selection, not
+codegen. Fixed with an exported `register_neo4j()`, mirroring
+`db_sql_ext`'s existing `register_postgresql`. `[[gnu::used]]` would NOT have
+fixed it: it stops the compiler discarding the object, and the object was never
+the problem.
+
+**sensen's pointer is deliberately NOT bumped.** The same libc++ fix is upstream
+(`a76d589b`), but sensen master has moved **40 commits** of unrelated GPU/RL work
+since this tree's pin, and dragging those in alongside a toolchain change makes
+any failure unattributable. It is also not load-bearing here — the clang 23
+engine linked at `rc=0` before that fix.
+
 ## Build Commands
 - **Frontend Production Build:** `cd frontend && npm run build`
 - **Frontend Dev Server:** `cd frontend && npm run dev`

@@ -69,7 +69,7 @@ RUN wget -qO /tmp/cmake.tar.gz \
     && rm /tmp/cmake.tar.gz \
     && cmake --version
 
-ARG LLVM_VERSION=22
+ARG LLVM_VERSION=23
 RUN wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh \
     && chmod +x /tmp/llvm.sh \
     && /tmp/llvm.sh ${LLVM_VERSION} \
@@ -141,7 +141,7 @@ RUN cmake -S /src/backend -B /src/build -G Ninja \
 
 # Collect the libc++ runtime the way backend/Dockerfile does: ask the freshly
 # linked binaries, do not hardcode a path. Ubuntu 24.04's own libc++1 is LLVM
-# 18 against an LLVM 22 binary -- same soname, one major version apart -- so
+# 18 against an LLVM 23 binary -- same soname, five major versions apart -- so
 # installing the distro package in the runtime stage would produce a container
 # that starts and then fails somewhere inside libc++. An unresolved entry fails
 # the build HERE, loudly, rather than at container start.
