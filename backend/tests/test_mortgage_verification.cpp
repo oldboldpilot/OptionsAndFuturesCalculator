@@ -1140,6 +1140,140 @@ auto main() -> int {
                     "is XIRR only");
     }
 
+    // =======================================================================
+    section("Down payments: M0 refuses one thing, M9 admits another");
+    // =======================================================================
+    // Both halves come from ONE production failure, measured 2026-08-29 through
+    // the live ingress on "a 500000 home with 20% down at 6.5%":
+    //
+    //   * `annual_rate = 0.2000` was returned as PROVEN. The model read the
+    //     down payment as the interest rate, dropped the stated 6.5%, and the
+    //     gate admitted it because 20 -> 0.20 is an ordinary M2 candidate for a
+    //     rate slot. A real field, a parseable value, every bound satisfied,
+    //     and a 20% mortgage priced. This is the "corrupted value" failure in
+    //     its most dangerous form, and per-field grounding could not see it.
+    //
+    //   * `present_value = 400000` -- the CORRECT loan -- had no candidate at
+    //     all, because every map was unary and 400000 is written nowhere.
+    //
+    // Those pull in opposite directions, which is why one section covers both:
+    // a fix for either alone would have been half a rule.
+    {
+        const std::string text =
+            "amortization schedule for a 500000 home with 20% down at 6.5% for 30 years";
+
+        // --- M0: the down-payment percent may not be the rate. -------------
+        auto as_rate = params("ComputeAmortization", {{"loan_amount", "500000.00"},
+                                                      {"annual_rate", "0.2000"},
+                                                      {"term_months", "360"},
+                                                      {"monthly_overpayment", "0.00"},
+                                                      {"pmi_annual_rate", "0.0000"},
+                                                      {"original_home_value", "500000.00"}});
+        expect(as_rate, text, mv::Outcome::Unsafe, mv::ReasonCode::UngroundedValue,
+               "the DOWN PAYMENT percent is refused as an interest rate -- this exact output "
+               "was returned as Proven in production and priced a 20% mortgage");
+
+        // The rate the user actually stated still grounds, from the same
+        // utterance. Without this the section would pass with a gate that
+        // refuses every rate, which is the failure mode it is guarding.
+        auto correct_rate = params("ComputeAmortization", {{"loan_amount", "500000.00"},
+                                                           {"annual_rate", "0.0650"},
+                                                           {"term_months", "360"},
+                                                           {"monthly_overpayment", "0.00"},
+                                                           {"pmi_annual_rate", "0.0000"},
+                                                           {"original_home_value", "500000.00"}});
+        expect_pass(correct_rate, text,
+                    "the STATED 6.5% still grounds as the rate in the same sentence");
+
+        // --- M9: the netted loan is admissible. ----------------------------
+        auto netted = params("ComputeAmortization", {{"loan_amount", "400000.00"},
+                                                     {"annual_rate", "0.0650"},
+                                                     {"term_months", "360"},
+                                                     {"monthly_overpayment", "0.00"},
+                                                     {"pmi_annual_rate", "0.0000"},
+                                                     {"original_home_value", "500000.00"}});
+        expect_pass(netted, text,
+                    "loan_amount = 500000 - 20% = 400000 is GROUNDED, though 400000 appears "
+                    "nowhere in the utterance");
+
+        // The money spelling of the same thing must behave identically. A rule
+        // that held for "20% down" and not for "100,000 down" would be a trap.
+        const std::string money_text =
+            "monthly payment on a 500000 home, 100000 down payment, 6.5%, 360 months";
+        auto money_netted = params("ComputePayment", {{"rate", "0.005417"},
+                                                      {"periods", "360"},
+                                                      {"present_value", "400000.00"},
+                                                      {"future_value", "0.00"},
+                                                      {"timing", "END_OF_PERIOD"}});
+        expect_pass(money_netted, money_text,
+                    "present_value = 500000 - 100000 is grounded on the MONEY spelling too");
+
+        // --- The bounds of M9, which are the point of scoping it. ----------
+        // A difference that is not a down payment is NOT admissible: this is
+        // what stops "any two numbers may be subtracted" from being the rule.
+        auto not_a_down_payment = params("ComputePayment", {{"rate", "0.005417"},
+                                                            {"periods", "360"},
+                                                            {"present_value", "400000.00"},
+                                                            {"future_value", "0.00"},
+                                                            {"timing", "END_OF_PERIOD"}});
+        expect(not_a_down_payment,
+               "monthly payment on a 500000 loan minus a 100000 credit at 6.5% for 360 months",
+               mv::Outcome::Unsafe, mv::ReasonCode::UngroundedValue,
+               "a difference of two money literals that is NOT a down payment stays ungrounded");
+
+        // And the netting is scoped to the loan slots by NAME. `future_value`
+        // is Money too, and nothing about it means "price less the deposit".
+        auto wrong_slot = params("ComputePayment", {{"rate", "0.005417"},
+                                                    {"periods", "360"},
+                                                    {"present_value", "500000.00"},
+                                                    {"future_value", "400000.00"},
+                                                    {"timing", "END_OF_PERIOD"}});
+        expect(wrong_slot, money_text, mv::Outcome::Unsafe, mv::ReasonCode::UngroundedValue,
+               "M9 does not reach `future_value` -- it is scoped to the two loan slots by name");
+
+        // The full price is STILL grounded, deliberately. M9 adds a candidate;
+        // it does not remove M1. "the payment on the 500,000" is a question a
+        // person can legitimately ask, and the gate's job is not to decide
+        // which of two admissible readings the user meant.
+        auto gross = params("ComputePayment", {{"rate", "0.005417"},
+                                               {"periods", "360"},
+                                               {"present_value", "500000.00"},
+                                               {"future_value", "0.00"},
+                                               {"timing", "END_OF_PERIOD"}});
+        expect_pass(gross, money_text,
+                    "the GROSS price still grounds -- M9 widens the candidate set, it does not "
+                    "replace M1, and choosing between readings is the model's job not the gate's");
+
+        // A down-payment percent in a RATIO slot is exactly right, and M0 must
+        // not touch it. The same literal is correct in one slot and dangerous
+        // in another, which is why this could never be a magnitude heuristic.
+        // A down-payment percent in a RATIO slot is exactly right, and M0 must
+        // not touch it -- the same literal is correct in one slot and dangerous
+        // in another, which is why this could never be a magnitude heuristic.
+        // Reusing the closing-costs control from the bounds section verbatim:
+        // its utterance says "with 10% down", so it is precisely the shape M0
+        // would break if it were scoped one level wider.
+        expect(params("ComputeClosingCosts", {{"home_price", "450000.00"},
+                                              {"down_payment_percent", "0.100000"},
+                                              {"annual_rate", "0.067500"},
+                                              {"origination_fee_percent", "0.007500"},
+                                              {"discount_points_percent", "0.000000"},
+                                              {"other_lender_fees", "1400.00"},
+                                              {"title_settlement_percent", "0.005500"},
+                                              {"appraisal_fee", "650.00"},
+                                              {"inspection_fee", "500.00"},
+                                              {"recording_fees", "225.00"},
+                                              {"transfer_tax_percent", "0.005000"},
+                                              {"homeowners_insurance_annual", "2100.00"},
+                                              {"property_tax_annual", "6300.00"},
+                                              {"tax_escrow_months", "3"},
+                                              {"seller_lender_credits", "0.00"},
+                                              {"prepaid_interest_days", "15"}}),
+               "Closing costs on a $450,000 home with 10% down at 6.75%: 0.75% origination, 0% discount points, $1,400 other lender fees, 0.55% title and settlement, $650 appraisal, $500 inspection, $225 recording, 0.5% transfer tax, $2,100 a year homeowners insurance, $6,300 a year property tax, 3 months of tax escrow, $0 seller credits, 15 days of prepaid interest.",
+               mv::Outcome::Proven, mv::ReasonCode::None,
+               "M0 is scoped to Rate: `down_payment_percent` = 0.10 from \"10% down\" is still Proven");
+    }
+
     // -----------------------------------------------------------------
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

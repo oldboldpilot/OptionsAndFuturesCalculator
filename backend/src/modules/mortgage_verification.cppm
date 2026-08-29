@@ -837,6 +837,25 @@ export [[nodiscard]] auto verify_mortgage_params(const MortgageParamsInput& inpu
 //                                            cash-flow series in which an
 //                                            outlay is negative ("I invest
 //                                            $60,000 today" -> -60000)
+////  M9 net of down       a - b, a x (1-p)     K == Money AND the field is named
+//      payment                                exactly `present_value` or
+//                                            `loan_amount`, AND `b`/`p` is a
+//                                            literal the LEXER tagged as
+//                                            naming a down payment. The ONLY
+//                                            binary map: "a 500,000 home with
+//                                            20% down" states a 400,000 loan
+//                                            that appears nowhere in the text.
+//
+// M9 is the only rule that reads two literals, and it is deliberately the
+// last one added rather than the first: every unary map is a finite
+// disjunction over ONE number the user wrote, which is what makes this gate
+// checkable by reading it. Widening to pairs costs that property, so it is
+// scoped to two field names and to a literal the lexer has already decided
+// names a down payment, and it runs only after every unary map has failed.
+//
+// M0 is not a map at all but belongs in the list because it is the same
+// mechanism used subtractively: a percent that names a down payment is
+// REMOVED from the candidate set of a Rate slot. See `expand_candidates`.
 //
 // Thousands separators and currency symbols are NOT maps: `$1,356,200` is
 // LEXED as the literal 1356200, so `1356200.00` matches it under M1. That is
@@ -994,6 +1013,29 @@ export struct NumericLiteral {
     LiteralTag tag = LiteralTag::Untagged;
     std::int64_t scale = 1;
     std::size_t offset = 0;
+
+    /**
+     * The words immediately after this literal name a DOWN PAYMENT
+     * ("20% down", "100,000 down payment", "$100k deposit").
+     *
+     * This is an ADJACENCY property, so it is the lexer's to decide -- the
+     * same judgement that turns "30-year" into a Years tag and "$1,200 a
+     * year" into Money. It is carried as a flag rather than a `LiteralTag`
+     * because it does not REPLACE the tag: "20% down" is still a Percent
+     * literal and "100,000 down" is still Money. It qualifies what those may
+     * ground, which the tag/kind matrix alone cannot express.
+     *
+     * It exists because of a measured production failure. On
+     * "amortization schedule for a 500000 home with 20% down at 6.5% for 30
+     * years" the model emitted `annual_rate = 0.2000` -- reading the DOWN
+     * PAYMENT as the interest rate and dropping the stated 6.5% entirely --
+     * and G3 admitted it, because 20 -> 0.20 is a perfectly ordinary M2
+     * candidate for a rate slot. The answer named a real field, parsed,
+     * satisfied every bound, and priced a 20% mortgage. That is exactly the
+     * "corrupted value" failure this gate exists to catch, and the gate could
+     * not see it: grounding is per-field, and nothing said WHICH percent.
+     */
+    bool names_down_payment = false;
 };
 
 /**
@@ -1574,6 +1616,21 @@ namespace detail {
     std::vector<Decimal> out;
     if (!tag_admissible(kind, lit.tag)) return out;
 
+    // M0 -- THE ONE SUBTRACTIVE RULE, and it is a refusal rather than a map.
+    //
+    // A percent that names a DOWN PAYMENT is not an interest rate, and no
+    // arithmetic makes it one. Without this, "20% down at 6.5%" grounds
+    // `annual_rate = 0.2000` under M2 and the gate returns Proven on an
+    // answer that silently prices a 20% mortgage while discarding the rate
+    // the user actually stated. Measured in production 2026-08-29.
+    //
+    // Scoped to Rate, not to Ratio: `down_payment_percent` on
+    // ComputeClosingCosts is a Ratio slot and 0.20 is exactly what belongs in
+    // it. The distinction is the whole point -- the same literal is correct
+    // in one slot and dangerous in another, which is why this could never be
+    // a magnitude heuristic.
+    if (kind == SlotKind::Rate && lit.names_down_payment) return out;
+
     const auto push = [&out](std::optional<Decimal> d) {
         if (d.has_value()) out.push_back(*d);
     };
@@ -1678,6 +1735,99 @@ namespace detail {
     if (field_name == "values") {
         const std::size_t n = out.size();
         for (std::size_t i = 0; i < n; ++i) out.push_back(out[i].negated());
+    }
+    return out;
+}
+
+/** The two money slots that hold a loan AFTER the down payment is taken off.
+ * Scoped by NAME, exactly as `kPerPeriodRateFields` scopes M3 -- the netting
+ * is a property of what the slot means, not of its type. */
+inline constexpr std::array<std::string_view, 2> kNettedLoanFields{"present_value", "loan_amount"};
+
+/**
+ * M9 -- the ONLY binary map, and the only one that reads two literals at once.
+ *
+ * "a 500,000 home with 20% down" states the loan without writing it: 400000
+ * appears nowhere in the text, so every unary map refuses it and a model that
+ * transcribes correctly is refused for being right. The user must not have to
+ * do the subtraction themselves to be understood.
+ *
+ * WHY IT IS SAFE TO WIDEN THE GATE HERE, stated as the bound rather than as a
+ * reassurance. It runs ONLY for a Money slot named `present_value` or
+ * `loan_amount`, and ONLY pairs a price with a literal the LEXER already
+ * decided names a down payment -- so it is not "any difference of any two
+ * numbers". On the failing utterance it adds exactly one candidate. The
+ * corrupted-value failure this gate was built for (5379.00 emitted for a
+ * stated 5378.63) is untouched: a corrupted digit is not a difference of two
+ * literals the user wrote.
+ *
+ * It is a FALLBACK, consulted only after every unary map has failed, so it
+ * costs nothing on the path every other request takes.
+ *
+ * NOTE WHAT THIS DOES NOT DO. It makes the correct answer ADMISSIBLE; it does
+ * not make the model emit it. The deployed model emits the full price, and
+ * that is a corpus gap needing a retrain -- see the handoff. Landing this
+ * first is the order that matters: teaching the model to net the down payment
+ * while the gate still refused the result would turn a wrong answer into a
+ * refusal, which is the "squeezed from both sides" failure this file already
+ * records three times.
+ */
+[[nodiscard]] inline auto expand_netted_loan(const std::vector<NumericLiteral>& literals,
+                                             SlotKind kind, std::string_view field_name)
+    -> std::vector<Decimal> {
+    std::vector<Decimal> out;
+    if (kind != SlotKind::Money || !is_one_of(kNettedLoanFields, field_name)) return out;
+
+    // M4 is applied here too: "$500k with 20% down" must net from 500000, not
+    // from 500. Reusing the same rule rather than restating it.
+    const auto money_value = [](const NumericLiteral& lit) -> std::optional<Decimal> {
+        if (!tag_admissible(SlotKind::Money, lit.tag)) return std::nullopt;
+        if (lit.scale != 1) return lit.value.scaled_by(lit.scale);
+        return lit.value;
+    };
+
+    for (const auto& price : literals) {
+        if (price.names_down_payment) continue;  // the price is not the down payment
+        const auto p = money_value(price);
+        if (!p.has_value() || p->units() <= 0) continue;
+
+        for (const auto& dp : literals) {
+            if (!dp.names_down_payment) continue;
+            if (dp.offset == price.offset) continue;
+
+            // A down payment stated as MONEY: loan = price - down.
+            if (const auto d = money_value(dp); d.has_value()) {
+                if (d->units() > 0 && d->units() < p->units()) {
+                    out.push_back(Decimal{p->units() - d->units()});
+                }
+            }
+
+            // A down payment stated as a PERCENT: loan = price x (1 - pct/100).
+            // The percent signature is the same one M2 uses, so "20% down" and
+            // "20 down" behave identically -- a rule that held for one spelling
+            // and not the other would be a trap rather than a gate.
+            const bool percent_signature =
+                dp.tag == LiteralTag::Percent ||
+                (dp.tag == LiteralTag::Untagged && dp.value.units() > 0 &&
+                 dp.value.units() < static_cast<__int128>(100) * Decimal::kScale);
+            if (!percent_signature) continue;
+            const __int128 pct = dp.value.units();
+            if (pct <= 0 || pct >= static_cast<__int128>(100) * Decimal::kScale) continue;
+            // SPLIT before multiplying. The naive `p * pct / (kScale * 100)`
+            // overflows the guard for any realistic house: 500,000 in units is
+            // 5e20 and 20% is 2e16, and their product is 1e37 against a 1.3e36
+            // ceiling -- so the guard rejected every genuine case and admitted
+            // only tiny ones. Written this way the two terms peak at ~1e20 and
+            // ~2e31, both far inside __int128, and no guard is needed at all.
+            //
+            // Truncating, which loses at most 1e-15 -- five orders below the
+            // tightest tolerance any slot uses, exactly as `divided_by` argues.
+            static_assert(Decimal::kPlaces == 15, "the split below assumes the unit scale");
+            const __int128 whole = p->units() / Decimal::kScale;
+            const __int128 frac = p->units() % Decimal::kScale;
+            const __int128 down = (whole * pct) / 100 + (frac * pct) / (Decimal::kScale * 100);
+            out.push_back(Decimal{p->units() - down});
+        }
     }
     return out;
 }
@@ -1962,6 +2112,33 @@ auto lex_numeric_literals(std::string_view text) -> std::vector<NumericLiteral> 
                     lit.tag = LiteralTag::Months;
                 } else if (word == "day" || word == "days") {
                     lit.tag = LiteralTag::Days;
+                }
+            }
+        }
+
+        // The down-payment adjacency, read AFTER the suffix so that `i` is
+        // sitting past "%", "k" or "million". Two words, because the phrase
+        // is "down payment" as often as it is "down", and a bare "down" is
+        // the form the failing production utterance used.
+        {
+            const std::string w1 = detail::next_word(text, i);
+            if (w1 == "down" || w1 == "downpayment" || w1 == "deposit") {
+                lit.names_down_payment = true;
+            } else if (w1 == "as" || w1 == "for" || w1 == "with") {
+                // "20% as a down payment" -- one filler word, no more. A
+                // wider window would start matching a down payment mentioned
+                // in a different clause, and this flag REMOVES candidates,
+                // so a false positive is a refused correct parse.
+                std::size_t j = i;
+                for (int step = 0; step < 3 && j < text.size(); ++step) {
+                    while (j < text.size() && (text[j] == ' ' || text[j] == '-')) ++j;
+                    while (j < text.size() && detail::is_alpha(text[j])) ++j;
+                    const std::string w = detail::next_word(text, j);
+                    if (w == "down" || w == "downpayment" || w == "deposit") {
+                        lit.names_down_payment = true;
+                        break;
+                    }
+                    if (w.empty()) break;
                 }
             }
         }
@@ -2340,6 +2517,18 @@ auto ground_emitted_values(const MortgageParamsInput& input, std::string_view us
                     }
                 }
                 if (grounded) break;
+            }
+
+            // M9 -- the binary map, consulted only after every unary one has
+            // failed, so the common path pays nothing for it.
+            if (!grounded) {
+                for (const auto& candidate :
+                     detail::expand_netted_loan(literals, kind, emitted.name)) {
+                    if (parsed->within(candidate, tolerance)) {
+                        grounded = true;
+                        break;
+                    }
+                }
             }
 
             if (!grounded) {
