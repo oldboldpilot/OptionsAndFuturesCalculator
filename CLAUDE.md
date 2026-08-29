@@ -91,7 +91,57 @@ gRPC-Web frames its trailers INTO THE BODY where no proxy can strip them.
 Verified — the response ends `0x80 00000f grpc-status:0`. That is what gRPC-Web
 is FOR, and it is why the browser path never had this problem.
 
-Three ways to reach production, and one that cannot work by construction:
+**NATIVE gRPC NOW WORKS AGAINST PRODUCTION.** `GRPC_NATIVE_PORT=50443` is set,
+Envoy binds a second listener with TLS (ALPN `h2`), and a Railway TCP proxy
+fronts it:
+
+```
+tokaido.proxy.rlwy.net:34513  ->  container :50443
+```
+
+Verified end to end, and the trailer is the proof:
+
+```
+HTTP/2 200
+content-type: application/grpc
+grpc-status: 0                      <- SURVIVES; the HTTP edge strips this
+body: -1798.651575458257198999
+```
+
+The full `smoke_client … finance` suite passes against production over it,
+which this file previously recorded as impossible. Run it as:
+
+```
+GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=<tls.crt> \
+GRPC_SSL_TARGET_NAME_OVERRIDE=grpc-native.optionsandfuturescalculator.com \
+SMOKE_TLS=1 smoke_client tokaido.proxy.rlwy.net:34513 SPY finance
+```
+
+The certificate is SELF-SIGNED, deliberately: a Railway TCP proxy hostname is
+not ours to obtain a public CA certificate for. It is a real TLS boundary --
+`GRPC_ALLOW_PLAINTEXT` exists and is NOT used, because this port is reachable
+from the public internet and authenticates with a long-lived API key header.
+
+**A note on the Railway GraphQL API, because a wrong belief here cost time.**
+This file said an `Unauthorized` from a write operation means the stored
+credential is read-scoped. That was asserted again on 2026-08-29 and was WRONG:
+the account token has full permissions, and `Not Authorized` came from sending
+an EMPTY bearer. `~/.railway/config.json` stores it at **`user.accessToken`** --
+`user.token` exists and is `null`, and there is no top-level `accessToken`, so
+a fallback chain that tries those first silently yields "". Confirm auth with
+`query{ me { email } }` before concluding anything about scope. The TCP proxy
+was then created in one call with `tcpProxyCreate`.
+
+**A DEAD TCP PROXY EXISTS ON THIS SERVICE and should probably be removed.**
+`sakura.proxy.rlwy.net:56253 -> container :50052`. Nothing binds 50052 in the
+engine container -- the connection is accepted by Railway and immediately reset
+by the upstream (`errno=104`), no TLS, no ALPN. Harmless today, but 50052 is
+SGEE's CONSENSUS port, and this file already warns against attaching a public
+endpoint to an SGEE port. If anything ever binds it in this container it becomes
+publicly reachable with no authentication.
+
+Three ways to reach production through the HTTP edge, and one that cannot work
+there by construction:
 
 | path | works | why |
 | --- | --- | --- |
@@ -99,6 +149,7 @@ Three ways to reach production, and one that cannot work by construction:
 | JSON transcoder (`POST /<pkg>.<Svc>/<Method>`) | ✅ | no trailers involved; `auto_mapping` covers every RPC |
 | Railway TCP proxy | ✅ | raw TCP, no HTTP edge in the path |
 | native gRPC via the custom domain | ❌ | edge strips the trailer the protocol requires |
+| native gRPC via the TCP proxy | ✅ | **now live** — `tokaido.proxy.rlwy.net:34513`, TLS, trailers intact |
 
 `smoke_client` now PRINTS this when pointed at the public domain, rather than
 failing with `Stream removed` and leaving the reader to re-derive it. The
