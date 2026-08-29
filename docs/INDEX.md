@@ -29,6 +29,13 @@
 
 ## Architecture & operations
 
+- [llama.cpp under libc++ 23](technical/LLAMACPP_LIBCXX23.md) — how the vendored
+  pin was made to compile on clang 23, and why it was PATCHED rather than bumped:
+  llama.cpp is here to be an independent control for the parity probes, so moving
+  the pin is changing the reference. Also carries the measured cost of compiling
+  it at C++23 (module-scan steps 1 → 486) and the house rules deliberately NOT
+  applied to upstream source.
+
 - [Tensor observer](../backend/docs/TENSOR_OBSERVER.md) — runtime per-layer
   inspection of the inference engine, attachable by environment variable to an
   already-built release binary

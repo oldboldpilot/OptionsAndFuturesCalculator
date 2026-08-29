@@ -3040,9 +3040,30 @@ would have to be redone on every bump. Compiling it at our standard is the part
 of "C++23 compliance" that is both meaningful and free of that cost.
 
 Four arms gated, all **103/103**: clang 23 with llama.cpp off, on at C++17, and
-on at C++23; plus clang 22 with the patch and C++23, because the local toolchain
-is still 22. The whole block sits inside `if(ENABLE_LLAMACPP_BACKEND)` — OFF in
-both images — so none of it reaches the deployed binary.
+on at C++23; plus clang 22 with the patch and C++23, from while the local
+toolchain was still 22. The whole block sits inside
+`if(ENABLE_LLAMACPP_BACKEND)` — OFF in both images — so none of it reaches the
+deployed binary. Method and rationale: `docs/technical/LLAMACPP_LIBCXX23.md`.
+
+**The LOCAL toolchain is clang 23 too, as of 2026-08-29** — `/usr/local` was
+overlaid with the LLVM 23.1.0 release, so `clang++`, `clang-tidy`, `clangd`,
+`lld` and libc++ (including `share/libc++/v1/std.cppm`) are all 23 and local
+builds no longer differ from the image. It is an OVERLAY, not a wipe: the
+tarball writes only its own files, so cmake, ninja, ctest, TBB and Z3 in
+`/usr/local` are untouched. The clang 22 tree it replaced is at
+`~/usr-local-llvm22-backup.tar.zst` (5.1 GB, `tar -C /usr/local --zstd -xf` to
+roll back) — a from-source LLVM is hours to rebuild, so the rollback had to be a
+file rather than a procedure.
+
+**Pass the REAL compiler path, never the ccache shim.** `which clang++` resolves
+to `/usr/lib64/ccache/clang++`, and CMake recording that as
+`CMAKE_CXX_COMPILER` sends sensen's
+`dirname(dirname(compiler))/share/libc++/v1/std.cppm` walk to
+`/usr/lib64/share/...`, which does not exist — the same failure the Dockerfile
+comment describes for `/usr/bin/clang++`. Configure with
+`-DCMAKE_CXX_COMPILER=/usr/local/bin/clang++` and
+`-DCMAKE_CXX_COMPILER_LAUNCHER=ccache`, which keeps the cache without breaking
+the walk.
 
 ### Two latent bugs the second toolchain exposed, both ours
 

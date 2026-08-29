@@ -28,8 +28,11 @@ This policy covers everything in the repository:
 
 1. **Build Verification**
    - Backend: `cmake -G Ninja -B backend/build -S backend && ninja -C backend/build`
-     Zero warnings, zero errors. The canonical toolchain is clang 22 with
-     libc++; do not mix stdlibs (see CLAUDE.md).
+     Zero warnings, zero errors. The canonical toolchain is clang 23 with
+     libc++ (moved from 22 on 2026-08-29); do not mix stdlibs (see CLAUDE.md).
+     Configure with -DCMAKE_CXX_COMPILER=/usr/local/bin/clang++ and
+     -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -- NOT the ccache shim as the
+     compiler, which breaks sensen's std.cppm path walk.
    - Container build is the real gate for deployment, because three classes of
      bug are invisible locally — private-model fetch credentials, BuildKit
      secret mounts, and TBB availability:
