@@ -393,6 +393,62 @@ model — score `[assistant] raw model output`, which is logged before it runs.
 
 ## Mortgage assistant
 
+### "20% down" was priced as a 20% interest rate, and the gate said Proven
+
+Reported from the app as "ParseOperation ignores the down payment", which is
+true and is the less serious half. Probing four phrasings through the live
+ingress on 2026-08-29 found this on the same utterance:
+
+```
+"amortization schedule for a 500000 home with 20% down at 6.5% for 30 years"
+-> ComputeAmortization{annual_rate: 0.2000, loan_amount: 500000.00, ...}   200 OK
+```
+
+The model read the DOWN PAYMENT as the interest rate and discarded the stated
+6.5%, and G3 admitted it because **20 -> 0.20 is an ordinary M2 candidate for a
+rate slot**. A real field, a parseable value, every bound satisfied, and a 20%
+mortgage priced. Grounding is per-field, so nothing asked WHICH percent.
+
+**THE APP'S SUGGESTED FIX WOULD HAVE MADE IT WORSE, and the reason generalises.**
+"The parser should emit `present_value = price - down`" was the right diagnosis
+and, on that engine, would have turned a wrong answer into a REFUSAL: every
+admissible map was UNARY, and 400000 appears nowhere in the utterance. That is
+the "squeezed from both sides" failure this file records three times. **When a
+client proposes a model change, check what the VERIFIER admits before agreeing.**
+
+Two rules, pulling opposite ways, which is why they shipped together:
+
+- **M0** — a percent the LEXER tagged as naming a down payment may not ground a
+  **Rate** slot. Scoped to Rate and NOT Ratio: `down_payment_percent` on
+  `ComputeClosingCosts` is a Ratio slot where 0.20 is exactly right. The same
+  literal is correct in one slot and dangerous in another, which is why this
+  could never be a magnitude heuristic. The existing closing-costs control,
+  whose utterance says "10% down", is the regression guard.
+- **M9** — the only BINARY map: `a - b` and `a x (1-p)` for a Money slot named
+  `present_value` or `loan_amount`. Bounded deliberately — two field names, a
+  literal the lexer already tagged, and a FALLBACK after every unary map fails.
+  It adds exactly one candidate on the failing utterance, and a test asserts
+  that a difference which is NOT a down payment stays ungrounded.
+
+**The overflow guard I wrote first was wrong in the direction that hides
+itself.** `p * pct` for a 500,000 house is 1e37 against a 1.3e36 ceiling, so it
+rejected every realistic case and admitted only tiny ones — a guard that looks
+conservative and is actually a silent feature-off switch. Splitting the multiply
+into whole and fractional parts peaks at ~2e31 and needs no guard.
+
+Both halves mutation-checked: deleting M0 reproduces the production symptom
+verbatim (`Proven/None` on the 20% mortgage), deleting M9 reproduces both
+refusals with their live message text.
+
+**The corpus half is written and NOT retrained** —
+`make_down_payment_extraction`, weight 0.045, both spellings, and six checks
+pinning every spelling it emits against the lexer's word list (two lists, two
+languages, two directories, nothing else connecting them). Until the retrain
+runs on the GPU server the model still emits the gross price, so the live
+outcome for "500k with 20% down" is an honest refusal naming the rate the user
+actually stated — the direction to fail in, and better than a silent 20%
+mortgage, but not the answer.
+
 **A BYTE-IDENTITY GATE IS INVALID ON THIS RESPONSE, and it looks exactly like
 the SGEE misrouting defect when you use one.** `FinanceParams.params` is a
 protobuf `map<string,string>`, and a map has no defined iteration order — the
