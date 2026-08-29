@@ -393,6 +393,22 @@ model — score `[assistant] raw model output`, which is logged before it runs.
 
 ## Mortgage assistant
 
+**A BYTE-IDENTITY GATE IS INVALID ON THIS RESPONSE, and it looks exactly like
+the SGEE misrouting defect when you use one.** `FinanceParams.params` is a
+protobuf `map<string,string>`, and a map has no defined iteration order — the
+JSON transcoder emits its six keys in hash-bucket order, which varies between
+processes and between runs. Measured 2026-08-29: 24 identical requests across
+three runs produced **three different aggregate SHAs and one distinct answer**
+after canonicalising with `sort_keys=True`.
+
+That matters because the re-promotion gate recorded further down this file is
+byte-identity across repeated runs, and applying it here reproduces the exact
+signature of the lease-surface bug — same total, different bytes each run —
+against a queue that is working correctly. **Canonicalise before hashing, or
+compare the parsed object.** The strategy assistant has no map field and IS
+byte-stable, so the two assistants need different gates.
+
+
 A **second, different** fine-tuned Qwen3-0.6B, serving
 `mortgage.assistant.MortgageAssistant` in the same process. It turns a
 plain-English mortgage / time-value-of-money request into **the name of a
