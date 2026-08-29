@@ -1479,6 +1479,29 @@ target_link_libraries(test_finance_service_validation PRIVATE proto_lib sensen_s
 
 add_test(NAME FinanceServiceValidationTest COMMAND test_finance_service_validation)
 
+# The write gate on RefreshStateAssumptions, in both directions.
+#
+# A SEPARATE binary from the sweep above, and not by preference: KeyRegistry is
+# a Meyers singleton that reads FINANCE_API_KEYS once at first use, so one
+# process holds one key configuration for its whole life. The sweep calls
+# anonymously ~200 times; this one needs keys configured before the first call.
+add_executable(test_state_assumptions_gate
+    tests/test_state_assumptions_gate.cpp
+    src/modules/finance_service.cpp
+    src/modules/quota.cpp
+    src/modules/api_key.cpp)
+target_sources(test_state_assumptions_gate
+    PRIVATE
+    FILE_SET CXX_MODULES FILES
+        src/modules/state_refresh.cppm
+        src/modules/finance_service.cppm
+        src/modules/quota.cppm
+        src/modules/api_key.cppm
+)
+target_link_libraries(test_state_assumptions_gate PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto sgee)
+
+add_test(NAME StateAssumptionsGateTest COMMAND test_state_assumptions_gate)
+
 # CalculateStrategy coverage -- EVERY strategy calculation on
 # optionsandfuturescalculator.com goes through this RPC and SGEE's graph
 # interpreter, and until this target it had zero automated coverage (see

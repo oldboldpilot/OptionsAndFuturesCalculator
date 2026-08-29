@@ -3038,6 +3038,37 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         // neither scales with the fifty UPDATEs behind them.
         CHARGE("RefreshStateAssumptions", quota::cost_default());
 
+        // THIS IS THE ONE WRITE ON THE FINANCE SURFACE, AND IT IS NOT
+        // ENTITLEMENT POLICY -- it is an integrity control, so it does NOT
+        // honour PRO_GATE_MODE. Every other gate in this tree is commercial
+        // ("is this caller paying?") and Off/Warn may switch it off. This one
+        // answers "may this caller overwrite the numbers on fifty live pages?",
+        // and honouring Off there would turn a billing switch into a
+        // data-integrity switch -- the same argument the saved-scenarios
+        // subject check makes, and it applies with more force here because the
+        // damage is not scoped to one user's rows.
+        //
+        // `data_year` is the specific reason a read-only quota is not enough.
+        // Every bound the validator enforces is a PLAUSIBILITY bound, and a
+        // 2015 ACS vintage passes all of them -- so an anonymous caller pinning
+        // an old year would rewrite all fifty states with decade-old figures
+        // that no downstream check can distinguish from current ones. The row
+        // would even carry honest provenance saying so, which nothing reads.
+        //
+        // Partner, specifically, rather than "authenticated" or "pro": the
+        // admin trigger is a SERVER-side call from the app holding the issued
+        // partner key, and a Pro subscriber is a customer of the calculator,
+        // not an operator of it. GetStateAssumptions below stays open, because
+        // reading public Census aggregates needs no credential at all.
+        if (_id.tier != "partner") {
+            logger::Logger::getInstance().warn(
+                "RefreshStateAssumptions refused for tier '" + _id.tier +
+                "' -- a partner credential is required to write state assumptions");
+            return Status(grpc::StatusCode::PERMISSION_DENIED,
+                          "Refreshing state assumptions requires a partner credential. "
+                          "Reading them (GetStateAssumptions) does not.");
+        }
+
         // Called through an INJECTED hook, not directly.
         //
         // `state_refresh`'s implementation unit imports `pg`, and this
