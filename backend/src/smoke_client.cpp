@@ -3471,6 +3471,56 @@ auto main(int argc, char** argv) -> int {
     std::cout << "Smoke test against " << target << " for " << symbol << " [suite: " << suite
               << "]\n\n";
 
+    // A named warning, because the failure it prevents was MISDIAGNOSED FOR
+    // MONTHS and the wrong diagnosis is what stopped it being fixed.
+    //
+    // Pointed at api.optionsandfuturescalculator.com this client fails every
+    // call with `UNKNOWN: Stream removed (Data frame with END_STREAM flag
+    // received)`, and the previous conclusion recorded in CLAUDE.md was that
+    // "native gRPC does not survive the Railway ingress ... no corresponding
+    // request appears in railway logs -- only gRPC-Web reaches the container".
+    //
+    // That is wrong in the part that matters. Measured 2026-08-29 against the
+    // live domain with curl --http2:
+    //
+    //   HTTP/2 200
+    //   content-type: application/grpc
+    //   x-envoy-upstream-service-time: 0        <- Envoy PROXIED IT, upstream ANSWERED
+    //   body: -1798.651575458257198999          <- the correct closed-form payment
+    //   grpc-status: <ABSENT>                   <- the only thing missing
+    //
+    // The request reaches Envoy, reaches the engine, and the engine computes
+    // the right answer. Railway's edge (`server: railway-hikari`) strips the
+    // HTTP/2 TRAILERS, and native gRPC carries `grpc-status` ONLY in trailers,
+    // so the client sees a DATA frame with END_STREAM and no status and calls
+    // it a removed stream. The identical request as gRPC-Web succeeds through
+    // the same edge because gRPC-Web frames its trailers INTO THE BODY, where
+    // nothing can strip them -- verified: the response ends
+    // `0x80 00000f grpc-status:0`.
+    //
+    // So there are three working ways to reach production and one that cannot
+    // work by construction. This is a property of the edge, not a bug in this
+    // client, the engine, or envoy.yaml -- do not go looking for a routing
+    // problem, there isn't one.
+    if (target.find("api.optionsandfuturescalculator.com") != std::string::npos ||
+        target.find("mortgagefvcalculator.com") != std::string::npos) {
+        std::cerr
+            << "WARNING: " << target << " is behind Railway's HTTP edge, which STRIPS HTTP/2\n"
+               "         trailers. Native gRPC carries grpc-status only in trailers, so every\n"
+               "         call here fails as `Stream removed` EVEN THOUGH the engine computed\n"
+               "         the correct answer and returned it in the body.\n"
+               "\n"
+               "         This is not a routing fault and not a service outage. Reach production\n"
+               "         one of these ways instead:\n"
+               "           1. gRPC-Web        -- trailers travel in the body; this is the\n"
+               "                                 browser path and it works through the edge.\n"
+               "           2. JSON transcoder -- POST /<package>.<Service>/<Method> with a JSON\n"
+               "                                 body; auto_mapping covers every RPC.\n"
+               "           3. The Railway TCP proxy -- raw TCP, no HTTP edge in the path, so\n"
+               "                                 trailers survive and THIS client works\n"
+               "                                 unchanged.\n\n";
+    }
+
     // TLS when SMOKE_TLS is set, so this gate can be pointed at the deployed
     // service and not only at a local build. Verifying production is the only
     // way to exercise the parts that depend on credentials the repository does

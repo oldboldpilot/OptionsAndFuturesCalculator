@@ -62,12 +62,51 @@ against independent identities — put-call parity, price/yield inversion,
 schedule closure, and the closed-form annuity formula — not against figures the
 engine produced earlier.
 
-**Native gRPC does not survive the Railway ingress.** `smoke_client` against
-`api.optionsandfuturescalculator.com:443` fails with `Stream removed`, and no
-corresponding request appears in `railway logs` — only gRPC-Web reaches the
-container. Verify production through the browser path or the logs; the native
-smoke client works locally and against the Railway TCP proxy, not the custom
-domain.
+**RAILWAY'S EDGE STRIPS HTTP/2 TRAILERS. That is the whole mechanism, and this
+section said something materially different until 2026-08-29.**
+
+It read: *"Native gRPC does not survive the Railway ingress … no corresponding
+request appears in `railway logs` — only gRPC-Web reaches the container."* The
+second half is FALSE, and being false is what kept it unfixed: it sent every
+reader hunting a routing fault that does not exist.
+
+Measured against the live domain with `curl --http2`:
+
+```
+HTTP/2 200
+content-type: application/grpc
+x-envoy-upstream-service-time: 0        <- Envoy PROXIED it; upstream ANSWERED
+body: -1798.651575458257198999          <- the correct closed-form payment
+grpc-status: <ABSENT>                   <- the only thing missing
+```
+
+The request reaches Envoy, reaches the engine, and the engine returns the RIGHT
+ANSWER. `server: railway-hikari` then drops the HTTP/2 trailers, and native gRPC
+carries `grpc-status` **only** in trailers — so the client sees a DATA frame
+with END_STREAM and no status and reports `Stream removed`. Nothing is
+mis-routed and nothing is down.
+
+The same request as **gRPC-Web succeeds through the same edge**, because
+gRPC-Web frames its trailers INTO THE BODY where no proxy can strip them.
+Verified — the response ends `0x80 00000f grpc-status:0`. That is what gRPC-Web
+is FOR, and it is why the browser path never had this problem.
+
+Three ways to reach production, and one that cannot work by construction:
+
+| path | works | why |
+| --- | --- | --- |
+| gRPC-Web | ✅ | trailers in the body |
+| JSON transcoder (`POST /<pkg>.<Svc>/<Method>`) | ✅ | no trailers involved; `auto_mapping` covers every RPC |
+| Railway TCP proxy | ✅ | raw TCP, no HTTP edge in the path |
+| native gRPC via the custom domain | ❌ | edge strips the trailer the protocol requires |
+
+`smoke_client` now PRINTS this when pointed at the public domain, rather than
+failing with `Stream removed` and leaving the reader to re-derive it. The
+lesson generalises past this repo: **`x-envoy-upstream-service-time` in a
+response proves the request reached the proxy and the upstream answered.** Its
+presence alongside a transport-level error means the failure is in the RESPONSE
+path, not the request path — which is the opposite of where the original
+diagnosis looked.
 
 ## Strategy assistant
 
