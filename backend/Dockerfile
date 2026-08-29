@@ -785,7 +785,7 @@ RUN chmod +x /app/start.sh /app/calculator_engine /app/smoke_client
 ENV LD_LIBRARY_PATH=/app/lib
 
 # Envoy serves gRPC-Web on 8080; the engine listens on 50051 behind it.
-EXPOSE 8080 50051
+EXPOSE 8080 50051 50443
 
 ENTRYPOINT []
 CMD ["/app/start.sh"]
