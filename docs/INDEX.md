@@ -29,6 +29,11 @@
 
 ## Architecture & operations
 
+- [clang 22 → 23 toolchain migration](technical/TOOLCHAIN_CLANG23_MIGRATION.md) —
+  the evaluation, the gates, and the three things that broke (two of them latent
+  bugs of ours that a second compiler exposed). Also the overlay-install trap:
+  libc++ 22's `ctype.h`/`inttypes.h`/`float.h`/`fenv.h` survive an overlay,
+  shadow the C library's, and produce 700+ errors INSIDE libc++ 23.
 - [llama.cpp under libc++ 23](technical/LLAMACPP_LIBCXX23.md) — how the vendored
   pin was made to compile on clang 23, and why it was PATCHED rather than bumped:
   llama.cpp is here to be an independent control for the parity probes, so moving

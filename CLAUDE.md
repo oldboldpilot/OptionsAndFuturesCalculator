@@ -3055,6 +3055,23 @@ tarball writes only its own files, so cmake, ninja, ctest, TBB and Z3 in
 roll back) — a from-source LLVM is hours to rebuild, so the rollback had to be a
 file rather than a procedure.
 
+**An OVERLAY install of a compiler is not a clean one, and the difference reads
+as a broken release.** The first rebuild after the move produced **700+ errors,
+every one INSIDE libc++ itself** — `"If libc++ starts defining <ctype.h>, the
+__has_include check should move to libc++'s <ctype.h>"`. libc++ 22 shipped four
+C-compatibility headers (`ctype.h`, `inttypes.h`, `float.h`, `fenv.h`) that
+libc++ 23 REMOVED; an overlay adds and overwrites but never deletes, so those
+four sat shadowing the C library's and libc++ 23's own `<cctype>` tripped its
+guard. Counted: **1,701 files locally against 1,688 upstream** — thirteen
+strays, four fatal. Fixed by replacing `include/c++/v1` wholesale rather than
+merging into it; `share/libc++` and `lib/x86_64-unknown-linux-gnu` were diffed
+the same way and were clean. **Diff the file lists after any overlay.**
+
+**`rm -rf backend/build` is not free.** It also removes `_deps/grpc-src`, which
+the other build directories reference via `FETCHCONTENT_SOURCE_DIR_*` — one
+build tree is load-bearing for the others, and deleting it forces a full gRPC
+re-clone and rebuild.
+
 **Pass the REAL compiler path, never the ccache shim.** `which clang++` resolves
 to `/usr/lib64/ccache/clang++`, and CMake recording that as
 `CMAKE_CXX_COMPILER` sends sensen's
