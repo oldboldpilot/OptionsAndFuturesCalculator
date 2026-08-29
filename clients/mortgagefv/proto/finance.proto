@@ -3,7 +3,7 @@
 //
 // Source:   https://github.com/oldboldpilot/OptionsAndFuturesCalculator
 //           backend/proto/finance.proto
-// Content:  (pending commit)  (2026-08-29) -- the last
+// Content:  9b064280b1ba78de42c0bd57f81add8ba0ab6e9c  (2026-08-29) -- the last
 //           upstream commit that CHANGED this file.
 // Verified: byte-identical below the header, asserted by
 //           tests/test_vendored_proto_drift.
