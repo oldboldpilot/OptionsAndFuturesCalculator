@@ -279,6 +279,51 @@ answer, not an error.
 | `ComputeRentVsBuy` | `property_price` **req** · `down_payment` **req** · `annual_home_appreciation` **req** · `current_monthly_rent` **req** · `annual_rent_increase` **req** · `annual_investment_return` **req** · `years` i32 · **plus exactly ONE shape** — see below | `{ total_cost_of_buying dbl, total_cost_of_renting dbl, is_buying_better bool, buying_advantage dbl }` + the `_exact` strings on the amortising shape only |
 | `ComputeHomeNpv` | `property_price` · `down_payment` · `closing_costs_buy` · `loan_amount` · `loan_annual_rate` · `loan_term_years` i32 · `monthly_taxes_ins_hoa` · `monthly_maintenance` · `annual_appreciation_rate` · `selling_closing_cost_percent` (`0.06` = 6% of sale price) · `monthly_rent_saved` · `annual_rent_increase` · `annual_discount_rate` — **all twelve strings required** | `{ net_present_value dbl, internal_rate_of_return dbl, future_sale_price dbl, future_equity dbl }` |
 
+### `ComputeRentVsBuyBatch` -- up to 1000 scenarios in one round trip
+
+Added 2026-08-28. Nothing about the single-scenario RPC changed; this is an
+additional method for callers doing SWEEPS -- a grid over rate, horizon,
+appreciation and rent growth, or pre-computing pages.
+
+```
+POST /sensen.finance.Finance/ComputeRentVsBuyBatch
+{ "scenarios": [ <RentVsBuyRequest>, <RentVsBuyRequest>, ... ] }
+
+{ "results": [ { "result": <RentVsBuyResponse> },
+               { "error": "property_price is not a decimal number: \"oops\"" },
+               ... ] }
+```
+
+Five things to know:
+
+- **`scenarios` is the SAME message you already send.** Both shapes work per
+  row, the dispatch is identical, and so is every refusal -- one implementation
+  serves both RPCs, so a batch cannot disagree with a single call.
+- **`results` is POSITIONAL.** Same length, same order. Nothing is ever filtered
+  out, only marked -- so `results[i]` always corresponds to `scenarios[i]`.
+- **Exactly one of `result` / `error` is set per row.** One malformed scenario
+  does NOT fail the batch; the other 999 still compute. The `error` string is
+  verbatim what the single-scenario RPC would have returned, so debugging row i
+  reads the same diagnostic either way.
+- **At most 1000 per call.** More is REFUSED, not truncated -- a truncated batch
+  returns a shorter list that looks like a complete answer.
+- **It is not a discount.** The batch charges per SCENARIO, so a thousand
+  scenarios cost exactly what a thousand calls cost. What it buys is freedom
+  from the ingress rate limit and from a thousand round trips.
+
+**Why you want it, if you are generating anything in bulk.** The ceiling on bulk
+work is not the engine -- a scenario is microseconds. It is the ingress rate
+limit, 10 requests per second per replica. Measured on one host:
+
+| scenarios | one batch call | as individual calls |
+| --- | --- | --- |
+| 100 | 519us | ~10s at the rate limit |
+| 500 | 1244us | ~50s |
+| 1000 | 1909us | ~100s |
+
+Per scenario that is **1.9-2.5us**; the fixed ~136us is the gRPC round trip
+itself. If you are pre-rendering pages, batch them.
+
 ### `ComputeRentVsBuy` carries TWO shapes, and a zero is not a silence
 
 The request message holds both the legacy composite and the amortising inputs,

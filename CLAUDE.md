@@ -476,6 +476,148 @@ monthly-rate-with-`periods=30` refused, annual-rate-with-`periods=360` refused.
 Mutation-checked — restoring the hardcoded x12 reproduces the production message
 verbatim AND flips the mismatched pair back to `Proven`.
 
+## Security posture: what is enforced, and what is only claimed
+
+Measured on 2026-08-28, not recalled. The distinction between "we observed it"
+and "it is enforced" is the whole content of this section.
+
+**TLS to Postgres is now ENFORCED.** libpq's default is `sslmode=prefer`, which
+negotiates opportunistically and falls back to plaintext SILENTLY. Production
+carried no explicit sslmode, so the TLSv1.3/TLS_AES_256_GCM_SHA384 it was
+observed using was luck, not policy. `pg::Connection::connect` now merges
+`sslmode` as a later `PQconnectdbParams` keyword -- the same mechanism it
+already used to force `connect_timeout` -- so it beats anything in
+`DATABASE_URL`. Default `require`; `PGSSLMODE_OVERRIDE` relaxes it for a local
+socket-only dev database.
+
+**`require` encrypts and does NOT verify the certificate.** It stops passive
+eavesdropping, not an active MITM, and that limit is stated rather than implied.
+`verify-ca` and `verify-full` were tested against production and both fail --
+*"Either provide the file or change sslmode to disable server certificate
+verification"* -- because the runtime image ships no CA bundle. `require` is the
+strongest level that works today.
+
+**RLS now covers every per-user table.** Before: `saved_strategies` rls=t
+force=t 1 policy; `users`, `profiles`, `inference_jobs` all rls=f force=f 0
+policies. Migration `06` extends the migration-04 pattern to `public.users` and
+`public.profiles`.
+
+**Proven to FILTER, not merely to be enabled** -- the same standard section 0 of
+`test_strategy_store_pg` sets, because behaviour cannot otherwise see it:
+
+```
+as postgres (superuser, bypasses RLS)  -> 2 rows
+as ofc_app, subject = user1            -> 1 row
+that user's view of the OTHER row      -> 0
+ofc_app with NO subject set            -> 0     <- fail-closed
+```
+
+Both tables are EMPTY today, so this closed a LATENT exposure. It stops being
+latent at the first signup, which is the wrong moment to find out.
+`inference_jobs` stays untouched: a shared work queue, not per-user data.
+
+**There is a FIPS GATE and there is no FIPS CLAIM, and the gap between those is
+deliberate.** `FIPS_MODE=off|preferred|required` (default `off`). `required`
+loads the OpenSSL `fips` and `base` providers, pins default properties to
+`fips=yes` so every implicit fetch resolves there, and **exits non-zero before
+binding the listener** if any step fails. All four paths are exercised,
+including the one that matters: with no provider reachable, `required` exits 1
+and `preferred` starts and says so.
+
+No message it emits contains "certified", "validated" or "compliant". The API
+can read a provider NAME; a name is not a certificate. Four measured facts bound
+every claim:
+
+- **Stock `ubuntu:24.04` ships NO fips provider** -- its `ossl-modules/` holds
+  only `legacy.so` -- so `FIPS_MODE=required` would refuse to start in
+  production today. That is correct behaviour and why the default is `off`:
+  this is the mechanism, not the claim.
+- **Public TLS is Railway's edge, not ours.** `envoy.yaml` contains no TLS
+  configuration whatsoever. No honest claim reaches past "cryptography inside
+  the application container" -- a property of the architecture, not a gap more
+  code can close.
+- **The engine has exactly ONE TLS stack.** `gRPC_SSL_PROVIDER=package` is
+  FORCEd in `backend/CMakeLists.txt` (originally to fix a segfault from two
+  libssl symbol sets in one process), so gRPC links system OpenSSL rather than
+  its vendored BoringSSL. `nm -D` shows zero defined `SSL_*` symbols. A boundary
+  containing two crypto libraries cannot be reasoned about at all.
+- **Every algorithm in use is already FIPS-approved** -- SHA-512,
+  HMAC-SHA-512 truncated to 256 bits, HMAC-SHA-256, `RAND_bytes` -- and the
+  whole surface is two files, `api_key.cpp`/`.cppm`. sensen performs no
+  cryptography at all. The gap was never algorithm CHOICE; it is module
+  VALIDATION, and that needs a validated module, not more code.
+
+One non-approved primitive exists and is unreachable: cpp-httplib carries an
+`EVP_md5` helper for HTTP digest auth, which no upstream this engine calls uses.
+Under `fips=yes` that fetch fails rather than silently computing an MD5.
+
+**HIPAA, PCI-DSS, SOC 2, ISO 27001 and FINRA: none, and none claimed.** No PHI
+is processed. No card data touches this backend -- Stripe holds it, and no
+column in the schema matches card/PAN/CVV/IBAN/SSN/routing patterns -- which is
+*de facto* out of scope, not an attestation.
+
+## Batch rent-vs-buy, and the ceiling that was never the engine
+
+`ComputeRentVsBuyBatch` takes up to 1000 `RentVsBuyRequest`s in one round trip.
+
+**The bottleneck for bulk work was never compute.** A single scenario is an
+O(years*12) walk bounded at 1200 steps. What bounds a bulk caller is the
+INGRESS: Envoy's local rate limit is `max_tokens: 100, tokens_per_fill: 10,
+fill_interval: 1s` -- ten requests per second per replica -- so a large sweep
+spends hours there and competes with live traffic throughout.
+
+**It is not a quota bypass, and the charge is what makes that true:** it charges
+`cost_default()` PER SCENARIO. It buys freedom from the rate limit and from a
+thousand round trips, and no compute for free.
+
+**Per-scenario outcomes.** One malformed row returns its own error -- verbatim
+the message the single-scenario RPC would give -- and the other 999 still
+compute. `results` is positional, so nothing is ever filtered out, only marked.
+
+**ONE implementation.** The single-scenario body was extracted to
+`compute_rent_vs_buy_one`, which both RPCs call, so the shape dispatch, the
+compounding bounds and every refusal are identical. This file already carries
+the scar of a dispatch that was correct for one caller and inverted for another.
+
+Parallelised through `sensen::parallel` -- not `tbb::parallel_for` directly, for
+the MSVC global-module reason `financial.cppm`'s own batch documents. Slots are
+allocated serially then filled in parallel: `add_results()` mutates the field,
+writing distinct elements does not.
+
+| n | serial | parallel only | **shipped** |
+| --- | --- | --- | --- |
+| 1 | 136us | 151us | **103us** |
+| 10 | 163us | 230us | **130us** |
+| 100 | 686us | 446us | **519us** |
+| 500 | 3275us | 1250us | **1244us** (2.6x) |
+| 1000 | 5736us | 1826us | **1909us** (3.0x) |
+
+**Parallel ALONE was SLOWER below ~64 scenarios** -- a scenario is only
+microseconds of work, so scheduling is the whole cost. Shipping it
+unconditionally would have traded a regression for every small caller against a
+win only bulk callers see. Below 64 the loop is serial, which is why the shipped
+column beats both. The residual ~136us is fixed gRPC/protobuf overhead,
+irreducible from inside the RPC.
+
+**The gate is byte-identity, not a timing:** the 500-scenario aggregate SHA is
+`f22e8f083630c4e4` on both paths.
+
+**Adding it failed the label-space drift check in THREE places** -- the
+generator's `EXCLUDE_RPCS`, `test_mortgage_grammar` and
+`test_mortgage_verification` -- which is the four-tables lesson working as
+intended. `ComputeRentVsBuyBatch` is excluded from the assistant's label space
+on purpose: it is a bulk API, not an utterance, and no sentence grounds a
+thousand scenarios.
+
+**On programmatic SEO, which is what prompted the batch RPC.** Generating tens
+of thousands of pages from one template with substituted numbers is the EXACT
+pattern that got this site flagged by AdSense on 2026-08-16, at four orders of
+magnitude more scale. Worse, `check-export.mjs`'s duplicate check is EXACT
+STRING EQUALITY (`byText`), so pages differing only in numbers are not
+identical and would sail through green. `MIN_WORDS = 600` and the `/guides/`
+ad ALLOWLIST are the guardrails that do still hold. Distinct numbers are not
+distinct prose, and only the second is publisher content.
+
 ## Rent vs buy, and the zero that was not a silence
 
 `ComputeRentVsBuy` carries TWO mutually exclusive request shapes in one
