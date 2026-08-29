@@ -17,7 +17,9 @@ a genuine 18-decimal-place fixed-point type and double would quietly truncate
 it -- so the checks below parse them with Decimal, not float.
 """
 import base64
+import json
 import math
+import re
 import struct
 import sys
 import urllib.request
@@ -393,6 +395,75 @@ try:
 except Exception:
     rejected = True
 check("ragged batch refused", rejected, "2 loans, 1 rate")
+
+# --------------------------------------------------------------------------
+# State assumptions -- the SHAPE of the payload, not the arithmetic.
+#
+# Over JSON rather than gRPC-Web, deliberately: the failure this section was
+# written for is a wire-FORMAT one, and decoding it back through a protobuf
+# reader would hide it. `refreshed_at` is a string field, so protobuf carries
+# whatever bytes the database rendered and only a client parsing that string
+# ever notices it is malformed.
+#
+# Postgres's to_char `OF` emits the SHORTEST offset -- "+00", not "+00:00" --
+# which is not valid RFC3339 and is not what finance.proto documents. V8 parses
+# it anyway and JavaScriptCore returns Invalid Date, so it works in the browser
+# you test in and fails in Safari.
+# --------------------------------------------------------------------------
+print("\nState assumptions")
+
+RFC3339_Z = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+
+try:
+    rq = urllib.request.Request(
+        HOST + SVC + "GetStateAssumptions",
+        data=b'{}',
+        headers={"Content-Type": "application/json"},
+    )
+    states = json.loads(urllib.request.urlopen(rq, timeout=60).read()).get("states", [])
+except Exception as exc:  # noqa: BLE001
+    states = []
+    check("GetStateAssumptions answers", False, str(exc))
+
+if states:
+    check("fifty states", len(states) == 50, f"{len(states)} rows")
+
+    bad_ts = [r["slug"] for r in states
+              if r.get("refreshedAt") and not RFC3339_Z.match(r["refreshedAt"])]
+    check("refreshedAt is RFC3339 with a Z", not bad_ts,
+          "all UTC-suffixed" if not bad_ts
+          else f"{len(bad_ts)} malformed, e.g. {states[0].get('refreshedAt')}")
+
+    # Every money field is a decimal STRING. A JSON number here would mean the
+    # engine rounded to float64 before the client could, which is the whole
+    # reason finance.proto states money as text.
+    numeric = [r["slug"] for r in states
+               if not isinstance(r.get("medianPrice"), str)
+               or not isinstance(r.get("medianRent"), str)]
+    check("money fields are strings", not numeric,
+          "decimal strings" if not numeric else f"{len(numeric)} came back numeric")
+
+    # Bounds are enforced in three places -- the C++ validator, the CHECK
+    # constraints, and here -- because a value can only reach this response by
+    # passing the first two, so a violation seen here means one of them is gone.
+    out_of_band = [
+        r["slug"] for r in states
+        if not (Decimal("50000") <= Decimal(r["medianPrice"]) <= Decimal("3000000"))
+        or not (Decimal("300") <= Decimal(r["medianRent"]) <= Decimal("8000"))
+        or not (Decimal("0.05") <= Decimal(r["propertyTaxRate"]) <= Decimal("4"))
+    ]
+    check("every value is inside the plausibility bounds", not out_of_band,
+          "50/50 in band" if not out_of_band else f"out of band: {out_of_band}")
+
+    years = {r.get("dataYear") for r in states}
+    check("one vintage across all fifty", len(years) == 1, f"data_year {years}")
+
+    # The editorial columns must be absent-or-authored, never a figure the
+    # refresh invented: the database grant makes them unwritable by the job, so
+    # a value appearing here that nobody typed would mean that grant is gone.
+    check("data_source names the ACS",
+          all(r.get("dataSource", "").startswith("US Census ACS 5-year") for r in states),
+          states[0].get("dataSource", ""))
 
 # --------------------------------------------------------------------------
 

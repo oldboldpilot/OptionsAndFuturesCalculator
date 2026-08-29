@@ -461,7 +461,14 @@ auto read_assumptions(std::string_view slug)
         "       COALESCE(insurance_annual::text, ''), COALESCE(state_income_tax::text, ''), "
         "       COALESCE(median_rent::text, ''), COALESCE(note, ''), "
         "       COALESCE(data_source, ''), COALESCE(data_year, 0), "
-        "       COALESCE(to_char(refreshed_at, 'YYYY-MM-DD\"T\"HH24:MI:SSOF'), '') "
+        // FORMATTED IN SQL, and 'Z' rather than OF. Postgres's OF renders the
+        // SHORTEST offset -- "+00", not "+00:00" -- which is not valid RFC3339
+        // and is not what finance.proto documents this field as. V8 parses it
+        // anyway; JavaScriptCore returns Invalid Date, so it would have worked
+        // in the browser it was tested in and failed in Safari. Converting to
+        // UTC and appending a literal Z is unambiguous everywhere.
+        "       COALESCE(to_char(refreshed_at AT TIME ZONE 'UTC', "
+        "                       'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), '') "
         "FROM public.state_assumptions "
         "WHERE $1::text IS NULL OR slug = $1 "
         "ORDER BY slug",
