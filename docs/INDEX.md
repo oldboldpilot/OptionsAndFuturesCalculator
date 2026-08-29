@@ -19,6 +19,11 @@
   answer differs: `frontend/` needs nothing (it calls one Finance RPC and this
   is not it), `clients/mortgagefv/` is re-vendored, and the RPC answers
   `UNIMPLEMENTED` until the backend carrying it ships.
+- [State assumptions handoff](STATE_ASSUMPTIONS_HANDOFF.md) — the weekly US
+  Census ACS refresh, now in the backend: `GetStateAssumptions` (open) and
+  `RefreshStateAssumptions` (**partner only** — the single write on the finance
+  service). Read §2 before parsing anything: every money field is a decimal
+  string, and an empty `refreshed_at` means "never refreshed", NOT the epoch.
 - [Business API](BUSINESS_API.md) — partner/commercial surface
 - [API Security](API_SECURITY.md) — threat model, key handling, quota enforcement
 

@@ -1290,6 +1290,148 @@ exactly what pricing sends or a reopened scenario prices differently from the
 one saved; two copies would agree the day they were written and drift on the
 first field added to `Leg`.
 
+## State assumptions, and why RLS is the WRONG tool here
+
+`RefreshStateAssumptions` / `GetStateAssumptions` on `sensen.finance.Finance`
+carry the weekly US Census ACS refresh that used to live in the mortgagefv web
+app. Fifty rows of per-state housing assumptions — median price, median rent and
+a derived property-tax rate — behind fifty programmatic SEO pages.
+`docs/STATE_ASSUMPTIONS_HANDOFF.md` is the client-facing contract.
+
+**The table is in THIS database, and the handoff said otherwise.** It described
+`public.state_assumptions` as already existing with the backend writing it —
+true, but in the *app's* Supabase, for which this backend holds no connection
+string. The only hosted-Supabase material in `config/.env` belongs to an
+unrelated product and is not even a libpq URL. Migration `07` creates and seeds
+it here. Reason from CONNECTION STRINGS rather than product names; migration 03
+reasoned from the product's name once and wrote a false conclusion down as
+settled.
+
+**RLS is largely theatre on this table, and the reason matters more than the
+conclusion.** Every other RLS migration in this tree protects TENANCY — rows
+belong to a subject, scoped by it. This table has no tenants: fifty rows of
+public Census aggregates that anyone may read. There is no confidentiality to
+protect, only INTEGRITY. What actually does that work, strongest first:
+
+1. **CHECK constraints** carrying the plausibility bounds. They bind EVERY
+   writer including `postgres` and a hand-typed psql session — strictly stronger
+   than an RLS `WITH CHECK`, which binds only policy-scoped roles. Measured:
+   `median_price = 5` as superuser is refused.
+2. **A column-scoped `GRANT UPDATE`** to `ofc_refresh` (NOLOGIN, NOSUPERUSER,
+   NOBYPASSRLS) on exactly six columns. `insurance_annual`, `state_income_tax`
+   and `note` are unwritable BY THE DATABASE, so a refresh cannot destroy
+   hand-authored content even if this code tries. Proven: writing an editorial
+   column as `ofc_refresh` is `permission denied`, as is DELETE.
+3. **A role separate from `ofc_app`**, which gets SELECT only — a
+   saved-strategies bug cannot write census columns, and vice versa.
+
+**And the honest limit, which INVERTS saved_strategies.** There, forgetting the
+subject GUC fails CLOSED. Here the connection is SUPERUSER, so a failed
+`SET LOCAL ROLE` fails OPEN. `state_refresh.cpp` therefore refuses to run the
+UPDATEs if the role drop errors — that refusal is the only thing making the
+column grant mean anything at runtime.
+
+**HIPAA does not apply and is not claimed.** Public aggregate Census housing
+data about states: no PHI, no covered entity. Asserting otherwise would be a
+false compliance claim, the same thing `fips_mode.cppm` refuses to make about
+FIPS. What the intent DOES translate to is implemented: per-row provenance
+(`data_source` / `data_year` / `refreshed_at`), a `job_runs` audit row, least
+privilege, integrity at rest, and a key that is never logged.
+
+### The first live run wrote NOTHING and reported success
+
+Fifty rows validated, fifty UPDATEs issued, transaction committed,
+`states_updated = 0`. The RLS SELECT policy named `ofc_app` and not
+`ofc_refresh`, and **under RLS an UPDATE must first SEE the row.** Nothing
+errored — an UPDATE matching zero rows is an ordinary UPDATE.
+
+Two fixes, because one was not enough. The policy became `TO PUBLIC`, which is
+what this data is. **And a zero-write run now rolls back and returns a
+refusal** — the count was in the response the whole time, and a weekly job
+reporting `ok` is one nobody reads. The success channel has to be wrong for the
+failure to surface.
+
+### The write was open to anyone, and quota is not authorisation
+
+`RefreshStateAssumptions` is the ONE write on a service that is otherwise
+entirely read-only, and it shipped with only a `CHARGE` in front of it — which
+meters volume and authorises nothing. Found while writing the handoff sentence
+describing which credential the admin button needs, and finding the honest
+answer was "none".
+
+**`data_year` is what makes that serious.** Every bound the validator enforces is
+a PLAUSIBILITY bound, and a 2015 ACS vintage satisfies all of them — so an
+anonymous caller pinning an old year rewrites all fifty states with decade-old
+figures nothing downstream can distinguish from current ones. The rows would
+carry honest provenance saying 2015, which no reader checks. Not a crash and not
+a refusal: quiet, plausible, wrong data on the site.
+
+Now **partner only** — not `authenticated`, not `pro`. The admin trigger is a
+SERVER-side call from the app holding the issued partner key; a Pro subscriber is
+a customer of the calculator, not an operator of it. Written as
+`!_id.authenticated` the gate would pass an anonymous-vs-signed-in test and still
+let every subscriber rewrite the site, so `test_state_assumptions_gate` exercises
+the refuse direction with a VALID pro key, and is mutation-checked against
+exactly that variant.
+
+**It does NOT honour `PRO_GATE_MODE`**, for the same reason the saved-scenarios
+subject check does not: every other gate here is commercial policy that Off/Warn
+may switch off, and this one is an integrity control. It applies with more force,
+because the blast radius is not one user's rows. `GetStateAssumptions` stays
+open — public aggregates, nothing to authenticate.
+
+### Design points that earned themselves
+
+- **Candidate vintages are DERIVED from the clock**, not hardcoded. The handoff
+  specified `[2023, 2022]`; derived candidates found **2024** — a full vintage
+  newer — and the literal would have rotted every January with a failure that
+  reads as an upstream outage.
+- **An aborted run does NOT touch `refreshed_at`.** Bumping it on a run that
+  wrote nothing makes every downstream staleness check lie — the LIVE-badge
+  defect in a different costume.
+- **Out-of-bounds values are REFUSED, never clamped**, and counted in
+  `states_rejected`. A clamped value is a number nobody measured that nothing
+  downstream can distinguish from one that was.
+- **`refreshed_at` is a STRING, not a `Timestamp`.** An absent value must be
+  distinguishable from `1970-01-01`, and with a numeric timestamp it is not.
+- **The API key is a QUERY PARAMETER** (Census's design), so the fetch never
+  logs the URL it built. `market_data.cppm` logs host+path on error, which is
+  right there and would leak the key here; that shape is deliberately not reused.
+- **A refusal travels as `OK` with `ok=false`**, not as a transport error — a
+  caller must tell "the site is serving last week's numbers" apart from "the RPC
+  did not happen", and a status code collapses those. `NotConfigured` is the
+  exception (`FAILED_PRECONDITION`): an engine with no `CENSUS_API_KEY` is a
+  supported build, exactly like an empty `MODEL_URL`.
+
+### Scheduling: catch-up, not a calendar, on both replicas
+
+A six-hourly tick asks "has a run succeeded in the last eight days?". A calendar
+slot is missed whenever a deploy lands on the hour, and a missed weekly slot is a
+week of staleness nothing reports; asking about the OUTCOME cannot miss.
+
+Both replicas run the timer, made safe by `pg_try_advisory_lock` rather than by
+electing a leader — Railway replicas share a hostname and have no stable
+identity, as this file documents at length. The loser takes the `ABORTED` path.
+The sleep is **interruptible**: `sleep_for` would hang a deploy for six hours.
+
+### `finance_service.cpp` takes INJECTED hooks, and that was forced
+
+`state_refresh`'s implementation unit imports `pg`, and `finance_service.cpp` is
+compiled into two pricing test targets that deliberately carry no libpq. Merely
+taking the ADDRESS of `state_refresh::run_refresh` there broke their link — so
+`RegisterFinanceService` takes `StateRefreshHooks` and only `main.cpp` names the
+implementation, the pattern `calculator_service` already uses with
+`IStrategyStore`. The finance service is now testable without a database, which
+it was not before. An unset hook is a SUPPORTED state answering
+`FAILED_PRECONDITION`, not a crash.
+
+Gates: `test_state_refresh` (19 checks, interface only, no libpq — with
+`static_assert`s that fail the BUILD if the `constexpr` helpers stop being
+constant-evaluable) and `test_state_assumptions_gate` (6 checks, a real
+in-process server, both directions). The gate test is a SEPARATE binary because
+`KeyRegistry` is a Meyers singleton reading `FINANCE_API_KEYS` once at first
+use, so one process holds one key configuration for its life.
+
 ## Pro tier and quota
 
 Entitlement flows through Supabase `auth.users.app_metadata.tier` (never

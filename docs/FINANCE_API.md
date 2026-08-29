@@ -227,8 +227,36 @@ Roughly fifty functions. See `backend/proto/finance.proto` for the full list.
 | Fixed income | `AnalyzeBond` (price, yield, duration, convexity) `AnalyzeTreasuryBill` (price + BEY/MMY/BDY) |
 | Futures | `PriceFutures` `ValueFutures` `SimulateMarginAccount` `ComputeHedge` `ComputeCommoditySpread` |
 | Real estate | `ComputeRentalRoi` |
+| State assumptions | `GetStateAssumptions` (open) `RefreshStateAssumptions` (**partner only — the one write on this service**) |
 | Options | `PriceOptionTree` (American/Bermudan/Asian) `PriceBlackScholes` (11 Greeks) `PriceOptionMonteCarlo` `ComputeProbabilityTree` |
 | Portfolio | `ComputePortfolioStats` `OptimizePortfolio` `ComputeRiskContributions` |
+
+### The one write, and why it is gated differently
+
+Everything else on this service computes a number from its arguments and
+returns it. `RefreshStateAssumptions` overwrites fifty rows that fifty live
+pages render, from a third-party feed, so it requires a **partner** credential
+and `GetStateAssumptions` requires none.
+
+Partner rather than "authenticated" or "pro", and the distinction is
+load-bearing rather than fussy. `data_year` lets a caller pin an ACS vintage,
+and every bound the validator enforces is a PLAUSIBILITY bound that a decade-old
+vintage satisfies — so pinning 2015 rewrites all fifty states with figures
+nothing downstream can distinguish from current ones. The admin trigger is a
+server-side call from an operator; a Pro subscriber is a customer of the
+calculator, not an operator of it.
+
+**It does not honour `PRO_GATE_MODE`.** Every other gate here is commercial
+policy that Off/Warn may switch off. This one is an integrity control, and
+honouring Off would turn a billing switch into a data-integrity switch.
+
+A refusal from the job itself — an unusable ACS vintage, too few valid states —
+arrives as `OK` with `ok: false` and a sentence in `error`, not as a transport
+error. A caller must be able to tell "the site is serving last week's numbers"
+apart from "the RPC did not happen", and a status code collapses those. See
+[State assumptions handoff](STATE_ASSUMPTIONS_HANDOFF.md).
+
+---
 
 ---
 
