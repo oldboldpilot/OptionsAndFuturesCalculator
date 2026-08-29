@@ -3,11 +3,12 @@
 //
 // Source:   https://github.com/oldboldpilot/OptionsAndFuturesCalculator
 //           backend/proto/finance.proto
-// Content:  901ba0c1e1f5e48370be28ffd1007c12bb69e010  (2026-08-19) -- the last
+// Content:  ecb18c33a1a797007a4ec1b80a126234e69601c8  (2026-08-28) -- the last
 //           upstream commit that CHANGED this file.
-// Verified: 901ba0c1e1f5e48370be28ffd1007c12bb69e010  (2026-08-20) -- diffed
-//           against upstream at this commit; this header block is the ONLY
-//           difference, so the contract below is current, not merely old.
+// Verified: ecb18c33a1a797007a4ec1b80a126234e69601c8  (2026-08-28) -- byte-identical below the
+//           header, asserted by tests/test_vendored_proto_drift (added the
+//           same day, because this copy had silently rotted ten days and a
+//           client team hit it before anybody here did).
 //
 // This file is self-contained (no imports), so it travels as a single copy.
 // There is no published package for it (npm, BSR, etc.) -- re-vendoring on
@@ -124,6 +125,7 @@ service Finance {
   rpc ComputeRentalRoi (RentalRoiRequest) returns (RentalRoiResponse);
   rpc ComputeHomeFutureValue (HomeFutureValueRequest) returns (HomeFutureValueResponse);
   rpc ComputeRentVsBuy (RentVsBuyRequest) returns (RentVsBuyResponse);
+  rpc ComputeRentVsBuyBatch (RentVsBuyBatchRequest) returns (RentVsBuyBatchResponse);
   rpc ComputeHomeNpv (HomeNpvRequest) returns (HomeNpvResponse);
   rpc ComputeClosingCosts (ClosingCostsRequest) returns (ClosingCostsResponse);
 
@@ -692,6 +694,15 @@ message HomeFutureValueResponse {
 message RentVsBuyRequest {
   string property_price = 1;
   string down_payment = 2;
+  // LEGACY aggregate: P&I plus taxes/insurance/maintenance in one number.
+  //
+  // Kept and still honoured. The split it lacks is what makes amortisation
+  // impossible, so a request carrying only this field is served by the ORIGINAL
+  // model and returns exactly what it always returned. Supply
+  // monthly_taxes_ins_maintenance (12) and loan_annual_rate (9) instead to reach
+  // the amortising model. Reserving this field would have broken every existing
+  // caller — including the deployed mortgage assistant, whose label space emits
+  // it — to improve an answer they did not ask to have improved.
   string monthly_piti_and_maintenance = 3;
   string annual_home_appreciation = 4;
   string current_monthly_rent = 5;
@@ -700,17 +711,137 @@ message RentVsBuyRequest {
   // opportunity cost side of the comparison.
   string annual_investment_return = 7;
   int32 years = 8;
+  // Nominal annual mortgage interest rate as a decimal (e.g. "0.065" for 6.5%/yr,
+  // compounded monthly as rate/12). Optional; default is "0" when empty.
+  string loan_annual_rate = 9;
+  // Mortgage loan amortization term in years (e.g. 30).
+  // Optional; omitted (0) defaults to 30 YEARS -- not to `years`, and not to
+  // any expression of it. An earlier revision of this comment read "defaults to
+  // years / 30", which is neither what the service does nor a meaningful
+  // quantity; finance_service.cpp has always set 30. Corrected 2026-08-28 after
+  // it was about to be copied into a client integration guide.
+  int32 loan_term_years = 10;
+  // Initial loan amount in currency units. Optional; default when empty is
+  // property_price - down_payment.
+  string loan_amount = 11;
+  // Monthly non-debt carrying costs (property taxes, insurance, HOA, maintenance)
+  // in currency units per month (everything EXCEPT P&I debt service).
+  // Optional; default is "0" when empty.
+  string monthly_taxes_ins_maintenance = 12;
+  // Buyer upfront closing costs and fees in currency units.
+  // Optional; default is "0" when empty.
+  string closing_costs_buy = 13;
+  // Selling costs as a decimal fraction of final home sale price (e.g. "0.06"
+  // for 6% broker and transfer fees).
+  //
+  // Optional; omitted means "0", NOT "0.06". This comment claimed 0.06 until
+  // 2026-08-28 and the service has always used zero, deliberately: a caller who
+  // genuinely sells for free is indistinguishable from one who said nothing,
+  // and defaulting to zero never INVENTS a cost the caller did not state.
+  // Measured both ways against production -- omitted and explicit "0" both
+  // return selling_costs 0.
+  //
+  // A UI that wants the customary 6% must send it explicitly.
+  string selling_cost_percent = 14;
+  // Annual inflation rate as a decimal (e.g. "0.025" for 2.5%/yr).
+  // Optional; default is "0" when empty.
+  string annual_inflation_rate = 15;
 }
 
-// All doubles: the rent escalation, appreciation and investment legs are all
-// computed in double, and the buy/rent figures are only meaningful against
-// each other -- quoting one side to 18 places would misstate which digits
-// are real.
 message RentVsBuyResponse {
+  // Fields 1, 2 and 4 KEEP their double type and their numbers. Replacing a
+  // double with a string at the same field number is wire-breaking: an old
+  // client decodes the new bytes as garbage rather than raising a clean error.
+  // They are always populated.
+  //
+  // WHICH MODEL FILLS THEM depends on the request. A request carrying only the
+  // legacy monthly_piti_and_maintenance gets the original model and therefore
+  // the numbers it has always received. A request supplying the amortising
+  // inputs gets the corrected model in these same fields — that caller opted in
+  // by sending them.
   double total_cost_of_buying = 1;
   double total_cost_of_renting = 2;
   bool is_buying_better = 3;
   double buying_advantage = 4;          // rent cost minus buy cost
+
+  // Exact decimal companions of the three figures above. Populated ONLY on the
+  // amortising path; empty on the legacy path, because the legacy model computes
+  // in double and rendering it to eighteen places would invent digits that are
+  // not real. Money is a decimal string here for the reason the file header
+  // gives: this service is reachable from browsers, where JavaScript's number IS
+  // a float64 and a double money field is lossy before anyone writes a line.
+  string total_cost_of_buying_exact = 5;
+  string total_cost_of_renting_exact = 6;
+  string buying_advantage_exact = 7;
+  string owner_terminal_wealth = 8;
+  string renter_terminal_wealth = 9;
+  string final_loan_balance = 10;
+  string home_sale_price = 11;
+  string selling_costs = 12;
+  string total_principal_paid = 13;
+  string total_interest_paid = 14;
+  string total_rent_paid = 15;
+
+  // Real (inflation-deflated) companions exist ONLY for terminal quantities,
+  // because total_cost_of_* are sums of cash flows occurring at different dates
+  // and no single deflator is meaningful.
+  string real_buying_advantage = 16;
+  string real_owner_terminal_wealth = 17;
+  string real_renter_terminal_wealth = 18;
+}
+
+// ---------------------------------------------------------------------------
+// Batched rent-vs-buy.
+//
+// EXISTS FOR THROUGHPUT, and the throughput problem is not the engine. A single
+// ComputeRentVsBuy is an O(years*12) walk bounded at 1200 iterations -- cheap.
+// What bounds a bulk caller is the INGRESS: Envoy's local rate limit is
+// `max_tokens: 100, tokens_per_fill: 10, fill_interval: 1s` (envoy.yaml), so
+// ten requests per second per replica. A caller generating a large corpus of
+// pre-computed scenarios -- static page generation, a research sweep -- spends
+// hours against that ceiling and competes with live traffic for the same
+// tokens the whole time. One request carrying a thousand scenarios does not.
+//
+// It is NOT a quota bypass, and the charge is what makes that true: this RPC
+// charges cost_default() PER SCENARIO, so a batch of 1000 costs exactly what
+// 1000 individual calls cost. It buys freedom from the per-request rate limit
+// and from a thousand round trips; it buys no compute for free.
+//
+// Deliberately `repeated RentVsBuyRequest` rather than the parallel-array shape
+// ComputeAmortizationBatch uses. That message has six columns and its own
+// comment explains that a ragged batch must be refused rather than truncated;
+// RentVsBuyRequest has sixteen fields and two mutually exclusive SHAPES, so
+// sixteen parallel arrays would make raggedness sixteen times likelier and
+// would obscure which shape each row selected. Nesting the existing message
+// also means the shape dispatch, the bounds and the refusals are IDENTICAL to
+// the single-scenario RPC -- one contract, one implementation, no second set of
+// rules to drift.
+message RentVsBuyBatchRequest {
+  // At most 1000. A larger batch is refused rather than truncated: a truncated
+  // batch returns a shorter list that looks like a complete answer, which is
+  // the same failure mode ComputeAmortizationBatch refuses raggedness to avoid.
+  repeated RentVsBuyRequest scenarios = 1;
+}
+
+// One scenario's outcome. Exactly one field is set.
+//
+// A per-scenario outcome, rather than failing the whole batch, is the point of
+// batching for a generation pipeline: one malformed row out of a thousand must
+// not discard the nine hundred and ninety-nine that computed. `error` carries
+// the SAME message the single-scenario RPC would have returned, so a caller
+// debugging one row reads the identical diagnostic either way.
+message RentVsBuyBatchResult {
+  oneof outcome {
+    RentVsBuyResponse result = 1;
+    string error = 2;
+  }
+}
+
+message RentVsBuyBatchResponse {
+  // Same length and same order as `scenarios`. Positional correspondence is the
+  // contract -- a caller matches results to inputs by index, so nothing is ever
+  // filtered out of this list, only marked with an `error`.
+  repeated RentVsBuyBatchResult results = 1;
 }
 
 message HomeNpvRequest {
@@ -726,18 +857,28 @@ message HomeNpvRequest {
   string selling_closing_cost_percent = 10;  // 0.06 for 6% of the sale price
   string monthly_rent_saved = 11;            // imputed rent the purchase displaces
   string annual_rent_increase = 12;
+  // NOMINAL annual discount rate (the modeled cash flows are nominal).
   string annual_discount_rate = 13;
   int32 holding_period_years = 14;
+  // Annual inflation rate as a decimal (e.g. "0.025" for 2.5%/yr).
+  // Optional; default is "0" when empty.
+  string annual_inflation_rate = 15;
 }
 
 // All doubles, matching ComputeXnpv/ComputeXirr above: this RPC is a cash-flow
 // model over the same xnpv/xirr primitives, which this service already serves
 // as doubles because that is what they compute in.
 message HomeNpvResponse {
+  // A real NPV is not provided because a nominal NPV discounted at a nominal rate
+  // is already in time-0 dollars, and a correctly built real NPV is identical
+  // term-by-term by Fisher.
   double net_present_value = 1;
   double internal_rate_of_return = 2;
   double future_sale_price = 3;
   double future_equity = 4;
+  double real_internal_rate_of_return = 5;
+  double real_future_sale_price = 6;
+  double real_future_equity = 7;
 }
 
 // ============================================================================

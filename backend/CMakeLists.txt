@@ -1375,6 +1375,13 @@ add_test(NAME MortgageVerificationTest COMMAND test_mortgage_verification)
 # mortgage_verification) and sensen.grammar, whose IGrammar contract this
 # module implements -- and neither depends on anything beyond std, so both are
 # compiled here as this target's own FILE_SET sources.
+# Pure text comparison of two files -- no engine, no protobuf, no links.
+add_executable(test_vendored_proto_drift tests/test_vendored_proto_drift.cpp)
+target_compile_definitions(test_vendored_proto_drift PRIVATE
+    kBackendDir="${CMAKE_CURRENT_SOURCE_DIR}"
+    kRepoRoot="${CMAKE_CURRENT_SOURCE_DIR}/..")
+add_test(NAME VendoredProtoDriftTest COMMAND test_vendored_proto_drift)
+
 add_executable(test_mortgage_grammar tests/test_mortgage_grammar.cpp)
 target_sources(test_mortgage_grammar
     PRIVATE
