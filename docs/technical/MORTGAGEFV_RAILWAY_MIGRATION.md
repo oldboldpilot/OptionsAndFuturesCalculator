@@ -146,6 +146,21 @@ in a repo without a competing root config, or upload the directory directly.
 dependencies with npm updated `package-lock.json` and left `bun.lock` stale;
 `bun install --frozen-lockfile` then refused the build.
 
+**The Railway access token expires, and the CLI hides it.** `~/.railway/config.json`
+carries `tokenExpiresAt`, roughly an hour out. The CLI refreshes silently on any
+command; raw GraphQL calls holding a value read earlier do not, and every
+mutation starts answering `Not Authorized`. That reads exactly like a scope
+problem and is not one — this file already records `Not Authorized` meaning an
+EMPTY bearer, and expiry is the second cause. Re-read the file, or run any
+`railway` command first to force the refresh.
+
+**Set `rootDirectory` BEFORE the first deploy, not after.** A service created
+without it deploys a snapshot that predates the setting, so railpack looks for a
+Dockerfile at the repo root, fails to find one, and reports `railpack prepare
+exited with an error` — which reads as "your Dockerfile is wrong" rather than
+"we built the wrong directory". The gateway was deployed by hand for a day on
+account of this.
+
 **A 500 under a parallel sweep may be your own load test.** One URL in 536
 failed at 12-way concurrency and passed on retry — Envoy allows 10 req/s per
 replica.
