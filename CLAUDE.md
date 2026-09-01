@@ -891,6 +891,38 @@ deliberate exception and keeps `FAILED_PRECONDITION`: 100,000 is ordinary on a
 larger closing and wrong only relative to a subtotal that cannot be known until
 the itemisation runs.
 
+### An operation must reach FOUR tables — and a FIFTH lives in the client
+
+**There is a fifth copy, it is in a different repository, and it had drifted to
+refusing THIRTEEN of the twenty-seven operations.** `nest-egg-loan`'s
+`assistant-api.server.ts` carried a hand-written `ALLOWED_OPERATIONS` set naming
+15. The model parsed the sentence, `mortgage_verification.cppm` admitted the
+parse, `mortgage_assistant_service.cpp` dispatched it, the answer came back —
+and the CLIENT then said "isn't an operation I can run from here".
+`ComputeClosingCosts` was among them, so the feature that took three retrains to
+reach 39/42 was unreachable from the app that asked for it. So were
+`ComputeDetailedAmortization`, `ComputeMortgageRecast`, `ComputeNpv`,
+`ComputeXirr`, `ComputeXnpv`, `ComputeDepreciation`, `ComputeCumulative`,
+`ComputeInterestPayment`, `ComputePrincipalPayment`, `ComputePayoffTiming` and
+`ComputePaybackPeriod`. Confirmed live 2026-09-01: `ComputeNpv` and
+`ComputePrincipalPayment` come back from production `ParseOperation` and were
+refused downstream.
+
+It was wrong in the other direction too — it allowed `ComputeRecast`, which is
+not an RPC. **A dead entry beside a missing one reads exactly like coverage.**
+
+Fixed by DERIVING the client set from the committed `finance-proto.json`
+descriptor, the same one its transport encodes against, minus a stated
+exclusion for batch RPCs. A table that is derived cannot drift; one maintained
+by hand in another repository has no mechanism that could keep it honest —
+nothing in this tree can even see it. **When adding an operation, the count is
+five, and the fifth is not in this repository.**
+
+Its test asserted two cases while claiming to "keep the allow-list in sync",
+both true throughout — the `ad-routes.test.ts` failure again: written from the
+same list as the code, so it could only ask whether the list was IMPLEMENTED,
+never whether it was COMPLETE.
+
 ### An operation must reach FOUR tables, and the fourth gates dispatch
 
 `kLabelSpace`/`kOperationIds` and the slot classifier in
