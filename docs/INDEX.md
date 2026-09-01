@@ -29,6 +29,12 @@
 
 ## Architecture & operations
 
+- [mortgagefvcalculator.com off Lovable](technical/MORTGAGEFV_RAILWAY_MIGRATION.md) —
+  the whole migration onto Railway, including native gRPC over the private
+  network (0.073s vs 1.97s), and the four defects found on the way: a transport
+  default contradicting its own comment, a leading space in a Stripe key that
+  broke every page, a database-wide search_path that broke GoTrue, and a webhook
+  secret belonging to a different endpoint.
 - [clang 22 → 23 toolchain migration](technical/TOOLCHAIN_CLANG23_MIGRATION.md) —
   the evaluation, the gates, and the three things that broke (two of them latent
   bugs of ours that a second compiler exposed). Also the overlay-install trap:
