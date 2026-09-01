@@ -1,0 +1,45 @@
+# One origin that looks like a Supabase project.
+#
+# @author Olumuyiwa Oluwasanmi
+#
+# supabase-js is given a single base URL and derives every path from it:
+# `<url>/auth/v1/...` for GoTrue and `<url>/rest/v1/...` for PostgREST. Self-
+# hosted, those are two separate services on two hostnames, so something has to
+# present them as one. Supabase's own stack uses Kong for this; Caddy does the
+# same job in nine lines and needs no database of its own.
+#
+# `handle_path` STRIPS the matched prefix, which is the whole point: GoTrue
+# serves /token and /user at its root, PostgREST serves /campaign_posts at its
+# root, and neither knows anything about the /auth/v1 or /rest/v1 that
+# supabase-js insists on prepending.
+{
+	admin off
+	auto_https off
+}
+
+:{$PORT:8080} {
+	handle_path /auth/v1/* {
+		reverse_proxy {$AUTH_UPSTREAM} {
+			header_up Host {upstream_hostport}
+		}
+	}
+
+	handle_path /rest/v1/* {
+		reverse_proxy {$REST_UPSTREAM} {
+			header_up Host {upstream_hostport}
+		}
+	}
+
+	# Railway's healthcheck, and a cheap way to tell "gateway is up" from
+	# "an upstream is down" when something 502s.
+	handle /health {
+		respond "ok" 200
+	}
+
+	# Anything else is a path supabase-js never generates. Answering 404 here
+	# rather than proxying keeps a typo from being served by whichever
+	# upstream happens to match.
+	handle {
+		respond "not a supabase route" 404
+	}
+}
