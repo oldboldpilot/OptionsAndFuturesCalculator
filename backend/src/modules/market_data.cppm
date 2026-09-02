@@ -998,39 +998,78 @@ public:
     }
 
     /**
-     * The option chain for one expiration.
+     * The option chain for one expiration: EVERY LISTED STRIKE, unfiltered.
      *
-     * Strikes are limited to a window around spot: an unfiltered SPY request
-     * is roughly 14,000 contracts at 100 per page, and no trader reads a
-     * 700-strike ladder. Every value returned is provider data — a strike with
-     * no quote comes back with zeros, which the UI renders as an em dash
-     * rather than inventing a price for it.
+     * This used to ask the provider for a fixed +/-12% of spot, and that hid
+     * most of the ladder in the way that hides itself -- a plausible window,
+     * centred correctly, so nothing looked broken. Measured 2026-09-02: NVDA
+     * at 224.92 for the 2026-12-18 expiry asked for 197..252 and returned 25
+     * of the 247 strikes that expiry lists (0.5 .. 460). Someone asking after
+     * the $184 strike could not reach it by scrolling, because it was filtered
+     * at the QUERY and never entered the response at all.
+     *
+     * The old justification cited "roughly 14,000 contracts" and a "700-strike
+     * ladder". Both are figures for ALL EXPIRATIONS AT ONCE, and neither
+     * describes this call, which is scoped to one. Measured cost of the full
+     * ladder for a single expiry: SPY 642 snapshots / 381 KB / 1.59 s, NVDA
+     * 808 / 439 KB / 1.18 s, both a single page.
+     *
+     * A narrower band was tried first and REJECTED: sigma*sqrt(T) scaling gave
+     * NVDA 73 of 247 strikes, which fixes this report and leaves the next one
+     * intact, because any band eventually excludes a strike somebody wants.
+     * Deep wings come back with no quote and render as an em dash, which is
+     * honest -- a strike that never arrives is indistinguishable from one that
+     * does not exist.
+     *
+     * Every value returned is provider data — a strike with no quote comes
+     * back with zeros, which the UI renders as an em dash rather than
+     * inventing a price for it.
      */
     [[nodiscard]] auto chain(const std::string& symbol, const std::string& expiration,
                              double spot) const -> std::expected<Chain, std::error_code> {
-        const double band = std::max(spot * 0.12, 5.0);
-        const double lo = std::max(1.0, std::floor(spot - band));
-        const double hi = std::ceil(spot + band);
-
-        const std::string path =
+        const std::string base =
             "/v1beta1/options/snapshots/" + symbol +
             "?feed=opra" +
             "&expiration_date=" + expiration +
-            "&strike_price_gte=" + std::to_string(static_cast<long long>(lo)) +
-            "&strike_price_lte=" + std::to_string(static_cast<long long>(hi)) +
             "&limit=1000";
 
-        auto body = get_json(credentials().data_host, path);
-        if (!body) return std::unexpected(body.error());
-
-        const auto& root = *body;
-        if (!root.contains("snapshots") || !root["snapshots"].is_object()) {
+        // FOLLOW THE PAGE TOKEN. Every expiry measured on 2026-09-02 fitted one
+        // page (the largest, NVDA, was 808 against a limit of 1000), but
+        // `next_page_token` was never read -- so exceeding it would have
+        // dropped the far strikes SILENTLY, which is the same defect the band
+        // was causing, one layer down, and is now reachable because the band is
+        // gone. A truncated ladder must not look like a complete one.
+        std::vector<fastjson::json_value> pages;
+        std::string page_token;
+        for (int page = 0; page < 20; ++page) {
+            const std::string path =
+                page_token.empty() ? base : base + "&page_token=" + page_token;
+            auto body = get_json(credentials().data_host, path);
+            // Only the FIRST page may fail the request. A later failure would
+            // otherwise yield a chain missing an arbitrary interior slice,
+            // which reads as "those strikes are not listed".
+            if (!body) {
+                if (pages.empty()) return std::unexpected(body.error());
+                break;
+            }
+            if (!(*body).contains("snapshots") || !(*body)["snapshots"].is_object()) {
+                if (pages.empty()) {
+                    return std::unexpected(make_error_code(MarketDataError::NotFound));
+                }
+                break;
+            }
+            page_token = str(*body, "next_page_token");
+            pages.push_back(std::move(*body));
+            if (page_token.empty()) break;
+        }
+        if (pages.empty()) {
             return std::unexpected(make_error_code(MarketDataError::NotFound));
         }
 
-        const auto open_interest = fetch_open_interest(symbol, expiration, lo, hi);
+        const auto open_interest = fetch_open_interest(symbol, expiration);
 
         std::map<double, StrikeRow> rows;
+        for (const auto& root : pages) {
         for (const auto& [occ, snap] : root["snapshots"].as_object()) {
             const auto parts = parse_occ(occ);
             if (!parts.valid) continue;
@@ -1060,6 +1099,7 @@ public:
             row.strike = parts.strike;
             (parts.is_call ? row.call : row.put) = q;
         }
+        }
 
         if (rows.empty()) {
             return std::unexpected(make_error_code(MarketDataError::NotFound));
@@ -1079,16 +1119,13 @@ public:
 private:
     /** Open interest by OCC symbol. Absent from the snapshots feed. */
     [[nodiscard]] static auto fetch_open_interest(const std::string& symbol,
-                                                  const std::string& expiration, double lo,
-                                                  double hi)
+                                                  const std::string& expiration)
         -> std::unordered_map<std::string, long long> {
         std::unordered_map<std::string, long long> out;
 
         const std::string path =
             "/v2/options/contracts?underlying_symbols=" + symbol +
             "&expiration_date=" + expiration +
-            "&strike_price_gte=" + std::to_string(static_cast<long long>(lo)) +
-            "&strike_price_lte=" + std::to_string(static_cast<long long>(hi)) +
             "&limit=10000";
 
         auto body = get_json(credentials().trading_host, path);
