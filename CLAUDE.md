@@ -449,6 +449,30 @@ outcome for "500k with 20% down" is an honest refusal naming the rate the user
 actually stated — the direction to fail in, and better than a silent 20%
 mortgage, but not the answer.
 
+**`map<string,string>` ALSO MEANS A REPEATED FIELD ARRIVES AS A STRING, and
+that broke four operations for as long as they existed.** The assistant has
+nowhere to put a list: every value in `FinanceParams.params` is a string, so a
+`repeated double` comes back as `values = "[-1000,1000,...]"`. A client passing
+the map through verbatim -- which is the documented, correct handling for money,
+and what `nest-egg-loan` did -- gets
+
+```
+values: invalid value "[-1000,1000,...]" for type TYPE_DOUBLE
+```
+
+so `ComputeNpv`, `ComputeIrr`, `ComputeXirr` and `ComputeXnpv` could be parsed,
+grounded and dispatched and still never compute. `ComputeIrr` was routable from
+the app the whole time and had never once worked. Fixed client-side on
+2026-09-01 by unwrapping a JSON-array string for a repeated field at the one
+seam that knows the declared wire type, upstream of the native-vs-gRPC-Web
+split so both transports send identical bytes.
+
+**The failure is invisible from either end.** The model's output is correct for
+the contract it was given, the engine's refusal is correct for the bytes it
+received, and only the seam between them is wrong -- which is why neither the
+assistant contract test nor the client unit test could see it, and why the gate
+that found it had to span parse -> route -> compute -> summarise in one test.
+
 **A BYTE-IDENTITY GATE IS INVALID ON THIS RESPONSE, and it looks exactly like
 the SGEE misrouting defect when you use one.** `FinanceParams.params` is a
 protobuf `map<string,string>`, and a map has no defined iteration order — the
