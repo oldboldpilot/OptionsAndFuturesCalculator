@@ -449,6 +449,37 @@ outcome for "500k with 20% down" is an honest refusal naming the rate the user
 actually stated — the direction to fail in, and better than a silent 20%
 mortgage, but not the answer.
 
+**`ComputeXnpv`/`ComputeXirr` DATES ARE UNIX SECONDS IN THE ENGINE AND DAYS IN
+THE CORPUS, and fixing the corpus would ACTIVATE a silent wrong answer.**
+`financial.cppm`'s `xnpv`/`xirr` divide by `31536000.0` — the comment says
+"Unix timestamp seconds as date proxy" — while
+`build_mortgage_dataset.py` writes `obj["dates"] = [float(d) for d in days]`.
+A factor of 86400.
+
+The two operations fail in opposite directions, and only one of them is safe:
+
+| | with day-numbers | why |
+| --- | --- | --- |
+| `ComputeXirr` | REFUSES, `Newton-Raphson flat derivative` | every `year_frac` collapses to ~0, so the derivative vanishes |
+| `ComputeXnpv` | **200 OK with the UNDISCOUNTED SUM** | it is a plain sum; `pow(1+r, ~0)` is 1, so nothing is discounted |
+
+Measured 2026-09-01: values summing to 1000 returned `999.9954`. Nothing in
+that response says the discounting did not happen.
+
+**It is unreachable today, and that is the only reason it is not live.** The
+model refuses both utterances — `mortgage_verification.cppm` already records
+224 corpus rows whose `dates` are "a cumulative day grid the generator derives
+at 30.44 days per month", ungroundable by design. So the grounding gate is
+currently the only thing standing between this contract mismatch and a wrong
+NPV on the site.
+
+**Therefore: do not fix those 224 rows without fixing the unit first.** That
+note lists them as "fixable at the generator", which is true and, taken alone,
+would ship a discounting bug the moment it is done. Fix the unit in the same
+change — and prefer making `xnpv` REFUSE a date span that implies a
+sub-hour horizon over silently returning a sum, because a solver that refuses
+is survivable and a plain sum that looks like an NPV is not.
+
 **`map<string,string>` ALSO MEANS A REPEATED FIELD ARRIVES AS A STRING, and
 that broke four operations for as long as they existed.** The assistant has
 nowhere to put a list: every value in `FinanceParams.params` is a string, so a
