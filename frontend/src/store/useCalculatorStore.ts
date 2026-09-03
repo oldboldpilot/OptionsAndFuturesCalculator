@@ -253,6 +253,20 @@ interface CalculatorState {
   rateSource: RateSource;
   /** Continuous dividend yield, decimal. Zero means no dividend is modelled. */
   dividendYield: number;
+  /**
+   * User-chosen price window for the P&L MATRIX only, or null for the engine's
+   * default +/-25% around spot. Each side is independent: pinning one leaves
+   * the other on the default.
+   *
+   * Deliberately scoped to the matrix. The engine draws the payoff curve --
+   * and therefore max profit, max loss, breakeven and the probability
+   * distribution -- by sweeping its own grid, so a window applied to both
+   * would report the best outcome INSIDE the window as the position's maximum
+   * profit. Correct arithmetic, wrong question. See StrategyRequest's
+   * matrix_price_min in calculator.proto.
+   */
+  matrixPriceMin: number | null;
+  matrixPriceMax: number | null;
   rateMeta: RateMeta | null;
   result: CalculationResult | null;
   isLoading: boolean;
@@ -317,6 +331,7 @@ interface CalculatorState {
   setSpotPrice: (price: number) => void;
   setRiskFreeRate: (rate: number) => void;
   setDividendYield: (q: number) => void;
+  setMatrixBounds: (bounds: { min?: number | null; max?: number | null }) => void;
   loadRiskFreeRate: () => Promise<void>;
   loadChain: (expiration?: string) => void;
   setSelectedExpiration: (date: string) => void;
@@ -456,6 +471,12 @@ export interface StrategyRequestInput {
   legs: Leg[];
   /** Fallback expiry for a leg that carries none of its own. */
   horizonDays: number;
+  /**
+   * Matrix-only price window. Null or omitted leaves the engine on its
+   * default; each side is independent.
+   */
+  matrixPriceMin?: number | null;
+  matrixPriceMax?: number | null;
 }
 
 /**
@@ -479,6 +500,13 @@ export function buildStrategyRequest(input: StrategyRequestInput): StrategyReque
   // modelled' — and the engine's q == 0 path is bit-for-bit plain
   // Black-Scholes, so this cannot perturb a non-dividend position.
   req.setDividendYield(input.dividendYield);
+
+  // Zero is the wire's "unset" on both, and it is what an absent bound must
+  // send -- omitting the setter would leave the same zero, but stating it keeps
+  // this function total over its input rather than relying on proto3 defaults
+  // for one field and explicit calls for every other.
+  req.setMatrixPriceMin(input.matrixPriceMin ?? 0);
+  req.setMatrixPriceMax(input.matrixPriceMax ?? 0);
 
   // Averaging style onto the wire enum. Written as an exhaustive record
   // rather than a chain of ternaries so that adding a style to
@@ -543,6 +571,8 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
   riskFreeRate: null,
   rateSource: 'pending',
   dividendYield: 0,
+  matrixPriceMin: null,
+  matrixPriceMax: null,
   rateMeta: null,
   result: null,
   isLoading: false,
@@ -685,6 +715,34 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
   // one would silently restate their input.
   setRiskFreeRate: (rate) => set({ riskFreeRate: rate, rateSource: 'user' }),
   setDividendYield: (q) => set({ dividendYield: q >= 0 ? q : 0 }),
+
+  /**
+   * Patches one or both matrix bounds.
+   *
+   * A PATCH rather than a pair, so clearing the lower bound cannot silently
+   * clear the upper one -- `{ min: null }` says "unpin the floor" and leaves
+   * the ceiling exactly where the user put it.
+   *
+   * A non-positive or non-finite number becomes null rather than travelling to
+   * the engine, which would refuse it. Zero is the wire's own sentinel for
+   * "unset", so a user clearing the field and a user typing 0 mean the same
+   * thing and are treated the same way. An INVERTED pair is NOT normalised
+   * here: the engine refuses it and names both numbers, and quietly swapping
+   * them in the client would answer a question the user did not ask -- the
+   * same reason the engine refuses rather than swapping.
+   */
+  setMatrixBounds: ({ min, max }) => {
+    const clean = (v: number | null | undefined, current: number | null) => {
+      if (v === undefined) return current;
+      if (v === null || !Number.isFinite(v) || v <= 0) return null;
+      return v;
+    };
+    set({
+      matrixPriceMin: clean(min, get().matrixPriceMin),
+      matrixPriceMax: clean(max, get().matrixPriceMax),
+    });
+    void get().calculateStrategy();
+  },
 
   /**
    * Fetch the measured risk-free rate.
@@ -1029,6 +1087,8 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
         dividendYield: get().dividendYield,
         legs,
         horizonDays: days,
+        matrixPriceMin: get().matrixPriceMin,
+        matrixPriceMax: get().matrixPriceMax,
       });
       const res = await client.calculateStrategy(req, authMetadata());
 

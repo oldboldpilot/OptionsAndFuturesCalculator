@@ -1844,6 +1844,27 @@ export class RentVsBuyRequest extends jspb.Message {
   getYears(): number;
   setYears(value: number): RentVsBuyRequest;
 
+  getLoanAnnualRate(): string;
+  setLoanAnnualRate(value: string): RentVsBuyRequest;
+
+  getLoanTermYears(): number;
+  setLoanTermYears(value: number): RentVsBuyRequest;
+
+  getLoanAmount(): string;
+  setLoanAmount(value: string): RentVsBuyRequest;
+
+  getMonthlyTaxesInsMaintenance(): string;
+  setMonthlyTaxesInsMaintenance(value: string): RentVsBuyRequest;
+
+  getClosingCostsBuy(): string;
+  setClosingCostsBuy(value: string): RentVsBuyRequest;
+
+  getSellingCostPercent(): string;
+  setSellingCostPercent(value: string): RentVsBuyRequest;
+
+  getAnnualInflationRate(): string;
+  setAnnualInflationRate(value: string): RentVsBuyRequest;
+
   serializeBinary(): Uint8Array;
   toObject(includeInstance?: boolean): RentVsBuyRequest.AsObject;
   static toObject(includeInstance: boolean, msg: RentVsBuyRequest): RentVsBuyRequest.AsObject;
@@ -1862,6 +1883,13 @@ export namespace RentVsBuyRequest {
     annualRentIncrease: string,
     annualInvestmentReturn: string,
     years: number,
+    loanAnnualRate: string,
+    loanTermYears: number,
+    loanAmount: string,
+    monthlyTaxesInsMaintenance: string,
+    closingCostsBuy: string,
+    sellingCostPercent: string,
+    annualInflationRate: string,
   }
 }
 
@@ -1878,6 +1906,48 @@ export class RentVsBuyResponse extends jspb.Message {
   getBuyingAdvantage(): number;
   setBuyingAdvantage(value: number): RentVsBuyResponse;
 
+  getTotalCostOfBuyingExact(): string;
+  setTotalCostOfBuyingExact(value: string): RentVsBuyResponse;
+
+  getTotalCostOfRentingExact(): string;
+  setTotalCostOfRentingExact(value: string): RentVsBuyResponse;
+
+  getBuyingAdvantageExact(): string;
+  setBuyingAdvantageExact(value: string): RentVsBuyResponse;
+
+  getOwnerTerminalWealth(): string;
+  setOwnerTerminalWealth(value: string): RentVsBuyResponse;
+
+  getRenterTerminalWealth(): string;
+  setRenterTerminalWealth(value: string): RentVsBuyResponse;
+
+  getFinalLoanBalance(): string;
+  setFinalLoanBalance(value: string): RentVsBuyResponse;
+
+  getHomeSalePrice(): string;
+  setHomeSalePrice(value: string): RentVsBuyResponse;
+
+  getSellingCosts(): string;
+  setSellingCosts(value: string): RentVsBuyResponse;
+
+  getTotalPrincipalPaid(): string;
+  setTotalPrincipalPaid(value: string): RentVsBuyResponse;
+
+  getTotalInterestPaid(): string;
+  setTotalInterestPaid(value: string): RentVsBuyResponse;
+
+  getTotalRentPaid(): string;
+  setTotalRentPaid(value: string): RentVsBuyResponse;
+
+  getRealBuyingAdvantage(): string;
+  setRealBuyingAdvantage(value: string): RentVsBuyResponse;
+
+  getRealOwnerTerminalWealth(): string;
+  setRealOwnerTerminalWealth(value: string): RentVsBuyResponse;
+
+  getRealRenterTerminalWealth(): string;
+  setRealRenterTerminalWealth(value: string): RentVsBuyResponse;
+
   serializeBinary(): Uint8Array;
   toObject(includeInstance?: boolean): RentVsBuyResponse.AsObject;
   static toObject(includeInstance: boolean, msg: RentVsBuyResponse): RentVsBuyResponse.AsObject;
@@ -1892,6 +1962,92 @@ export namespace RentVsBuyResponse {
     totalCostOfRenting: number,
     isBuyingBetter: boolean,
     buyingAdvantage: number,
+    totalCostOfBuyingExact: string,
+    totalCostOfRentingExact: string,
+    buyingAdvantageExact: string,
+    ownerTerminalWealth: string,
+    renterTerminalWealth: string,
+    finalLoanBalance: string,
+    homeSalePrice: string,
+    sellingCosts: string,
+    totalPrincipalPaid: string,
+    totalInterestPaid: string,
+    totalRentPaid: string,
+    realBuyingAdvantage: string,
+    realOwnerTerminalWealth: string,
+    realRenterTerminalWealth: string,
+  }
+}
+
+export class RentVsBuyBatchRequest extends jspb.Message {
+  getScenariosList(): Array<RentVsBuyRequest>;
+  setScenariosList(value: Array<RentVsBuyRequest>): RentVsBuyBatchRequest;
+  clearScenariosList(): RentVsBuyBatchRequest;
+  addScenarios(value?: RentVsBuyRequest, index?: number): RentVsBuyRequest;
+
+  serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): RentVsBuyBatchRequest.AsObject;
+  static toObject(includeInstance: boolean, msg: RentVsBuyBatchRequest): RentVsBuyBatchRequest.AsObject;
+  static serializeBinaryToWriter(message: RentVsBuyBatchRequest, writer: jspb.BinaryWriter): void;
+  static deserializeBinary(bytes: Uint8Array): RentVsBuyBatchRequest;
+  static deserializeBinaryFromReader(message: RentVsBuyBatchRequest, reader: jspb.BinaryReader): RentVsBuyBatchRequest;
+}
+
+export namespace RentVsBuyBatchRequest {
+  export type AsObject = {
+    scenariosList: Array<RentVsBuyRequest.AsObject>,
+  }
+}
+
+export class RentVsBuyBatchResult extends jspb.Message {
+  getResult(): RentVsBuyResponse | undefined;
+  setResult(value?: RentVsBuyResponse): RentVsBuyBatchResult;
+  hasResult(): boolean;
+  clearResult(): RentVsBuyBatchResult;
+
+  getError(): string;
+  setError(value: string): RentVsBuyBatchResult;
+
+  getOutcomeCase(): RentVsBuyBatchResult.OutcomeCase;
+
+  serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): RentVsBuyBatchResult.AsObject;
+  static toObject(includeInstance: boolean, msg: RentVsBuyBatchResult): RentVsBuyBatchResult.AsObject;
+  static serializeBinaryToWriter(message: RentVsBuyBatchResult, writer: jspb.BinaryWriter): void;
+  static deserializeBinary(bytes: Uint8Array): RentVsBuyBatchResult;
+  static deserializeBinaryFromReader(message: RentVsBuyBatchResult, reader: jspb.BinaryReader): RentVsBuyBatchResult;
+}
+
+export namespace RentVsBuyBatchResult {
+  export type AsObject = {
+    result?: RentVsBuyResponse.AsObject,
+    error: string,
+  }
+
+  export enum OutcomeCase { 
+    OUTCOME_NOT_SET = 0,
+    RESULT = 1,
+    ERROR = 2,
+  }
+}
+
+export class RentVsBuyBatchResponse extends jspb.Message {
+  getResultsList(): Array<RentVsBuyBatchResult>;
+  setResultsList(value: Array<RentVsBuyBatchResult>): RentVsBuyBatchResponse;
+  clearResultsList(): RentVsBuyBatchResponse;
+  addResults(value?: RentVsBuyBatchResult, index?: number): RentVsBuyBatchResult;
+
+  serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): RentVsBuyBatchResponse.AsObject;
+  static toObject(includeInstance: boolean, msg: RentVsBuyBatchResponse): RentVsBuyBatchResponse.AsObject;
+  static serializeBinaryToWriter(message: RentVsBuyBatchResponse, writer: jspb.BinaryWriter): void;
+  static deserializeBinary(bytes: Uint8Array): RentVsBuyBatchResponse;
+  static deserializeBinaryFromReader(message: RentVsBuyBatchResponse, reader: jspb.BinaryReader): RentVsBuyBatchResponse;
+}
+
+export namespace RentVsBuyBatchResponse {
+  export type AsObject = {
+    resultsList: Array<RentVsBuyBatchResult.AsObject>,
   }
 }
 
@@ -1938,6 +2094,9 @@ export class HomeNpvRequest extends jspb.Message {
   getHoldingPeriodYears(): number;
   setHoldingPeriodYears(value: number): HomeNpvRequest;
 
+  getAnnualInflationRate(): string;
+  setAnnualInflationRate(value: string): HomeNpvRequest;
+
   serializeBinary(): Uint8Array;
   toObject(includeInstance?: boolean): HomeNpvRequest.AsObject;
   static toObject(includeInstance: boolean, msg: HomeNpvRequest): HomeNpvRequest.AsObject;
@@ -1962,6 +2121,7 @@ export namespace HomeNpvRequest {
     annualRentIncrease: string,
     annualDiscountRate: string,
     holdingPeriodYears: number,
+    annualInflationRate: string,
   }
 }
 
@@ -1978,6 +2138,15 @@ export class HomeNpvResponse extends jspb.Message {
   getFutureEquity(): number;
   setFutureEquity(value: number): HomeNpvResponse;
 
+  getRealInternalRateOfReturn(): number;
+  setRealInternalRateOfReturn(value: number): HomeNpvResponse;
+
+  getRealFutureSalePrice(): number;
+  setRealFutureSalePrice(value: number): HomeNpvResponse;
+
+  getRealFutureEquity(): number;
+  setRealFutureEquity(value: number): HomeNpvResponse;
+
   serializeBinary(): Uint8Array;
   toObject(includeInstance?: boolean): HomeNpvResponse.AsObject;
   static toObject(includeInstance: boolean, msg: HomeNpvResponse): HomeNpvResponse.AsObject;
@@ -1992,6 +2161,9 @@ export namespace HomeNpvResponse {
     internalRateOfReturn: number,
     futureSalePrice: number,
     futureEquity: number,
+    realInternalRateOfReturn: number,
+    realFutureSalePrice: number,
+    realFutureEquity: number,
   }
 }
 
@@ -2715,6 +2887,166 @@ export namespace ClosingCostsResponse {
     downPayment: string,
     totalCashToClose: string,
     closingCostsPercentOfPrice: number,
+  }
+}
+
+export class RefreshStateAssumptionsRequest extends jspb.Message {
+  getDryRun(): boolean;
+  setDryRun(value: boolean): RefreshStateAssumptionsRequest;
+
+  getDataYear(): number;
+  setDataYear(value: number): RefreshStateAssumptionsRequest;
+
+  serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): RefreshStateAssumptionsRequest.AsObject;
+  static toObject(includeInstance: boolean, msg: RefreshStateAssumptionsRequest): RefreshStateAssumptionsRequest.AsObject;
+  static serializeBinaryToWriter(message: RefreshStateAssumptionsRequest, writer: jspb.BinaryWriter): void;
+  static deserializeBinary(bytes: Uint8Array): RefreshStateAssumptionsRequest;
+  static deserializeBinaryFromReader(message: RefreshStateAssumptionsRequest, reader: jspb.BinaryReader): RefreshStateAssumptionsRequest;
+}
+
+export namespace RefreshStateAssumptionsRequest {
+  export type AsObject = {
+    dryRun: boolean,
+    dataYear: number,
+  }
+}
+
+export class RefreshStateAssumptionsResponse extends jspb.Message {
+  getOk(): boolean;
+  setOk(value: boolean): RefreshStateAssumptionsResponse;
+
+  getDataYear(): number;
+  setDataYear(value: number): RefreshStateAssumptionsResponse;
+
+  getStatesUpdated(): number;
+  setStatesUpdated(value: number): RefreshStateAssumptionsResponse;
+
+  getStatesRejected(): number;
+  setStatesRejected(value: number): RefreshStateAssumptionsResponse;
+
+  getDataSource(): string;
+  setDataSource(value: string): RefreshStateAssumptionsResponse;
+
+  getError(): string;
+  setError(value: string): RefreshStateAssumptionsResponse;
+
+  serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): RefreshStateAssumptionsResponse.AsObject;
+  static toObject(includeInstance: boolean, msg: RefreshStateAssumptionsResponse): RefreshStateAssumptionsResponse.AsObject;
+  static serializeBinaryToWriter(message: RefreshStateAssumptionsResponse, writer: jspb.BinaryWriter): void;
+  static deserializeBinary(bytes: Uint8Array): RefreshStateAssumptionsResponse;
+  static deserializeBinaryFromReader(message: RefreshStateAssumptionsResponse, reader: jspb.BinaryReader): RefreshStateAssumptionsResponse;
+}
+
+export namespace RefreshStateAssumptionsResponse {
+  export type AsObject = {
+    ok: boolean,
+    dataYear: number,
+    statesUpdated: number,
+    statesRejected: number,
+    dataSource: string,
+    error: string,
+  }
+}
+
+export class GetStateAssumptionsRequest extends jspb.Message {
+  getSlug(): string;
+  setSlug(value: string): GetStateAssumptionsRequest;
+
+  serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): GetStateAssumptionsRequest.AsObject;
+  static toObject(includeInstance: boolean, msg: GetStateAssumptionsRequest): GetStateAssumptionsRequest.AsObject;
+  static serializeBinaryToWriter(message: GetStateAssumptionsRequest, writer: jspb.BinaryWriter): void;
+  static deserializeBinary(bytes: Uint8Array): GetStateAssumptionsRequest;
+  static deserializeBinaryFromReader(message: GetStateAssumptionsRequest, reader: jspb.BinaryReader): GetStateAssumptionsRequest;
+}
+
+export namespace GetStateAssumptionsRequest {
+  export type AsObject = {
+    slug: string,
+  }
+}
+
+export class StateAssumption extends jspb.Message {
+  getSlug(): string;
+  setSlug(value: string): StateAssumption;
+
+  getName(): string;
+  setName(value: string): StateAssumption;
+
+  getAbbr(): string;
+  setAbbr(value: string): StateAssumption;
+
+  getMedianPrice(): string;
+  setMedianPrice(value: string): StateAssumption;
+
+  getPropertyTaxRate(): string;
+  setPropertyTaxRate(value: string): StateAssumption;
+
+  getInsuranceAnnual(): string;
+  setInsuranceAnnual(value: string): StateAssumption;
+
+  getStateIncomeTax(): string;
+  setStateIncomeTax(value: string): StateAssumption;
+
+  getMedianRent(): string;
+  setMedianRent(value: string): StateAssumption;
+
+  getNote(): string;
+  setNote(value: string): StateAssumption;
+
+  getDataSource(): string;
+  setDataSource(value: string): StateAssumption;
+
+  getDataYear(): number;
+  setDataYear(value: number): StateAssumption;
+
+  getRefreshedAt(): string;
+  setRefreshedAt(value: string): StateAssumption;
+
+  serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): StateAssumption.AsObject;
+  static toObject(includeInstance: boolean, msg: StateAssumption): StateAssumption.AsObject;
+  static serializeBinaryToWriter(message: StateAssumption, writer: jspb.BinaryWriter): void;
+  static deserializeBinary(bytes: Uint8Array): StateAssumption;
+  static deserializeBinaryFromReader(message: StateAssumption, reader: jspb.BinaryReader): StateAssumption;
+}
+
+export namespace StateAssumption {
+  export type AsObject = {
+    slug: string,
+    name: string,
+    abbr: string,
+    medianPrice: string,
+    propertyTaxRate: string,
+    insuranceAnnual: string,
+    stateIncomeTax: string,
+    medianRent: string,
+    note: string,
+    dataSource: string,
+    dataYear: number,
+    refreshedAt: string,
+  }
+}
+
+export class GetStateAssumptionsResponse extends jspb.Message {
+  getStatesList(): Array<StateAssumption>;
+  setStatesList(value: Array<StateAssumption>): GetStateAssumptionsResponse;
+  clearStatesList(): GetStateAssumptionsResponse;
+  addStates(value?: StateAssumption, index?: number): StateAssumption;
+
+  serializeBinary(): Uint8Array;
+  toObject(includeInstance?: boolean): GetStateAssumptionsResponse.AsObject;
+  static toObject(includeInstance: boolean, msg: GetStateAssumptionsResponse): GetStateAssumptionsResponse.AsObject;
+  static serializeBinaryToWriter(message: GetStateAssumptionsResponse, writer: jspb.BinaryWriter): void;
+  static deserializeBinary(bytes: Uint8Array): GetStateAssumptionsResponse;
+  static deserializeBinaryFromReader(message: GetStateAssumptionsResponse, reader: jspb.BinaryReader): GetStateAssumptionsResponse;
+}
+
+export namespace GetStateAssumptionsResponse {
+  export type AsObject = {
+    statesList: Array<StateAssumption.AsObject>,
   }
 }
 

@@ -928,6 +928,143 @@ auto main() -> int {
         ::unsetenv("SUPABASE_JWT_SECRET");
     }
 
+    // =======================================================================
+    section("7. MATRIX PRICE BOUNDS: a window on the grid, not on the answer");
+    // =======================================================================
+    // The matrix gets its OWN price grid, and the reason is the invariant
+    // asserted below rather than tidiness. price_grid is swept four times --
+    // the expiry curve (which is where max_profit, max_loss and break_even
+    // come from), the breakeven interpolation, the matrix, and the lognormal
+    // probability distribution. Narrowing a SHARED grid to inspect 480..520
+    // would have reported the maximum P&L *inside that window* as the
+    // position's max profit: a smaller number, correctly computed, answering a
+    // question nobody asked. That is the failure this whole design exists to
+    // prevent, so it is the first thing tested.
+    //
+    // Single-leg throughout, so it holds under any ambient PRO_GATE_MODE --
+    // the same control section 3 relies on.
+    {
+        const auto base = [] {
+            StrategyRequest req;
+            req.set_underlying_symbol("SPY");
+            req.set_current_price(500.0);
+            req.set_risk_free_rate(0.04);
+            req.set_price_range_percent(0.20);   // default window: 400..600
+            req.set_price_steps(41);
+            req.set_date_steps(3);
+            add_leg(req, Leg::BUY, Leg::CALL, 500.0, 45.0, 15.0, 0.25);
+            return req;
+        };
+
+        const auto cell_range = [](const StrategyResponse& r) {
+            double lo = std::numeric_limits<double>::infinity();
+            double hi = -std::numeric_limits<double>::infinity();
+            for (const auto& c : r.matrix()) {
+                lo = std::min(lo, c.price());
+                hi = std::max(hi, c.price());
+            }
+            return std::pair{lo, hi};
+        };
+
+        auto [st_free, unbounded] = call_strategy(stub, base());
+        check(st_free.ok(), "unbounded request succeeds");
+
+        {
+            auto req = base();
+            req.set_matrix_price_min(480.0);
+            req.set_matrix_price_max(520.0);
+            auto [status, resp] = call_strategy(stub, req);
+            check(status.ok(), "a bounded request succeeds");
+
+            const auto [lo, hi] = cell_range(resp);
+            check(std::abs(lo - 480.0) < 1e-9 && std::abs(hi - 520.0) < 1e-9,
+                  "the matrix spans EXACTLY the requested 480..520 (got " +
+                      std::to_string(lo) + ".." + std::to_string(hi) + ")");
+            check(resp.matrix_size() == 41 * 3,
+                  "and still has the requested 41 x 3 cells -- bounds change the WINDOW, "
+                  "not the resolution (got " + std::to_string(resp.matrix_size()) + ")");
+
+            // THE INVARIANT. Equality, not a tolerance: these are computed by
+            // sweeping a grid the bounds must not have touched, so any
+            // difference at all means the grids got shared again.
+            check(resp.max_profit() == unbounded.max_profit() &&
+                      resp.max_loss() == unbounded.max_loss() &&
+                      resp.break_even() == unbounded.break_even(),
+                  "max_profit, max_loss and break_even are IDENTICAL to the unbounded "
+                  "request -- bounding the matrix does not rewrite the headline numbers");
+
+            bool curve_same = resp.pnl_matrix_size() == unbounded.pnl_matrix_size();
+            for (int i = 0; curve_same && i < resp.pnl_matrix_size(); ++i) {
+                curve_same = resp.pnl_matrix(i).underlying_price() == unbounded.pnl_matrix(i).underlying_price() &&
+                             resp.pnl_matrix(i).pnl() == unbounded.pnl_matrix(i).pnl();
+            }
+            check(curve_same,
+                  "and the expiry curve is unmoved, point for point -- the probability "
+                  "distribution is drawn over that same grid");
+        }
+        {
+            // Each side falls back independently, so a caller can pin the
+            // upside alone. Asserting the UNPINNED end is the point: it must
+            // still be the default 400, not 0 and not the pinned value.
+            auto req = base();
+            req.set_matrix_price_max(700.0);
+            auto [status, resp] = call_strategy(stub, req);
+            const auto [lo, hi] = cell_range(resp);
+            check(status.ok() && std::abs(lo - 400.0) < 1e-9 && std::abs(hi - 700.0) < 1e-9,
+                  "pinning only the upper bound leaves the lower at the default 400 (got " +
+                      std::to_string(lo) + ".." + std::to_string(hi) + ")");
+        }
+        {
+            auto req = base();
+            req.set_matrix_price_min(550.0);
+            auto [status, resp] = call_strategy(stub, req);
+            const auto [lo, hi] = cell_range(resp);
+            check(status.ok() && std::abs(lo - 550.0) < 1e-9 && std::abs(hi - 600.0) < 1e-9,
+                  "pinning only the lower bound leaves the upper at the default 600");
+        }
+        {
+            // Refused, not swapped. Two plausible repairs exist and choosing
+            // one silently answers a different question.
+            auto req = base();
+            req.set_matrix_price_min(520.0);
+            req.set_matrix_price_max(480.0);
+            auto [status, resp] = call_strategy(stub, req);
+            check(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT,
+                  "an inverted pair is REFUSED, not silently swapped");
+        }
+        {
+            // The one-sided inversion, which is the easy case to miss: 300 is
+            // a perfectly ordinary lower bound and only inverts because the
+            // unset upper falls back to 200.
+            auto req = base();
+            req.set_price_range_percent(0.60);
+            req.set_current_price(500.0);
+            auto narrow = base();
+            narrow.set_price_range_percent(0.02);  // default window 490..510
+            narrow.set_matrix_price_min(600.0);
+            auto [status, resp] = call_strategy(stub, narrow);
+            check(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT,
+                  "a lower bound above the UNSET upper's fallback is refused, and the "
+                  "message names both numbers");
+        }
+        {
+            auto req = base();
+            req.set_matrix_price_min(-10.0);
+            auto [status, resp] = call_strategy(stub, req);
+            check(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT,
+                  "a negative bound is REFUSED -- 0 is the sentinel for unset, so a "
+                  "negative one cannot be a typo for it");
+        }
+        {
+            auto req = base();
+            req.set_matrix_price_max(std::numeric_limits<double>::quiet_NaN());
+            auto [status, resp] = call_strategy(stub, req);
+            check(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT,
+                  "a NaN bound is REFUSED -- unchecked it renders as a grid of blanks, "
+                  "which reads as 'no data' rather than as a bad argument");
+        }
+    }
+
     // -----------------------------------------------------------------
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

@@ -1049,7 +1049,9 @@ proto.calculator.StrategyRequest.toObject = function(includeInstance, msg) {
     priceRangePercent: jspb.Message.getFloatingPointFieldWithDefault(msg, 6, 0.0),
     priceSteps: jspb.Message.getFieldWithDefault(msg, 7, 0),
     dateSteps: jspb.Message.getFieldWithDefault(msg, 8, 0),
-    dividendYield: jspb.Message.getFloatingPointFieldWithDefault(msg, 9, 0.0)
+    dividendYield: jspb.Message.getFloatingPointFieldWithDefault(msg, 9, 0.0),
+    matrixPriceMin: jspb.Message.getFloatingPointFieldWithDefault(msg, 10, 0.0),
+    matrixPriceMax: jspb.Message.getFloatingPointFieldWithDefault(msg, 11, 0.0)
   };
 
   if (includeInstance) {
@@ -1122,6 +1124,14 @@ proto.calculator.StrategyRequest.deserializeBinaryFromReader = function(msg, rea
     case 9:
       var value = /** @type {number} */ (reader.readDouble());
       msg.setDividendYield(value);
+      break;
+    case 10:
+      var value = /** @type {number} */ (reader.readDouble());
+      msg.setMatrixPriceMin(value);
+      break;
+    case 11:
+      var value = /** @type {number} */ (reader.readDouble());
+      msg.setMatrixPriceMax(value);
       break;
     default:
       reader.skipField();
@@ -1213,6 +1223,20 @@ proto.calculator.StrategyRequest.serializeBinaryToWriter = function(message, wri
   if (f !== 0.0) {
     writer.writeDouble(
       9,
+      f
+    );
+  }
+  f = message.getMatrixPriceMin();
+  if (f !== 0.0) {
+    writer.writeDouble(
+      10,
+      f
+    );
+  }
+  f = message.getMatrixPriceMax();
+  if (f !== 0.0) {
+    writer.writeDouble(
+      11,
       f
     );
   }
@@ -1398,6 +1422,42 @@ proto.calculator.StrategyRequest.prototype.getDividendYield = function() {
  */
 proto.calculator.StrategyRequest.prototype.setDividendYield = function(value) {
   return jspb.Message.setProto3FloatField(this, 9, value);
+};
+
+
+/**
+ * optional double matrix_price_min = 10;
+ * @return {number}
+ */
+proto.calculator.StrategyRequest.prototype.getMatrixPriceMin = function() {
+  return /** @type {number} */ (jspb.Message.getFloatingPointFieldWithDefault(this, 10, 0.0));
+};
+
+
+/**
+ * @param {number} value
+ * @return {!proto.calculator.StrategyRequest} returns this
+ */
+proto.calculator.StrategyRequest.prototype.setMatrixPriceMin = function(value) {
+  return jspb.Message.setProto3FloatField(this, 10, value);
+};
+
+
+/**
+ * optional double matrix_price_max = 11;
+ * @return {number}
+ */
+proto.calculator.StrategyRequest.prototype.getMatrixPriceMax = function() {
+  return /** @type {number} */ (jspb.Message.getFloatingPointFieldWithDefault(this, 11, 0.0));
+};
+
+
+/**
+ * @param {number} value
+ * @return {!proto.calculator.StrategyRequest} returns this
+ */
+proto.calculator.StrategyRequest.prototype.setMatrixPriceMax = function(value) {
+  return jspb.Message.setProto3FloatField(this, 11, value);
 };
 
 

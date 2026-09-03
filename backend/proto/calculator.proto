@@ -104,6 +104,20 @@ message StrategyRequest {
   // user set it must label it as stated rather than measured, the same way the
   // risk-free rate distinguishes its two sources.
   double dividend_yield = 9;
+
+  // User-chosen price bounds for the price x date MATRIX only. Zero means
+  // "unset" on each side independently, so a caller may pin one end and let
+  // the other follow price_range_percent.
+  //
+  // These deliberately do NOT move the grid the expiry curve is drawn on.
+  // max_profit, max_loss, break_even_points and the probability distribution
+  // are all computed by sweeping that grid, so a caller who narrowed a shared
+  // grid to inspect a price window would silently rewrite the position's
+  // headline numbers -- a max profit that is only the maximum INSIDE the
+  // window, reported as the maximum. The matrix gets its own grid precisely so
+  // that zooming it cannot do that.
+  double matrix_price_min = 10;
+  double matrix_price_max = 11;
 }
 
 // Position-level sensitivities, already multiplied by contract multiplier,

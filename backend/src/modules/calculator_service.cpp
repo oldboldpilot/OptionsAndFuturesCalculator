@@ -540,6 +540,9 @@ struct ComputeContext {
     std::uint32_t date_steps{0};
     std::uint32_t price_steps{0};
     std::vector<double> price_grid;
+    // The matrix's own grid. Equal to price_grid unless the caller pinned a
+    // bound -- see StrategyRequest.matrix_price_min for why it is separate.
+    std::vector<double> matrix_price_grid;
     std::vector<double> expiry_pnl;
 };
 using Ctx = std::shared_ptr<ComputeContext>;
@@ -677,6 +680,56 @@ inline constexpr std::array<std::string_view, 5> kAllActionNames{
     for (std::uint32_t i = 0; i < ctx->price_steps; ++i) {
         ctx->price_grid.push_back(lo + step * static_cast<double>(i));
     }
+
+    // The matrix's own bounds. Each side falls back INDEPENDENTLY to the grid
+    // just built, so a caller may pin one end and leave the other alone.
+    //
+    // Refused rather than clamped or swapped. An inverted pair is a caller
+    // mistake with two plausible repairs -- swap them, or drop one -- and
+    // picking either silently answers a question nobody asked. A non-finite
+    // bound would propagate NaN through every cell and render as a grid of
+    // blanks, which reads as "no data" rather than as "you sent NaN".
+    const double req_min = ctx->request.matrix_price_min();
+    const double req_max = ctx->request.matrix_price_max();
+    if (!std::isfinite(req_min) || !std::isfinite(req_max)) {
+        ctx->status = grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                                   "matrix_price_min and matrix_price_max must be finite");
+        return std::unexpected(sgee::ExecutionError::ActionFailed);
+    }
+    if (req_min < 0.0 || req_max < 0.0) {
+        ctx->status = grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                                   "matrix price bounds cannot be negative; use 0 to leave a "
+                                   "bound unset");
+        return std::unexpected(sgee::ExecutionError::ActionFailed);
+    }
+
+    const double m_lo = req_min > 0.0 ? req_min : lo;
+    const double m_hi = req_max > 0.0 ? req_max : hi;
+    if (m_hi <= m_lo) {
+        ctx->status = grpc::Status(
+            grpc::StatusCode::INVALID_ARGUMENT,
+            "matrix price upper bound (" + std::format("{:.4g}", m_hi) +
+                ") must be above the lower bound (" + std::format("{:.4g}", m_lo) +
+                "); an unset side falls back to the default range, so pinning one bound past "
+                "it inverts the pair");
+        return std::unexpected(sgee::ExecutionError::ActionFailed);
+    }
+
+    if (m_lo == lo && m_hi == hi) {
+        // The overwhelmingly common path: no bounds asked for. Share the grid
+        // rather than recomputing an identical one, so an unbounded request is
+        // byte-for-byte what it was before this field existed.
+        ctx->matrix_price_grid = ctx->price_grid;
+        return {};
+    }
+
+    const double m_step =
+        (m_hi - m_lo) / static_cast<double>(ctx->price_steps > 1 ? ctx->price_steps - 1 : 1);
+    ctx->matrix_price_grid.clear();
+    ctx->matrix_price_grid.reserve(ctx->price_steps);
+    for (std::uint32_t i = 0; i < ctx->price_steps; ++i) {
+        ctx->matrix_price_grid.push_back(m_lo + m_step * static_cast<double>(i));
+    }
     return {};
 }
 
@@ -769,7 +822,7 @@ inline constexpr std::array<std::string_view, 5> kAllActionNames{
                                            static_cast<unsigned>(ymd.month()),
                                            static_cast<unsigned>(ymd.day()));
 
-        for (const double price : ctx->price_grid) {
+        for (const double price : ctx->matrix_price_grid) {
             const double pnl =
                 value_at_elapsed(ctx->request, price, elapsed, ctx->r, ctx->q, ctx->sigma, ctx->horizon);
             auto& cell = *ctx->response.add_matrix();

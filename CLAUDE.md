@@ -2509,6 +2509,64 @@ with the right order of magnitude is not a finding. Seven of them were wrong
 here. Profile the allocator before changing anything sized in gigabytes.
 
 
+## P&L matrix price bounds, and the grid that must NOT be shared
+
+`StrategyRequest.matrix_price_min` / `matrix_price_max` let a user pin the
+price axis of the P&L matrix — "show me 480 to 620" rather than the engine's
+default ±25% around spot. Each side is independent, and zero means unset, so a
+caller may pin one end and leave the other on the default.
+
+**The matrix gets its OWN grid, and that is the entire design.** `price_grid`
+is swept four times in `calculator_service.cpp`: the expiry curve (`:696`),
+which is where `max_profit`, `max_loss` and `break_even` come from; the
+breakeven interpolation (`:722`); the matrix (`:772`); and the lognormal
+probability distribution (`:913`). Applying a user's window to that shared grid
+would have reported the best outcome **inside the window** as the position's
+maximum profit — correct arithmetic, answering a question nobody asked, with a
+smaller number that looks entirely plausible. So `matrix_price_grid` is built
+separately and only the matrix reads it.
+
+**That invariant is the gate, not the feature.** Section 7 of
+`test_calculator_service` (12 checks) asserts `max_profit`, `max_loss`,
+`break_even` and the whole expiry curve are **identical** — equality, not a
+tolerance — between a bounded and an unbounded request. Mutation-checked by
+assigning the bounded grid back to `price_grid`: the bounds still apply, the
+cell count is still right, the window is still exactly 480..620, and **only the
+invariant fails**. Every surface check passes on the broken build, which is why
+the invariant had to be written down.
+
+When neither bound is set the matrix grid is assigned from `price_grid` rather
+than recomputed, so an unbounded request is byte-for-byte what it was before
+the field existed.
+
+**Refused, never repaired.** An inverted pair, a negative bound and a non-finite
+bound are all `INVALID_ARGUMENT`. Swapping an inverted pair has two plausible
+repairs and picking either silently answers a different question; a NaN bound
+left unchecked renders as a grid of blanks, which reads as "no data" rather
+than as "you sent NaN". The refusal names both numbers, because the one-sided
+inversion is the case that is hard to see: `min = 600` is an ordinary lower
+bound and only inverts because the *unset* upper fell back to 510.
+
+Three things on the client side:
+
+- **The inputs are DRAFTS, committed on blur or Enter.** Per-keystroke commits
+  would fire a priced round trip at `4`, `48` and `480` — three requests for
+  one number, two of them about prices nobody asked about. The staleness token
+  would discard the losers correctly, so this is not a correctness fix.
+- **The draft is re-seeded by adjusting state during render**, against the last
+  store value seen — not from an effect. React flags the effect version
+  (`react-hooks/set-state-in-effect`) and it renders twice, once with the stale
+  draft.
+- **`setMatrixBounds` takes a PATCH, not a pair.** `{ min: null }` unpins the
+  floor and leaves the ceiling where the user put it; `{}` changes nothing.
+  `undefined` and `null` mean different things here — "leave it" against "clear
+  it" — a distinction two positional arguments could not express. A
+  non-positive or non-finite value collapses to unset rather than travelling,
+  since zero is the wire's own sentinel and the engine would refuse the rest.
+
+Gated by `matrix-bounds.test.ts` (10 checks) on the client and section 7 on the
+engine.
+
 ## Option chain cache
 
 `market_data.cppm` caches chains and quotes in a `TtlCache`. The chain TTL is

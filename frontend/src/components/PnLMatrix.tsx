@@ -27,7 +27,10 @@ type ValueMode = 'dollars' | 'percent';
  * calendar spread's peak is mid-life, not at expiry).
  */
 export function PnLMatrix() {
-  const { result, spotPrice, isLoading, error, modelLimit, gateDenied, notReady } = useCalculatorStore();
+  const {
+    result, spotPrice, isLoading, error, modelLimit, gateDenied, notReady,
+    matrixPriceMin, matrixPriceMax, setMatrixBounds,
+  } = useCalculatorStore();
   const [mode, setMode] = useState<ValueMode>('percent');
 
   const grid = useMemo(() => {
@@ -73,8 +76,75 @@ export function PnLMatrix() {
     }
     if (magnitude === 0) magnitude = 1;
 
-    return { dates, dteByDate, rows, byKey, spotRow, magnitude };
+    // The window the engine ACTUALLY used, taken from the cells rather than
+    // recomputed from spot and the default percentage. If the two ever
+    // disagree the cells are right, and this is the number shown to the user
+    // as the thing their bounds override.
+    return {
+      dates, dteByDate, rows, byKey, spotRow, magnitude,
+      windowLo: prices[prices.length - 1],
+      windowHi: prices[0],
+    };
   }, [result, spotPrice, mode]);
+
+  /**
+   * The bound inputs are DRAFTS until committed on blur or Enter.
+   *
+   * Committing per keystroke would fire a priced round trip at "4", "48" and
+   * "480" -- three requests for one number, of which two describe prices the
+   * user never asked about. The store's staleness token would discard the
+   * losers correctly, so this is not a correctness fix; it is the difference
+   * between one request and one per character.
+   *
+   * The draft is seeded from the store and re-seeded whenever the store's
+   * value changes, so the Auto button and a scenario load both show up in the
+   * fields rather than leaving them stale.
+   */
+  const text = (v: number | null) => (v === null ? '' : String(v));
+  const [loDraft, setLoDraft] = useState(() => text(matrixPriceMin));
+  const [hiDraft, setHiDraft] = useState(() => text(matrixPriceMax));
+  const [boundsHint, setBoundsHint] = useState<string | null>(null);
+
+  // Re-seeded by ADJUSTING STATE DURING RENDER against the previous store
+  // value, not from an effect. An effect would render once with the stale
+  // draft, then again with the fresh one -- and React flags exactly this
+  // (react-hooks/set-state-in-effect). Comparing to the last value seen keeps
+  // the user's own keystrokes intact while still picking up Auto and a
+  // scenario load, which is the whole reason the mirror exists.
+  const [seeded, setSeeded] = useState<readonly [number | null, number | null]>(
+    () => [matrixPriceMin, matrixPriceMax],
+  );
+  if (seeded[0] !== matrixPriceMin || seeded[1] !== matrixPriceMax) {
+    setSeeded([matrixPriceMin, matrixPriceMax]);
+    setLoDraft(text(matrixPriceMin));
+    setHiDraft(text(matrixPriceMax));
+    setBoundsHint(null);
+  }
+
+  function commitBounds() {
+    const parse = (t: string): number | null => {
+      const trimmed = t.trim();
+      if (trimmed === '') return null;
+      const n = Number(trimmed);
+      return Number.isFinite(n) && n > 0 ? n : null;
+    };
+    const lo = parse(loDraft);
+    const hi = parse(hiDraft);
+
+    // Refused here rather than swapped, and rather than sent. The engine
+    // refuses an inverted pair too -- that is the real gate -- but letting it
+    // travel would blank the grid behind a red "Unavailable", which is the
+    // wrong shape for a typo in the field the user is still looking at.
+    if (lo !== null && hi !== null && hi <= lo) {
+      setBoundsHint('High must be above low');
+      return;
+    }
+    setBoundsHint(null);
+    if (lo === matrixPriceMin && hi === matrixPriceMax) return;
+    setMatrixBounds({ min: lo, max: hi });
+  }
+
+  const bounded = matrixPriceMin !== null || matrixPriceMax !== null;
 
   function tint(value: number, magnitude: number): string {
     const frac = Math.min(Math.abs(value) / magnitude, 1);
@@ -121,21 +191,94 @@ export function PnLMatrix() {
             </span>
           )}
         </div>
-        <div className="segment">
-          <button
-            className="segment-item"
-            data-active={mode === 'dollars'}
-            onClick={() => setMode('dollars')}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+          {/* Price bounds. Scoped to this panel because they are scoped to
+              this panel's data -- the engine keeps the payoff curve, and
+              therefore max profit and breakeven, on its own untouched grid. */}
+          <div
+            style={{ display: 'flex', alignItems: 'center', gap: '0.25rem' }}
+            title={
+              'Limits the price axis of this grid. The payoff curve, max profit, ' +
+              'max loss, breakeven and the probability distribution are unaffected ' +
+              '\u2014 they are computed over the full range regardless.'
+            }
           >
-            $
-          </button>
-          <button
-            className="segment-item"
-            data-active={mode === 'percent'}
-            onClick={() => setMode('percent')}
-          >
-            % risk
-          </button>
+            <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--color-ink-400)' }}>
+              price
+            </span>
+            <input
+              className="input"
+              style={{ width: '62px', textAlign: 'right' }}
+              type="number"
+              min={0}
+              step="any"
+              inputMode="decimal"
+              aria-label="Matrix lower price bound"
+              placeholder={grid ? grid.windowLo.toFixed(0) : 'low'}
+              value={loDraft}
+              onChange={(e) => setLoDraft(e.target.value)}
+              onBlur={commitBounds}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') e.currentTarget.blur();
+              }}
+            />
+            <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--color-ink-400)' }}>
+              &ndash;
+            </span>
+            <input
+              className="input"
+              style={{ width: '62px', textAlign: 'right' }}
+              type="number"
+              min={0}
+              step="any"
+              inputMode="decimal"
+              aria-label="Matrix upper price bound"
+              placeholder={grid ? grid.windowHi.toFixed(0) : 'high'}
+              value={hiDraft}
+              onChange={(e) => setHiDraft(e.target.value)}
+              onBlur={commitBounds}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') e.currentTarget.blur();
+              }}
+            />
+            {/* Only offered once there is something to reset. A permanently
+                visible Auto invites a click that does nothing. */}
+            {bounded && (
+              <button
+                className="chip"
+                style={{ cursor: 'pointer' }}
+                aria-label="Reset matrix price bounds"
+                onClick={() => setMatrixBounds({ min: null, max: null })}
+              >
+                auto
+              </button>
+            )}
+            {boundsHint && (
+              <span
+                role="alert"
+                style={{ fontSize: 'var(--text-2xs)', color: 'var(--color-loss)' }}
+              >
+                {boundsHint}
+              </span>
+            )}
+          </div>
+
+          <div className="segment">
+            <button
+              className="segment-item"
+              data-active={mode === 'dollars'}
+              onClick={() => setMode('dollars')}
+            >
+              $
+            </button>
+            <button
+              className="segment-item"
+              data-active={mode === 'percent'}
+              onClick={() => setMode('percent')}
+            >
+              % risk
+            </button>
+          </div>
         </div>
       </div>
 

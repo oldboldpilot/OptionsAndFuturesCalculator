@@ -104,6 +104,12 @@ export class StrategyRequest extends jspb.Message {
   getDividendYield(): number;
   setDividendYield(value: number): StrategyRequest;
 
+  getMatrixPriceMin(): number;
+  setMatrixPriceMin(value: number): StrategyRequest;
+
+  getMatrixPriceMax(): number;
+  setMatrixPriceMax(value: number): StrategyRequest;
+
   serializeBinary(): Uint8Array;
   toObject(includeInstance?: boolean): StrategyRequest.AsObject;
   static toObject(includeInstance: boolean, msg: StrategyRequest): StrategyRequest.AsObject;
@@ -123,6 +129,8 @@ export namespace StrategyRequest {
     priceSteps: number,
     dateSteps: number,
     dividendYield: number,
+    matrixPriceMin: number,
+    matrixPriceMax: number,
   }
 }
 

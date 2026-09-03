@@ -1501,6 +1501,49 @@ export class FinanceClient {
     this.methodDescriptorComputeRentVsBuy);
   }
 
+  methodDescriptorComputeRentVsBuyBatch = new grpcWeb.MethodDescriptor(
+    '/sensen.finance.Finance/ComputeRentVsBuyBatch',
+    grpcWeb.MethodType.UNARY,
+    finance_pb.RentVsBuyBatchRequest,
+    finance_pb.RentVsBuyBatchResponse,
+    (request: finance_pb.RentVsBuyBatchRequest) => {
+      return request.serializeBinary();
+    },
+    finance_pb.RentVsBuyBatchResponse.deserializeBinary
+  );
+
+  computeRentVsBuyBatch(
+    request: finance_pb.RentVsBuyBatchRequest,
+    metadata?: grpcWeb.Metadata | null): Promise<finance_pb.RentVsBuyBatchResponse>;
+
+  computeRentVsBuyBatch(
+    request: finance_pb.RentVsBuyBatchRequest,
+    metadata: grpcWeb.Metadata | null,
+    callback: (err: grpcWeb.RpcError,
+               response: finance_pb.RentVsBuyBatchResponse) => void): grpcWeb.ClientReadableStream<finance_pb.RentVsBuyBatchResponse>;
+
+  computeRentVsBuyBatch(
+    request: finance_pb.RentVsBuyBatchRequest,
+    metadata?: grpcWeb.Metadata | null,
+    callback?: (err: grpcWeb.RpcError,
+               response: finance_pb.RentVsBuyBatchResponse) => void) {
+    if (callback !== undefined) {
+      return this.client_.rpcCall(
+        this.hostname_ +
+          '/sensen.finance.Finance/ComputeRentVsBuyBatch',
+        request,
+        metadata || {},
+        this.methodDescriptorComputeRentVsBuyBatch,
+        callback);
+    }
+    return this.client_.unaryCall(
+    this.hostname_ +
+      '/sensen.finance.Finance/ComputeRentVsBuyBatch',
+    request,
+    metadata || {},
+    this.methodDescriptorComputeRentVsBuyBatch);
+  }
+
   methodDescriptorComputeHomeNpv = new grpcWeb.MethodDescriptor(
     '/sensen.finance.Finance/ComputeHomeNpv',
     grpcWeb.MethodType.UNARY,
@@ -1585,6 +1628,92 @@ export class FinanceClient {
     request,
     metadata || {},
     this.methodDescriptorComputeClosingCosts);
+  }
+
+  methodDescriptorRefreshStateAssumptions = new grpcWeb.MethodDescriptor(
+    '/sensen.finance.Finance/RefreshStateAssumptions',
+    grpcWeb.MethodType.UNARY,
+    finance_pb.RefreshStateAssumptionsRequest,
+    finance_pb.RefreshStateAssumptionsResponse,
+    (request: finance_pb.RefreshStateAssumptionsRequest) => {
+      return request.serializeBinary();
+    },
+    finance_pb.RefreshStateAssumptionsResponse.deserializeBinary
+  );
+
+  refreshStateAssumptions(
+    request: finance_pb.RefreshStateAssumptionsRequest,
+    metadata?: grpcWeb.Metadata | null): Promise<finance_pb.RefreshStateAssumptionsResponse>;
+
+  refreshStateAssumptions(
+    request: finance_pb.RefreshStateAssumptionsRequest,
+    metadata: grpcWeb.Metadata | null,
+    callback: (err: grpcWeb.RpcError,
+               response: finance_pb.RefreshStateAssumptionsResponse) => void): grpcWeb.ClientReadableStream<finance_pb.RefreshStateAssumptionsResponse>;
+
+  refreshStateAssumptions(
+    request: finance_pb.RefreshStateAssumptionsRequest,
+    metadata?: grpcWeb.Metadata | null,
+    callback?: (err: grpcWeb.RpcError,
+               response: finance_pb.RefreshStateAssumptionsResponse) => void) {
+    if (callback !== undefined) {
+      return this.client_.rpcCall(
+        this.hostname_ +
+          '/sensen.finance.Finance/RefreshStateAssumptions',
+        request,
+        metadata || {},
+        this.methodDescriptorRefreshStateAssumptions,
+        callback);
+    }
+    return this.client_.unaryCall(
+    this.hostname_ +
+      '/sensen.finance.Finance/RefreshStateAssumptions',
+    request,
+    metadata || {},
+    this.methodDescriptorRefreshStateAssumptions);
+  }
+
+  methodDescriptorGetStateAssumptions = new grpcWeb.MethodDescriptor(
+    '/sensen.finance.Finance/GetStateAssumptions',
+    grpcWeb.MethodType.UNARY,
+    finance_pb.GetStateAssumptionsRequest,
+    finance_pb.GetStateAssumptionsResponse,
+    (request: finance_pb.GetStateAssumptionsRequest) => {
+      return request.serializeBinary();
+    },
+    finance_pb.GetStateAssumptionsResponse.deserializeBinary
+  );
+
+  getStateAssumptions(
+    request: finance_pb.GetStateAssumptionsRequest,
+    metadata?: grpcWeb.Metadata | null): Promise<finance_pb.GetStateAssumptionsResponse>;
+
+  getStateAssumptions(
+    request: finance_pb.GetStateAssumptionsRequest,
+    metadata: grpcWeb.Metadata | null,
+    callback: (err: grpcWeb.RpcError,
+               response: finance_pb.GetStateAssumptionsResponse) => void): grpcWeb.ClientReadableStream<finance_pb.GetStateAssumptionsResponse>;
+
+  getStateAssumptions(
+    request: finance_pb.GetStateAssumptionsRequest,
+    metadata?: grpcWeb.Metadata | null,
+    callback?: (err: grpcWeb.RpcError,
+               response: finance_pb.GetStateAssumptionsResponse) => void) {
+    if (callback !== undefined) {
+      return this.client_.rpcCall(
+        this.hostname_ +
+          '/sensen.finance.Finance/GetStateAssumptions',
+        request,
+        metadata || {},
+        this.methodDescriptorGetStateAssumptions,
+        callback);
+    }
+    return this.client_.unaryCall(
+    this.hostname_ +
+      '/sensen.finance.Finance/GetStateAssumptions',
+    request,
+    metadata || {},
+    this.methodDescriptorGetStateAssumptions);
   }
 
   methodDescriptorPriceOptionTree = new grpcWeb.MethodDescriptor(
