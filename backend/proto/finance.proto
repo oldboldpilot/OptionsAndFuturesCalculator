@@ -426,12 +426,24 @@ message IrrRequest {
 }
 
 // XNPV/XIRR: cash flows on their actual dates rather than on a regular period
-// grid. `dates` are day offsets from an arbitrary common epoch and must be the
-// same length as `values`.
+// grid.
+//
+// `dates` are DAY offsets from an arbitrary common epoch, and the unit is
+// load-bearing rather than a convention -- the engine underneath computes in
+// Unix timestamp SECONDS, and `finance_service.cpp::dates_to_seconds` is the
+// one place that bridges the two. Sending seconds here does not produce a
+// scaled answer, it produces a REFUSAL naming the unit; sending days before
+// 2026-09-03 produced a 200 OK carrying the undiscounted sum. Both spans are
+// bounded there, in days, and the bounds do not overlap: a schedule spanning
+// under one day cannot be discounted at all, and one spanning over a hundred
+// years is seconds.
+//
+// `dates` must be the same length as `values`. A single flow is exempt from
+// the span rules: it sits at t=0 and its present value is its face value.
 message DatedCashFlowRequest {
   double rate = 1;              // XNPV only; ignored by XIRR
   repeated double values = 2;
-  repeated double dates = 3;
+  repeated double dates = 3;    // day offsets; see the message comment
   double guess = 4;             // XIRR only
 }
 

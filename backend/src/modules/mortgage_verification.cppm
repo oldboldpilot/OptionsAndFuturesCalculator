@@ -985,10 +985,28 @@ export [[nodiscard]] auto verify_mortgage_params(const MortgageParamsInput& inpu
 //             exact by design, so 250 does not ground. The generator is
 //             discarding information the label needs.
 //   224 rows  `ComputeXnpv`/`ComputeXirr` `dates`, a cumulative day grid the
-//             generator derives at 30.44 days per month from text that says
-//             "after 14 months". No admissible map reproduces it, and adding
-//             one would mean teaching this file an average-month constant
-//             the user never wrote.
+//             generator derived at 30.44 days per month from text that says
+//             "after 14 months". No admissible map reproduced it, and adding
+//             one would have meant teaching this file an average-month
+//             constant the user never wrote.
+//
+//             CORRECTED 2026-09-03: this row is FIXED and the fix was in the
+//             generator, exactly as the paragraph below predicted. Commit
+//             38730dd rewrote the template to say "after 372 days" and label
+//             372.0, so the literal is DAYS-tagged and grounds under M1 with
+//             no new map. There are 213 such rows in the current corpus
+//             (`ComputeXnpv` 103, `ComputeXirr` 110) and they are Proven --
+//             `test_mortgage_verification` asserts exactly that on "after 349
+//             days" / "after 736 days".
+//
+//             Left in the list rather than deleted because the WARNING it
+//             carries outlived the defect: the day unit this gate proves is
+//             ALSO the unit `finance.proto` documents, and the engine
+//             underneath computes in Unix timestamp SECONDS. That gap was
+//             open until 2026-09-03 and returned an undiscounted sum with a
+//             200 OK. `finance_service.cpp::dates_to_seconds` bridges it.
+//             Anyone tempted to move `dates` to seconds to match the engine
+//             would be un-fixing this row -- no utterance says 32,140,800.
 //    39 rows  `ComputeDepreciation.recovery_period`, emitted as int(life),
 //             so a stated "27.5-year life" becomes 27.
 //
@@ -1265,8 +1283,10 @@ constexpr std::array<ConventionValue, 38> kConventionValues{{
     // "closing on the last day of the month, none owed".
     {.field = "prepaid_interest_days", .value = "15"},
     {.field = "prepaid_interest_days", .value = "0"},
-    // XNPV/XIRR `dates` are day offsets from an arbitrary common epoch, and the
-    // first flow is the outlay, so dates[0] is ALWAYS 0. The utterance says
+    // XNPV/XIRR `dates` are day offsets from an arbitrary common epoch -- the
+    // unit `finance.proto` documents and `finance_service.cpp` converts to
+    // seconds for the engine -- and the first flow is the outlay, so dates[0]
+    // is ALWAYS 0. The utterance says
     // "I invest $243,800 TODAY" -- it says today, it does not say zero, so
     // grounding refused every dated-cash-flow parse on the epoch itself.
     // Found by the excluded-field test below: removing the `guess`/`rate`

@@ -1814,17 +1814,24 @@ auto check_finance(sensen::finance::Finance::Stub& stub) -> bool {
         // (financial.cppm:2196-2260): initial outflow D+closing at t=0;
         // monthly rent_saved - (pmt+taxes+maintenance) with rent bumped
         // every 12 months; terminal +sale - selling costs - remaining
-        // balance. DATE-UNIT TRAP: dates are seconds on a 365-day year,
-        // seconds_per_month = 31536000/12, so each month's exponent reduces
-        // to m/12 years -- this reconstruction must use that, not day
-        // offsets, or the discounting is wrong by a units mismatch that
-        // still "looks" plausible.
+        // balance. DATE-UNIT TRAP: `dates` on the WIRE are DAY offsets on a
+        // 365-day year (finance.proto's DatedCashFlowRequest; the service
+        // converts to the seconds sensen computes in), so
+        // days_per_month = 365/12 and each month's exponent reduces to m/12
+        // years -- this reconstruction must use the same basis it SENDS, or
+        // the discounting is wrong by a units mismatch that still "looks"
+        // plausible. This block sent SECONDS until 2026-09-03 and passed,
+        // which is exactly how the unit stayed undecided: the identity below
+        // is scale-free, so it holds against either unit as long as the
+        // reconstruction and the request agree with each other. What it
+        // cannot see is whether they agree with the ENGINE -- the
+        // cross-check against ComputeXnpv two blocks down is what does that.
         const double loan_rate_period = loan_rate / 12.0;
         const int total_loan_months = loan_term_years * 12;
         const double pmt_val =
             loan_amount * loan_rate_period /
             (1.0 - std::pow(1.0 + loan_rate_period, -static_cast<double>(total_loan_months)));
-        const double seconds_per_month = 31536000.0 / 12.0;
+        const double days_per_month = 365.0 / 12.0;
 
         std::vector<double> cash_flows{-(down_payment + closing_buy)};
         std::vector<double> dates{0.0};
@@ -1832,7 +1839,7 @@ auto check_finance(sensen::finance::Finance::Stub& stub) -> bool {
         double current_balance = loan_amount;
         double current_rent = rent_saved0;
         for (int m = 1; m <= holding_years * 12; ++m) {
-            current_time += seconds_per_month;
+            current_time += days_per_month;
             const double interest = current_balance * loan_rate_period;
             const double principal = pmt_val - interest;
             current_balance -= principal;
@@ -1854,7 +1861,7 @@ auto check_finance(sensen::finance::Finance::Stub& stub) -> bool {
         // reconstruction in one assertion.
         double npv_at_irr = 0.0;
         for (std::size_t i = 0; i < cash_flows.size(); ++i) {
-            const double year_frac = (dates[i] - dates[0]) / 31536000.0;
+            const double year_frac = (dates[i] - dates[0]) / 365.0;
             npv_at_irr += cash_flows[i] / std::pow(1.0 + res.internal_rate_of_return(), year_frac);
         }
         if (std::abs(npv_at_irr) > 1.0) {

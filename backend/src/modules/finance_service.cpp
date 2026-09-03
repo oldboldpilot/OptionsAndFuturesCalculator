@@ -1944,8 +1944,9 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         if (auto s = require_all_finite(request->values(), "values"); !s.ok()) return s;
         if (auto s = require_all_finite(request->dates(), "dates"); !s.ok()) return s;
         const std::vector<double> values(request->values().begin(), request->values().end());
-        const std::vector<double> dates(request->dates().begin(), request->dates().end());
-        if (auto s = check_dated_span(dates); !s.ok()) return s;
+        const std::vector<double> wire_dates(request->dates().begin(), request->dates().end());
+        std::vector<double> dates;
+        if (auto s = dates_to_seconds(wire_dates, dates); !s.ok()) return s;
         const auto r = sensen::xnpv(request->rate(), values, dates);
         if (!r) return fail(r);
         response->set_value(*r);
@@ -1966,8 +1967,9 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         if (auto s = require_all_finite(request->dates(), "dates"); !s.ok()) return s;
         if (auto s = require_finite(request->guess(), "guess"); !s.ok()) return s;
         const std::vector<double> values(request->values().begin(), request->values().end());
-        const std::vector<double> dates(request->dates().begin(), request->dates().end());
-        if (auto s = check_dated_span(dates); !s.ok()) return s;
+        const std::vector<double> wire_dates(request->dates().begin(), request->dates().end());
+        std::vector<double> dates;
+        if (auto s = dates_to_seconds(wire_dates, dates); !s.ok()) return s;
         const auto r = (request->guess() == 0.0) ? sensen::xirr(values, dates)
                                                  : sensen::xirr(values, dates, request->guess());
         if (!r) return fail(r);
@@ -4288,6 +4290,97 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
             return Status(grpc::StatusCode::INVALID_ARGUMENT, ok.error());
         }
         return Status::OK;
+    }
+
+    /**
+     * XNPV/XIRR dates are DAY offsets on the wire and SECONDS in the engine,
+     * and until 2026-09-03 nothing bridged the two.
+     *
+     * Three of the four artifacts that describe this field speak days.
+     * `finance.proto` documents `dates` as "day offsets from an arbitrary
+     * common epoch"; `mortgage_verification.cppm` classifies it
+     * `SlotKind::DayOffsets` and bounds it at 36,525 -- a hundred years IN
+     * DAYS; and the training corpus labels "$23,099.61 after 372 days" as
+     * 372.0, because the sentence the assistant reads is itself in days.
+     * `sensen::xnpv`/`xirr` divide by 31,536,000: they compute in SECONDS.
+     *
+     * So a day grid reached the engine unscaled, every `year_frac` collapsed
+     * to ~0, and `xnpv` -- a plain sum with no solve to fail -- returned the
+     * UNDISCOUNTED SUM with a 200 OK. Measured 2026-09-01: flows summing to
+     * 1000 came back 999.9954. `xirr` failed the other way, on
+     * "Newton-Raphson flat derivative", which is true of the solver and
+     * useless to the caller.
+     *
+     * The conversion lives HERE rather than in sensen because each unit is
+     * right for its own callers, and that is the whole reason this is a seam
+     * rather than a bug to flatten. A library caller holds real timestamps. A
+     * caller of THIS service is an assistant extracting "after 372 days" from
+     * a sentence -- a seconds wire would make it emit 32,140,800 for a stated
+     * 372, a number the user never wrote, which is exactly the
+     * label-not-derivable-from-its-input defect the grounding gate exists to
+     * refuse. Moving the wire to seconds would have cost a retrain to teach
+     * the model a multiplication and bought a worse contract.
+     */
+    static constexpr double kSecondsPerDay = 86'400.0;
+    /**
+     * A hundred years in days -- the same ceiling
+     * `mortgage_verification.cppm`'s `kMaxDayUnits` puts on this field, stated
+     * in the same unit so the two cannot drift apart unnoticed.
+     */
+    static constexpr double kMaxCashFlowDaySpan = 36'525.0;
+
+    /**
+     * Validates a wire date vector IN DAYS and converts it to the seconds the
+     * engine computes in.
+     *
+     * Both unit errors are refused, in the caller's own unit and naming it,
+     * and the two ranges do not overlap -- which is what makes this a
+     * discriminator rather than a magnitude heuristic. The longest schedule
+     * anyone discounts is a hundred years (36,525 days); the shortest span a
+     * SECONDS grid can have is one day (86,400). A vector spanning less than
+     * one day cannot carry a discount at all: every factor would be exactly
+     * 1.0 and the "present value" the plain sum. A vector spanning more than a
+     * century is not a schedule -- it is seconds, sent by a caller who read
+     * sensen instead of the proto.
+     *
+     * A LONE cash flow is exempt from both: it sits at t=0, its present value
+     * IS its face value, and refusing it would break a legitimate call to buy
+     * nothing. The extent is max-minus-min rather than last-minus-first, so an
+     * unsorted vector is judged on what it actually spans.
+     *
+     * Runs AFTER the finite checks -- min/max over a NaN is not a span.
+     */
+    [[nodiscard]] static auto dates_to_seconds(const std::vector<double>& days,
+                                               std::vector<double>& seconds) -> Status {
+        if (days.size() > 1) {
+            const auto [lo, hi] = std::minmax_element(days.begin(), days.end());
+            const double span = *hi - *lo;
+            if (span < 1.0) {
+                return Status(
+                    grpc::StatusCode::INVALID_ARGUMENT,
+                    "dates span " + std::to_string(span) + " days across " +
+                        std::to_string(days.size()) +
+                        " cash flows, which is under one day: every discount factor would be 1.0 "
+                        "and the result an undiscounted sum rather than a present value.");
+            }
+            if (span > kMaxCashFlowDaySpan) {
+                return Status(
+                    grpc::StatusCode::INVALID_ARGUMENT,
+                    "dates span " + std::to_string(static_cast<long long>(span)) + " days across " +
+                        std::to_string(days.size()) +
+                        " cash flows, which is over a hundred years. XNPV/XIRR dates are DAY "
+                        "offsets from a common epoch -- a grid of Unix timestamp seconds produces "
+                        "exactly this.");
+            }
+        }
+        seconds.clear();
+        seconds.reserve(days.size());
+        for (const double d : days) seconds.push_back(d * kSecondsPerDay);
+        // sensen's own guard, applied to the CONVERTED vector. Unreachable in a
+        // correct build -- a span of at least one day is at least 86,400
+        // seconds, which is exactly its threshold -- and kept as the backstop
+        // that catches this conversion being dropped again.
+        return check_dated_span(seconds);
     }
 
     /**

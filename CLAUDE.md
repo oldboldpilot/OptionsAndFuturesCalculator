@@ -449,14 +449,13 @@ outcome for "500k with 20% down" is an honest refusal naming the rate the user
 actually stated — the direction to fail in, and better than a silent 20%
 mortgage, but not the answer.
 
-**`ComputeXnpv`/`ComputeXirr` DATES ARE UNIX SECONDS IN THE ENGINE AND DAYS IN
-THE CORPUS, and fixing the corpus would ACTIVATE a silent wrong answer.**
-`financial.cppm`'s `xnpv`/`xirr` divide by `31536000.0` — the comment says
-"Unix timestamp seconds as date proxy" — while
-`build_mortgage_dataset.py` writes `obj["dates"] = [float(d) for d in days]`.
-A factor of 86400.
+**`ComputeXnpv`/`ComputeXirr` DATES: DAYS ON THE WIRE, SECONDS IN THE ENGINE,
+and until 2026-09-03 nothing bridged the two.** `financial.cppm`'s
+`xnpv`/`xirr` divide by `31536000.0` — the comment says "Unix timestamp seconds
+as date proxy" — while `finance.proto` documents `dates` as "day offsets from
+an arbitrary common epoch". A factor of 86400, with no conversion anywhere.
 
-The two operations fail in opposite directions, and only one of them is safe:
+The two operations failed in opposite directions, and only one was safe:
 
 | | with day-numbers | why |
 | --- | --- | --- |
@@ -466,45 +465,80 @@ The two operations fail in opposite directions, and only one of them is safe:
 Measured 2026-09-01: values summing to 1000 returned `999.9954`. Nothing in
 that response says the discounting did not happen.
 
-**It is unreachable today, and that is the only reason it is not live.** The
-model refuses both utterances — `mortgage_verification.cppm` already records
-224 corpus rows whose `dates` are "a cumulative day grid the generator derives
-at 30.44 days per month", ungroundable by design. So the grounding gate is
-currently the only thing standing between this contract mismatch and a wrong
-NPV on the site.
+**COUNTING THE ARTIFACTS IS WHAT DECIDED THE FIX, and the first answer was
+wrong.** On 2026-09-01 this was read as "the corpus is in the wrong unit", and
+a span guard was shipped to `sensen::check_dated_span` refusing anything
+spanning under one day OF SECONDS — which is correct for the library and made
+the documented wire contract unusable. Four artifacts describe this field and
+**three of them speak days**:
 
-**THE ENGINE HALF IS NOW FIXED, and the corpus half still is not.**
-`sensen::check_dated_span` (`financial.cppm`) refuses a date vector spanning
-less than **one day of seconds** whenever there is more than one cash flow, and
-both `xnpv` and `xirr` call it before doing anything. So the 224 rows are now
-safe to fix at the generator: correcting them can no longer activate a silent
-discounting bug, because the wrong unit is refused rather than summed.
+| artifact | unit |
+| --- | --- |
+| `finance.proto` `DatedCashFlowRequest` | days |
+| `mortgage_verification.cppm` — `SlotKind::DayOffsets`, `kMaxDayUnits` 36,525 | days |
+| the training corpus — "after 372 days" labelled `372.0` | days |
+| `sensen::xnpv`/`xirr` | **seconds** |
 
-**The span is the test because the two ranges do not overlap**, which is what
-makes this a discriminator rather than a magnitude heuristic. A thirty-year
-monthly schedule on a day grid spans 10,957 and even a hundred-year DAILY grid
-spans 36,525 — three and ten hours, read as seconds — while the shortest
-genuine schedule, two flows one day apart, spans 86,400. A *sub-hour* bound,
-which is what this file asked for before it was measured, would have MISSED
-every schedule longer than ten years.
+The engine is the outlier, and it is a general-purpose library whose callers
+hold real timestamps. So the WIRE stays in days and
+`finance_service.cpp::dates_to_seconds` bridges once, at the service.
 
-Three details are load-bearing:
+**Moving the wire to seconds would have cost a retrain and bought a worse
+contract.** The assistant reads "after 372 days" and would have to emit
+32,140,800 — a number the user never wrote, which is exactly the
+label-not-derivable-from-its-input defect the grounding gate exists to refuse,
+and which this file has already paid for three times. It also needed a ×86400
+map added to a gate whose entire value is that it is small enough to read.
+Days on the wire needed no corpus change, no verifier change and no retrain,
+and it made the 213 existing `ComputeXnpv`/`ComputeXirr` corpus rows CORRECT
+rather than regenerable.
 
-- **A lone cash flow is exempt.** It sits at t=0 and its present value IS its
-  face value; refusing it would break a legitimate call to buy nothing.
+**The 224-row note that said those rows were ungroundable was STALE, and it was
+the thing arguing against the cheap fix.** It described a generator that said
+"after 14 months" and derived a day grid at 30.44 days per month. Commit
+`38730dd` rewrote that template to say "after 372 days" and label `372.0`, so
+the literal is DAYS-tagged and grounds under M1 with no new map.
+`test_mortgage_verification` has asserted exactly that on "after 349 days" the
+whole time. **A stale comment recording why something is impossible is worse
+than no comment: it is the one a reader trusts instead of measuring.**
+
+**Both unit errors are now refused, in the caller's own unit, and the ranges do
+not overlap** — which is what makes this a discriminator rather than a
+magnitude heuristic. The longest schedule anyone discounts is a hundred years,
+36,525 days; the shortest span a SECONDS grid can have is one day, 86,400.
+Under one day nothing discounts; over 36,525 the caller read sensen instead of
+the proto. Both bounds are stated in days, in one function.
+
+Four details are load-bearing:
+
+- **A lone cash flow is exempt from both.** It sits at t=0 and its present
+  value IS its face value; refusing it would break a legitimate call to buy
+  nothing.
 - **The extent is max-minus-min, not last-minus-first**, so an unsorted vector
   is judged on what it actually spans.
-- **The rule lives in sensen and the STATUS lives in the service.**
-  `finance_service.cpp`'s `check_dated_span` calls the sensen predicate purely
-  to answer `INVALID_ARGUMENT` — `fail()` maps every engine error to
-  `FAILED_PRECONDITION`, and dates in the wrong unit are a bad ARGUMENT, fixed
-  by changing what the caller sends. One threshold, two callers, right code on
-  the wire. The refusal names the UNIT; `xirr`'s old "Newton-Raphson flat
-  derivative" was true of the solver and useless to the caller.
+- **`sensen::check_dated_span` stays, and is now UNREACHABLE from the service
+  by construction** — a span of at least one day is at least 86,400 seconds,
+  which is exactly its threshold. It is the library's own guard for direct
+  callers, and the backstop that catches this conversion being dropped again.
+  The mutation arm proves it: deleting the `× 86400` makes it fire.
+- **The refusal names BOTH units** — what the field takes and what the caller
+  appears to have sent. `xirr`'s old "Newton-Raphson flat derivative" was true
+  of the solver and useless to the caller.
 
-Gated by section 25 of `test_finance_service_validation` (7 checks) and
-mutation-checked: deleting the guard reproduces the production symptom
-verbatim — `code=0`, `value=999.973034` for flows summing to 1000.
+Gated by section 25 of `test_finance_service_validation` (11 checks), including
+a training-corpus row sent exactly as the model emits it and checked against
+the closed form, which is the one assertion written in the model's units rather
+than the test's. Mutation-checked with `CCACHE_DISABLE=1`: deleting the
+conversion reproduces the production symptom and fails six checks.
+
+**Two other files were sending seconds and passing, which is how the unit
+stayed undecided for so long.** `smoke_client.cpp` built its `ComputeHomeNpv`
+cross-check grid at `31536000/12` per month and three validation checks used
+`31536000.0` for one year. Both are now in days. The identity
+`NPV(IRR) == 0` is SCALE-FREE, so it held against either unit as long as the
+reconstruction and the request agreed with each other — it could never see
+whether they agreed with the ENGINE. **An identity that survives a unit change
+is not a unit test.**
 
 **That mutation check silently passed THREE TIMES before it was believed**, and
 the reason is in the build, not the code. See the ccache note under Build

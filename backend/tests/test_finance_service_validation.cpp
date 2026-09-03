@@ -467,7 +467,7 @@ auto main() -> int {
         req.add_values(-1000.0);
         req.add_values(1200.0);
         req.add_dates(0.0);
-        req.add_dates(31536000.0);
+        req.add_dates(365.0);  // one year, in the DAY offsets the wire takes
         sensen::finance::DoubleResponse resp;
         auto ctx = make_context();
         auto status = stub.ComputeXnpv(ctx.get(), req, &resp);
@@ -481,7 +481,7 @@ auto main() -> int {
         req.add_values(-1000.0);
         req.add_values(1200.0);
         req.add_dates(0.0);
-        req.add_dates(31536000.0);
+        req.add_dates(365.0);  // one year, in the DAY offsets the wire takes
         sensen::finance::DoubleResponse resp;
         auto ctx = make_context();
         auto status = stub.ComputeXnpv(ctx.get(), req, &resp);
@@ -524,7 +524,7 @@ auto main() -> int {
         req.add_values(-1000.0);
         req.add_values(1200.0);
         req.add_dates(0.0);
-        req.add_dates(31536000.0);
+        req.add_dates(365.0);  // one year, in the DAY offsets the wire takes
         sensen::finance::DoubleResponse resp;
         auto ctx = make_context();
         auto status = stub.ComputeXirr(ctx.get(), req, &resp);
@@ -2332,28 +2332,31 @@ auto main() -> int {
     }
 
     // =======================================================================
-    section("25. ComputeXnpv / ComputeXirr: a date grid in the wrong UNIT");
+    section("25. ComputeXnpv / ComputeXirr: DAYS on the wire, SECONDS in the engine");
     // =======================================================================
     //
-    // The engine's dates are Unix timestamp SECONDS -- financial.cppm divides
-    // by 31536000.0 -- while the mortgage assistant's corpus generator writes a
-    // cumulative DAY grid at 30.44 days per month. A factor of 86400.
+    // `finance.proto` documents `dates` as DAY offsets. `sensen::xnpv`/`xirr`
+    // divide by 31,536,000 -- they compute in SECONDS. Nothing bridged the two
+    // until 2026-09-03, so a day grid reached the engine unscaled, every
+    // year_frac collapsed to ~0, and ComputeXnpv -- a plain sum with no solve
+    // to fail -- returned the UNDISCOUNTED SUM with a 200 OK. Measured on
+    // production: flows summing to 1000 came back 999.9954. ComputeXirr failed
+    // the other way, blaming its own solver ("Newton-Raphson flat derivative"),
+    // which is true and useless to a caller.
     //
-    // The two operations failed in OPPOSITE directions on that input, and only
-    // one of them was safe. ComputeXirr refused, honestly if not informatively,
-    // because every year_frac collapsed to ~0 and Newton-Raphson saw a flat
-    // derivative. ComputeXnpv returned 200 OK with the plain UNDISCOUNTED SUM,
-    // because pow(1 + r, ~0) is 1 -- and nothing in the response said the
-    // discounting had not happened.
+    // Three of the four artifacts describing this field speak days -- the
+    // proto, `mortgage_verification.cppm`'s SlotKind::DayOffsets bounded at
+    // 36,525, and a corpus that labels "after 372 days" as 372.0 -- so the
+    // wire stayed in days and `dates_to_seconds` bridges once, at the service.
+    // A seconds wire would have cost a retrain to teach the model to emit
+    // 32,140,800 for a stated 372: a number the user never wrote.
     //
-    // It was unreachable from the site only because the assistant's grounding
-    // gate refuses those 224 corpus rows. That made the gate the sole thing
-    // standing between a contract mismatch and a wrong NPV, which is not where
-    // this belongs.
+    // These checks are written in BOTH directions on purpose. A guard that
+    // refuses seconds proves nothing on its own; the day grid computing, with
+    // the discounting demonstrably applied, is the half that was broken.
     {
-        // The measured production shape: values summing to exactly 1000 over a
-        // ten-year monthly DAY grid. This returned 999.9954 -- an undiscounted
-        // sum wearing an NPV's clothes.
+        // The corpus's own shape: 120 monthly flows on a cumulative DAY grid,
+        // values summing to exactly 1000.
         const auto day_grid = [] {
             sensen::finance::DatedCashFlowRequest r;
             r.set_rate(0.08);
@@ -2369,54 +2372,63 @@ auto main() -> int {
         };
 
         {
+            // The direction that was WRONG. Asserting ok() alone would pass
+            // against the old build that returned the plain sum, so the value
+            // is checked against an INDEPENDENT closed form -- the same
+            // discounting written out here in days, which is what pins the
+            // conversion factor at exactly 86,400. A conversion off by any
+            // amount, or dropped entirely, fails this and nothing else.
             auto req = day_grid();
+            double expected = 0.0;
+            double plain_sum = 0.0;
+            for (int i = 0; i < req.values_size(); ++i) {
+                const double year_frac = (req.dates(i) - req.dates(0)) / 365.0;
+                expected += req.values(i) / std::pow(1.0 + req.rate(), year_frac);
+                plain_sum += req.values(i);
+            }
             sensen::finance::DoubleResponse resp;
             auto ctx = make_context();
             auto status = stub.ComputeXnpv(ctx.get(), req, &resp);
-            const std::string msg = status.error_message();
-            check(is_invalid_argument(status) &&
-                      msg.find("Unix timestamp SECONDS") != std::string::npos,
-                  "ComputeXnpv on a DAY grid is REFUSED and the refusal names the UNIT -- "
-                  "it used to answer 200 OK with the undiscounted sum (1000 -> 999.9954)");
+            check(status.ok() && std::abs(resp.value() - expected) < 1e-6,
+                  "ComputeXnpv on a DAY grid computes, and matches the closed form "
+                  "discounted at days/365 -- this pins the conversion at 86400");
+            check(status.ok() && std::abs(resp.value() - plain_sum) > 100.0,
+                  "and it differs from the UNDISCOUNTED sum by more than 100 -- the "
+                  "discounting actually ran (it used to return 1000 -> 999.9954)");
         }
         {
-            // xirr already failed here, but blamed its own solver. The caller
-            // can act on "your dates are in the wrong unit"; they can do
-            // nothing at all with "flat derivative".
+            // xirr on the same grid used to refuse, blaming its solver.
             auto req = day_grid();
             sensen::finance::DoubleResponse resp;
             auto ctx = make_context();
             auto status = stub.ComputeXirr(ctx.get(), req, &resp);
-            const std::string msg = status.error_message();
-            check(is_invalid_argument(status) &&
-                      msg.find("Unix timestamp SECONDS") != std::string::npos &&
-                      msg.find("derivative") == std::string::npos,
-                  "ComputeXirr on the SAME grid names the unit, not "
-                  "'Newton-Raphson flat derivative'");
+            check(status.ok() && resp.value() > 0.0 && resp.value() < 1.0,
+                  "ComputeXirr on the SAME grid solves to a plausible rate, where it "
+                  "used to fail on 'Newton-Raphson flat derivative'");
         }
         {
-            // The admit direction, which is what makes the refusals mean
-            // anything: the identical schedule in SECONDS computes, AND the
-            // discounting demonstrably happened. Asserting only ok() would pass
-            // against a build that still returned the plain sum.
+            // The mirror error, and the one this contract newly creates: a
+            // caller who read sensen instead of the proto sends seconds. That
+            // is a century-scale day span, refused NAMING THE UNIT rather than
+            // silently discounting everything to nothing.
             sensen::finance::DatedCashFlowRequest req;
             req.set_rate(0.08);
             req.add_values(-5000.0);
             req.add_dates(0.0);
             double sec = 0.0;
-            double plain_sum = -5000.0;
             for (int m = 1; m <= 120; ++m) {
                 sec += 30.44 * 86400.0;
                 req.add_values(50.0);
                 req.add_dates(sec);
-                plain_sum += 50.0;
             }
             sensen::finance::DoubleResponse resp;
             auto ctx = make_context();
             auto status = stub.ComputeXnpv(ctx.get(), req, &resp);
-            check(status.ok() && std::abs(resp.value() - plain_sum) > 100.0,
-                  "the same schedule in SECONDS computes, and differs from the undiscounted "
-                  "sum by more than 100 -- the discounting actually ran");
+            const std::string msg = status.error_message();
+            check(is_invalid_argument(status) && msg.find("DAY offsets") != std::string::npos &&
+                      msg.find("seconds") != std::string::npos,
+                  "the same schedule in SECONDS is REFUSED and the refusal names BOTH "
+                  "units -- what this field takes and what the caller sent");
         }
         {
             // A lone cash flow spans nothing and its present value IS its face
@@ -2429,11 +2441,13 @@ auto main() -> int {
             auto ctx = make_context();
             auto status = stub.ComputeXnpv(ctx.get(), req, &resp);
             check(status.ok() && std::abs(resp.value() - 1000.0) < 1e-9,
-                  "a single cash flow is EXEMPT and returns its face value");
+                  "a single cash flow is EXEMPT from both bounds and returns its face value");
         }
         {
-            // The boundary, asserted from both sides. One day apart is the
-            // shortest genuine schedule; anything shorter cannot be one.
+            // Both boundaries, from both sides. The gap between them is what
+            // makes this a discriminator rather than a magnitude heuristic:
+            // the longest schedule anyone discounts is 36,525 days and the
+            // shortest a seconds grid can be is 86,400.
             const auto at_span = [&](double span) {
                 sensen::finance::DatedCashFlowRequest r;
                 r.set_rate(0.08);
@@ -2445,9 +2459,13 @@ auto main() -> int {
                 auto ctx = make_context();
                 return stub.ComputeXnpv(ctx.get(), r, &resp);
             };
-            check(at_span(86400.0).ok(), "a span of exactly one day (86400 s) is ADMITTED");
-            check(is_invalid_argument(at_span(86399.0)),
-                  "a span one second shorter is REFUSED -- the bound is the day, stated once");
+            check(at_span(1.0).ok(), "a span of exactly one day is ADMITTED");
+            check(is_invalid_argument(at_span(0.9)),
+                  "a span of 0.9 days is REFUSED -- under a day nothing discounts");
+            check(at_span(36'525.0).ok(), "a hundred years in days is ADMITTED");
+            check(is_invalid_argument(at_span(36'526.0)),
+                  "a day past a hundred years is REFUSED -- past it the caller is "
+                  "sending seconds, not a schedule");
         }
         {
             // Judged on max-minus-min, not last-minus-first. An unsorted vector
@@ -2459,14 +2477,42 @@ auto main() -> int {
             req.add_values(600.0);
             req.add_values(600.0);
             req.add_dates(0.0);
-            req.add_dates(315360000.0);  // +10 years
-            req.add_dates(1.0);          // back near the start
+            req.add_dates(3650.0);  // +10 years, in days
+            req.add_dates(1.0);     // back near the start
             sensen::finance::DoubleResponse resp;
             auto ctx = make_context();
             auto status = stub.ComputeXnpv(ctx.get(), req, &resp);
             check(status.ok(),
                   "an UNSORTED vector is judged on its extent (max-min), not on "
                   "last-minus-first -- a decade of flows is admitted");
+        }
+        {
+            // Pinned to the CORPUS, verbatim. This row is
+            // agent/dataset/data_mortgage/train.jsonl's own label for "I invest
+            // $147,800 today and expect back ... after 372 days; ... after 2163
+            // days", and the utterance the assistant reads is in days. If the
+            // wire unit is ever moved to seconds, this check is what says so --
+            // it is the one assertion here written in the model's units rather
+            // than the test's.
+            sensen::finance::DatedCashFlowRequest req;
+            req.set_rate(0.0903);
+            for (const double v : {-147800.0, 23099.61, 49842.12, 56991.96, 41328.32, 43430.39,
+                                   68915.12}) {
+                req.add_values(v);
+            }
+            for (const double d : {0.0, 372.0, 694.0, 1013.0, 1353.0, 1761.0, 2163.0}) {
+                req.add_dates(d);
+            }
+            double expected = 0.0;
+            for (int i = 0; i < req.values_size(); ++i) {
+                expected += req.values(i) / std::pow(1.0 + req.rate(), req.dates(i) / 365.0);
+            }
+            sensen::finance::DoubleResponse resp;
+            auto ctx = make_context();
+            auto status = stub.ComputeXnpv(ctx.get(), req, &resp);
+            check(status.ok() && std::abs(resp.value() - expected) < 1e-6,
+                  "a training-corpus row, sent exactly as the model emits it, computes "
+                  "the closed-form answer -- the corpus and the wire agree on the unit");
         }
     }
 
