@@ -1,0 +1,13 @@
+# Belt-and-braces over the root .gitignore's `config/.env` and
+# `config/config.yaml`. A second rule costs nothing and survives someone
+# tidying the root file; a leaked credential does not survive anything.
+.env
+*.env
+config.yaml
+
+# NOT `*.yaml`. config/agents/ holds three TRACKED agent definitions, so a
+# blanket rule is already contradicted by the directory's own contents -- and
+# because git never un-tracks a file an ignore rule catches late, the three
+# would keep working while the NEXT agent added here vanished silently. An
+# ignore rule that is wrong about tracked files is invisible until it eats an
+# untracked one.

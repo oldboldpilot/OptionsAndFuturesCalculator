@@ -473,12 +473,44 @@ at 30.44 days per month", ungroundable by design. So the grounding gate is
 currently the only thing standing between this contract mismatch and a wrong
 NPV on the site.
 
-**Therefore: do not fix those 224 rows without fixing the unit first.** That
-note lists them as "fixable at the generator", which is true and, taken alone,
-would ship a discounting bug the moment it is done. Fix the unit in the same
-change — and prefer making `xnpv` REFUSE a date span that implies a
-sub-hour horizon over silently returning a sum, because a solver that refuses
-is survivable and a plain sum that looks like an NPV is not.
+**THE ENGINE HALF IS NOW FIXED, and the corpus half still is not.**
+`sensen::check_dated_span` (`financial.cppm`) refuses a date vector spanning
+less than **one day of seconds** whenever there is more than one cash flow, and
+both `xnpv` and `xirr` call it before doing anything. So the 224 rows are now
+safe to fix at the generator: correcting them can no longer activate a silent
+discounting bug, because the wrong unit is refused rather than summed.
+
+**The span is the test because the two ranges do not overlap**, which is what
+makes this a discriminator rather than a magnitude heuristic. A thirty-year
+monthly schedule on a day grid spans 10,957 and even a hundred-year DAILY grid
+spans 36,525 — three and ten hours, read as seconds — while the shortest
+genuine schedule, two flows one day apart, spans 86,400. A *sub-hour* bound,
+which is what this file asked for before it was measured, would have MISSED
+every schedule longer than ten years.
+
+Three details are load-bearing:
+
+- **A lone cash flow is exempt.** It sits at t=0 and its present value IS its
+  face value; refusing it would break a legitimate call to buy nothing.
+- **The extent is max-minus-min, not last-minus-first**, so an unsorted vector
+  is judged on what it actually spans.
+- **The rule lives in sensen and the STATUS lives in the service.**
+  `finance_service.cpp`'s `check_dated_span` calls the sensen predicate purely
+  to answer `INVALID_ARGUMENT` — `fail()` maps every engine error to
+  `FAILED_PRECONDITION`, and dates in the wrong unit are a bad ARGUMENT, fixed
+  by changing what the caller sends. One threshold, two callers, right code on
+  the wire. The refusal names the UNIT; `xirr`'s old "Newton-Raphson flat
+  derivative" was true of the solver and useless to the caller.
+
+Gated by section 25 of `test_finance_service_validation` (7 checks) and
+mutation-checked: deleting the guard reproduces the production symptom
+verbatim — `code=0`, `value=999.973034` for flows summing to 1000.
+
+**That mutation check silently passed THREE TIMES before it was believed**, and
+the reason is in the build, not the code. See the ccache note under Build
+Commands: `CCACHE_DISABLE=1` is required for any mutation check that edits a
+module interface, because ccache hashes a consumer's SOURCE TEXT and not the
+BMI it compiles against.
 
 **`map<string,string>` ALSO MEANS A REPEATED FIELD ARRIVES AS A STRING, and
 that broke four operations for as long as they existed.** The assistant has
@@ -3240,6 +3272,33 @@ engine linked at `rc=0` before that fix.
   a written list, because a list edited alongside every new `add_executable` is
   one that will silently omit the newest test — the one most likely to be
   failing.
+
+  **`CCACHE_DISABLE=1` IS REQUIRED FOR A MUTATION CHECK THAT EDITS A MODULE
+  INTERFACE, and without it the check passes while proving nothing.**
+  `CMAKE_CXX_COMPILER_LAUNCHER=ccache` is set in this build tree. ccache hashes
+  a translation unit's own SOURCE TEXT and flags; it does **not** hash the BMIs
+  that unit imports. A function defined in a `.cppm` is visible to consumers and
+  gets inlined into their objects — so editing `financial.cppm` and rebuilding
+  gives a consumer whose text never changed a **cache HIT**, and it keeps the
+  OLD inlined body. `touch` does not help: touching changes mtime, which ninja
+  reads, and ccache ignores.
+
+  Measured on 2026-09-03 while gating the `xnpv` span guard. The guard was
+  deleted from `financial.cppm`, `financial.cppm.o` recompiled, the BMI was
+  rebuilt, `finance_service.cpp.o` relinked — and the test still reported the
+  refusal, message and all, because the refusal was executing out of a stale
+  cached object. Three separate mutation runs "passed". With `CCACHE_DISABLE=1`
+  the same edit immediately produced `code=0, value=999.973034` — the
+  production symptom.
+
+  **This is the `ninja && ctest` stale-binary trap in its worst costume**, and
+  the difference is what makes it worth its own paragraph: there, ninja
+  truthfully said "no work to do" and the mtimes gave it away. Here ninja
+  schedules the work, the compiler runs, the mtimes all advance, and the object
+  is still stale. Nothing in the build output is false — it just is not
+  evidence. A mutation check that cannot fail is not a check, so run the
+  DELETION arm with ccache off and confirm it FAILS before trusting the arm
+  that passes.
 
 ### Frontend test suite
 

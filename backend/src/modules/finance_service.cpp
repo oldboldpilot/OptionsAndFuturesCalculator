@@ -1945,6 +1945,7 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         if (auto s = require_all_finite(request->dates(), "dates"); !s.ok()) return s;
         const std::vector<double> values(request->values().begin(), request->values().end());
         const std::vector<double> dates(request->dates().begin(), request->dates().end());
+        if (auto s = check_dated_span(dates); !s.ok()) return s;
         const auto r = sensen::xnpv(request->rate(), values, dates);
         if (!r) return fail(r);
         response->set_value(*r);
@@ -1966,6 +1967,7 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         if (auto s = require_finite(request->guess(), "guess"); !s.ok()) return s;
         const std::vector<double> values(request->values().begin(), request->values().end());
         const std::vector<double> dates(request->dates().begin(), request->dates().end());
+        if (auto s = check_dated_span(dates); !s.ok()) return s;
         const auto r = (request->guess() == 0.0) ? sensen::xirr(values, dates)
                                                  : sensen::xirr(values, dates, request->guess());
         if (!r) return fail(r);
@@ -4266,6 +4268,24 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         }
         if (request->values_size() == 0) {
             return Status(grpc::StatusCode::INVALID_ARGUMENT, "no cash flows supplied");
+        }
+        return Status::OK;
+    }
+
+    /**
+     * Refuses a date vector whose span cannot carry a discount.
+     *
+     * The RULE lives in sensen (`check_dated_span`), so a direct engine caller
+     * is refused identically and there is one threshold rather than two. This
+     * exists only to give the wire the right STATUS: `fail()` maps every
+     * engine error to FAILED_PRECONDITION, and dates in the wrong unit are a
+     * bad ARGUMENT -- the caller fixes it by changing what they send, which is
+     * what INVALID_ARGUMENT means. Runs AFTER the finite checks, because
+     * min/max over a NaN is not a span.
+     */
+    [[nodiscard]] static auto check_dated_span(const std::vector<double>& dates) -> Status {
+        if (auto ok = sensen::check_dated_span(dates); !ok) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT, ok.error());
         }
         return Status::OK;
     }
