@@ -448,9 +448,35 @@ messages, and both are in `kOperationExcludedFields` and the generator's
 `OP_EXCLUDED_FIELDS`. `BondRequest.yield_guess` is the fourth seed in the file
 and is NOT in the assistant's label space, so the class is fully swept.
 
-**Exclusion alone would have fixed nothing, which is the trap.** It stops G2b
-REQUIRING a field; an emitted one is still grounded, and the deployed model
-does emit it. The two halves are independent and both were needed.
+**CORRECTION, same day: the EXCLUSION is the load-bearing half, and the commit
+message shipping this said the opposite.** It claimed "exclusion alone would
+have fixed nothing" — reasoned from the verifier, where exclusion only stops
+G2b REQUIRING a field and an emitted one is still grounded. That is true of the
+verifier and false of the system, because
+`mortgage_assistant_service.cpp` DROPS an excluded field **before** building
+`verifiable.fields`, so it never reaches the verifier at all:
+
+```cpp
+if (mv::operation_excludes_field(operation, key)) { continue; }
+```
+
+Its own comment says why — *"Forwarding that seeds the solver with garbage.
+Absent is what the proto asked for, and only this side can guarantee it."*
+Confirmed by observation across the deploy: `guess = 0.25` appeared in the live
+refusal before, and after the deploy `ParseOperation` returns no `guess` key at
+all while `ComputeXirr` answers 20.2%, 9.0% and 10.3% on the three utterances
+that were refused. **Reading one layer's rule and not the layer that calls it
+is the same mistake this file records against `last_applied`, the LIVE badge
+and Railway's SUCCESS.**
+
+So the grounding exemption is UNREACHABLE from the service today — all four
+operations that declare `guess` now exclude it. It is kept deliberately, and
+the reason is a property rather than a hedge: *a solver seed is ungroundable by
+construction* is true of the verifier as a library, `test_mortgage_verification`
+asserts it against the verifier DIRECTLY rather than through the service, and
+the next operation that declares a seed the engine genuinely needs FORWARDED
+would otherwise land back here. Do not read it as live coverage of the
+production path; the exclusion is what covers that.
 
 Gated by `test_mortgage_verification` (120 checks, 11 new), including the exact
 production value 0.25, an arbitrary 0.1734, a negative seed still refused, the
