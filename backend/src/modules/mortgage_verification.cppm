@@ -1217,14 +1217,70 @@ struct ConventionValue {
 // So the field may be emitted and is no longer REQUIRED. Absence becomes the
 // contract's own "omit for the engine's default", which is what it always
 // said.
+/**
+ * Fields exempt from grounding as a FIELD rather than at one exact value --
+ * the ONLY such list, and it holds exactly one name.
+ *
+ * The convention list above is a whitelist of CONSTANTS on purpose: a field
+ * exemption cannot also catch a user who DID state a value the model then
+ * mangled. That reasoning is sound for every field it governs, because for
+ * all of them the user COULD have stated something. It does not reach a
+ * Newton-Raphson STARTING SEED, because no utterance can state one. There is
+ * no user statement about a solver seed for grounding to protect.
+ *
+ * So `guess` is not merely unstated, it is UNGROUNDABLE BY CONSTRUCTION, and
+ * every value the model puts there is invented. Enumerating those values was
+ * the previous approach and it failed in production: the corpus teaches 0.1
+ * and the deployed model emits **0.25** for `ComputeXirr`, which nothing
+ * whitelisted. Measured 2026-09-03 against the live ingress -- 3 of 3 dated
+ * IRR utterances refused with `"guess" = 0.25 does not correspond to anything
+ * in the request`, while `ComputeIrr` (which emits 0.1) and `ComputeRate`
+ * (which omits it) both parsed. One operation of twenty-seven, dead, on one
+ * constant.
+ *
+ * TWO THINGS KEEP THIS FROM BEING A HOLE, and they are why it is scoped to a
+ * literal field NAME rather than to a suffix or a slot kind:
+ *
+ *   - BOUNDS STILL APPLY. G5 runs in `translate()` BEFORE grounding is ever
+ *     consulted -- the same ordering `tax_escrow_months` and
+ *     `loan_term_years` document above -- so `guess` is still classified
+ *     SlotKind::Rate and still refused if it is negative or absurd. This
+ *     exempts a seed from having to APPEAR IN THE TEXT; it does not exempt it
+ *     from being a rate.
+ *   - A SEED CANNOT CARRY A WRONG ANSWER THE WAY A QUANTITY CAN. It selects
+ *     a root, it does not state one. The documented dangerous failure --
+ *     `present_value = 304000.00` on a 495,000 utterance, which prices a
+ *     different loan -- has no analogue here: a bad seed either converges to
+ *     the same IRR or fails to converge, and the engine refuses honestly when
+ *     it does.
+ *
+ * The residual risk is stated rather than waved away: a cash flow with more
+ * than one sign change has more than one IRR, and the seed picks which one is
+ * found. That is a property of the CASH FLOW, not of the seed, and refusing
+ * every dated IRR request is not a defence against it.
+ */
+constexpr std::array<std::string_view, 1> kUngroundedFields{"guess"};
+
+[[nodiscard]] constexpr auto is_ungrounded_field(std::string_view field) -> bool {
+    return is_one_of(kUngroundedFields, field);
+}
+
 struct ExcludedField {
     std::string_view operation;
     std::string_view field;
 };
-constexpr std::array<ExcludedField, 3> kOperationExcludedFields{{
+constexpr std::array<ExcludedField, 5> kOperationExcludedFields{{
     {.operation = "ComputeXirr", .field = "rate"},   // "ignored by XIRR"
     {.operation = "ComputeXnpv", .field = "guess"},  // "XIRR only"
     {.operation = "ComputeRate", .field = "guess"},  // "omit for the engine's own starting guess"
+    // The same seed, on the two operations that actually USE it. Missed when
+    // ComputeRate's row was added, which is the sweep-the-class lesson this
+    // tree has already paid for once: `finance_service.cpp` dispatches
+    // `guess == 0.0 ? xirr(values, dates) : xirr(values, dates, guess)`, so
+    // omitting it means the engine's own starting guess here EXACTLY as
+    // RateRequest's comment says it does. The proto now says so on all three.
+    {.operation = "ComputeXirr", .field = "guess"},
+    {.operation = "ComputeIrr", .field = "guess"},
 }};
 
 [[nodiscard]] constexpr auto is_excluded_field(std::string_view operation,
@@ -1237,7 +1293,7 @@ constexpr std::array<ExcludedField, 3> kOperationExcludedFields{{
     return false;
 }
 
-constexpr std::array<ConventionValue, 38> kConventionValues{{
+constexpr std::array<ConventionValue, 36> kConventionValues{{
     // ComputeRentVsBuy / ComputeHomeNpv: the optional inputs added with the
     // amortising model. An utterance that never mentions closing costs, selling
     // costs or inflation grounds none of them, and without an exemption the
@@ -1318,9 +1374,12 @@ constexpr std::array<ConventionValue, 38> kConventionValues{{
     {.field = "current_pmi_monthly", .value = "0"},
     {.field = "new_pmi_monthly", .value = "0"},
     {.field = "annual_inflation_rate", .value = "0"},
-    // Solver seeds, not user quantities.
-    {.field = "guess", .value = "0.005"},
-    {.field = "guess", .value = "0.1"},
+    // `guess` USED to be listed here at 0.005 and 0.1 -- the two values the
+    // model happened to emit. It is now exempt as a FIELD; see
+    // kUngroundedFields. Enumerating a solver seed's values was whack-a-mole
+    // and it lost: the deployed model emits 0.25 for ComputeXirr, a value the
+    // corpus never taught, and that ONE unlisted constant made the operation
+    // 100% unreachable. A dead row here would read exactly like coverage.
     // The statutory PMI drop-off threshold and the declining-balance factor.
     {.field = "pmi_drop_off_ltv", .value = "0.80"},
     {.field = "factor", .value = "2.0"},
@@ -2521,6 +2580,11 @@ auto ground_emitted_values(const MortgageParamsInput& input, std::string_view us
                 return verdict;
             }
 
+            // A solver seed is ungroundable by construction -- no utterance
+            // states a Newton starting point. Bounds already ran in
+            // translate() (G5), so this exempts it from appearing in the TEXT
+            // and not from being a plausible rate. See kUngroundedFields.
+            if (detail::is_ungrounded_field(emitted.name)) continue;
             if (detail::is_convention_value(emitted.name, *parsed)) continue;
             // A cadence stated as a WORD ("compounded quarterly") grounds its
             // count. See cadence_word_grounds for why this is not folded into

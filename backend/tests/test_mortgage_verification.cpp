@@ -1103,6 +1103,123 @@ auto main() -> int {
                     "excluded: ComputeRate WITH `guess` is STILL Proven -- the deployed model "
                     "emits it, and refusing it would break production");
     }
+
+    // -----------------------------------------------------------------
+    // The SEED, swept across the whole class this time.
+    //
+    // ComputeRate's `guess` was excluded above and its two semantic twins were
+    // not. `finance_service.cpp` dispatches
+    // `guess == 0.0 ? xirr(values, dates) : xirr(values, dates, guess)`, so
+    // omitting it means "the engine's own starting guess" on ComputeXirr and
+    // ComputeIrr EXACTLY as RateRequest's comment says it does -- the proto now
+    // states that on all three messages.
+    //
+    // Being excluded is only half of it, and the half that did not matter.
+    // Exclusion stops G2b REQUIRING the field; an emitted one is still ground-
+    // ed, and the deployed model DOES emit it. Measured against the live
+    // ingress on 2026-09-03: the corpus teaches `guess: 0.1`, the model invents
+    // **0.25** for ComputeXirr, nothing whitelisted it, and 3 of 3 dated IRR
+    // utterances were refused with `"guess" = 0.25 does not correspond to
+    // anything in the request`. ComputeIrr (emits 0.1) and ComputeRate (omits
+    // it) both parsed. One operation of twenty-seven, dead, on one constant --
+    // which is why the fix is a FIELD exemption and not a 39th convention row.
+    {
+        const std::string xirr_text =
+            "I invest $168,100 today and expect back $127,237.88 after 349 days; "
+            "$88,963.55 after 736 days. What return (IRR) am I getting?";
+        const auto xirr_base = [&] {
+            mv::MortgageParamsInput in;
+            in.params_emitted = true;
+            in.operation = "ComputeXirr";
+            in.fields.push_back(mv::EmittedField{
+                .name = "values", .values = {"-168100", "127237.88", "88963.55"}, .repeated = true});
+            in.fields.push_back(mv::EmittedField{
+                .name = "dates", .values = {"0.0", "349.0", "736.0"}, .repeated = true});
+            return in;
+        };
+
+        expect_pass(xirr_base(), xirr_text,
+                    "seed: ComputeXirr WITHOUT `guess` is Proven -- omission is the proto's "
+                    "own 'use the engine's default'");
+
+        auto xirr_025 = xirr_base();
+        xirr_025.fields.push_back(
+            mv::EmittedField{.name = "guess", .values = {"0.25"}, .repeated = false});
+        expect_pass(xirr_025, xirr_text,
+                    "seed: ComputeXirr WITH the production `guess` = 0.25 is Proven -- this is "
+                    "the exact live refusal that made the operation unreachable");
+
+        auto xirr_odd = xirr_base();
+        xirr_odd.fields.push_back(
+            mv::EmittedField{.name = "guess", .values = {"0.1734"}, .repeated = false});
+        expect_pass(xirr_odd, xirr_text,
+                    "seed: an ARBITRARY guess is Proven too -- the exemption is the field, not "
+                    "a longer whitelist; the next model's invented constant is covered");
+
+        // The exemption is GROUNDING-only, and this is what says so. Bounds run
+        // in translate() (G5) BEFORE grounding is ever consulted, so `guess` is
+        // still SlotKind::Rate and still has to be a plausible one. If this
+        // check ever passes, the exemption has stopped being scoped.
+        auto xirr_negative = xirr_base();
+        xirr_negative.fields.push_back(
+            mv::EmittedField{.name = "guess", .values = {"-0.25"}, .repeated = false});
+        expect(xirr_negative, xirr_text, mv::Outcome::Unsafe, mv::ReasonCode::OutOfRange,
+               "seed: a NEGATIVE guess is still REFUSED -- exempt from appearing in the text, "
+               "not exempt from being a rate");
+
+        // And the exemption must not leak to the fields beside it on the same
+        // request. `rate` is the value XIRR COMPUTES and is excluded from this
+        // operation entirely, so the neighbour used here is `values` -- an
+        // invented cash flow is still an invented cash flow.
+        auto xirr_bad_neighbour = xirr_base();
+        xirr_bad_neighbour.fields.push_back(
+            mv::EmittedField{.name = "guess", .values = {"0.25"}, .repeated = false});
+        xirr_bad_neighbour.fields[0].values = {"-168100", "127237.88", "99999.99"};
+        expect(xirr_bad_neighbour, xirr_text, mv::Outcome::Unsafe, mv::ReasonCode::UngroundedValue,
+               "seed: an exempt `guess` does NOT license the field next to it -- a corrupted "
+               "cash flow on the same request is still refused");
+    }
+    {
+        // The sibling, for the same reason. It parses today only because the
+        // model happens to emit the one value the corpus taught.
+        const std::string irr_text =
+            "I invest $50,000 today and expect back year 1: $20,000; year 2: $22,000; "
+            "year 3: $25,000. What return (IRR) am I getting?";
+        mv::MortgageParamsInput irr;
+        irr.params_emitted = true;
+        irr.operation = "ComputeIrr";
+        irr.fields.push_back(mv::EmittedField{
+            .name = "values", .values = {"-50000", "20000", "22000", "25000"}, .repeated = true});
+        expect_pass(irr, irr_text,
+                    "seed: ComputeIrr WITHOUT `guess` is Proven -- the same exclusion, on the "
+                    "sibling that was missed with it");
+
+        auto irr_with = irr;
+        irr_with.fields.push_back(
+            mv::EmittedField{.name = "guess", .values = {"0.28"}, .repeated = false});
+        expect_pass(irr_with, irr_text,
+                    "seed: ComputeIrr with an unlisted guess is Proven -- it emits 0.1 today, "
+                    "and nothing guarantees the next model does");
+
+        // The band's UPPER edge, asserted so the limit is written down rather
+        // than discovered. `guess` is SlotKind::Rate, so kMaxRateUnits (30%)
+        // applies to it, and a seed above that is refused even though the
+        // ENGINE would accept it -- the verifier is stricter here.
+        //
+        // That is accepted, and it is accepted on a MEASUREMENT rather than an
+        // argument: bounding the SEED does not bound the ANSWER. Against
+        // production on 2026-09-03, ComputeXirr on {-1000, +5200} one year
+        // apart returns **4.2** -- a 420% IRR -- from a seed of 0.1, and
+        // identically with the seed omitted. Newton does not need to start
+        // near the root, so capping the seed at 30% costs no reachable answer.
+        auto irr_out_of_band = irr;
+        irr_out_of_band.fields.push_back(
+            mv::EmittedField{.name = "guess", .values = {"0.31"}, .repeated = false});
+        expect(irr_out_of_band, irr_text, mv::Outcome::Unsafe, mv::ReasonCode::OutOfRange,
+               "seed: a guess ABOVE the 30% rate band is refused -- the exemption is from "
+               "grounding only, and this costs no answer because a 420% IRR is still found "
+               "from a seed of 0.1");
+    }
     {
         // ComputeXirr. `rate` is ignored by XIRR and is the answer it returns.
         const std::string xirr_text =

@@ -393,6 +393,73 @@ model — score `[assistant] raw model output`, which is logged before it runs.
 
 ## Mortgage assistant
 
+### `ComputeXirr` was 100% unreachable, on one invented constant
+
+Measured against the live ingress on 2026-09-03, with the issued partner key.
+Three dated-IRR utterances, three refusals, all identical:
+
+```
+"guess" = 0.25 does not correspond to anything in the request
+          (the nearest figure you gave is 349)
+```
+
+`ComputeIrr` parsed. `ComputeRate` parsed. Only the dated sibling was dead, and
+it had been dead since it existed.
+
+**The corpus teaches `guess: 0.1` and the deployed model emits 0.25.** Nothing
+whitelisted 0.25, so grounding refused it — correctly, by the rule as written.
+`kConventionValues` exempts a field at ONE EXACT VALUE, deliberately: "a
+whitelist of constants, not a whitelist of fields", because a field-level
+exemption cannot also catch a user who DID state a value the model then
+mangled.
+
+**That reasoning is sound for every field it governs and does not reach a
+solver seed, because no utterance can state one.** There is no user statement
+about a Newton starting point for grounding to protect, so every value the
+model puts there is invented by construction — enumerating them is whack-a-mole
+against a model whose emissions the corpus does not control, and it lost.
+`guess` is now exempt as a FIELD (`kUngroundedFields`, one entry).
+
+Two things keep that from being a hole:
+
+- **Bounds still apply.** G5 runs in `translate()` BEFORE grounding is ever
+  consulted — the ordering `tax_escrow_months` and `loan_term_years` already
+  document — so `guess` is still `SlotKind::Rate` and still refused if it is
+  negative or above the 30% band. Exempt from appearing in the TEXT, not from
+  being a rate.
+- **A seed selects a root; it does not state one.** The documented dangerous
+  failure — `present_value = 304000.00` on a 495,000 utterance, pricing a
+  different loan — has no analogue. A bad seed converges to the same IRR or
+  fails to converge, and the engine refuses honestly when it does.
+
+**The 30% cap on the seed is STRICTER than the engine, and that was accepted on
+a measurement rather than an argument.** Bounding the seed does not bound the
+answer: `ComputeXirr` on `{-1000, +5200}` one year apart returns **4.2** — a
+420% IRR — from a seed of 0.1, and identically with the seed omitted. Newton
+does not need to start near the root.
+
+**It is also the sweep-the-class lesson again.** `ComputeRate.guess` was
+excluded from being REQUIRED and its two semantic twins were missed:
+`finance_service.cpp` dispatches
+`guess == 0.0 ? xirr(values, dates) : xirr(values, dates, guess)`, so omission
+means "the engine's own starting guess" on `ComputeXirr` and `ComputeIrr`
+exactly as `RateRequest`'s comment says. The proto now states it on all three
+messages, and both are in `kOperationExcludedFields` and the generator's
+`OP_EXCLUDED_FIELDS`. `BondRequest.yield_guess` is the fourth seed in the file
+and is NOT in the assistant's label space, so the class is fully swept.
+
+**Exclusion alone would have fixed nothing, which is the trap.** It stops G2b
+REQUIRING a field; an emitted one is still grounded, and the deployed model
+does emit it. The two halves are independent and both were needed.
+
+Gated by `test_mortgage_verification` (120 checks, 11 new), including the exact
+production value 0.25, an arbitrary 0.1734, a negative seed still refused, the
+30% edge, and a corrupted `values` on the same request still refused — so the
+exemption is proven not to license its neighbours. Mutation-checked: removing
+the field exemption reproduces the live message verbatim, `(the nearest figure
+you gave is 349)`, and fails 5 checks.
+
+
 ### "20% down" was priced as a 20% interest rate, and the gate said Proven
 
 Reported from the app as "ParseOperation ignores the down payment", which is

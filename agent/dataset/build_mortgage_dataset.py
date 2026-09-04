@@ -267,7 +267,17 @@ ENUMS = _PARSED["enums"]
 # leaving G2a accepting them, so the model deployed today -- which does emit
 # `guess` -- keeps parsing unchanged.
 OP_EXCLUDED_FIELDS: dict[str, set[str]] = {
-    "ComputeXirr": {"rate"},   # DatedCashFlowRequest.rate  -- "ignored by XIRR"
+    # `guess` is excluded from ALL THREE operations that declare it as a seed,
+    # not just ComputeRate. Adding it for ComputeRate alone left the identical
+    # field on ComputeXirr and ComputeIrr, and the cost was measured on
+    # 2026-09-03: the deployed model invents `guess: 0.25` for ComputeXirr --
+    # the corpus teaches 0.1 -- and grounding refused 3 of 3 live utterances,
+    # making the operation 100% unreachable from the app. Teaching a value for
+    # a slot the utterance cannot state is the same defect as `phrase_money`
+    # and `prepaid_interest_days`; the model fills it with something plausible
+    # because it has nothing to read.
+    "ComputeXirr": {"rate", "guess"},  # rate "ignored by XIRR"; guess is a seed
+    "ComputeIrr": {"guess"},   # IrrRequest.guess -- a seed, omit for the default
     "ComputeXnpv": {"guess"},  # DatedCashFlowRequest.guess -- "XIRR only"
     "ComputeRate": {"guess"},  # RateRequest.guess -- "omit for the engine's own starting guess"
 }

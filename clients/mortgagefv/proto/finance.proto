@@ -432,7 +432,7 @@ message NpvRequest {
 
 message IrrRequest {
   repeated double values = 1;
-  double guess = 2;
+  double guess = 2;             // omit for the engine's own starting guess
 }
 
 // XNPV/XIRR: cash flows on their actual dates rather than on a regular period
@@ -454,7 +454,7 @@ message DatedCashFlowRequest {
   double rate = 1;              // XNPV only; ignored by XIRR
   repeated double values = 2;
   repeated double dates = 3;    // day offsets; see the message comment
-  double guess = 4;             // XIRR only
+  double guess = 4;             // XIRR only; omit for the engine's own starting guess
 }
 
 message PaybackRequest {
