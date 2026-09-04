@@ -2516,6 +2516,123 @@ auto main() -> int {
         }
     }
 
+    section("26. ComputeRate / ComputePeriods: a TVM solve needs money flowing BOTH ways");
+    // =======================================================================
+    //
+    // Both operations solve `PV*(1+r)^n + PMT*annuity(r,n) + FV = 0`. With
+    // FV = 0 that has a solution only when PV and PMT have OPPOSITE signs.
+    // The training corpus emits BOTH POSITIVE -- "$1,275,100 loan,
+    // $7,751.77/month" is how a person says it -- and the two operations then
+    // failed in opposite directions, only one of them safely:
+    //
+    //   ComputeRate     FAILED_PRECONDITION "Newton-Raphson solver failed to
+    //                   converge" -- true of the solver, useless to the caller
+    //   ComputePeriods  **200 OK with -119.702968202252976128**
+    //
+    // Measured against production on 2026-09-03. The right answer is 359.955,
+    // so a 30-year mortgage came back as minus ten years with nothing in the
+    // response saying so. Same shape as section 25's undiscounted sum: a plain
+    // formula has no solver to fail, so a convention error arrives as a
+    // plausible number rather than as an error.
+    {
+        // The corpus's own label, verbatim.
+        const auto periods_req = [](const char* pmt, const char* pv) {
+            sensen::finance::PeriodsRequest r;
+            r.set_rate("0.005108");
+            r.set_payment(pmt);
+            r.set_present_value(pv);
+            r.set_future_value("0.00");
+            r.set_timing(sensen::finance::END_OF_PERIOD);
+            return r;
+        };
+        {
+            auto req = periods_req("7751.77", "1275100.00");
+            sensen::finance::DecimalResponse resp;
+            auto ctx = make_context();
+            auto status = stub.ComputePeriods(ctx.get(), req, &resp);
+            const std::string msg = status.error_message();
+            check(is_invalid_argument(status) && msg.find("SAME sign") != std::string::npos,
+                  "ComputePeriods on same-signed PV and payment is REFUSED naming the "
+                  "convention -- it used to answer 200 OK with -119.70 periods");
+        }
+        {
+            // The admit direction, checked against the closed form rather than
+            // against ok(): -ln(1 - PV*r/PMT)/ln(1+r) = 359.9554...
+            auto req = periods_req("-7751.77", "1275100.00");
+            sensen::finance::DecimalResponse resp;
+            auto ctx = make_context();
+            auto status = stub.ComputePeriods(ctx.get(), req, &resp);
+            const double got = status.ok() ? std::stod(resp.value()) : 0.0;
+            check(status.ok() && std::abs(got - 359.955447) < 1e-4,
+                  "the same request with the payment signed computes 359.955 -- the closed "
+                  "form, and a 30-year loan");
+        }
+        {
+            // A savings goal is legitimately same-signed, and is why this is
+            // scoped to FV == 0 rather than being a sign heuristic: pay in
+            // every month AND start with a balance, to reach a target.
+            sensen::finance::PeriodsRequest req;
+            req.set_rate("0.004");
+            req.set_payment("-500.00");
+            req.set_present_value("-10000.00");
+            req.set_future_value("100000.00");
+            req.set_timing(sensen::finance::END_OF_PERIOD);
+            sensen::finance::DecimalResponse resp;
+            auto ctx = make_context();
+            auto status = stub.ComputePeriods(ctx.get(), req, &resp);
+            check(status.ok() && std::stod(resp.value()) > 0.0,
+                  "a NON-ZERO future value with same-signed PV and payment is ADMITTED -- a "
+                  "savings goal is exactly that shape, so this is not a sign heuristic");
+        }
+        {
+            // ComputeRate, same input, and the message must name the cause
+            // rather than the solver -- the identical complaint section 25
+            // records against xirr's "flat derivative".
+            sensen::finance::RateRequest req;
+            req.set_periods(240);
+            req.set_payment("5083.69");
+            req.set_present_value("731800.00");
+            req.set_future_value("0.00");
+            req.set_timing(sensen::finance::END_OF_PERIOD);
+            sensen::finance::DecimalResponse resp;
+            auto ctx = make_context();
+            auto status = stub.ComputeRate(ctx.get(), req, &resp);
+            const std::string msg = status.error_message();
+            check(is_invalid_argument(status) && msg.find("SAME sign") != std::string::npos &&
+                      msg.find("Newton") == std::string::npos,
+                  "ComputeRate names the sign convention, not 'Newton-Raphson failed to "
+                  "converge'");
+
+            req.set_payment("-5083.69");
+            sensen::finance::DecimalResponse ok_resp;
+            auto ctx2 = make_context();
+            auto ok_status = stub.ComputeRate(ctx2.get(), req, &ok_resp);
+            const double got = ok_status.ok() ? std::stod(ok_resp.value()) : 0.0;
+            check(ok_status.ok() && std::abs(got - 0.004683340) < 1e-7,
+                  "and with the payment signed it solves to 0.0046833 -- 5.62% a year, the "
+                  "closed-form rate that fits");
+        }
+        {
+            // The post-check is NOT redundant with the pre-check, and this is
+            // the case that proves it: a payment SMALLER than the first
+            // period's interest never retires the loan. Signs are opposite, so
+            // the pre-check passes; the formula still yields a meaningless
+            // term.
+            sensen::finance::PeriodsRequest req;
+            req.set_rate("0.01");
+            req.set_payment("-50.00");          // interest alone is 1000/period
+            req.set_present_value("100000.00");
+            req.set_future_value("0.00");
+            req.set_timing(sensen::finance::END_OF_PERIOD);
+            sensen::finance::DecimalResponse resp;
+            auto ctx = make_context();
+            auto status = stub.ComputePeriods(ctx.get(), req, &resp);
+            check(!status.ok(),
+                  "a payment below the periodic interest does not return a term -- the "
+                  "post-check catches what the sign rule cannot");
+        }
+    }
+
     // -----------------------------------------------------------------
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

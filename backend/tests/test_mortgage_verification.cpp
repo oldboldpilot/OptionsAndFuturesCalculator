@@ -1105,6 +1105,58 @@ auto main() -> int {
     }
 
     // -----------------------------------------------------------------
+    // The BATCH's plural convention fields, missed when the singulars landed.
+    //
+    // ComputeAmortizationBatch takes parallel arrays. `extra_payments` and
+    // `pmi_rates` are the per-offer spellings of `extra_monthly_payment` and
+    // `pmi_annual_rate`, both of which were already exempt at 0 -- and neither
+    // plural was. A comparison utterance never mentions extra payments or PMI,
+    // so the model emits [0, 0] for both and EVERY batch request was refused.
+    // Measured against the live ingress on 2026-09-03.
+    {
+        const std::string batch_text =
+            "Compare these loan offers: $362,100 at 5.56% over 15-year; "
+            "$256,100 at 7.1% over 30-year.";
+        const auto batch = [] {
+            mv::MortgageParamsInput in;
+            in.params_emitted = true;
+            in.operation = "ComputeAmortizationBatch";
+            in.fields.push_back(mv::EmittedField{
+                .name = "loan_amounts", .values = {"362100", "256100"}, .repeated = true});
+            in.fields.push_back(mv::EmittedField{
+                .name = "annual_rates", .values = {"0.0556", "0.071"}, .repeated = true});
+            in.fields.push_back(mv::EmittedField{
+                .name = "term_months", .values = {"180", "360"}, .repeated = true});
+            in.fields.push_back(mv::EmittedField{
+                .name = "extra_payments", .values = {"0", "0"}, .repeated = true});
+            in.fields.push_back(mv::EmittedField{
+                .name = "pmi_rates", .values = {"0.0", "0.0"}, .repeated = true});
+            in.fields.push_back(mv::EmittedField{
+                .name = "home_values", .values = {"362100", "256100"}, .repeated = true});
+            return in;
+        };
+        expect_pass(batch(), batch_text,
+                    "batch: the corpus's own label is Proven -- `extra_payments` and "
+                    "`pmi_rates` at [0, 0] are the batch spelling of two zeros already exempt");
+
+        // Per ELEMENT, not per field. A stated overpayment must still ground,
+        // or the exemption would launder every value in the array.
+        auto batch_ungrounded = batch();
+        batch_ungrounded.fields[3].values = {"0", "250"};
+        expect(batch_ungrounded, batch_text, mv::Outcome::Unsafe,
+               mv::ReasonCode::UngroundedValue,
+               "batch: [0, 250] is still REFUSED on the 250 -- the exemption is per element, "
+               "so a zero beside an invented number does not carry it");
+
+        // And a genuinely stated overpayment grounds, which is what proves the
+        // check above is refusing the INVENTION and not the shape.
+        auto batch_stated = batch();
+        batch_stated.fields[3].values = {"0", "250"};
+        expect_pass(batch_stated, batch_text + " On the second one I'd add $250 a month.",
+                    "batch: the same [0, 250] is Proven once the utterance states the $250");
+    }
+
+    // -----------------------------------------------------------------
     // The SEED, swept across the whole class this time.
     //
     // ComputeRate's `guess` was excluded above and its two semantic twins were

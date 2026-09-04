@@ -1351,6 +1351,7 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         REQUIRE_DECIMAL(pv_v, request->present_value(), "present_value");
         READ_DECIMAL(fv_v, request->future_value(), "future_value");
         READ_DECIMAL(guess, request->guess(), "guess");
+        if (auto s = check_tvm_solvable(pv_v, pmt_v, fv_v, "rate"); !s.ok()) return s;
         // rate_fn solves iteratively in double, unlike the closed-form annuity
         // functions above -- so the inputs narrow here rather than pretending
         // to a precision the solver does not carry.
@@ -1377,10 +1378,23 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         REQUIRE_DECIMAL(pmt_v, request->payment(), "payment");
         REQUIRE_DECIMAL(pv_v, request->present_value(), "present_value");
         READ_DECIMAL(fv_v, request->future_value(), "future_value");
+        if (auto s = check_tvm_solvable(pv_v, pmt_v, fv_v, "term"); !s.ok()) return s;
         // nper_fn is a double-domain closed form, same as rate_fn above.
         const auto r = sensen::nper_fn(rate.to_double(), pmt_v.to_double(), pv_v.to_double(),
                                        fv_v.to_double(), timing_of(request->timing()));
         if (!r) return fail(r);
+        // Defence in depth, and NOT redundant with the check above: nper_fn is
+        // a plain formula with no solver to fail, so every way of reaching a
+        // meaningless answer arrives here as a number rather than an error. A
+        // term is a count of periods; zero or fewer of them is not a shorter
+        // loan, it is not a loan.
+        if (*r <= 0.0) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "the inputs imply a term of " + BigDecimal(*r).to_string() +
+                              " periods, which is not a term; check the signs of payment and "
+                              "present_value and the magnitude of the payment against the "
+                              "interest alone");
+        }
         response->set_value(BigDecimal(*r).to_string());
         return Status::OK;
     }
@@ -4243,6 +4257,64 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
                           std::string(field) + " must be positive");
         }
         return Status::OK;
+    }
+
+    /**
+     * A TVM SOLVE needs money to flow BOTH ways, and until 2026-09-03 nothing
+     * said so.
+     *
+     * `ComputeRate` and `ComputePeriods` both solve the annuity balance
+     * `PV*(1+r)^n + PMT*annuity(r,n) + FV = 0`. With `FV = 0` that equation has
+     * a solution only if `PV` and `PMT` have OPPOSITE signs -- you borrow money
+     * and pay it back. Same-signed inputs describe receiving a loan AND
+     * receiving the payments, which no rate and no term can balance.
+     *
+     * The two operations failed in opposite directions on exactly that input,
+     * and only one was safe:
+     *
+     *   ComputeRate     FAILED_PRECONDITION, "Newton-Raphson solver failed to
+     *                   converge for rate" -- true of the solver, useless to
+     *                   the caller, and it names neither the cause nor the fix.
+     *   ComputePeriods  **200 OK with -119.702968202252976128** -- the closed
+     *                   form is a plain formula with no solver to fail, so a
+     *                   sign error comes back as a negative period count that
+     *                   nothing in the response flags.
+     *
+     * Measured against production on 2026-09-03 with the training corpus's own
+     * label for "$1,275,100 loan, $7,751.77/month at 0.5108%": the engine
+     * served **-119.70 periods** where the answer is **359.955** -- a 30-year
+     * mortgage reported as minus ten years. Flipping one sign returns
+     * 359.955447133832478720, matching the closed form
+     * `-ln(1 - PV*r/PMT)/ln(1+r)` exactly.
+     *
+     * REFUSED, NOT REPAIRED. Negating `payment` would answer the question the
+     * caller probably meant, and this file's own rule is that a repair with a
+     * plausible alternative reading is a guess wearing an answer's clothes --
+     * the same reason an inverted P&L matrix bound is refused rather than
+     * swapped. The refusal names the convention, so the caller can fix it in
+     * one edit.
+     *
+     * SCOPED TO `FV == 0`, deliberately. With a non-zero future value the
+     * balance CAN hold with `PV` and `PMT` on the same side -- a savings goal
+     * is exactly that shape -- so this is not a sign heuristic, it is the
+     * degenerate case stated exactly. `ComputePayment`, `ComputePresentValue`
+     * and `ComputeFutureValue` are untouched: they EVALUATE a closed form
+     * rather than solving one, and their signed output IS the convention
+     * (`ComputePayment` returning -3210.56 is correct and documented).
+     */
+    [[nodiscard]] static auto check_tvm_solvable(const BigDecimal& pv, const BigDecimal& pmt,
+                                                 const BigDecimal& fv,
+                                                 std::string_view solving_for) -> Status {
+        if (!fv.is_zero() || pv.is_zero() || pmt.is_zero()) return Status::OK;
+        if (pv.is_negative() != pmt.is_negative()) return Status::OK;
+        return Status(
+            grpc::StatusCode::INVALID_ARGUMENT,
+            "present_value " + pv.to_string() + " and payment " + pmt.to_string() +
+                " have the SAME sign with future_value 0, so no " + std::string{solving_for} +
+                " can balance them: the money only ever flows one way. XNPV-style cash-flow "
+                "convention applies here too -- a loan you receive is positive and the payments "
+                "you make against it are negative (or the reverse), exactly as ComputePayment "
+                "returns a negative payment for a positive present value.");
     }
 
     [[nodiscard]] static auto check_term(int term_months) -> Status {

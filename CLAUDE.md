@@ -393,6 +393,103 @@ model — score `[assistant] raw model output`, which is logged before it runs.
 
 ## Mortgage assistant
 
+### Sweeping all 27 operations through the live chain, and what it found
+
+`ComputeXirr` was found by probing three utterances. That is sampling, not
+measurement, so on 2026-09-03 all **27** operations were run end to end against
+production: one holdout utterance each from `val.jsonl`, through
+`ParseOperation` with the partner key, then the resulting params dispatched to
+the `sensen.finance.Finance` RPC the model named.
+
+**24 of 27 complete. Three did not, and two were real defects.**
+
+| operation | symptom | verdict |
+| --- | --- | --- |
+| `ComputePeriods` | **200 OK, `-119.70` periods** for a 30-year loan | wrong answer, fixed |
+| `ComputeAmortizationBatch` | `"extra_payments" = 0 does not correspond to anything` | 100% refused, fixed |
+| `ComputeDepreciation` | model emitted `factor = 3` where gold is 2.0 | model error; refusal is correct |
+
+**The harness was wrong first, and saying so matters more than the fix.** The
+first pass reported 22/27, with `ComputePayment` and `ComputeAmortization`
+returning clarifications. Both are MULTI-TURN rows — "redo it for $274,500",
+"what if I pay $750 more a month?" — and the extractor had taken the LAST user
+turn, dropping the request that states the numbers. **129 of 600 holdout rows
+are multi-turn.** `ParseRequest` carries `prior_clarification` and
+`prior_question` for exactly this, and re-running with the turn roles right
+moved 22 → 24. The model was behaving correctly and the measurement was not;
+a harness bug reads exactly like a model bug.
+
+### A 30-year mortgage served as MINUS TEN YEARS, with a 200 OK
+
+`ComputeRate` and `ComputePeriods` both solve
+`PV*(1+r)^n + PMT*annuity(r,n) + FV = 0`. With `FV = 0` that has a solution
+only when `PV` and `PMT` have OPPOSITE signs — you borrow and you pay back.
+The corpus emits BOTH POSITIVE, because "$1,275,100 loan, $7,751.77/month" is
+how a person says it.
+
+The two failed in opposite directions and only one was safe — **the same shape
+as the XNPV bug above, on a different pair of operations:**
+
+| | same-signed input | why |
+| --- | --- | --- |
+| `ComputeRate` | FAILED_PRECONDITION, `Newton-Raphson solver failed to converge` | true of the solver, useless to the caller |
+| `ComputePeriods` | **200 OK with `-119.702968202252976128`** | a closed form has no solver to fail |
+
+Measured against production. The answer is **359.955** — `-ln(1 - PV*r/PMT)/ln(1+r)`
+to six figures — so a 30-year mortgage came back as minus ten years with
+nothing in the response flagging it. Signing the payment returns
+`359.955447133832478720`.
+
+**The seed was the first suspect and was innocent.** `ComputeRate`'s `guess` is
+dropped by the exclusion above, so the obvious hypothesis was that the engine's
+default seed failed. It fails identically at 0.005 (the gold), 0.001, 0.01 and
+0.1 — *no* seed converges, because no root exists. **Check whether the answer
+exists before blaming the thing that looks for it.**
+
+`check_tvm_solvable` refuses both, naming the convention.
+
+- **Refused, never repaired.** Negating `payment` would answer the question the
+  caller probably meant; this file's rule is that a repair with a plausible
+  alternative reading is a guess wearing an answer's clothes — the same reason
+  an inverted P&L matrix bound is refused rather than swapped.
+- **Scoped to `FV == 0`, so it is not a sign heuristic.** With a non-zero
+  future value the balance CAN hold with `PV` and `PMT` on the same side — a
+  savings goal is exactly that shape — and a test asserts that case is
+  admitted.
+- **`ComputePeriods` also refuses a non-positive RESULT, and that is not
+  redundant.** The formula has no solver to fail, so every other route to a
+  meaningless term arrives as a number: a payment smaller than the first
+  period's interest passes the sign rule and still never retires the loan.
+  With the sign rule mutated out, the post-check still turns `-119.70` into a
+  refusal — it is the safety net, and the pre-check is what makes the message
+  useful.
+- **`ComputePayment`, `ComputePresentValue` and `ComputeFutureValue` are
+  untouched.** They EVALUATE a closed form rather than solving one, and their
+  signed output IS the convention — `ComputePayment` returning `-3210.56` is
+  correct and documented above.
+
+Both operations stay unreachable from the app until the corpus carries the
+sign, which needs a retrain. Turning a wrong answer into an honest refusal is
+the same trade the XNPV fix made, and the same direction.
+
+### The batch's plural convention fields, missed when the singulars landed
+
+`ComputeAmortizationBatch` takes parallel arrays. `extra_payments` and
+`pmi_rates` are the per-offer spellings of `extra_monthly_payment` and
+`pmi_annual_rate` — **both singulars were exempt at 0 and neither plural was.**
+A comparison utterance never mentions extra payments or PMI, so the model
+correctly emits `[0, 0]` for both and every batch request was refused on
+`"extra_payments" = 0 does not correspond to anything in the request`.
+
+Exemption is per ELEMENT, which is what keeps it safe: `[0, 0]` is two exempt
+zeros and `[0, 250]` must still ground the 250 — asserted in both directions,
+including that the same `[0, 250]` passes once the utterance states the $250.
+No corpus change and no retrain: the gold was already right.
+
+**Three sweep-the-class misses in one day** — `guess` on two operations, the
+two batch plurals, and `dates_to_seconds`' missing conversion. Each was a rule
+applied correctly to one member of a family and never carried to the rest.
+
 ### `ComputeXirr` was 100% unreachable, on one invented constant
 
 Measured against the live ingress on 2026-09-03, with the issued partner key.

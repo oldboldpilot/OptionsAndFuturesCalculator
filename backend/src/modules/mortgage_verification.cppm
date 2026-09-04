@@ -1293,7 +1293,7 @@ constexpr std::array<ExcludedField, 5> kOperationExcludedFields{{
     return false;
 }
 
-constexpr std::array<ConventionValue, 36> kConventionValues{{
+constexpr std::array<ConventionValue, 38> kConventionValues{{
     // ComputeRentVsBuy / ComputeHomeNpv: the optional inputs added with the
     // amortising model. An utterance that never mentions closing costs, selling
     // costs or inflation grounds none of them, and without an exemption the
@@ -1374,6 +1374,21 @@ constexpr std::array<ConventionValue, 36> kConventionValues{{
     {.field = "current_pmi_monthly", .value = "0"},
     {.field = "new_pmi_monthly", .value = "0"},
     {.field = "annual_inflation_rate", .value = "0"},
+    // The BATCH spellings of two of the zeros above. ComputeAmortizationBatch
+    // takes parallel arrays -- `extra_payments` and `pmi_rates` are
+    // `extra_monthly_payment` and `pmi_annual_rate` per offer -- and both were
+    // missed when the singulars were listed. The cost was TOTAL rather than
+    // partial: "Compare these loan offers: $362,100 at 5.56% over 15-year;
+    // $256,100 at 7.1% over 30-year" is the only shape a comparison utterance
+    // has, it never mentions extra payments or PMI, and the model correctly
+    // emits [0, 0] for both -- so every batch request was refused on
+    // `"extra_payments" = 0 does not correspond to anything in the request`.
+    // Measured against the live ingress on 2026-09-03.
+    //
+    // Exemption is per ELEMENT, which is what keeps this safe: [0, 0] is two
+    // exempt zeros and [0, 250] must still ground the 250.
+    {.field = "extra_payments", .value = "0"},
+    {.field = "pmi_rates", .value = "0"},
     // `guess` USED to be listed here at 0.005 and 0.1 -- the two values the
     // model happened to emit. It is now exempt as a FIELD; see
     // kUngroundedFields. Enumerating a solver seed's values was whack-a-mole
