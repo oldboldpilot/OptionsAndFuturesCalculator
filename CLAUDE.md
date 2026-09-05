@@ -393,6 +393,14 @@ model — score `[assistant] raw model output`, which is logged before it runs.
 
 ## Mortgage assistant
 
+### 27 of 27 reachable, verified end to end on 2026-09-05
+
+| operation | production value | independent check |
+| --- | --- | --- |
+| `ComputeRate` | `0.004683340486983064` | closed-form rate fitting the payment, 5.62%/yr |
+| `ComputePeriods` | `359.955447133832478720` | `-ln(1 - PV*r/PMT)/ln(1+r)` = 359.9554 |
+| `ComputeDepreciation` | `5017.948717948718` | `(199400 - 3700)/39` exactly |
+
 ### All 27 reachable: the three stragglers, and why NONE of them was compute
 
 `ComputeRate`, `ComputePeriods` and `ComputeDepreciation` were the last three
@@ -404,6 +412,17 @@ saying they "stay unreachable until the corpus carries the sign, which needs a
 retrain" was superseded the same week and is wrong. **The retrain would only
 have changed what the MODEL EMITS; the serving layer can translate instead, and
 does.**
+
+**Compute was never the bottleneck, and it is worth stating with a number.**
+Measured against production: all three return in **~71 ms**, of which the
+arithmetic is one Newton solve (at most 100 iterations of three flops), one
+log-ratio, and one subtract-and-divide. Effectively all of that is network,
+TLS, Envoy and gRPC framing. There is nothing here for SIMD, more cores or a
+GPU to do — sensen already vectorises where vectorising pays (the 0.6B
+assistants decode on CPU through `sensen.cpu_features`), and none of these
+three operations has a vector in it. **A reachability failure that looks like
+a performance problem is neither; check what the layer REFUSED before asking
+what it computed.**
 
 - **`ComputeRate` / `ComputePeriods` — the TVM sign convention.** Both solve
   `PV*(1+r)^n + PMT*annuity(r,n) + FV = 0`, which with `FV = 0` has a root only
