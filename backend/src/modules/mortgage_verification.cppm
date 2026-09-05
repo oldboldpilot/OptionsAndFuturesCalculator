@@ -2574,6 +2574,30 @@ auto MortgageParamsDomain::translate(const MortgageParamsInput& in) const -> Ver
         if (detail::is_excluded_field(in.operation, spec.field)) {
             continue;
         }
+        // Nor is a field the chosen VARIANT does not read. The serving side
+        // DROPS these before building `in.fields` (mortgage_assistant_service),
+        // so requiring them here refuses the very parse that drop enables --
+        // which is exactly what happened when the drop shipped without this:
+        // ComputeDepreciation went from `"factor" = 3 ungrounded` to
+        // `"period" ... was not emitted`, trading one refusal for another.
+        //
+        // The variant comes from the model's OWN emitted enum, so a request
+        // that omits or garbles it drops nothing and every field stays
+        // required -- the fail-closed direction.
+        if (const auto governing = detail::variant_governing_field(in.operation);
+            !governing.empty()) {
+            std::string_view variant;
+            for (const auto& emitted : in.fields) {
+                if (emitted.name == governing && emitted.values.size() == 1) {
+                    variant = emitted.values.front();
+                    break;
+                }
+            }
+            if (!variant.empty() &&
+                detail::is_variant_inert_field(in.operation, variant, spec.field)) {
+                continue;
+            }
+        }
         bool present = false;
         for (const auto& emitted : in.fields) {
             if (emitted.name == spec.field) {

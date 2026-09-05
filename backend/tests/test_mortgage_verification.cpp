@@ -1192,6 +1192,47 @@ auto main() -> int {
               "variant: `recovery_period` is LIVE for MACRS");
         check(!mv::field_is_inert_for_variant("ComputeDepreciation", "STRAIGHT_LINE", "cost"),
               "variant: nothing ever makes `cost` inert");
+
+        // G2b MUST honour the same table the serving side drops on. It did not
+        // when the drop first shipped, and the sweep caught it end to end:
+        // ComputeDepreciation went from `"factor" = 3 ungrounded` straight to
+        // `"period" ... was not emitted`, one refusal traded for another. A
+        // unit test of the predicate alone could not see it -- only a request
+        // built the way the service builds one.
+        const std::string dep_text =
+            "Depreciate $199,400 of equipment I bought for the rental using straight-line, "
+            "39-year life, salvage $3,700. Year 35's deduction?";
+        mv::MortgageParamsInput dep;
+        dep.params_emitted = true;
+        dep.operation = "ComputeDepreciation";
+        dep.fields.push_back(mv::EmittedField{
+            .name = "method", .values = {"STRAIGHT_LINE"}, .repeated = false});
+        dep.fields.push_back(mv::EmittedField{.name = "cost", .values = {"199400"}, .repeated = false});
+        dep.fields.push_back(mv::EmittedField{.name = "salvage", .values = {"3700"}, .repeated = false});
+        dep.fields.push_back(mv::EmittedField{.name = "life", .values = {"39"}, .repeated = false});
+        expect_pass(dep, dep_text,
+                    "variant: a STRAIGHT_LINE parse carrying ONLY the fields sln reads is "
+                    "Proven -- G2b honours the same table the service drops on");
+
+        // And the fields it DOES read are still required, so the skip is
+        // scoped rather than a hole in G2b.
+        auto dep_missing_life = dep;
+        dep_missing_life.fields.pop_back();
+        expect(dep_missing_life, dep_text, mv::Outcome::Unsafe, mv::ReasonCode::MissingField,
+               "variant: `life` is still REQUIRED for STRAIGHT_LINE -- sln reads it");
+
+        // A DDB parse must still carry period and factor, which SLN drops.
+        mv::MortgageParamsInput ddb;
+        ddb.params_emitted = true;
+        ddb.operation = "ComputeDepreciation";
+        ddb.fields.push_back(mv::EmittedField{
+            .name = "method", .values = {"DECLINING_BALANCE"}, .repeated = false});
+        ddb.fields.push_back(mv::EmittedField{.name = "cost", .values = {"199400"}, .repeated = false});
+        ddb.fields.push_back(mv::EmittedField{.name = "salvage", .values = {"3700"}, .repeated = false});
+        ddb.fields.push_back(mv::EmittedField{.name = "life", .values = {"39"}, .repeated = false});
+        expect(ddb, dep_text, mv::Outcome::Unsafe, mv::ReasonCode::MissingField,
+               "variant: the SAME field set is REFUSED for DECLINING_BALANCE -- it reads "
+               "period and factor, so the skip is per variant and not per operation");
     }
 
     // -----------------------------------------------------------------
