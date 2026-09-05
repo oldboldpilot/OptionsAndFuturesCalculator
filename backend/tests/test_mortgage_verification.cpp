@@ -1105,6 +1105,96 @@ auto main() -> int {
     }
 
     // -----------------------------------------------------------------
+    // The TVM SIGN CONVENTION, and the per-VARIANT inert fields.
+    //
+    // Both are contract facts about the Finance RPCs that the assistant service
+    // applies to its own output, so they are tested here as pure predicates
+    // rather than through a model.
+    {
+        // ComputeRate / ComputePeriods solve the annuity balance. With FV = 0
+        // it has a root only when PV and PMT oppose. The corpus emits both
+        // positive -- "$1,275,100 loan, $7,751.77/month" is how a person says
+        // it -- and before this the assistant handed back parameters the RPC it
+        // NAMES refuses: ComputeRate on "Newton-Raphson failed to converge" and
+        // ComputePeriods with a 200 OK carrying -119.70 periods for a loan
+        // whose term is 359.955.
+        check(mv::tvm_payment_needs_sign_flip("ComputeRate", "731800.00", "5083.69", "0.00"),
+              "sign: ComputeRate with both legs positive and FV 0 needs the flip");
+        check(mv::tvm_payment_needs_sign_flip("ComputePeriods", "1275100.00", "7751.77", "0.00"),
+              "sign: ComputePeriods likewise -- this is the -119.70 request");
+        check(mv::tvm_payment_needs_sign_flip("ComputeRate", "-731800.00", "-5083.69", "0"),
+              "sign: BOTH negative also needs it -- the rule is same-sign, not positive");
+        check(!mv::tvm_payment_needs_sign_flip("ComputeRate", "731800.00", "-5083.69", "0.00"),
+              "sign: already opposed is left alone -- a retrained model that emits the sign "
+              "must not have it flipped back");
+
+        // Scoped to FV == 0, which is what keeps it from being a sign
+        // heuristic: a savings goal legitimately has both legs on one side.
+        check(!mv::tvm_payment_needs_sign_flip("ComputePeriods", "-10000.00", "-500.00",
+                                               "100000.00"),
+              "sign: a NON-ZERO future value is left alone -- a savings goal is same-signed "
+              "on purpose");
+
+        // Zero is not a sign. Flipping against a zero leg would turn a
+        // degenerate request into a different degenerate request.
+        check(!mv::tvm_payment_needs_sign_flip("ComputeRate", "0.00", "5083.69", "0.00"),
+              "sign: a zero present_value has no sign to oppose");
+        check(!mv::tvm_payment_needs_sign_flip("ComputeRate", "731800.00", "0", "0.00"),
+              "sign: a zero payment likewise");
+        check(mv::tvm_payment_needs_sign_flip("ComputeRate", "731800.00", "5083.69", "-0.00"),
+              "sign: -0.00 IS zero, so this is still the FV == 0 case and it flips -- a minus "
+              "on a zero is notation, not a direction");
+
+        // Scoped to the two operations that SOLVE. ComputePayment,
+        // ComputePresentValue and ComputeFutureValue EVALUATE a closed form and
+        // their signed output IS the convention.
+        for (const char* op : {"ComputePayment", "ComputePresentValue", "ComputeFutureValue",
+                               "ComputeAmortization"}) {
+            check(!mv::tvm_payment_needs_sign_flip(op, "731800.00", "5083.69", "0.00"),
+                  std::string{"sign: "} + op + " is untouched -- it evaluates, it does not solve");
+        }
+    }
+    {
+        // Per-variant inert fields. DepreciationRequest is one message serving
+        // four methods; six of its eight fields are restricted per method in
+        // proto comments no consumer can see. A straight-line request was
+        // refused live on `"factor" = 3`, a number that provably changes
+        // nothing (2.0/3.0/1.5 all return 5017.9487179487178).
+        check(mv::variant_governing_field("ComputeDepreciation") == "method",
+              "variant: `method` governs which ComputeDepreciation fields are inert");
+        check(mv::variant_governing_field("ComputePayment").empty(),
+              "variant: an operation with no variants reports no governing field");
+
+        check(mv::field_is_inert_for_variant("ComputeDepreciation", "STRAIGHT_LINE", "factor"),
+              "variant: `factor` is inert for STRAIGHT_LINE -- this is the live refusal");
+        check(mv::field_is_inert_for_variant("ComputeDepreciation", "STRAIGHT_LINE", "period"),
+              "variant: SLN takes no period -- sln(cost, salvage, life)");
+        check(mv::field_is_inert_for_variant("ComputeDepreciation", "SUM_OF_YEARS_DIGITS",
+                                             "factor"),
+              "variant: SYD takes no factor either");
+        check(mv::field_is_inert_for_variant("ComputeDepreciation", "MACRS", "life"),
+              "variant: MACRS uses recovery_period instead of life");
+
+        // THE ROW A PROBE GOT WRONG, and the reason this table is derived from
+        // the function signatures instead. Varying `salvage` on an early DDB
+        // period changes nothing, so a one-field-at-a-time probe called it
+        // inert. `sensen::ddb` reads it twice -- the `cost <= salvage` guard and
+        // the per-period floor -- and dropping it would change the answer for a
+        // late period.
+        check(!mv::field_is_inert_for_variant("ComputeDepreciation", "DECLINING_BALANCE",
+                                              "salvage"),
+              "variant: `salvage` is LIVE for DECLINING_BALANCE -- ddb reads it as the floor, "
+              "which a probe on an early period cannot see");
+        check(!mv::field_is_inert_for_variant("ComputeDepreciation", "DECLINING_BALANCE",
+                                              "factor"),
+              "variant: `factor` is LIVE for DECLINING_BALANCE -- it is the whole point of DDB");
+        check(!mv::field_is_inert_for_variant("ComputeDepreciation", "MACRS", "recovery_period"),
+              "variant: `recovery_period` is LIVE for MACRS");
+        check(!mv::field_is_inert_for_variant("ComputeDepreciation", "STRAIGHT_LINE", "cost"),
+              "variant: nothing ever makes `cost` inert");
+    }
+
+    // -----------------------------------------------------------------
     // The BATCH's plural convention fields, missed when the singulars landed.
     //
     // ComputeAmortizationBatch takes parallel arrays. `extra_payments` and

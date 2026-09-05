@@ -683,6 +683,25 @@ export enum class ReasonCode {
 export [[nodiscard]] auto operation_excludes_field(std::string_view operation,
                                                    std::string_view field) -> bool;
 
+/** The enum field whose VALUE decides which fields this operation's chosen
+ * variant ignores, or empty when it has none. See `kVariantInertFields`. */
+export [[nodiscard]] auto variant_governing_field(std::string_view operation) -> std::string_view;
+
+/** True when `operation` solves the annuity balance and the params put both
+ * money legs on the same side of it, so no answer exists. See the definition
+ * for why flipping one is a translation and not a repair. */
+export [[nodiscard]] auto tvm_payment_needs_sign_flip(std::string_view operation,
+                                                      std::string_view present_value,
+                                                      std::string_view payment,
+                                                      std::string_view future_value) -> bool;
+
+/** True when `field` is declared on `operation`'s request message but is not
+ * read at all by the variant named `variant`. See `kVariantInertFields` for why
+ * this is derived from the function signatures rather than by probing. */
+export [[nodiscard]] auto field_is_inert_for_variant(std::string_view operation,
+                                                     std::string_view variant,
+                                                     std::string_view field) -> bool;
+
 export struct VerificationFacts {
     bool violated = false;   ///< a definite contradiction -> Unsafe
     bool incomplete = false; ///< a rule could not be evaluated -> Indeterminate
@@ -1283,6 +1302,128 @@ constexpr std::array<ExcludedField, 5> kOperationExcludedFields{{
     {.operation = "ComputeIrr", .field = "guess"},
 }};
 
+/**
+ * Fields a SHARED request message declares that a particular VARIANT of the
+ * operation does not read -- the per-enum-value form of `kOperationExcludedFields`.
+ *
+ * `DepreciationRequest` is one message serving four methods, and `finance.proto`
+ * restricts six of its eight fields in comments no consumer can see:
+ * "unused by MACRS", "MACRS uses recovery_period instead", "unused by SLN",
+ * "DDB only", "MACRS only". G2b requires every declared field, so the model
+ * must fill slots the chosen method discards -- and then grounding refuses the
+ * value it invented for them.
+ *
+ * Measured against the live ingress on 2026-09-03: a straight-line utterance
+ * ("Depreciate $199,400 ... using straight-line, 39-year life, salvage $3,700.
+ * Year 35's deduction?") was refused on `"factor" = 3 does not correspond to
+ * anything in the request`. `factor` is DDB's rate multiplier and STRAIGHT_LINE
+ * never reads it -- confirmed by measurement, 2.0/3.0/1.5 all return
+ * 5017.9487179487178 -- so the operation was unreachable for its most common
+ * method on a number that changes nothing.
+ *
+ * DERIVED FROM THE FUNCTION SIGNATURES, NOT FROM PROBING, and that distinction
+ * caught a real error. A probe varying one field at a time reported `salvage`
+ * INERT for DECLINING_BALANCE. It is not: `sensen::ddb` reads it twice -- as
+ * the `cost <= salvage` guard and as the per-period floor -- and the probe only
+ * looked at an early period where the book value sits far above it. Dropping it
+ * would have changed the answer for a late period. A field is listed here only
+ * when the method's function CANNOT read it:
+ *
+ *   sln(cost, salvage, life)                          -> period, factor, recovery_period, year
+ *   syd(cost, salvage, life, per)                     -> factor, recovery_period, year
+ *   ddb(cost, salvage, life, period, factor)          -> recovery_period, year
+ *   macrs(cost, recovery_period, year)                -> salvage, life, period, factor
+ */
+struct VariantInertField {
+    std::string_view operation;
+    std::string_view governing_field;
+    std::string_view variant;
+    std::string_view field;
+};
+constexpr std::array<VariantInertField, 13> kVariantInertFields{{
+    {"ComputeDepreciation", "method", "STRAIGHT_LINE", "period"},
+    {"ComputeDepreciation", "method", "STRAIGHT_LINE", "factor"},
+    {"ComputeDepreciation", "method", "STRAIGHT_LINE", "recovery_period"},
+    {"ComputeDepreciation", "method", "STRAIGHT_LINE", "year"},
+    {"ComputeDepreciation", "method", "SUM_OF_YEARS_DIGITS", "factor"},
+    {"ComputeDepreciation", "method", "SUM_OF_YEARS_DIGITS", "recovery_period"},
+    {"ComputeDepreciation", "method", "SUM_OF_YEARS_DIGITS", "year"},
+    {"ComputeDepreciation", "method", "DECLINING_BALANCE", "recovery_period"},
+    {"ComputeDepreciation", "method", "DECLINING_BALANCE", "year"},
+    {"ComputeDepreciation", "method", "MACRS", "salvage"},
+    {"ComputeDepreciation", "method", "MACRS", "life"},
+    {"ComputeDepreciation", "method", "MACRS", "period"},
+    {"ComputeDepreciation", "method", "MACRS", "factor"},
+}};
+
+/**
+ * True when this operation SOLVES the annuity balance and the params carry the
+ * two money legs on the SAME side of it, so no answer exists.
+ *
+ * `ComputeRate` and `ComputePeriods` solve
+ * `PV*(1+r)^n + PMT*annuity(r,n) + FV = 0`. With `FV = 0` that has a root only
+ * when `PV` and `PMT` have OPPOSITE signs -- you borrow and you pay back. A
+ * person says "$1,275,100 loan, $7,751.77/month", both positive, and so does
+ * the training corpus, so the assistant was emitting parameters the RPC it
+ * NAMES refuses.
+ *
+ * Pure and string-in on purpose: the caller holds protobuf `map<string,string>`
+ * values, and the decision needs only each value's SIGN, so parsing a decimal
+ * here would add a failure mode the question does not have.
+ *
+ * The flip is a TRANSLATION rather than a repair, and the difference is that
+ * there is exactly one admissible reading. The balance equation is HOMOGENEOUS
+ * -- negating both legs leaves the root unchanged -- so flipping either operand
+ * gives the identical answer; measured, signing the payment and signing the
+ * present value both return 0.004683340486983064 on the same request. Nothing
+ * legitimate is being reinterpreted either, because same-signed with `FV = 0`
+ * has no valid reading at all.
+ *
+ * Scoped to `FV == 0`, which is what keeps it from being a sign heuristic: with
+ * a non-zero future value the balance CAN hold with both legs on one side, and
+ * a savings goal is exactly that shape.
+ */
+[[nodiscard]] inline auto tvm_payment_needs_sign_flip(std::string_view operation,
+                                                      std::string_view present_value,
+                                                      std::string_view payment,
+                                                      std::string_view future_value) -> bool {
+    if (operation != "ComputeRate" && operation != "ComputePeriods") return false;
+    // -1, 0 or +1 from the text alone: the first sign or significant digit
+    // settles it, and "0", "0.00" and "-0.00" are all zero.
+    const auto sign_of = [](std::string_view v) -> int {
+        int sign = 1;
+        for (const char c : v) {
+            if (c == '-') { sign = -1; continue; }
+            if (c >= '1' && c <= '9') return sign;
+        }
+        return 0;
+    };
+    if (sign_of(future_value) != 0) return false;
+    const int pv = sign_of(present_value);
+    const int pmt = sign_of(payment);
+    return pv != 0 && pmt != 0 && pv == pmt;
+}
+
+/** The enum field whose value decides which of `kVariantInertFields` apply, or
+ * empty when this operation has no such field. One lookup, so a caller knows
+ * WHICH value to pass to `field_is_inert_for_variant` without a second table. */
+[[nodiscard]] constexpr auto variant_governing_field(std::string_view operation)
+    -> std::string_view {
+    for (const auto& e : kVariantInertFields) {
+        if (e.operation == operation) return e.governing_field;
+    }
+    return {};
+}
+
+[[nodiscard]] constexpr auto is_variant_inert_field(std::string_view operation,
+                                                    std::string_view variant,
+                                                    std::string_view field) -> bool {
+    for (const auto& e : kVariantInertFields) {
+        if (e.operation == operation && e.variant == variant && e.field == field) return true;
+    }
+    return false;
+}
+
 [[nodiscard]] constexpr auto is_excluded_field(std::string_view operation,
                                                std::string_view field) -> bool {
     for (const auto& e : kOperationExcludedFields) {
@@ -1520,6 +1661,20 @@ auto Decimal::to_string() const -> std::string {
 
 auto operation_excludes_field(std::string_view operation, std::string_view field) -> bool {
     return detail::is_excluded_field(operation, field);
+}
+
+auto variant_governing_field(std::string_view operation) -> std::string_view {
+    return detail::variant_governing_field(operation);
+}
+
+auto tvm_payment_needs_sign_flip(std::string_view operation, std::string_view present_value,
+                                 std::string_view payment, std::string_view future_value) -> bool {
+    return detail::tvm_payment_needs_sign_flip(operation, present_value, payment, future_value);
+}
+
+auto field_is_inert_for_variant(std::string_view operation, std::string_view variant,
+                                std::string_view field) -> bool {
+    return detail::is_variant_inert_field(operation, variant, field);
 }
 
 auto parse_strict_decimal(std::string_view text) -> std::optional<Decimal> {

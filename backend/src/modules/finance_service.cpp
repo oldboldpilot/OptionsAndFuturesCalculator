@@ -2133,6 +2133,27 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
                     return Status(grpc::StatusCode::INVALID_ARGUMENT,
                                   "MACRS needs a positive recovery_period and year");
                 }
+                // `sensen::macrs` returns 0.0 BOTH for "no charge in this year"
+                // and for "I have no table for that class", which is
+                // unanswerable at the call site. Measured against production on
+                // 2026-09-03: a 15-, 20-, 27.5- or 39-year class came back
+                // `{"value":0}` with a 200 OK, and nothing in the response said
+                // the class was unsupported. 15 and 20 are now in the table;
+                // the two REAL-PROPERTY classes are refused rather than
+                // approximated, because both use the MID-MONTH convention and
+                // this message carries no month-placed-in-service to apply it
+                // with. A half-year table for them would be wrong by up to
+                // eleven twelfths of a year's charge, in both directions.
+                if (!sensen::macrs_supports(request->recovery_period())) {
+                    return Status(
+                        grpc::StatusCode::INVALID_ARGUMENT,
+                        "MACRS recovery_period " + std::to_string(request->recovery_period()) +
+                            " has no table here; supported GDS classes are 3, 5, 7, 10, 15 and "
+                            "20 years. 27.5-year residential rental and 39-year nonresidential "
+                            "real property use the MID-MONTH convention, which needs the month "
+                            "the property was placed in service -- a value this request cannot "
+                            "carry, so they are refused rather than approximated.");
+                }
                 v = sensen::macrs(request->cost(), request->recovery_period(), request->year());
                 break;
             default:

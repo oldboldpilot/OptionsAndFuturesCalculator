@@ -393,6 +393,77 @@ model — score `[assistant] raw model output`, which is logged before it runs.
 
 ## Mortgage assistant
 
+### All 27 reachable: the three stragglers, and why NONE of them was compute
+
+`ComputeRate`, `ComputePeriods` and `ComputeDepreciation` were the last three
+unreachable from the app. **Not one was blocked by arithmetic.** Each is a
+handful of scalar flops that already runs on CPU in microseconds; what blocked
+them was a CONTRACT mismatch and a GROUNDING refusal. Nothing here would be
+changed by SIMD, by more cores, or by a GPU — and an earlier note in this file
+saying they "stay unreachable until the corpus carries the sign, which needs a
+retrain" was superseded the same week and is wrong. **The retrain would only
+have changed what the MODEL EMITS; the serving layer can translate instead, and
+does.**
+
+- **`ComputeRate` / `ComputePeriods` — the TVM sign convention.** Both solve
+  `PV*(1+r)^n + PMT*annuity(r,n) + FV = 0`, which with `FV = 0` has a root only
+  when `PV` and `PMT` OPPOSE. A person says "$1,275,100 loan, $7,751.77/month"
+  and so does the corpus, so the assistant was handing back parameters the RPC
+  it NAMES refuses — an inconsistency inside our own system, since this
+  service's whole contract is "the name of a Finance RPC plus that RPC's own
+  parameters". `mortgage_verification.cppm::tvm_payment_needs_sign_flip` decides
+  it and `mortgage_assistant_service.cpp` applies it to the OUTGOING params.
+
+  **A translation, not a repair**, and the difference is that exactly one
+  reading is admissible: the balance equation is HOMOGENEOUS, so flipping
+  either leg gives the identical answer — measured, signing the payment and
+  signing the present value both return `0.004683340486983064`. Same-signed
+  with `FV = 0` has no valid reading at all, so nothing legitimate is being
+  reinterpreted. Scoped to `FV == 0`, because a savings goal is legitimately
+  same-signed.
+
+  **The ENGINE still refuses, deliberately.** `check_tvm_solvable` is unchanged:
+  the Finance service is a public API whose convention is documented, and
+  `nest-egg-loan` — checked, in the other repository — **already sends
+  `payment: -payment.value` at every call site**. So the engine is right, the
+  client follows it, and only the corpus did not. That is what settled where the
+  fix belongs.
+
+- **`ComputeDepreciation` — a field the chosen METHOD never reads.**
+  `DepreciationRequest` is one message serving four methods, and `finance.proto`
+  restricts six of its eight fields in comments no consumer can see. G2b
+  requires every declared field, so the model fills slots the method discards
+  and grounding refuses the invented value: measured live, a straight-line
+  request refused on `"factor" = 3`, where 2.0/3.0/1.5 all return
+  `5017.9487179487178`. `kVariantInertFields` is the per-enum-value form of
+  `kOperationExcludedFields`, and the service drops on it.
+
+  **DERIVED FROM THE FUNCTION SIGNATURES, NOT FROM PROBING, and that caught a
+  real error.** A probe varying one field at a time reported `salvage` INERT for
+  `DECLINING_BALANCE`. It is not — `sensen::ddb` reads it twice, as the
+  `cost <= salvage` guard and as the per-period floor — and the probe only
+  looked at an early period where the book value sits far above it. Dropping it
+  would have changed the answer for a late period. Mutation-checked in exactly
+  that direction.
+
+### MACRS served an unsupported class as ZERO
+
+Found while building the depreciation table. `sensen::macrs` returned `0.0`
+BOTH for "no charge in this year" and for "I have no table for that class",
+which is unanswerable at the call site. Measured on production: 3/5/7/10-year
+classes were correct throughout, and **15-, 20-, 27.5- and 39-year all came
+back `{"value":0}` with a 200 OK.** A spot check using the common classes could
+not have seen it.
+
+15 and 20 are now in the table — standard Publication 946 half-year 150%
+declining-balance rows, and **every table is asserted to sum to the whole
+cost**, because a dropped or mistyped row shows up as a plausible charge in
+some year rather than as an error. The two REAL-PROPERTY classes are REFUSED
+rather than approximated: both use the MID-MONTH convention, whose first and
+last years depend on the month placed in service — an input this message does
+not carry, so a half-year table for them would be wrong by up to eleven
+twelfths of a year's charge in both directions.
+
 ### Sweeping all 27 operations through the live chain, and what it found
 
 `ComputeXirr` was found by probing three utterances. That is sampling, not

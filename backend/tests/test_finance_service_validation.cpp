@@ -2633,6 +2633,91 @@ auto main() -> int {
         }
     }
 
+    section("27. ComputeDepreciation MACRS: an unsupported class was served as ZERO");
+    // =======================================================================
+    //
+    // `sensen::macrs` returned 0.0 BOTH for "no charge in this year" and for
+    // "I have no table for that class", which is unanswerable at the call site.
+    // Measured against production on 2026-09-03: 15-, 20-, 27.5- and 39-year
+    // classes all came back `{"value":0}` with a 200 OK, and nothing in the
+    // response said the class was unsupported. 3/5/7/10 were correct
+    // throughout, so the failure was invisible to any spot check that used the
+    // common classes.
+    //
+    // 15 and 20 are now in the table. The two REAL-PROPERTY classes are refused
+    // rather than approximated: both use the MID-MONTH convention, and this
+    // message carries no month-placed-in-service to apply it with.
+    {
+        const auto dep = [](int recovery, int year) {
+            sensen::finance::DepreciationRequest r;
+            r.set_method(sensen::finance::DepreciationRequest::MACRS);
+            r.set_cost(100000.0);
+            r.set_recovery_period(recovery);
+            r.set_year(year);
+            return r;
+        };
+        const auto charge = [&](int recovery, int year, double& out) {
+            auto req = dep(recovery, year);
+            sensen::finance::DoubleResponse resp;
+            auto ctx = make_context();
+            auto st = stub.ComputeDepreciation(ctx.get(), req, &resp);
+            out = st.ok() ? resp.value() : -1.0;
+            return st;
+        };
+
+        {
+            double v = 0.0;
+            auto st = charge(15, 1, v);
+            check(st.ok() && std::abs(v - 5000.0) < 1e-6,
+                  "MACRS 15-year, year 1 is 5.00% of cost -- it used to answer 0 with a 200 OK");
+        }
+        {
+            double v = 0.0;
+            auto st = charge(20, 2, v);
+            check(st.ok() && std::abs(v - 7219.0) < 1e-6,
+                  "MACRS 20-year, year 2 is 7.219% of cost");
+        }
+        {
+            // EVERY table must sum to the whole cost. A dropped or mistyped row
+            // shows up as a plausible charge in some year rather than as an
+            // error, so the closure identity is the only thing that sees it.
+            for (const int recovery : {3, 5, 7, 10, 15, 20}) {
+                double total = 0.0;
+                bool ok = true;
+                for (int y = 1; y <= recovery + 1; ++y) {
+                    double v = 0.0;
+                    if (!charge(recovery, y, v).ok()) { ok = false; break; }
+                    total += v;
+                }
+                check(ok && std::abs(total - 100000.0) < 1e-6,
+                      "MACRS " + std::to_string(recovery) +
+                          "-year table sums to the whole cost (" + std::to_string(total) + ")");
+            }
+        }
+        {
+            double v = 0.0;
+            auto st = charge(27, 1, v);
+            const std::string msg = st.error_message();
+            check(is_invalid_argument(st) && msg.find("MID-MONTH") != std::string::npos,
+                  "a 27-year class is REFUSED naming the mid-month convention, not served as 0");
+        }
+        {
+            double v = 0.0;
+            auto st = charge(39, 1, v);
+            check(is_invalid_argument(st),
+                  "39-year nonresidential real property is REFUSED -- it used to return 0");
+        }
+        {
+            // The admit direction on the classes that always worked, so the
+            // refusal above is proven to be scoped rather than blanket.
+            double v = 0.0;
+            auto st = charge(5, 2, v);
+            check(st.ok() && std::abs(v - 32000.0) < 1e-6,
+                  "MACRS 5-year, year 2 is still 32% -- the refusal is scoped to classes with "
+                  "no table");
+        }
+    }
+
     // -----------------------------------------------------------------
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

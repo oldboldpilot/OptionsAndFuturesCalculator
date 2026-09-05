@@ -2296,6 +2296,80 @@ namespace mv = ::mortgage_calculator::assistant::verify;
 }
 
 /**
+ * Applies the time-value-of-money SIGN CONVENTION to the params this service
+ * hands back, for the two operations that SOLVE the annuity balance.
+ *
+ * `ComputeRate` and `ComputePeriods` both solve
+ * `PV*(1+r)^n + PMT*annuity(r,n) + FV = 0`. With `FV = 0` that has a solution
+ * only when `PV` and `PMT` have OPPOSITE signs -- you borrow and you pay back.
+ * A person says "$1,275,100 loan, $7,751.77/month", both positive, and so does
+ * the training corpus, so this service was emitting parameters the RPC it
+ * NAMES refuses. That is an inconsistency inside our own system: this service's
+ * whole contract is "the name of a Finance RPC plus that RPC's own parameters".
+ *
+ * What it cost, measured against production on 2026-09-03 before this existed:
+ * ComputeRate came back `Newton-Raphson solver failed to converge` and
+ * ComputePeriods came back **200 OK with -119.702968202252976128** for a loan
+ * whose term is 359.955 months. A thirty-year mortgage reported as minus ten
+ * years.
+ *
+ * WHY THIS IS A TRANSLATION AND NOT A REPAIR, which is the distinction this
+ * codebase refuses to blur:
+ *
+ *   - There is exactly ONE admissible reading. The balance equation is
+ *     HOMOGENEOUS -- negating both sides leaves the root unchanged -- so
+ *     flipping either operand gives the identical answer. Measured: signing the
+ *     payment and signing the present value both return
+ *     0.004683340486983064. There is no second candidate to choose between,
+ *     which is precisely what makes the inverted P&L matrix bound a repair and
+ *     this a convention.
+ *   - Same-signed with `FV = 0` has NO valid reading, so nothing legitimate is
+ *     being reinterpreted. There is no request this can turn into a different
+ *     question.
+ *   - It is SCOPED TO `FV == 0`. With a non-zero future value the balance can
+ *     legitimately hold with `PV` and `PMT` on the same side -- a savings goal
+ *     is exactly that shape -- so this is not a sign heuristic.
+ *
+ * AND THE ENGINE STILL REFUSES. `finance_service.cpp::check_tvm_solvable` is
+ * unchanged and still returns INVALID_ARGUMENT naming the convention, because
+ * the Finance service is a PUBLIC API whose sign convention is documented and
+ * whose direct callers must not have their input silently rewritten. This runs
+ * only on the assistant's own output, where the model's conventions are
+ * translated to the wire's -- the same seam, and the same reasoning, as `dates`
+ * staying in days while `dates_to_seconds` bridges to the engine.
+ *
+ * Runs AFTER verification, deliberately. Grounding checks the model against the
+ * user's words, and the user wrote "5,083.69" -- a negated payment would not
+ * ground, and widening M8 beyond `values` to make it would weaken the gate to
+ * buy something a wire convention already settles.
+ */
+auto apply_tvm_sign_convention(std::string_view operation,
+                               ::mortgage::assistant::FinanceParams& params) -> void {
+    auto& m = *params.mutable_params();
+    const auto pv = m.find("present_value");
+    const auto pmt = m.find("payment");
+    const auto fv = m.find("future_value");
+    if (pv == m.end() || pmt == m.end() || fv == m.end()) return;
+    if (!mv::tvm_payment_needs_sign_flip(operation, pv->second, pmt->second, fv->second)) return;
+
+    // Flip the PAYMENT rather than the present value. Either gives the same
+    // answer -- the balance equation is homogeneous -- and this is the leg a
+    // person states as a bare magnitude: "$5,083.69 a month" is money leaving,
+    // and ComputePayment already RETURNS it negative for a positive present
+    // value.
+    std::string& p = pmt->second;
+    if (!p.empty() && p.front() == '-') {
+        p.erase(p.begin());
+    } else {
+        p.insert(p.begin(), '-');
+    }
+    logger::Logger::getInstance().debug(
+        "mortgage assistant: {} -- applied the TVM sign convention to `payment` ({} against a "
+        "present_value of {}, future_value 0)",
+        operation, p, pv->second);
+}
+
+/**
  * Turns the model's `<params>` JSON into a FinanceParams, or into the refusal
  * that says why it could not be.
  *
@@ -2656,6 +2730,27 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
             continue;
         }
 
+        // The same drop, one level finer: a field this operation's chosen
+        // VARIANT does not read. DepreciationRequest is one message serving
+        // four methods and finance.proto restricts six of its eight fields in
+        // comments no consumer can see. G2b requires every declared field, so
+        // the model fills slots the method discards and grounding then refuses
+        // the value it invented -- measured live on 2026-09-03, a straight-line
+        // request refused on `"factor" = 3`, a number that provably changes
+        // nothing (2.0/3.0/1.5 all return 5017.9487179487178).
+        //
+        // The governing value is read from the model's own object rather than
+        // from loop order, because the enum may be declared after the field it
+        // governs. An absent or unparseable governing value drops nothing,
+        // which is the fail-closed direction: everything stays grounded.
+        if (const auto governing = mv::variant_governing_field(operation); !governing.empty()) {
+            const std::string gk{governing};
+            if (obj.contains(gk) && obj[gk].is_string() &&
+                mv::field_is_inert_for_variant(operation, obj[gk].as_string(), key)) {
+                continue;
+            }
+        }
+
         if (!obj.contains(key)) {
             populate_refusal(response, ::mortgage::assistant::Refusal::INVALID_PARAMETERS,
                              "The assistant left out \"" + key + "\", which " + operation +
@@ -2723,6 +2818,8 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
                              : verdict.message);
         return ModelOutputOutcome::Refused;
     }
+
+    apply_tvm_sign_convention(operation, params);
 
     *response.mutable_params() = std::move(params);
     return ModelOutputOutcome::Success;
