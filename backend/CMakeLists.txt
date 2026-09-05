@@ -898,6 +898,22 @@ target_include_directories(sensen_slim PUBLIC $<BUILD_INTERFACE:${SENSEN_SRC}>)
 # file in this closure needs it, so it is added PRIVATE here, not PUBLIC.
 target_include_directories(sensen_slim SYSTEM PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/sensen/external/xbyak")
 
+# qwen38.cppm and three sibling modules `#include "sensen_mmvq_bridge.h"` and
+# "sensen_norm_bridge.h" UNCONDITIONALLY -- not inside an ENABLE_CUDA guard --
+# so a CPU-only dependency scan fails outright with "file not found" before it
+# compiles anything. sensen's own src/CMakeLists.txt carries this same -I for
+# the same reason and says so; this is the mirror of it for the slim target,
+# which builds those modules from its own hand-written module list.
+#
+# PRIVATE, and that matters: this directory also holds `ggml.h`, an OLDER
+# vendored copy kept byte-identical for mul_mat_vec_q. Exposing it PUBLIC would
+# put it on the include path of anything linking sensen_slim, where it would
+# win over llama.cpp's real ggml.h if ENABLE_LLAMACPP_BACKEND were ever turned
+# on here -- the "redefinition of 'ggml_op_pool' and forty more" failure
+# sensen's own file documents. Nothing in this closure needs the vendored
+# ggml.h; the two bridge headers include <stddef.h> and nothing else.
+target_include_directories(sensen_slim SYSTEM PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/sensen/third_party/ggml_mmvq")
+
 # sensen.safetensors_weight_loader (pulled in by the llm_pipeline closure, for
 # reading safetensors-format checkpoint metadata) does `import fastjson;`.
 # calculator_engine and test_runner already list `fastjson` on their own
