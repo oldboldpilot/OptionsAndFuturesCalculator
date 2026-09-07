@@ -94,6 +94,7 @@ smoke client.
 
 ## Session logs
 
+- [2026-09-05 — the finance surface swept end to end: two wrong answers served with 200 OK, three dead operations, and a probe that lied](session_logs/session_2026-09-05_finance_surface_sweep.md)
 - [2026-08-20 — the mortgage assistant was never broken: three dataset defects, a vocabulary extension that starved the adapters, and three retrains to prove it](session_logs/session_2026-08-20_mortgage_corpus_and_three_retrains.md)
 - [2026-08-28 (second) — the security question answered by measurement: TLS was observed but not enforced, RLS covered one table of three, and a FIPS gate that deliberately makes no FIPS claim](session_logs/session_2026-08-28_security_posture_and_batch_rpc.md)
 - [2026-08-28 — rank 16 was the ceiling: +124 rows from adapter capacity, a holdout that scored memorised rows, and a struct that said BigDecimal while computing in double](session_logs/session_2026-08-28_rank64_v12_and_bigdecimal.md)
