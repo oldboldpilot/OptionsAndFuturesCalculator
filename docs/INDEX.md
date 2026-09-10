@@ -77,16 +77,68 @@
 
 | Layer | Host | Domain |
 | --- | --- | --- |
-| Frontend | Cloudflare Pages | `optionsandfuturescalculator.com` |
+| Frontend | Cloudflare **Workers static assets** (`frontend/wrangler.toml`) | `optionsandfuturescalculator.com` |
 | Backend | Railway container (Envoy + C++23 engine) | `api.optionsandfuturescalculator.com` |
 | Database | Railway PostgreSQL | `postgres.railway.internal:5432` |
-| Billing | Cloudflare Worker | not yet deployed |
+| Billing | Cloudflare Worker `ofc-billing` | `ofc-billing.muyiwamc2.workers.dev` |
 
-Native gRPC does not currently survive the Railway ingress — `smoke_client`
-against `api.optionsandfuturescalculator.com:443` fails with `Stream removed`
-and no request reaches the container. Only gRPC-Web works from outside. Verify
-production behaviour through the browser path or `railway logs`, not the native
-smoke client.
+Two rows in that table were WRONG until 2026-09-09 and both wrongnesses cost
+something. The frontend row said **Cloudflare Pages**: `wrangler pages deploy`
+succeeds, prints a URL, and changes nothing a user can see, because the live
+domains are Workers custom domains — five "completed" frontend deploys landed
+nowhere. The billing row said **not yet deployed**; measured today,
+`GET /health` on that Worker returns `200 {"ok":true,"supabaseConfigured":true}`,
+so it is deployed and holds its Supabase credentials. What remains unproven is a
+live Stripe checkout round trip, which is a different claim and is recorded as
+such in CLAUDE.md.
+
+Native gRPC does not survive the Railway **HTTP** ingress, and the reason is
+narrower than this paragraph used to claim. It said "no request reaches the
+container", which is false: the request reaches Envoy, reaches the engine, and
+the engine returns the right answer — `x-envoy-upstream-service-time` proves it.
+Railway's edge then strips the HTTP/2 **trailers**, and native gRPC carries
+`grpc-status` only in a trailer, so the client reports `Stream removed`. gRPC-Web
+frames its trailers into the body and is unaffected.
+
+Native gRPC therefore DOES work over a path with no HTTP edge in it — the
+Railway TCP proxy at `tokaido.proxy.rlwy.net:34513`, TLS, trailers intact, all
+four services. See CLAUDE.md for the measured evidence and the `smoke_client`
+invocation.
+
+## Code reference
+
+Generated 2026-09-09 by reading the sources, and verified afterwards: every
+`path:line` citation in these documents was checked to resolve to a file that
+exists at a line that exists. They describe what the code DOES; CLAUDE.md
+describes why it is that way and what it cost to find out.
+
+- [Feature inventory, as built](FEATURES.md) — what the system does today, per
+  feature: the route or component, the RPC, the entitlement, and the gate that
+  would fail if it regressed. Its last section is the useful one — features
+  named in the planning documents that **do not exist in the code**, including
+  an edge function that is checked in, has no caller, and writes to a table no
+  migration creates.
+- [gRPC surface reference](api/GRPC_SURFACE.md) — all four protos, every RPC and
+  message, with the units, the decimal-string rule, the day-offset convention,
+  and the JSON-transcoder path for each method.
+- [Backend code map: the gRPC service layer](architecture/CODE_MAP_BACKEND_SERVICES.md)
+  — `main.cpp`'s boot sequence and every RPC's delegate, gate and status codes.
+- [Backend code map: grounding, grammar and pricing](architecture/CODE_MAP_BACKEND_VERIFICATION.md)
+  — the five verification gates in execution order, and every static table with
+  its size and the rule it encodes.
+- [Backend code map: platform services](architecture/CODE_MAP_BACKEND_PLATFORM.md)
+  — keys, quota, Postgres, the stores, the inference queues, market data, FIPS.
+- [Frontend code map](architecture/CODE_MAP_FRONTEND.md) — routes, stores, the
+  staleness token and its guards, components, and every assertion
+  `check-export.mjs` makes against the emitted bytes.
+- [Edge workers, vendored clients and database code map](architecture/CODE_MAP_EDGE_AND_CLIENTS.md)
+  — the billing Worker, the vendored mortgagefv client, every migration, the
+  deploy scripts and Envoy.
+- [Model pipeline and operational scripts code map](architecture/CODE_MAP_ML_AND_SCRIPTS.md)
+  — dataset generation, training, the evaluation harnesses and their
+  denominators, the parity probes, and every script in `scripts/`.
+- [Test and gate inventory](architecture/TEST_INVENTORY.md) — one row per target,
+  with the column that matters: what breaks if it is deleted.
 
 ## Design specs
 
@@ -94,6 +146,7 @@ smoke client.
 
 ## Session logs
 
+- [2026-09-09 — the whole codebase documented, then the documentation verified: fabrication clusters in THIN files, an edge function wired to nothing, and an auto-correction that made the citations worse](session_logs/session_2026-09-09_code_documentation_sweep.md)
 - [2026-09-05 — the finance surface swept end to end: two wrong answers served with 200 OK, three dead operations, and a probe that lied](session_logs/session_2026-09-05_finance_surface_sweep.md)
 - [2026-08-20 — the mortgage assistant was never broken: three dataset defects, a vocabulary extension that starved the adapters, and three retrains to prove it](session_logs/session_2026-08-20_mortgage_corpus_and_three_retrains.md)
 - [2026-08-28 (second) — the security question answered by measurement: TLS was observed but not enforced, RLS covered one table of three, and a FIPS gate that deliberately makes no FIPS claim](session_logs/session_2026-08-28_security_posture_and_batch_rpc.md)
