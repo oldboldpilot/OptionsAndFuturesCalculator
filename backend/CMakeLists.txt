@@ -778,6 +778,19 @@ target_sources(sensen_slim
             # "module 'sensen.lowbit_flash_attention' not found". Nothing
             # derives this list, so run scripts/sensen_module_closure.py --check
             # after every bump rather than waiting for the compiler to say it.
+            # sensen.logic + its parser: the Horn-clause engine, brought into the
+            # engine for mortgage_derivation.cppm. Chosen over z3 deliberately --
+            # z3 is vendored for gp_ara and reachable, but it would put libz3 in
+            # the production image for one feature, and it is the WRONG tool
+            # here: `Term` has no binary-float alternative and logic.cppm carries
+            # a static_assert saying so, so `5.64 / 12` evaluates as an EXACT
+            # decimal. That is the property this whole surface is built on -- the
+            # reason finance.proto carries money as decimal strings at all -- and
+            # it is precisely what the 0.6B model gets wrong (it emitted 0.004667
+            # for 5.64%/12, where the exact answer is 0.004700).
+            "${SENSEN_SRC}/logic_numeric.cppm"
+            "${SENSEN_SRC}/logic.cppm"
+            "${SENSEN_SRC}/logic_parser.cppm"
             "${SENSEN_SRC}/lowbit_flash_attention.cppm"
             "${SENSEN_SRC}/kv_lowbit.cppm"
             "${SENSEN_SRC}/kv_q8.cppm"
@@ -1405,6 +1418,30 @@ add_test(NAME AssistantVerificationTest COMMAND test_assistant_verification)
 # NOT linked against sensen_slim -- the only sensen module it needs,
 # sensen.gp_ara_interfaces, has no dependencies beyond std, so it is compiled
 # here as this target's own FILE_SET source.
+# mortgage_derivation: the Horn-clause derivation layer. Links sensen_slim
+# because it imports sensen.logic and sensen.logic_parser, which the engine now
+# carries -- see the logic.cppm entry in the slim list for why that is the right
+# engine for this and z3 is not.
+add_executable(dbg_derivation tests/dbg_derivation.cpp)
+target_sources(dbg_derivation PRIVATE FILE_SET CXX_MODULES FILES
+    sensen/src/gp_ara_interfaces.cppm
+    src/modules/mortgage_verification.cppm
+    src/modules/mortgage_derivation.cppm)
+target_link_libraries(dbg_derivation PRIVATE sensen_slim fastjson logger)
+
+add_executable(test_mortgage_derivation tests/test_mortgage_derivation.cpp)
+target_sources(test_mortgage_derivation
+    PRIVATE
+    FILE_SET CXX_MODULES FILES
+        sensen/src/gp_ara_interfaces.cppm
+        src/modules/mortgage_verification.cppm
+        src/modules/mortgage_derivation.cppm
+)
+target_link_libraries(test_mortgage_derivation PRIVATE sensen_slim fastjson logger)
+target_compile_definitions(test_mortgage_derivation PRIVATE
+    MORTGAGE_FINANCE_PROTO_PATH="${CMAKE_CURRENT_SOURCE_DIR}/proto/finance.proto")
+add_test(NAME MortgageDerivationTest COMMAND test_mortgage_derivation)
+
 add_executable(test_mortgage_verification tests/test_mortgage_verification.cpp)
 target_sources(test_mortgage_verification
     PRIVATE
