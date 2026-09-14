@@ -111,6 +111,38 @@ from pathlib import Path
 import grpc
 
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "dataset"))
+try:
+    from build_mortgage_dataset import OP_EXCLUDED_FIELDS
+except Exception:                                   # dataset module unavailable
+    OP_EXCLUDED_FIELDS = {}
+
+
+def drop_excluded(obj: dict | None) -> dict | None:
+    """Remove fields the chosen operation DISCARDS, as the service does.
+
+    `mortgage_assistant_service.cpp` drops an excluded field BEFORE building
+    `verifiable.fields`, so it never reaches grounding and never reaches the
+    Finance RPC. Comparing it here measures something production cannot see.
+
+    It is not hypothetical arithmetic. On 2026-09-14 the raw comparison scored
+    ComputeRate 0/7, ComputeIrr 0/6 and ComputeXirr 0/6 -- every failure the
+    `guess` seed alone, with every other field exact. All three are perfect as
+    production serves them, and three of the four "unserved operations" a
+    coverage sweep reported were this and nothing else. A harness that reports
+    0/N for an operation that answers N/N is not conservative; it is wrong in
+    the direction that triggers an unnecessary retrain, which this project has
+    already paid for once.
+
+    `guess` appears ZERO times in the training corpus and the system prompt is
+    322 characters with no field list, so the model is not learning it here --
+    it is a pretraining prior (Excel's `IRR(values, [guess])`). That is why
+    this is a measurement fix and not a corpus one.
+    """
+    if not obj:
+        return obj
+    excluded = OP_EXCLUDED_FIELDS.get(obj.get("operation", ""), set())
+    return {k: v for k, v in obj.items() if k not in excluded} if excluded else obj
 try:
     import mortgage_assistant_pb2
     import mortgage_assistant_pb2_grpc
@@ -328,7 +360,7 @@ def classify_refusal(reason: int, message: str) -> str:
 # The measurement
 # ---------------------------------------------------------------------------
 def evaluate(rows: list[dict], stub, tail: RawOutputTail, timeout: float,
-             verbose: bool) -> dict:
+             verbose: bool, strict: bool = False) -> dict:
     raw_exact = raw_total = 0            # gold-has-params rows, raw model output
     raw_emitted = 0                      # of those, how many emitted any params
     raw_nonparam_ok = raw_nonparam_total = 0
@@ -423,7 +455,11 @@ def evaluate(rows: list[dict], stub, tail: RawOutputTail, timeout: float,
             # defects: one is a model that stayed silent, the other is a decode
             # that fell apart mid-object.
             raw_block_invalid[0] += 1
-        if got == want:
+        if strict:
+            comparable = got
+        else:
+            comparable = drop_excluded(got)
+        if comparable == want:
             raw_exact += 1
         else:
             failures.append({
@@ -522,6 +558,13 @@ def main() -> None:
     ap.add_argument("--json-out", help="write the full result, failures included, here")
     ap.add_argument("--show-failures", type=int, default=8)
     ap.add_argument("-v", "--verbose", action="store_true")
+    ap.add_argument("--raw-strict", action="store_true",
+                    help="compare the model's params VERBATIM, including fields the "
+                         "chosen operation discards. The default drops them, as "
+                         "mortgage_assistant_service.cpp does before grounding -- "
+                         "otherwise an operation that answers N/N in production is "
+                         "reported 0/N. Use this only to reproduce a pre-2026-09-14 "
+                         "number.")
     ap.add_argument("--assert-disjoint-from", action="append", default=[],
                     metavar="TRAIN.JSONL",
                     help="a train.jsonl the holdout MUST NOT overlap. Repeatable -- "
@@ -583,7 +626,7 @@ def main() -> None:
                 print(f"[ok] holdout is disjoint from {tp} ({len(train)} train rows)")
 
     t0 = time.time()
-    res = evaluate(rows, stub, tail, args.timeout, args.verbose)
+    res = evaluate(rows, stub, tail, args.timeout, args.verbose, args.raw_strict)
     dt = time.time() - t0
     print(f"[{len(rows)} rows, {dt:.1f}s, {dt / max(len(rows), 1) * 1000:.0f} ms/row]")
     report(res, args.label, args.show_failures)
