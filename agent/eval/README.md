@@ -55,6 +55,15 @@ alone — fields `OP_EXCLUDED_FIELDS` declares the operation discards and
 the way production serves, all three are perfect. Pooled: 465/567 = 82.0% raw,
 **485/567 = 85.5% production-equivalent**.
 
+**A fifth and sixth check cover the FEATURE a retrain was for.** A pooled score
+cannot see it: 29 feature rows inside 567 move the total by at most five points.
+`feature_absent(I)` fires when the emitted loan EQUALS the stated price — the
+pre-retrain signature — and `feature_arithmetic_slip(I)` when the subtraction
+was attempted and missed. On v13: **absent 0, slip 12, correct 17**. Measured
+against production on the same utterances, the deployed model is **0/29 correct
+with 21/29 emitting the gross price**. Always score the feature separately from
+the pool, and always against the model you would be replacing.
+
 **The fourth was real.** `ComputeXnpv` is 0/9, and 8 of those 9 are answered
 `ComputeNpv` — the model names the wrong operation and drops the dates. That is
 not a field slip: NPV over evenly-spaced periods and XNPV over dated flows are

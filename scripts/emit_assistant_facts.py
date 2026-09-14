@@ -26,11 +26,20 @@ What the facts describe, and why each one earns its place:
   emitted_field(I, F)      a key the model put in its <params> block
   refusal_shape(S, N)      how the service refused, and how often
 
+  down_payment_row(I)      a held-out row for make_down_payment_extraction --
+                           the feature the 2026-09-14 retrain existed for. The
+                           loan is NOT the stated price and must be DERIVED,
+                           which is what the previous model could not do.
+  stated_price(I, V)       the gross figure the utterance names
+  gold_loan(I, V)          what the loan must be (price minus the down payment)
+  emitted_loan(I, V)       what the model actually put in the loan slot
+
 The QUESTIONS are in assistant_check.cpp. Every one is written so that a
 healthy run returns NO solutions, because a coverage defect is invisible to any
 aggregate score: 400/508 says nothing about whether one operation is 0/11.
 """
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -73,6 +82,39 @@ def main() -> int:
                 break
         gold.append(op)
 
+    # The down-payment feature, identified from the ROW rather than asserted:
+    # an utterance naming a down payment, on an operation whose loan slot must
+    # therefore be derived. Scoring it apart from the pooled figure is the whole
+    # point -- 17/29 on the feature is invisible inside 465/567.
+    raw_rows = [json.loads(l) for l in val_path.read_text().splitlines() if l.strip()]
+    dp: dict[int, tuple[str, str]] = {}
+    for i, row in enumerate(raw_rows):
+        utt = next((t.get("content", "") for t in row.get("conversations", [])
+                    if t.get("role") == "user"), "")
+        if not re.search(r"\b(down|deposit)\b", utt, re.I):
+            continue
+        final = next((t.get("content", "") for t in reversed(row.get("conversations", []))
+                      if t.get("role") == "assistant"), "")
+        # make_down_payment_extraction emits ONLY these two operations. Other
+        # generators mention a down payment legitimately (closing costs,
+        # rent-vs-buy) and deriving a loan is not the feature there -- without
+        # this filter the row count went 29 -> 61 and the fact stopped meaning
+        # what its name says.
+        m_op = re.search(r'"operation"\s*:\s*"([^"]+)"', final)
+        if not m_op or m_op.group(1) not in ("ComputePayment", "ComputeAmortization"):
+            continue
+        m_loan = re.search(r'"(?:loan_amount|present_value)"\s*:\s*"([\d.]+)"', final)
+        if not m_loan:
+            continue
+        # The gross price is the LARGEST money figure the utterance states.
+        money = [x.replace(",", "") for x in re.findall(r"\$([\d,]+)", utt)]
+        if not money:
+            continue
+        price = f"{max(float(x) for x in money):.2f}"
+        if price == m_loan.group(1):
+            continue  # nothing to derive; not a feature row
+        dp[i] = (price, m_loan.group(1))
+
     res = json.loads(eval_path.read_text())
     failures = {f["row"]: f for f in res.get("failures", [])}
 
@@ -112,6 +154,20 @@ def main() -> int:
             for key in sorted(k for k in got if k != "operation"):
                 L.append(f"emitted_field({i}, {atom(key)}).")
     L.append("")
+    for i, (price, loan) in sorted(dp.items()):
+        L.append(f"down_payment_row({i}).")
+        L.append(f"stated_price({i}, '{price}').")
+        L.append(f"gold_loan({i}, '{loan}').")
+        f = failures.get(i)
+        got = (f.get("got") or {}) if f else {}
+        emitted = None
+        if isinstance(got, dict):
+            emitted = got.get("loan_amount") or got.get("present_value")
+        if f is None:
+            emitted = loan
+        if emitted is not None:
+            L.append(f"emitted_loan({i}, '{emitted}').")
+    L.append("")
     for shape, n in sorted(res.get("refusal_shapes", {}).items()):
         L.append(f"refusal_shape({atom(shape)}, {n}).")
     L.append("")
@@ -121,7 +177,8 @@ def main() -> int:
     out_path.write_text("\n".join(L) + "\n")
     print(f"wrote {out_path}  "
           f"{len(G.OPERATIONS)} operations, {len(gold)} holdout rows, "
-          f"{len(failures)} failures, {len(emitted_ops)} distinct operations emitted")
+          f"{len(failures)} failures, {len(emitted_ops)} distinct operations emitted, "
+          f"{len(dp)} down-payment rows")
     return 0
 
 

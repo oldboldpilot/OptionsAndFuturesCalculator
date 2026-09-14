@@ -105,3 +105,44 @@ file now does the same thing.
   the paired comparison above and a decision on `ComputeXnpv`.
 - The `ComputeXnpv`/`ComputeNpv` confusion is a corpus question, not a serving
   one, and needs a retrain to fix.
+
+## ADDENDUM: the feature was never tested, and the paired comparison exists now
+
+The section above evaluated a generic 600-row holdout and never asked the one
+question the retrain existed to answer. That was the gap, and it was raised
+rather than found.
+
+**The feature works.** 29 held-out `make_down_payment_extraction` rows, scored
+apart from the pool:
+
+| | deployed model | retrained v13 |
+| --- | --- | --- |
+| loan derived correctly | **0/29** | **17/29** |
+| emitted the GROSS price (the defect) | **21/29** | **0/29** |
+| named `ComputeXnpv` on XNPV rows | **6/9** | **1/9** |
+
+The deployed figures are measured against PRODUCTION through the live ingress
+with the issued partner key, on the same utterances — not recalled.
+
+`assistant_check` now carries the two rules that separate the failure modes,
+because they are different defects:
+
+- `feature_absent(I)` — the emitted loan EQUALS the stated price. This is the
+  pre-retrain signature, and it is **OK, zero solutions** on v13. The deployed
+  model produces it 21 times.
+- `feature_arithmetic_slip(I)` — the subtraction was attempted and missed.
+  **12 solutions.** Grounding REFUSES these, so they cost reachability and
+  never price a loan nobody asked for.
+
+**v13 is still NOT deployed, and now for a measured reason rather than a
+cautious one.** `ComputeXnpv` 6/9 -> 1/9 is a real regression, and it is the
+half that does NOT fail safe: naming `ComputeNpv` discards the dates and
+returns a plausible NPV for a different question, where a down-payment slip
+returns an honest refusal. +17 safe-failing rows against -5 silently-wrong ones
+is not a trade to make quietly.
+
+It is also the saturation pattern this file already records at rank 16 — one
+capability displacing another — appearing now at rank 64. The next iteration
+should hold the down-payment gain and recover XNPV, and `ComputeXnpv` vs
+`ComputeNpv` is a corpus question: the two are told apart by whether the
+utterance carries DATES.
