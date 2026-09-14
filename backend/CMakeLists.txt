@@ -1322,6 +1322,34 @@ target_link_libraries(test_runner PRIVATE proto_lib sensen_slim fastjson logger 
 
 add_test(NAME CoreEngineTest COMMAND test_runner)
 
+# CorpusInvariantsTest: deterministic properties of the assistant's TRAINING
+# DATA, asserted without a model, a checkpoint or a GPU.
+#
+# Every corpus defect this project has paid for was visible in the data before
+# any model was trained, and every one was found only after a retrain measured
+# worse -- `phrase_money` rounding away the cents its label kept (0/98 on eight
+# operations), `prepaid_interest_days` labelling a convention the utterance
+# never states (21 of 26 closing-cost failures), and the dated cash-flow grid
+# generated at ~365-day intervals and labelled ComputeXnpv, whose entire
+# distinction from ComputeNpv is IRREGULAR spacing (8 of 9 held-out rows
+# answered as the wrong operation). The generator is a pure function of
+# (seed, n, val_frac, its own source), so all of it is checkable in a second.
+#
+# Plain `python3`, deliberately NOT ${Python_EXECUTABLE}: that variable only
+# exists when BUILD_PYTHON_BINDINGS is ON, which the production container build
+# must never require. Registered only if an interpreter is present, so a host
+# without one skips the test rather than failing it.
+find_program(PYTHON3_FOR_CORPUS_TEST NAMES python3)
+if(PYTHON3_FOR_CORPUS_TEST)
+    add_test(
+        NAME CorpusInvariantsTest
+        COMMAND ${PYTHON3_FOR_CORPUS_TEST}
+                ${CMAKE_CURRENT_SOURCE_DIR}/../agent/dataset/test_corpus_invariants.py
+    )
+else()
+    message(STATUS "python3 not found -- CorpusInvariantsTest not registered")
+endif()
+
 # Retry-with-backoff + circuit-breaker orchestration around market_data.cppm's
 # network fetches (fetch_with_resilience, built on SGEE's own
 # sgee.runtime.resilience::BackoffPolicy / CircuitBreaker). Exercises the
