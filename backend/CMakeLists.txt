@@ -1422,6 +1422,13 @@ add_test(NAME AssistantVerificationTest COMMAND test_assistant_verification)
 # because it imports sensen.logic and sensen.logic_parser, which the engine now
 # carries -- see the logic.cppm entry in the slim list for why that is the right
 # engine for this and z3 is not.
+add_executable(bench_derivation tests/bench_derivation.cpp)
+target_sources(bench_derivation PRIVATE FILE_SET CXX_MODULES FILES
+    sensen/src/gp_ara_interfaces.cppm
+    src/modules/mortgage_verification.cppm
+    src/modules/mortgage_derivation.cppm)
+target_link_libraries(bench_derivation PRIVATE sensen_slim fastjson logger)
+
 add_executable(dbg_derivation tests/dbg_derivation.cpp)
 target_sources(dbg_derivation PRIVATE FILE_SET CXX_MODULES FILES
     sensen/src/gp_ara_interfaces.cppm

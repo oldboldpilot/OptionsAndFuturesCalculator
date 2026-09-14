@@ -230,6 +230,35 @@ derive(F, V) :- price_slot(F), money(P), down_money(_), V is P.
 }
 
 
+
+/**
+ * The rule clauses, parsed ONCE.
+ *
+ * `Program` is a `std::vector<Clause>`, so the per-request facts are appended
+ * to these rather than re-parsing forty lines of Prolog on every call.
+ */
+[[nodiscard]] auto rule_clauses() -> const sensen::logic::Program& {
+    static const sensen::logic::Program rules = [] {
+        auto parsed = read_program(std::string{kRules});
+        return parsed.has_value() ? std::move(*parsed) : sensen::logic::Program{};
+    }();
+    return rules;
+}
+
+/**
+ * The single goal `derive(F, V)`, parsed once and solved once.
+ *
+ * Asking per field cost one `solve` per DECLARED field -- sixteen on
+ * ComputeClosingCosts and ComputeRentVsBuy, of which fourteen derive nothing,
+ * which is why the cost tracked field count rather than utterance length.
+ * Leaving F unbound returns every (field, value) pair the rule base admits in
+ * one search. The rules are unchanged; only the number of searches is.
+ */
+[[nodiscard]] auto all_pairs_goal() -> const sensen::logic::Term& {
+    static const sensen::logic::Term goal = *read_term("derive(F, V).");
+    return goal;
+}
+
 }  // namespace
 
 auto derive_candidates(std::string_view operation, std::string_view user_text)
@@ -277,38 +306,50 @@ auto derive_candidates(std::string_view operation, std::string_view user_text)
         }
     }
 
-    auto prog = read_program(facts + std::string{kRules});
-    if (!prog) {
+    auto facts_prog = read_program(facts);
+    if (!facts_prog) {
         return out;   // a malformed fact base derives nothing; grounding still runs
     }
+    const auto& rules = rule_clauses();
+    sensen::logic::Program prog = std::move(*facts_prog);
+    prog.insert(prog.end(), rules.begin(), rules.end());
 
-    for (const auto& f : fields) {
-        auto goal = read_term("derive(" + std::string{f.field} + ", V).");
-        if (!goal) {
+    const auto& goal = all_pairs_goal();
+    auto res = solve(prog, {goal}, 1024);
+    if (!res) {
+        return out;
+    }
+
+    // `derive(loan_amount, 716400.0)` -> ("loan_amount", "716400.0"). Rendering
+    // the substituted goal keeps the number in the solver's own exact spelling.
+    std::map<std::string, std::vector<std::string>> grouped;
+    for (const auto& sub : *res) {
+        const std::string rendered = to_string(apply_substitution(sub, goal));
+        const auto open_paren = rendered.find('(');
+        const auto comma = rendered.rfind(", ");
+        const auto close_paren = rendered.rfind(')');
+        if (open_paren == std::string::npos || comma == std::string::npos ||
+            close_paren == std::string::npos || comma <= open_paren + 1 ||
+            close_paren <= comma + 2) {
             continue;
         }
-        auto res = solve(*prog, {*goal}, 256);
-        if (!res) {
-            continue;
-        }
-        std::vector<std::string> values;
-        for (const auto& s : *res) {
-            std::string rendered = to_string(apply_substitution(s, *goal));
-            // `derive(field, 0.0047)` -> `0.0047`
-            const auto comma = rendered.rfind(", ");
-            const auto close = rendered.rfind(')');
-            if (comma == std::string::npos || close == std::string::npos || close <= comma + 2) {
-                continue;
-            }
-            std::string v = rendered.substr(comma + 2, close - comma - 2);
-            if (std::ranges::find(values, v) == values.end()) {
-                values.push_back(std::move(v));
-            }
-        }
-        if (!values.empty()) {
-            out.push_back({std::string{f.field}, std::move(values)});
+        std::string field = rendered.substr(open_paren + 1, comma - open_paren - 1);
+        std::string value = rendered.substr(comma + 2, close_paren - comma - 2);
+        auto& values = grouped[std::move(field)];
+        if (std::ranges::find(values, value) == values.end()) {
+            values.push_back(std::move(value));
         }
     }
+
+    // Emitted in the proto's field order, not the map's, so the output is
+    // byte-identical to the per-field loop this replaced.
+    for (const auto& f : fields) {
+        const auto it = grouped.find(std::string{f.field});
+        if (it != grouped.end() && !it->second.empty()) {
+            out.push_back({std::string{f.field}, it->second});
+        }
+    }
+
     return out;
 }
 
