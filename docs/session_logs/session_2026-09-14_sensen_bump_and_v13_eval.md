@@ -146,3 +146,56 @@ capability displacing another — appearing now at rank 64. The next iteration
 should hold the down-payment gain and recover XNPV, and `ComputeXnpv` vs
 `ComputeNpv` is a corpus question: the two are told apart by whether the
 utterance carries DATES.
+
+## ADDENDUM 2: the regression is now TESTED, and the corpus that caused it is fixed
+
+"Add it to the testing requirements" was asked, and the first attempt was to
+write it in two checklists. That was the wrong answer to a problem those
+checklists had already failed at: `ASSISTANT_EVALUATION.md` item 8 has required
+a paired comparison against the deployed model the whole time, and it was
+skipped on this very retrain.
+
+So the requirement is now executable in three places.
+
+**1. An engine guard, tested both ways.**
+`mv::dated_utterance_rejects_operation` refuses `ComputeNpv`/`ComputeIrr` when
+the utterance states day offsets. It REFUSES rather than remapping -- Graph A
+beside it can rewrite `ComputeFutureValue` because every value it writes is
+already in the utterance, and this cannot, because the missing field is the day
+grid the model never emitted.
+
+Section 26 of `test_mortgage_verification` (8 checks, 148 -> 156) gates it, and
+the specificity half is the one that matters: an evenly-spaced NPV utterance is
+still served, `ComputeXnpv` is never refused for carrying dates, and "15 days of
+prepaid interest" on `ComputeClosingCosts` is untouched. Mutation-checked with
+`CCACHE_DISABLE=1` -- removing the operation scope fails exactly 2 checks and
+the restore returns to 0.
+
+**2. A promotion gate that refuses.**
+`scripts/assistant_promotion_gate.py` refuses on a missing baseline, on any
+per-operation regression beyond one row, and on any operation that goes to
+zero. Mutation-checked in three arms; the synthetic baseline reproduces
+`ComputeXnpv 6/9 -> 0/9  <-- NEW ZERO` and exit 1, which is the real case.
+
+**3. The corpus, which is where the defect actually came from.**
+`make_cashflow_extraction` built its dated grid with
+`triangular(300, 430, 365)`. Every interval was about a year, so
+"after 394 days; after 725 days; after 1102 days" IS an annual grid to three
+significant figures. **The entire distinction between XNPV and NPV is irregular
+spacing, and the generator was producing regular spacing and labelling it
+XNPV.** Both families opened with a byte-identical clause, and dated rows were
+35% of the family (183 NPV against 103 XNPV).
+
+The model was not confused. It was taught two things that look the same and
+told they are different.
+
+Fixed: intervals `randint(40, 900)`, a distinct opening clause per family, and
+an even split. No label became less derivable -- every day count is still
+stated verbatim in the utterance.
+
+**Methodology note for the v13-vs-v14 comparison.** v13's baseline runs on the
+pre-Graph-B binary and v14's on the post-Graph-B one. That is safe for the
+RAW layer and only the raw layer: `[assistant] raw model output` is written at
+`mortgage_assistant_service.cpp:2987` and `validate_and_populate_params` is
+called at `:2997`, so no guard can touch the number the gate compares. The
+SERVED layer is not comparable across the two and is not used for the verdict.
