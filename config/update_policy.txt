@@ -54,6 +54,23 @@ This policy covers everything in the repository:
    - Frontend: verify the static export contains no secret material before
      deploying (grep the build output for sk_live_/rk_live_/whsec_/service-role
      patterns). The frontend is public by construction.
+   - **Assistant model change** (a retrain, a corpus revision, a new MODEL_URL):
+     a pooled score is NOT a result and must not be quoted on its own.
+       * score the candidate AND the model it replaces on the SAME holdout,
+         through the real RPC, in the same session
+       * `python3 scripts/assistant_promotion_gate.py <holdout> <cand> <base>`
+         must pass, or the trade must be stated explicitly -- what is gained,
+         what is lost, and WHICH DIRECTION each failure takes. A refusal the
+         user sees is not the same defect as a plausible answer to a question
+         nobody asked.
+       * `scripts/emit_assistant_facts.py` + `assistant_check`: `feature_absent`
+         must be zero, or the corpus change did not take
+       * score each feature the corpus added SEPARATELY. 29 feature rows in a
+         567-row holdout move the pooled figure by at most five points.
+     Written after item 8 of docs/guides/ASSISTANT_EVALUATION.md -- which
+     already required the paired comparison -- was skipped on 2026-09-14 and a
+     6/9 -> 1/9 operation regression went unseen behind a 0.9-point pooled
+     delta.
 
 3. **Documentation Updates** (required for every push)
    - Update CLAUDE.md — architecture, gRPC surface, deployment, DNS, and any

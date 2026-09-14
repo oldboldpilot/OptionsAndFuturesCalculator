@@ -1595,6 +1595,60 @@ auto main() -> int {
     }
 
     // -----------------------------------------------------------------
+    // Section 26. The DATED SIBLING guard: ComputeNpv/ComputeXnpv and
+    // ComputeIrr/ComputeXirr.
+    //
+    // WHY THIS SECTION EXISTS. On 2026-09-14 a retrained model answered 8 of 9
+    // held-out ComputeXnpv rows as ComputeNpv. Every one of those answers
+    // parsed, named a real operation, carried the caller's own figures and
+    // satisfied every bound -- so nothing already in this file could see it.
+    // The dates were simply dropped and an evenly-spaced NPV came back looking
+    // exactly like the right answer. It cost 0.9 points of a pooled score,
+    // which is indistinguishable from noise.
+    //
+    // The guard has to be SPECIFIC as well as sensitive, and the controls below
+    // are the half that matters: an ordinary NPV utterance must still be served,
+    // the dated operation itself must never be refused for carrying dates, and
+    // an unrelated operation that happens to mention days must be untouched.
+    {
+        const std::string dated =
+            "I invest $321,700 today and expect back $48,314.06 after 394 days; "
+            "$13,975.34 after 725 days; $32,829.43 after 1102 days.";
+        const std::string periodic =
+            "I invest $125,000 today and expect back year 1: $68,822.83; "
+            "year 2: $56,190.54; year 3: $82,357.43. What's the NPV at a 9% discount rate?";
+
+        check(mv::dated_utterance_rejects_operation("ComputeNpv", dated),
+              "ComputeNpv on a day-stated series is REFUSED -- it would discard the dates");
+        check(mv::dated_utterance_rejects_operation("ComputeIrr", dated),
+              "ComputeIrr on a day-stated series is REFUSED -- same pair, same defect");
+
+        // Specificity. Without these three the guard could refuse everything
+        // and still pass the two above, which is the shape of a gate that is
+        // green and useless.
+        check(!mv::dated_utterance_rejects_operation("ComputeNpv", periodic),
+              "an evenly-spaced NPV utterance is still served");
+        check(!mv::dated_utterance_rejects_operation("ComputeIrr", periodic),
+              "an evenly-spaced IRR utterance is still served");
+        check(!mv::dated_utterance_rejects_operation("ComputeXnpv", dated),
+              "ComputeXnpv is the operation that HANDLES dates and is never refused for them");
+        check(!mv::dated_utterance_rejects_operation("ComputeXirr", dated),
+              "ComputeXirr likewise");
+
+        // Scoping. "15 days of prepaid interest" is an ordinary closing-costs
+        // phrase; a guard that read the word "days" anywhere would break it.
+        check(!mv::dated_utterance_rejects_operation(
+                  "ComputeClosingCosts",
+                  "Closing costs on a $450,000 home with 10% down at 6.75%, "
+                  "3 months of tax escrow, 15 days of prepaid interest."),
+              "an unrelated operation mentioning days is untouched");
+        check(!mv::dated_utterance_rejects_operation(
+                  "ComputePayoffTiming",
+                  "How many days until the loan is paid off if I add $300 a month?"),
+              "the guard is scoped to the two operations that HAVE a dated sibling");
+    }
+
+    // -----------------------------------------------------------------
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

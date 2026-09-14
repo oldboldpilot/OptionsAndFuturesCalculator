@@ -1092,6 +1092,36 @@ export struct NumericLiteral {
 export [[nodiscard]] auto lex_numeric_literals(std::string_view text) -> std::vector<NumericLiteral>;
 
 /**
+ * Does this utterance carry DATED cash flows that the named operation cannot
+ * represent?
+ *
+ * `ComputeNpv` and `ComputeXnpv` are told apart by exactly one thing: whether
+ * the flows arrive on stated DAYS ("$48,314.06 after 394 days") or in even
+ * periods ("year 1: $68,822.83"). Their request messages differ only by the
+ * `dates` field, and their utterances share an identical opening clause -- so
+ * a model that names the wrong one produces params that PARSE, satisfy every
+ * bound, ground against the utterance's own figures, and then answer a
+ * different question. The dates are simply dropped and an evenly-spaced NPV
+ * comes back looking exactly like the right answer.
+ *
+ * Measured on the 2026-09-14 retrain: 8 of 9 held-out `ComputeXnpv` rows were
+ * answered `ComputeNpv`. Nothing in the response said so, and the pooled score
+ * moved 0.9 points. That is the "corrupted value that parses" failure this gate
+ * exists to catch, one level up -- the corruption is the OPERATION, not a field.
+ *
+ * REFUSED, NEVER REPAIRED. Rewriting `ComputeNpv` to `ComputeXnpv` would need
+ * the day grid the model did not emit, and inventing it is a guess wearing an
+ * answer's clothes -- the same reason an inverted P&L bound is refused rather
+ * than swapped, and a same-signed TVM request is refused rather than negated.
+ *
+ * Scoped to the two operations that HAVE a dated sibling and no `dates` field
+ * of their own, so an utterance mentioning days on any other operation is
+ * untouched.
+ */
+export [[nodiscard]] auto dated_utterance_rejects_operation(std::string_view operation,
+                                                            std::string_view user_text) -> bool;
+
+/**
  * G3. Every numeric field of `input` must be traceable to `user_text`
  * through the admissible maps above.
  *
@@ -2238,6 +2268,26 @@ namespace detail {
 }
 
 }  // namespace detail
+
+auto dated_utterance_rejects_operation(std::string_view operation,
+                                       std::string_view user_text) -> bool {
+    // Only the undated halves of a dated/undated PAIR. ComputeNpv's sibling is
+    // ComputeXnpv and ComputeIrr's is ComputeXirr; every other operation either
+    // declares `dates` itself or has no dated form at all, and must not be
+    // refused for mentioning a day.
+    if (operation != "ComputeNpv" && operation != "ComputeIrr") {
+        return false;
+    }
+    // The lexer already decides what a day literal is -- "after 394 days"
+    // tags Days -- so this asks the same question the grounding maps ask
+    // rather than re-deriving it from the text.
+    for (const auto& lit : lex_numeric_literals(user_text)) {
+        if (lit.tag == LiteralTag::Days) {
+            return true;
+        }
+    }
+    return false;
+}
 
 auto lex_numeric_literals(std::string_view text) -> std::vector<NumericLiteral> {
     std::vector<NumericLiteral> out;

@@ -744,7 +744,28 @@ def make_heloc_extraction(rng: random.Random) -> dict:
 # discount rate -> NPV-family (XNPV if dates are irregular); no rate, asking
 # "what return" -> IRR-family.
 def make_cashflow_extraction(rng: random.Random) -> dict:
-    dated = rng.random() < 0.35
+    # DATED AND UNDATED ARE BALANCED, AND THE DATED ONES ARE GENUINELY
+    # IRREGULAR. Both halves of that sentence are corrections, made on
+    # 2026-09-14 after a retrained model answered 8 of 9 held-out ComputeXnpv
+    # rows as ComputeNpv -- and the corpus, not the model, is what made that
+    # reasonable:
+    #
+    #   * `dated` fired 35% of the time, so the training set carried 183
+    #     ComputeNpv rows against 103 ComputeXnpv.
+    #   * the day grid was `triangular(300, 430, 365)`, so EVERY interval was
+    #     roughly a year. "after 394 days; after 725 days; after 1102 days" IS
+    #     an annual grid to three significant figures, and a model reading it
+    #     as one is not making a mistake -- it is repeating what it was shown.
+    #     The whole distinction between XNPV and NPV is irregular spacing, and
+    #     the generator was producing regular spacing and labelling it XNPV.
+    #   * both families opened with a byte-identical clause, so the only cue
+    #     arrived mid-sentence, after the shape of the answer was half decided.
+    #
+    # The fix is to make the data say what the label means: intervals that
+    # cannot be read as a yearly grid, an opening clause that differs, and an
+    # even split. Nothing here makes the label less derivable -- every day
+    # count is still stated verbatim in the utterance.
+    dated = rng.random() < 0.5
     op = rng.choice((["ComputeXnpv", "ComputeXirr"] if dated
                       else ["ComputeNpv", "ComputeIrr"]))
     outlay = round_money(rng.triangular(5_000, 500_000, 60_000))
@@ -756,17 +777,28 @@ def make_cashflow_extraction(rng: random.Random) -> dict:
     if dated:
         days = [0]
         for _ in range(n):
-            days.append(days[-1] + round(rng.triangular(300, 430, 365)))
+            # 40 to 900 days, mode 210 -- deliberately NOT centred on a year.
+            days.append(days[-1] + rng.randint(40, 900))
         flow_desc = "; ".join(
             f"{phrase_money(f)} after {d} days" for f, d in zip(flows, days[1:]))
+        lead = rng.choice([
+            "On an irregular schedule, I invest",
+            "The timing is uneven here -- I invest",
+            "These payouts land on specific days, not yearly. I invest",
+        ])
     else:
         flow_desc = "; ".join(f"year {i+1}: {phrase_money(f)}" for i, f in enumerate(flows))
+        lead = rng.choice([
+            "At the end of each year, I invest",
+            "On a regular annual schedule, I invest",
+            "Evenly spaced, one payout a year: I invest",
+        ])
 
     if op in ("ComputeNpv", "ComputeXnpv"):
-        user = (f"I invest {phrase_money(outlay)} today and expect back {flow_desc}. "
+        user = (f"{lead} {phrase_money(outlay)} today and expect back {flow_desc}. "
                 f"What's the NPV at a {phrase_pct(discount_rate)} discount rate?")
     else:
-        user = (f"I invest {phrase_money(outlay)} today and expect back {flow_desc}. "
+        user = (f"{lead} {phrase_money(outlay)} today and expect back {flow_desc}. "
                 f"What return (IRR) am I getting?")
 
     obj = {}

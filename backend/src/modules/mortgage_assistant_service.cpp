@@ -2666,6 +2666,27 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
         return validate_and_populate_params(*remapped, user_text, response);
     }
 
+    // Graph B, the dated/undated sibling. Placed beside Graph A because it is
+    // the same defect -- the model names the wrong member of a pair whose
+    // request messages differ by one field -- and the OPPOSITE remedy, for a
+    // reason worth stating: Graph A can remap because every value it writes is
+    // already in the utterance, and this one cannot, because the missing field
+    // is the day grid the model never emitted. Inventing it is fabrication, and
+    // refusal is the documented fallback.
+    //
+    // Measured 2026-09-14: 8 of 9 held-out ComputeXnpv rows came back as
+    // ComputeNpv. Those answers parse, ground against the user's own figures
+    // and satisfy every bound -- they simply discount evenly-spaced periods for
+    // a caller who stated days, and nothing in the response says so.
+    if (mv::dated_utterance_rejects_operation(operation, user_text)) {
+        populate_refusal(
+            response, ::mortgage::assistant::Refusal::INVALID_PARAMETERS,
+            "This request gives the cash flows on stated days, which " + operation +
+                " cannot represent -- it discounts evenly-spaced periods and would "
+                "silently ignore the dates. Ask for the dated form instead.");
+        return ModelOutputOutcome::Refused;
+    }
+
     const Operation* op = find_operation(operation);
     if (op == nullptr) {
         // Deliberately NOT normalised to a nearest match. Among these

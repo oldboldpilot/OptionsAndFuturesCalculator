@@ -496,6 +496,38 @@ turn contains a `<params>` block.
    session — not against a number from a previous run or a different engine.
 9. Before writing the number down, state the four attributes: artifact, engine,
    environment, scoring rule.
+10. **Score every FEATURE the corpus change added, apart from the pool**, with
+    its own row selector. A pooled figure cannot show it: 29
+    `make_down_payment_extraction` rows inside a 567-row holdout move the total
+    by at most five points, so a feature that went 0/29 → 17/29 and a feature
+    that did nothing at all produce nearly the same number.
+11. **Run the promotion gate, and let it decide whether a regression is a
+    rounding error.**
+
+        python3 scripts/assistant_promotion_gate.py \
+            holdout.jsonl candidate-eval.json baseline-eval.json
+
+    It refuses on a missing baseline, on any per-operation regression beyond one
+    row, and on any operation that goes to zero. It does NOT decide the
+    trade-off — it prints both columns and stops you calling a dead operation
+    noise.
+12. **Run the reasoning pass** — `scripts/emit_assistant_facts.py` then
+    `assistant_check` (see `agent/eval/README.md`). `feature_absent` must be
+    zero: a non-zero answer means the corpus change did not take.
+
+### Steps 8, 10 and 11 exist because step 8 was skipped
+
+Item 8 has been in this checklist the whole time. On 2026-09-14 a retrain was
+evaluated, reported at a pooled 82.0%, and recommended-against on a *guess* —
+by someone who had read this file. The feature the retrain existed for was
+never scored apart from the pool, and a `ComputeXnpv` regression of **6/9 → 1/9**
+stayed invisible until the deployed model was probed by hand afterwards. The
+pooled cost of that regression is 0.9 points, which is indistinguishable from
+noise.
+
+**That is why 11 is a script and not a sentence.** A rule nothing executes is a
+rule that gets skipped exactly when it matters, and this file already proved it
+on itself.
 
 ## Related
 
