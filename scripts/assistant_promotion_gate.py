@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Refuse to promote an assistant model on a pooled score alone.
 
-    scripts/assistant_promotion_gate.py <holdout.jsonl> <candidate.json> <baseline.json>
+    scripts/assistant_promotion_gate.py <holdout.jsonl> <candidate.json> <baseline.json> \
+        [--train train.jsonl ...]
 
 @author Olumuyiwa Oluwasanmi
 
@@ -20,6 +21,20 @@ WHAT IT REFUSES, and why each one is a defect a pooled score cannot show:
                         without the number it replaces; the model of record
                         scored 78.7% on a DIFFERENT holdout, which is not a
                         comparison.
+
+  CONTAMINATION         a holdout row that is in EITHER model's training set.
+                        Pass --train once per model being compared. This is not
+                        hypothetical and it is not rare: on 2026-09-14 a v14
+                        holdout was checked disjoint from v14's train and
+                        compared against v13 anyway -- and 364 of its 600 rows
+                        were byte-identical members of v13's train split. The
+                        baseline had memorised 61% of the test, so the gate
+                        reported eight regressions that were mostly the
+                        baseline's memory. CLAUDE.md records the same defect at
+                        304/600 on an earlier pair. A contaminated comparison
+                        does not fail loudly; it fails in the older model's
+                        favour, which is the direction that blocks a good
+                        candidate.
 
   PER-OPERATION         an operation the baseline serves and the candidate does
   REGRESSION            not. 27 operations inside one score: ComputeXnpv going
@@ -79,6 +94,9 @@ def main() -> int:
         print(__doc__, file=sys.stderr)
         return 2
     holdout, cand_p, base_p = (Path(a) for a in sys.argv[1:4])
+    trains = [Path(a) for a in sys.argv[5::2]] if "--train" in sys.argv[4:] else []
+    rest = sys.argv[4:]
+    trains = [Path(rest[i + 1]) for i, a in enumerate(rest) if a == "--train" and i + 1 < len(rest)]
 
     for p in (holdout, cand_p, base_p):
         if not p.exists() or p.stat().st_size == 0:
@@ -89,6 +107,41 @@ def main() -> int:
             return 2
 
     ops = gold_ops(holdout)
+
+    # Restrict to rows no model under comparison was trained on. Restricting is
+    # the right remedy rather than refusing outright: the clean subset is still
+    # a valid measurement, and it is the only one both columns can be read from.
+    keep = set(range(len(ops)))
+    if trains:
+        def convo_keys(path: Path) -> set[str]:
+            out = set()
+            for line in path.read_text().splitlines():
+                if line.strip():
+                    out.add(json.dumps(json.loads(line).get("conversations"),
+                                       sort_keys=True, ensure_ascii=False))
+            return out
+        seen = set()
+        for t in trains:
+            if not t.exists():
+                print(f"REFUSING: --train {t} does not exist.", file=sys.stderr)
+                return 2
+            seen |= convo_keys(t)
+        hold = [json.dumps(json.loads(l).get("conversations"), sort_keys=True,
+                           ensure_ascii=False)
+                for l in holdout.read_text().splitlines() if l.strip()]
+        keep = {i for i, k in enumerate(hold) if k not in seen}
+        dropped = len(hold) - len(keep)
+        print(f"contamination: {dropped}/{len(hold)} holdout rows appear in a training "
+              f"set under comparison; scoring the {len(keep)} clean rows.\n")
+        if not keep:
+            print("REFUSING: no holdout row is clean for every model compared.",
+                  file=sys.stderr)
+            return 2
+    else:
+        print("WARNING: no --train given, so contamination was NOT checked. A row the\n"
+              "         BASELINE memorised counts in its favour and reads as a candidate\n"
+              "         regression. Pass --train once per model.\n")
+    ops = [op if i in keep else "" for i, op in enumerate(ops)]
     cand = per_op(ops, json.loads(cand_p.read_text()))
     base = per_op(ops, json.loads(base_p.read_text()))
 
