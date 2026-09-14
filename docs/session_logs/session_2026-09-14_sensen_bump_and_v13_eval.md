@@ -199,3 +199,52 @@ RAW layer and only the raw layer: `[assistant] raw model output` is written at
 `mortgage_assistant_service.cpp:2987` and `validate_and_populate_params` is
 called at `:2997`, so no guard can touch the number the gate compares. The
 SERVED layer is not comparable across the two and is not used for the verdict.
+
+## ADDENDUM 3: per-generator seeding, and why the v13-vs-v14 result was unreadable
+
+v14 was refused, and the refusal itself was nearly wrong twice.
+
+**First the gate's verdict was invalid.** It reported eight per-operation
+regressions. 364 of the 600 holdout rows were byte-identical members of v13's
+TRAIN split -- the baseline had memorised 61% of the test. The eval had been run
+with `--assert-disjoint-from` against *v14's* train, which is the check that
+feels sufficient and is not: the BASELINE was trained on a different corpus
+revision and most rows survive a revision unchanged. CLAUDE.md records the same
+defect at 304/600. Contamination does not fail loudly; it fails in the older
+model's favour, which is the direction that blocks a good candidate. The gate
+now takes `--train` once per model and scores only the rows clean for all of
+them; on the clean 236 the eight regressions became three and pooled went
+-33 to -11.
+
+**Then the experiment turned out to be unattributable anyway.** One shared RNG
+drove the weighted selection, every generator's internal draws AND the
+train/val shuffle. Measured: adding ONE extra `rng.random()` inside
+`make_cashflow_extraction` changed **2032 of 4000 rows**, across every family.
+So the XNPV edit also moved ComputeHeloc, ComputeRefinance and
+ComputeFutureValueDetailed, and nothing could distinguish "my edit caused this"
+from "this is a different sample of the same distribution".
+
+Fixed: selection, each generator, and the split draw from separate streams
+seeded by `stream_seed(master, name)` = sha256 of `"{seed}:{name}"`. **NOT**
+`random.Random((seed, name))` -- Python salts `hash()` of a str per process, so
+the corpus would differ between runs of the same command.
+
+The same perturbation now changes **360 of 4000**, and all 360 belong to the
+four operations that generator emits. Rows are also sorted before the shuffle,
+so the split is a function of the SET of rows and the seed rather than of the
+order generators happened to be selected in.
+
+The effect on measurement is larger than the tidiness suggests. The v15 holdout
+overlaps v13's train on **4 rows** and v14's on **5**, against v14's 364 -- so
+the next comparison has ~595 usable rows instead of 236, on the same 600-row
+holdout.
+
+Gated by the isolation group in `test_corpus_invariants.py` (37 checks now),
+including that each generator's row is unchanged after every OTHER generator
+has run, and that `stream_seed` is stable ACROSS PROCESSES rather than merely
+within one.
+
+**Where the XNPV fix actually stands.** v13 answered 8 of 8 held-out
+ComputeXnpv rows as ComputeNpv. v14 answered 6 of 8 that way and 2 correctly --
+0/8 to 2/8 production-equivalent. Real movement, not a fix, and not worth
+promoting on its own.

@@ -2338,6 +2338,18 @@ def make_unknown_operation(rng: random.Random) -> dict:
 # ============================================================================
 
 
+def stream_seed(master: int, name: str) -> int:
+    """A stable seed for one named stream.
+
+    `random.Random((seed, name))` would be the obvious thing and is WRONG:
+    Python salts `hash()` of a str per process unless PYTHONHASHSEED is fixed,
+    so the corpus would differ between runs of the same command. sha256 of the
+    text is stable everywhere, which is the whole property being bought here.
+    """
+    digest = hashlib.sha256(f"{master}:{name}".encode()).digest()
+    return int.from_bytes(digest[:8], "big")
+
+
 # THE AUTHORITATIVE GENERATOR TABLE, hoisted to module scope so it can be
 # IMPORTED rather than retyped.
 #
@@ -2388,7 +2400,27 @@ def main() -> None:
     ap.add_argument("--val-frac", type=float, default=0.05)
     args = ap.parse_args()
 
-    rng = random.Random(args.seed)
+    # PER-GENERATOR SEEDING. One shared stream used to drive the weighted
+    # selection, every generator's internal draws, AND the train/val shuffle --
+    # so editing ONE generator's draw count shifted every row generated after
+    # it, in every other family. Two corpus revisions then differed everywhere
+    # and no change could be attributed to the edit that caused it.
+    #
+    # Measured on 2026-09-14: `make_cashflow_extraction` was changed to fix an
+    # XNPV/NPV confusion, and the resulting corpus also moved ComputeHeloc,
+    # ComputeRefinance and ComputeFutureValueDetailed. On a 236-row clean
+    # subset there was no way to tell whether the edit caused those or whether
+    # they were a different sample of the same distribution. An experiment you
+    # cannot attribute is not an experiment.
+    #
+    # Now: selection draws from its own stream, each generator draws from a
+    # stream derived from (seed, its own name), and the split draws from a
+    # third. Editing a generator's internals changes ONLY that generator's
+    # rows. Changing the MIX changes which rows are selected, but each
+    # generator still emits the same k-th row -- only the count moves.
+    select_rng = random.Random(stream_seed(args.seed, "__select__"))
+    split_rng = random.Random(stream_seed(args.seed, "__split__"))
+    gen_rngs: dict[str, random.Random] = {}
 
     print(f"parsed {len(_PARSED['rpcs'])} RPCs from {PROTO_PATH}")
     print(f"in-scope operations (label space): {len(OPERATIONS)}")
@@ -2428,8 +2460,10 @@ def main() -> None:
     attempts = 0
     while len(rows) < args.n and attempts < args.n * 40:
         attempts += 1
-        fn = rng.choices(fns, weights)[0]
-        row = fn(rng)
+        fn = select_rng.choices(fns, weights)[0]
+        gen_rng = gen_rngs.setdefault(fn.__name__,
+                                      random.Random(stream_seed(args.seed, fn.__name__)))
+        row = fn(gen_rng)
         key = json.dumps(row, sort_keys=True)
         if key in seen:
             continue
@@ -2437,7 +2471,11 @@ def main() -> None:
         rows.append(row)
         counts[fn.__name__] += 1
 
-    rng.shuffle(rows)
+    # Sorted before shuffling, so the split is a function of the SET of rows and
+    # the seed -- not of the order the generators happened to be selected in.
+    # Without this, adding a generator reshuffles the whole holdout.
+    rows.sort(key=lambda r: json.dumps(r, sort_keys=True))
+    split_rng.shuffle(rows)
     n_val = max(1, int(len(rows) * args.val_frac))
     val, train = rows[:n_val], rows[n_val:]
 

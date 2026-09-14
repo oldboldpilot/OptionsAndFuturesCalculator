@@ -168,7 +168,44 @@ check(all(float(params(r).get("original_home_value", 0)) > 0
       "original_home_value carries the PRICE, not the loan -- PMI drops off against it")
 
 # ---------------------------------------------------------------------------
-print("\n4. coverage -- the test's subjects are DERIVED, not named")
+print("\n4. isolation -- one generator's draws cannot perturb another's")
+# The property that makes a corpus experiment ATTRIBUTABLE. Until 2026-09-14 a
+# single shared RNG drove the weighted selection, every generator's internal
+# draws and the train/val shuffle, so adding one extra draw inside ONE generator
+# changed 2032 of 4000 rows across every family. With per-generator streams the
+# same perturbation changes 360, and all 360 belong to the four operations that
+# generator emits.
+#
+# Without this, a corpus edit and its measured effect cannot be connected: the
+# XNPV fix on 2026-09-14 also moved ComputeHeloc, ComputeRefinance and
+# ComputeFutureValueDetailed, and there was no way to tell cause from resample.
+check(G.stream_seed(0, "a") != G.stream_seed(0, "b"),
+      "distinct generator names get distinct streams")
+check(G.stream_seed(0, "a") == G.stream_seed(0, "a"),
+      "stream_seed is a pure function of (seed, name)")
+check(G.stream_seed(1, "a") != G.stream_seed(0, "a"),
+      "the master seed still reaches every stream")
+# sha256, not hash(): Python salts str hashing per process unless PYTHONHASHSEED
+# is fixed, which would make the corpus differ between runs of one command.
+check(G.stream_seed(0, "make_cashflow_extraction") == 16490498688349206090,
+      "stream_seed is stable ACROSS PROCESSES, not merely within one")
+
+# Non-interference, tested directly: a generator's k-th row must not depend on
+# what else has drawn in between.
+import random as _r
+for _, fn in G.CORPUS_MIX[:6]:
+    name = fn.__name__
+    first = [fn(_r.Random(G.stream_seed(0, name))) for _ in range(1)][0]
+    noise = _r.Random(99)
+    for _, other in G.CORPUS_MIX:
+        if other is not fn:
+            other(noise)
+    again = fn(_r.Random(G.stream_seed(0, name)))
+    check(first == again,
+          f"{name}'s row is unchanged after every other generator has run")
+
+# ---------------------------------------------------------------------------
+print("\n5. coverage -- the test's subjects are DERIVED, not named")
 # A test that lists its own subjects can only check the ones somebody
 # remembered. That is the defect this repository records against a hand-written
 # operation allow-list which drifted to refusing thirteen of the twenty-seven
@@ -193,7 +230,7 @@ check(not (IN_MIX - DEFINED),
       f"every CORPUS_MIX entry names a real function ({sorted(IN_MIX - DEFINED)})")
 
 # ---------------------------------------------------------------------------
-print("\n5. per-generator contract -- applied to EVERY generator automatically")
+print("\n6. per-generator contract -- applied to EVERY generator automatically")
 # The invariants that hold for ANY row the corpus can contain, so a generator
 # added tomorrow is covered the moment it joins CORPUS_MIX. Nothing here needs
 # to know what the new generator is for.
