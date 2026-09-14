@@ -3432,6 +3432,24 @@ with `module 'sensen.kv_lowbit' not found` the moment the submodule pointer move
 Every new module that a listed module imports has to be added alongside it;
 nothing derives this.
 
+**It has now happened THREE times, so stop waiting for the compiler to say it.**
+The 2026-09-14 bump from `d12cb0e2` to `3bd65c84` (925 commits) died on
+`module 'sensen.lowbit_flash_attention' not found`, imported by
+`training_cross_attention.cppm`, `quantized_kv_cache.cppm` and
+`diffusion_attention_cpu.cppm`. `scripts/sensen_module_closure.py --check` names
+the missing entry in one command — run it immediately after moving the pointer.
+
+**That checker is NOT exact, and its two standing complaints are both false.**
+It reports `logger.cppm` MISSING when only `src/utils/logger.cppm` exists and is
+listed (twice), and `numa_bind.cpp` EXTRA when that file is deliberately extra
+with the reason written beside it. It matches on BASENAME. Use it to find the
+module the compiler is about to complain about; do not treat a clean `--check`
+as the gate, and do not "fix" either of those two.
+
+**Gated after the bump, and all of it passed:** `calculator_engine` links,
+`ninja build_tests` 263/263, **ctest 103/103**, and the full
+`smoke_client … finance` identity suite against a local engine.
+
 **A CUDA-only test must SKIP, not vanish and not crash.** Guarding the source
 with `#ifdef SENSEN_HAS_CUDA` and giving it `int main() { return 77; }` keeps the
 target present and reports Skipped, which is the convention

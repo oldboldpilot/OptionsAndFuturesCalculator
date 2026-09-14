@@ -770,6 +770,15 @@ target_sources(sensen_slim
             # alongside it, and the failure only appears when the pointer moves.
             "${SENSEN_SRC}/dispatch_contract.cppm"
             "${SENSEN_SRC}/paged_kv_dispatch.cppm"
+            # training_cross_attention.cppm, quantized_kv_cache.cppm and
+            # diffusion_attention_cpu.cppm import sensen.lowbit_flash_attention.
+            # Third instance of the same trap in this list (kv_lowbit,
+            # dispatch_contract/paged_kv_dispatch, now this): the submodule
+            # pointer moved 925 commits and sensen_slim died on
+            # "module 'sensen.lowbit_flash_attention' not found". Nothing
+            # derives this list, so run scripts/sensen_module_closure.py --check
+            # after every bump rather than waiting for the compiler to say it.
+            "${SENSEN_SRC}/lowbit_flash_attention.cppm"
             "${SENSEN_SRC}/kv_lowbit.cppm"
             "${SENSEN_SRC}/kv_q8.cppm"
             "${SENSEN_SRC}/kv_cache.cppm"
