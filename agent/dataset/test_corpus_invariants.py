@@ -168,21 +168,74 @@ check(all(float(params(r).get("original_home_value", 0)) > 0
       "original_home_value carries the PRICE, not the loan -- PMI drops off against it")
 
 # ---------------------------------------------------------------------------
-print("\n4. contract -- every row matches the proto, with nothing extra or missing")
-mixed = rows + dp
-bad_keys = [params(r)["operation"] for r in mixed
-            if set(params(r)) - {"operation"} != G.op_field_names(params(r)["operation"])]
+print("\n4. coverage -- the test's subjects are DERIVED, not named")
+# A test that lists its own subjects can only check the ones somebody
+# remembered. That is the defect this repository records against a hand-written
+# operation allow-list which drifted to refusing thirteen of the twenty-seven
+# live operations, and against a hand-maintained module list that has broken a
+# submodule bump three times. So the generators below come from CORPUS_MIX --
+# the table build_mortgage_dataset.main() actually samples -- and a generator
+# added to the module without being wired in fails HERE rather than silently
+# shipping untested.
+IN_MIX = {fn.__name__ for _, fn in G.CORPUS_MIX}
+DEFINED = {name for name in dir(G)
+           if name.startswith("make_") and callable(getattr(G, name))}
+
+# Helpers another generator calls, rather than rows the corpus samples. Each
+# entry needs a REASON, so adding one is a decision and not a reflex.
+NOT_SAMPLED_DIRECTLY: set[str] = set()
+
+unwired = DEFINED - IN_MIX - NOT_SAMPLED_DIRECTLY
+check(not unwired,
+      f"every make_* in the module is in CORPUS_MIX or explicitly excluded "
+      f"(unwired: {sorted(unwired)})")
+check(not (IN_MIX - DEFINED),
+      f"every CORPUS_MIX entry names a real function ({sorted(IN_MIX - DEFINED)})")
+
+# ---------------------------------------------------------------------------
+print("\n5. per-generator contract -- applied to EVERY generator automatically")
+# The invariants that hold for ANY row the corpus can contain, so a generator
+# added tomorrow is covered the moment it joins CORPUS_MIX. Nothing here needs
+# to know what the new generator is for.
+bad_keys, bad_ops, excluded_leaks, nondeterministic, empty = [], [], [], [], []
+for _, fn in G.CORPUS_MIX:
+    name = fn.__name__
+    try:
+        batch = sample(fn, 120, seed=23)
+        again = sample(fn, 120, seed=23)
+    except Exception as exc:                 # a generator that throws is a defect
+        bad_ops.append(f"{name}: raised {type(exc).__name__}")
+        continue
+    if batch != again:
+        nondeterministic.append(name)
+    if not batch or any(not utterance(r).strip() for r in batch):
+        empty.append(name)
+    for r in batch:
+        p_ = params(r)
+        if p_ is None:
+            continue                         # refusal / chitchat / clarification
+        op = p_.get("operation")
+        if op not in G.OPERATIONS:
+            bad_ops.append(f"{name}: {op}")
+            continue
+        if set(p_) - {"operation"} != G.op_field_names(op):
+            bad_keys.append(f"{name}/{op}")
+        for f in G.OP_EXCLUDED_FIELDS.get(op, set()):
+            if f in p_:
+                excluded_leaks.append(f"{name}/{op}.{f}")
+
+check(not nondeterministic,
+      f"every generator is deterministic in its seed ({sorted(set(nondeterministic))})")
+check(not empty, f"no generator emits an empty utterance ({sorted(set(empty))})")
+check(not bad_ops,
+      f"every operation named exists in finance.proto ({sorted(set(bad_ops))[:3]})")
 check(not bad_keys,
-      f"every emitted key set EXACTLY equals the operation's field set minus "
-      f"exclusions ({Counter(bad_keys).most_common(3)})")
-check(all(params(r)["operation"] in G.OPERATIONS for r in mixed),
-      "every operation named exists in finance.proto")
-excluded_leaks = [(params(r)["operation"], f)
-                  for r in mixed
-                  for f in G.OP_EXCLUDED_FIELDS.get(params(r)["operation"], set())
-                  if f in params(r)]
+      f"every key set EXACTLY equals the operation's field set minus exclusions "
+      f"({sorted(set(bad_keys))[:3]})")
 check(not excluded_leaks,
-      f"no row labels a field its operation DISCARDS ({excluded_leaks[:3]})")
+      f"no generator labels a field its operation DISCARDS "
+      f"({sorted(set(excluded_leaks))[:3]})")
+print(f"     ({len(G.CORPUS_MIX)} generators exercised)")
 
 print(f"\n{CHECKS} checks, {FAILURES} failures")
 sys.exit(0 if FAILURES == 0 else 1)

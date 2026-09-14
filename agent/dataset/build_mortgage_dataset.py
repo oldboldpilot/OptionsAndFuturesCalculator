@@ -2338,6 +2338,48 @@ def make_unknown_operation(rng: random.Random) -> dict:
 # ============================================================================
 
 
+# THE AUTHORITATIVE GENERATOR TABLE, hoisted to module scope so it can be
+# IMPORTED rather than retyped.
+#
+# agent/dataset/test_corpus_invariants.py derives its coverage from this list:
+# a generator added here is automatically exercised, and one added to the
+# module but NOT here fails the test that asserts the two agree. A test that
+# names its own subjects can only check the ones somebody remembered, which
+# is the same defect as the hand-written operation allow-list that drifted to
+# refusing thirteen of twenty-seven live operations.
+CORPUS_MIX = [
+    (0.152, make_amortization_extraction),
+    (0.081, make_tvm_solver_extraction),
+    (0.054, make_cashflow_extraction),
+    (0.045, make_refinance_extraction),
+    (0.045, make_rent_vs_buy_extraction),
+    (0.036, make_heloc_extraction),
+    (0.036, make_future_value_detailed_extraction),
+    (0.036, make_rental_roi_extraction),
+    (0.027, make_period_payment_extraction),
+    (0.027, make_payback_extraction),
+    (0.018, make_amortization_batch_extraction),
+    (0.018, make_cumulative_extraction),
+    (0.018, make_depreciation_extraction),
+    (0.018, make_payoff_timing_extraction),
+    (0.018, make_home_future_value_extraction),
+    (0.0135, make_mortgage_recast_extraction),
+    (0.0135, make_home_npv_extraction),
+    (0.045, make_closing_costs_extraction),
+    # Down payments carry the SAME weight as closing costs, and for the
+    # same reason that operation was added: the failure was structural
+    # rather than a weak model. "20% down" was out of distribution
+    # entirely, and out-of-distribution here does not produce a refusal --
+    # it produced a 20% interest rate that passed every gate.
+    (0.045, make_down_payment_extraction),
+    (0.126, make_clarification),
+    (0.090, make_modification),
+    (0.07, make_refusal),
+    (0.03, make_chitchat),
+    (0.03, make_unknown_operation),
+]
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=str(HERE / "data_mortgage"))
@@ -2376,37 +2418,7 @@ def main() -> None:
     # relative shape of the extraction mix and --n unchanged -- see the
     # section-6 comment above make_refusal for why the two extra points of
     # weight were previously unreachable regardless of number.
-    mix = [
-        (0.152, make_amortization_extraction),
-        (0.081, make_tvm_solver_extraction),
-        (0.054, make_cashflow_extraction),
-        (0.045, make_refinance_extraction),
-        (0.045, make_rent_vs_buy_extraction),
-        (0.036, make_heloc_extraction),
-        (0.036, make_future_value_detailed_extraction),
-        (0.036, make_rental_roi_extraction),
-        (0.027, make_period_payment_extraction),
-        (0.027, make_payback_extraction),
-        (0.018, make_amortization_batch_extraction),
-        (0.018, make_cumulative_extraction),
-        (0.018, make_depreciation_extraction),
-        (0.018, make_payoff_timing_extraction),
-        (0.018, make_home_future_value_extraction),
-        (0.0135, make_mortgage_recast_extraction),
-        (0.0135, make_home_npv_extraction),
-        (0.045, make_closing_costs_extraction),
-        # Down payments carry the SAME weight as closing costs, and for the
-        # same reason that operation was added: the failure was structural
-        # rather than a weak model. "20% down" was out of distribution
-        # entirely, and out-of-distribution here does not produce a refusal --
-        # it produced a 20% interest rate that passed every gate.
-        (0.045, make_down_payment_extraction),
-        (0.126, make_clarification),
-        (0.090, make_modification),
-        (0.07, make_refusal),
-        (0.03, make_chitchat),
-        (0.03, make_unknown_operation),
-    ]
+    mix = CORPUS_MIX
 
     weights = [w for w, _ in mix]
     fns = [f for _, f in mix]
