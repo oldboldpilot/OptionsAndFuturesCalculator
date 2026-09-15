@@ -1649,6 +1649,49 @@ auto main() -> int {
     }
 
     // -----------------------------------------------------------------
+    std::printf("\n27. the lexer's INCREMENT adjacency\n");
+    {
+        // TESTED HERE, NOT ONLY THROUGH THE DERIVATION LAYER. This flag is set
+        // in mortgage_verification.cppm and consumed in mortgage_derivation
+        // .cppm, and a test that can only see it through the consumer reports
+        // "the solver is wrong" when the LEXER is. The two modules are the
+        // places a reader looks; the flag should be falsifiable in both.
+        //
+        // It exists because "$750 more a month" is an ordinary money literal
+        // until the adjacent words say otherwise, and while it was one it
+        // paired with an opening turn's "10% down" under the loan rule and
+        // derived a $675 mortgage -- two real literals, exact arithmetic, and
+        // a rule with no way to know "more" meant an increment.
+        const auto flagged = [](std::string_view text) {
+            for (const auto& lit : mv::lex_numeric_literals(text)) {
+                if (lit.names_increment) { return true; }
+            }
+            return false;
+        };
+
+        // Both spellings the corpus generates, on both sides of the literal.
+        check(flagged("what if I pay $750 more a month?"),
+              "\"$750 more a month\" is an increment (qualifier AFTER)");
+        check(flagged("now add $300 extra a month"),
+              "\"$300 extra a month\" is an increment");
+        check(flagged("paying an extra $250/month"),
+              "\"an extra $250/month\" is an increment (qualifier BEFORE)");
+        check(flagged("with $300/month extra"),
+              "\"$300/month extra\" is an increment (qualifier past a slash)");
+
+        // AND THE FALSE POSITIVES, which are the dangerous direction: this flag
+        // MOVES a literal to another slot, so a wrong one is a wrong answer
+        // rather than a refused one.
+        check(!flagged("rent $3,200/month, mortgage payment $2,300/month"),
+              "an ordinary monthly figure is NOT an increment");
+        check(!flagged("Amortize the loan on a $796,000 property, a 10% deposit"),
+              "a price and a deposit are not increments");
+        check(!flagged("redo it for $817,400"),
+              "a REVISION of the price is not an increment");
+        check(!flagged("5.97% over 30 years"),
+              "a percent is never tagged as a money increment");
+    }
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

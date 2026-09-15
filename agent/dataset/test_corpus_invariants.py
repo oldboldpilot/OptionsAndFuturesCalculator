@@ -274,5 +274,40 @@ check(not excluded_leaks,
       f"({sorted(set(excluded_leaks))[:3]})")
 print(f"     ({len(G.CORPUS_MIX)} generators exercised)")
 
+# ---------------------------------------------------------------------------
+print("\n9. the HARNESS sends what the contract carries")
+# The eval harness is measurement apparatus, and a defect in it is reported as a
+# defect in the model. `eval_grpc_mortgage.py` computed `question1` on every
+# path, carried a comment saying to echo it back on the scored call, and did not
+# pass it -- so `prior_question` was "" on every scored request for as long as
+# the field existed.
+#
+# It cost two full evaluation cycles. `prior_question` goes into the PROMPT, so
+# adding it changes what the model emits: raw_exact moved 449 -> 443 on
+# identical weights, which means no number measured before the fix is comparable
+# with one measured after it. It also silently disabled a serving-layer rule
+# that keys on the field, so a change measured as "no effect" had simply never
+# been exercised.
+#
+# Asserted against the SOURCE because the alternative is a live engine, and a
+# gate nobody can run is not a gate. It is the same shape as the pricing page's
+# own guard in the sibling repository: ask whether the call site passes the
+# thing, not whether the variable exists.
+_harness = (Path(__file__).resolve().parent.parent / "train" / "eval_grpc_mortgage.py").read_text()
+
+# The scored (second) call must forward the question the service asked.
+_scored = [ln for ln in _harness.splitlines()
+           if "call(stub, utterance, reply" in ln and not ln.strip().startswith("#")]
+check(len(_scored) == 1,
+      f"exactly one scored ParseOperation call site (found {len(_scored)})")
+check(bool(_scored) and "question1" in _scored[0],
+      "the scored call forwards prior_question -- without it the service "
+      "substitutes a placeholder that appears ZERO times in the corpus")
+
+# And `question1` must actually be bound from the first call, not left "".
+check("question1, _ = call(stub, utterance" in _harness or
+      ", question1, _ = call(stub, utterance" in _harness,
+      "question1 is bound from the FIRST call's clarification, not a constant")
+
 print(f"\n{CHECKS} checks, {FAILURES} failures")
 sys.exit(0 if FAILURES == 0 else 1)
