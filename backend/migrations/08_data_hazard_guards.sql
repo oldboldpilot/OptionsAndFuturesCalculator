@@ -206,8 +206,29 @@ $$;
 --    cannot see the rows and a FOR EACH ROW trigger cannot see the total, so
 --    neither could state this rule at all.
 -- ---------------------------------------------------------------------------
+-- SECURITY DEFINER is load-bearing TWICE, and a GRANT would only fix the first.
+--
+--   1. The function reads public.protected_relations, and a DML trigger runs as
+--      the INVOKING role. Every application delete arrives as ofc_app, which has
+--      no SELECT on the guard list, so DeleteStrategy failed `permission denied
+--      for table protected_relations` for every user -- caught by section 4 of
+--      test_strategy_store_pg, 8 failures, all one cause.
+--
+--   2. `remaining` is counted through RLS otherwise. As ofc_app the count sees
+--      only the CALLER'S rows, so the fraction is measured against one subject's
+--      slice instead of the table: a user deleting 30 of their own rows trips
+--      `30 > 0.50 * 30` while the table holds thousands. A mass-delete rule is a
+--      statement about the TABLE, so its denominator has to be the table.
+--
+-- search_path is pinned because a SECURITY DEFINER function that resolves names
+-- through the caller's path lets the caller choose which protected_relations it
+-- reads. The transition table `deleted_rows` is an ephemeral named relation
+-- resolved ahead of search_path, so pinning does not hide it.
 CREATE OR REPLACE FUNCTION public.guard_mass_delete() RETURNS trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
 DECLARE
     removed   bigint;
     remaining bigint;
