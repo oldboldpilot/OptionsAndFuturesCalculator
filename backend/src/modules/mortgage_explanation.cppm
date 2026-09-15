@@ -22,6 +22,14 @@
  * interpolate arguments cannot retype a number, which is exactly the property
  * that makes the paragraph above true.
  *
+ * WHY THE OUTPUT IS ITEMISED RATHER THAN A PARAGRAPH. Each point carries a
+ * stable TOPIC beside its sentence. A caller can then render bullets, suppress
+ * one line, group two, or re-order for a narrow screen without parsing English
+ * back out of a blob -- and a test can assert that the termination point EXISTS
+ * rather than that some sentence contains a substring, which is the difference
+ * between checking a fact and checking a wording. The topics are the layer's
+ * contract; the sentences are its presentation, and only one of those is stable.
+ *
  * WHAT IT DELIBERATELY DOES NOT DO. It does not compute. `pmi_ends` is a fact
  * the amortisation schedule already knows; deriving it here would give two
  * answers to one question and no way to tell which is wrong -- the same reason
@@ -70,12 +78,31 @@ struct PmiFacts {
 };
 
 /**
- * One sentence per salient fact, in a fixed order.
+ * One itemised point: what it is about, and how to say it.
+ *
+ * `topic` is the stable half. It is what a caller keys on, so it is a
+ * dotted identifier rather than a sentence fragment and it does not change
+ * when the wording improves.
+ */
+struct ExplanationPoint {
+    std::string topic;
+    std::string text;
+};
+
+/** Topic identifiers, named so callers and tests do not spell them by hand. */
+inline constexpr std::string_view kTopicNoPmi        = "pmi.none";
+inline constexpr std::string_view kTopicTermination  = "pmi.termination";
+inline constexpr std::string_view kTopicFullTerm     = "pmi.full_term";
+inline constexpr std::string_view kTopicCost         = "pmi.cost";
+inline constexpr std::string_view kTopicOverpayment  = "pmi.overpayment";
+
+/**
+ * The itemised points for a scenario, in a fixed order.
  *
  * Empty only when the facts say nothing worth saying, which is itself a
  * supported answer rather than a failure.
  */
-[[nodiscard]] auto explain_pmi(const PmiFacts& facts) -> std::vector<std::string>;
+[[nodiscard]] auto explain_pmi(const PmiFacts& facts) -> std::vector<ExplanationPoint>;
 
 }  // namespace mortgage_calculator::assistant::explain
 
@@ -129,6 +156,39 @@ say(pmi_pulled_forward(S, B, A)) :-
     S is B - A.
 )PL";
 
+/**
+ * The atom vocabulary: every term `say/1` can wrap, with the topic it becomes
+ * and where it sits in the itemised list.
+ *
+ * ONE table rather than three parallel ones. Rank, topic and arity drifting
+ * apart is the defect this repository has recorded against hand-maintained
+ * lists more than once, and a point whose rank says "third" while its topic
+ * says something else is not a thing that can be reasoned about. `arity` is
+ * here so a clause that grows an argument fails the vocabulary test rather
+ * than silently rendering nothing.
+ */
+struct PointSpec {
+    std::string_view functor;
+    std::size_t arity;
+    int rank;
+    std::string_view topic;
+};
+
+constexpr std::array<PointSpec, 5> kVocabulary{{
+    {.functor = "no_pmi",             .arity = 0, .rank = 0, .topic = kTopicNoPmi},
+    {.functor = "pmi_until",          .arity = 4, .rank = 1, .topic = kTopicTermination},
+    {.functor = "pmi_whole_term",     .arity = 2, .rank = 1, .topic = kTopicFullTerm},
+    {.functor = "pmi_cost",           .arity = 1, .rank = 2, .topic = kTopicCost},
+    {.functor = "pmi_pulled_forward", .arity = 3, .rank = 3, .topic = kTopicOverpayment},
+}};
+
+[[nodiscard]] auto spec_for(std::string_view functor) -> const PointSpec* {
+    for (const auto& s : kVocabulary) {
+        if (s.functor == functor) { return &s; }
+    }
+    return nullptr;
+}
+
 [[nodiscard]] auto rule_clauses() -> const sensen::logic::Program& {
     static const sensen::logic::Program rules = [] {
         auto parsed = sensen::logic::read_program(std::string{kRules});
@@ -175,26 +235,9 @@ say(pmi_pulled_forward(S, B, A)) :-
     return {functor, args};
 }
 
-/**
- * Sentence order, stated rather than inherited from the solver.
- *
- * Solution order is a property of the search, so ordering the output by it
- * would make the paragraph depend on clause layout. A lower number is said
- * first; an atom this table does not name is dropped, so adding a clause
- * without deciding where its sentence belongs cannot silently append one.
- */
-[[nodiscard]] auto rank(std::string_view functor) -> int {
-    if (functor == "no_pmi") { return 0; }
-    if (functor == "pmi_until") { return 1; }
-    if (functor == "pmi_whole_term") { return 1; }
-    if (functor == "pmi_cost") { return 2; }
-    if (functor == "pmi_pulled_forward") { return 3; }
-    return -1;
-}
-
 /** One atom, one sentence. The ONLY place English lives, and it can do nothing
  *  to a figure but place it. */
-[[nodiscard]] auto render(const std::string& functor, const std::vector<std::string>& a)
+[[nodiscard]] auto render(std::string_view functor, const std::vector<std::string>& a)
     -> std::string {
     if (functor == "no_pmi") {
         return "This loan carries no mortgage insurance.";
@@ -220,7 +263,7 @@ say(pmi_pulled_forward(S, B, A)) :-
 
 }  // namespace detail
 
-auto explain_pmi(const PmiFacts& facts) -> std::vector<std::string> {
+auto explain_pmi(const PmiFacts& facts) -> std::vector<ExplanationPoint> {
     std::string program;
     const auto fact = [&program](std::string_view name, const std::string& value) {
         program += std::string{name} + "(" + value + ").\n";
@@ -253,7 +296,7 @@ auto explain_pmi(const PmiFacts& facts) -> std::vector<std::string> {
         return {};
     }
 
-    std::vector<std::pair<int, std::string>> ranked;
+    std::vector<std::pair<int, ExplanationPoint>> ranked;
     for (const auto& sub : *solutions) {
         // `say(pmi_cost(29125.00))` -> the inner atom, in the solver's own
         // exact spelling of the number.
@@ -264,22 +307,29 @@ auto explain_pmi(const PmiFacts& facts) -> std::vector<std::string> {
         const std::string inner = rendered.substr(open + 1, rendered.size() - open - 2);
 
         const auto [functor, args] = detail::split_atom(inner);
-        const int r = detail::rank(functor);
-        if (r < 0) { continue; }
+        const auto* spec = detail::spec_for(functor);
+        // A clause whose atom is not in the vocabulary is DROPPED rather than
+        // appended: adding a rule without deciding what its point is called and
+        // where it belongs should produce nothing, not an unlabelled sentence
+        // at an arbitrary position.
+        if (spec == nullptr || args.size() != spec->arity) { continue; }
+
         std::string sentence = detail::render(functor, args);
         if (sentence.empty()) { continue; }
-        if (std::ranges::none_of(ranked, [&sentence](const auto& p) {
-                return p.second == sentence;
+
+        ExplanationPoint point{.topic = std::string{spec->topic}, .text = std::move(sentence)};
+        if (std::ranges::none_of(ranked, [&point](const auto& p) {
+                return p.second.topic == point.topic && p.second.text == point.text;
             })) {
-            ranked.emplace_back(r, std::move(sentence));
+            ranked.emplace_back(spec->rank, std::move(point));
         }
     }
 
-    std::ranges::stable_sort(ranked, {}, &std::pair<int, std::string>::first);
+    std::ranges::stable_sort(ranked, {}, &std::pair<int, ExplanationPoint>::first);
 
-    std::vector<std::string> out;
+    std::vector<ExplanationPoint> out;
     out.reserve(ranked.size());
-    for (auto& [r, s] : ranked) { out.push_back(std::move(s)); }
+    for (auto& [r, p] : ranked) { out.push_back(std::move(p)); }
     return out;
 }
 

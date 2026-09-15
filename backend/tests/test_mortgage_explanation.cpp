@@ -22,19 +22,34 @@ auto check(bool cond, const std::string& what) -> void {
     if (!cond) { ++g_failures; }
 }
 
-auto joined(const std::vector<std::string>& lines) -> std::string {
+using Points = std::vector<mx::ExplanationPoint>;
+
+auto joined(const Points& pts) -> std::string {
     std::string all;
-    for (const auto& l : lines) { all += l + " "; }
+    for (const auto& p : pts) { all += p.text + " "; }
     return all;
 }
 
-auto mentions(const std::vector<std::string>& lines, std::string_view needle) -> bool {
-    return joined(lines).find(needle) != std::string::npos;
+auto mentions(const Points& pts, std::string_view needle) -> bool {
+    return joined(pts).find(needle) != std::string::npos;
+}
+
+/** Is this POINT present, by its stable id? Asserting a topic exists is a
+ *  different and better question from asserting some sentence contains a
+ *  substring: one checks the fact, the other checks the wording. */
+auto has_topic(const Points& pts, std::string_view topic) -> bool {
+    return std::ranges::any_of(pts, [topic](const auto& p) { return p.topic == topic; });
+}
+
+auto topics_of(const Points& pts) -> std::vector<std::string> {
+    std::vector<std::string> out;
+    for (const auto& p : pts) { out.push_back(p.topic); }
+    return out;
 }
 
 /** Every run of digits in the prose, so a sentence can be checked against the
  *  facts it claims to describe. */
-auto numerals(const std::vector<std::string>& lines) -> std::vector<std::string> {
+auto numerals(const Points& lines) -> std::vector<std::string> {
     std::vector<std::string> out;
     std::string cur;
     // A '.' is only part of a number when digits sit around it -- otherwise it
@@ -79,7 +94,7 @@ auto main() -> int {
     std::printf("1. a terminating scenario is explained, with the month and the basis\n");
     {
         const auto lines = mx::explain_pmi(terminating());
-        for (const auto& l : lines) { std::printf("    | %s\n", l.c_str()); }
+        for (const auto& l : lines) { std::printf("    | [%s] %s\n", l.topic.c_str(), l.text.c_str()); }
         check(!lines.empty(), "a scenario with PMI produces sentences");
         check(mentions(lines, "month 137"),
               "the termination month is stated");
@@ -169,20 +184,62 @@ auto main() -> int {
         f.ends_month = 104;
         f.baseline_ends_month = 137;
         const auto lines = mx::explain_pmi(f);
-        const auto pos = [&lines](std::string_view needle) {
+        const auto pos = [&lines](std::string_view topic) {
             for (std::size_t i = 0; i < lines.size(); ++i) {
-                if (lines[i].find(needle) != std::string::npos) { return static_cast<int>(i); }
+                if (lines[i].topic == topic) { return static_cast<int>(i); }
             }
             return -1;
         };
-        const int termination = pos("stops after month");
-        const int cost = pos("over the life of the loan");
-        const int saving = pos("months early");
+        const int termination = pos(mx::kTopicTermination);
+        const int cost = pos(mx::kTopicCost);
+        const int saving = pos(mx::kTopicOverpayment);
         check(termination >= 0 && cost > termination && saving > cost,
               "termination, then cost, then what the overpayment bought");
 
         const auto again = mx::explain_pmi(f);
-        check(again == lines, "the same facts produce the identical paragraph every run");
+        check(topics_of(again) == topics_of(lines) && joined(again) == joined(lines),
+              "the same facts produce the identical itemised list every run");
+    }
+
+    std::printf("\n7. the output is ITEMISED, and every point in the vocabulary is reachable\n");
+    {
+        // Each point carries a stable topic beside its sentence, so a caller can
+        // render bullets, suppress one line or re-order for a narrow screen
+        // without parsing English back out of a blob.
+        const auto lines = mx::explain_pmi(terminating());
+        check(has_topic(lines, mx::kTopicTermination) && has_topic(lines, mx::kTopicCost),
+              "a terminating scenario itemises BOTH the termination and the cost");
+        check(std::ranges::none_of(lines, [](const auto& p) { return p.topic.empty(); }),
+              "no point is emitted without a topic");
+        check(std::ranges::all_of(lines, [](const auto& p) {
+                  return p.topic.find(' ') == std::string::npos && p.topic.find('.') != std::string::npos;
+              }),
+              "topics are dotted identifiers, not sentence fragments");
+
+        // A DEAD VOCABULARY ENTRY READS EXACTLY LIKE COVERAGE -- the lesson this
+        // repository has paid for with a hand-maintained allow-list that named a
+        // thing which was not an RPC. So every topic the layer can emit must be
+        // reachable from some scenario, asserted by sweeping scenarios rather
+        // than by reading the table.
+        std::vector<std::string> seen;
+        const auto absorb = [&seen](const Points& pts) {
+            for (const auto& p : pts) {
+                if (std::ranges::find(seen, p.topic) == seen.end()) { seen.push_back(p.topic); }
+            }
+        };
+        absorb(mx::explain_pmi(terminating()));                       // termination + cost
+        { mx::PmiFacts f; f.term_months = 360; absorb(mx::explain_pmi(f)); }   // none
+        { auto f = terminating(); f.ends_month = 0; f.baseline_ends_month = 0;
+          absorb(mx::explain_pmi(f)); }                               // full term
+        { auto f = terminating(); f.monthly_overpayment = "250";
+          f.ends_month = 104; f.baseline_ends_month = 137;
+          absorb(mx::explain_pmi(f)); }                               // overpayment
+
+        for (const auto& topic : {mx::kTopicNoPmi, mx::kTopicTermination, mx::kTopicFullTerm,
+                                  mx::kTopicCost, mx::kTopicOverpayment}) {
+            check(std::ranges::find(seen, std::string{topic}) != seen.end(),
+                  std::string{"topic "} + std::string{topic} + " is reachable from some scenario");
+        }
     }
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
