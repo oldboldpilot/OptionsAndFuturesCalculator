@@ -218,6 +218,198 @@ auto main() -> int {
               "with no candidates the model's value is left for grounding to judge");
     }
 
+    std::printf("\n10. a later turn supersedes an earlier statement of the same kind\n");
+    {
+        // THE MEASURED CLASS. 17 of the 19 multi-turn single-field failures on
+        // the 563-row holdout are a revision the model ignored, answering with
+        // the OPENING turn's figure. Every one of them parses, grounds and
+        // satisfies every bound -- the earlier value really was stated.
+        const std::string open_rate = "Amortize $451,300 at 5.25% over 20-year.";
+
+        const auto rate = md::derive_candidates_in_turns("ComputeAmortization", open_rate,
+                                                         "try 6.75%");
+        const auto ar = only(rate, "annual_rate");
+        check(ar.size() == 1 && ar.front() == "0.0675",
+              "'try 6.75%' supersedes the opening 5.25% -- ONE candidate, not two (got "
+              + std::to_string(ar.size()) + ": " + (ar.empty() ? "none" : ar.front()) + ")");
+
+        const auto term = md::derive_candidates_in_turns("ComputeAmortization", open_rate,
+                                                         "redo it over 15-year");
+        const auto tm = only(term, "term_months");
+        check(tm.size() == 1 && tm.front() == "180",
+              "'redo it over 15-year' supersedes 20-year -> term_months 180 (got "
+              + (tm.empty() ? "none" : tm.front()) + ")");
+
+        // Years and months supersede ACROSS kinds: the same slot, restated in
+        // the other unit. A per-kind rule would let both survive.
+        const auto tm2 = only(md::derive_candidates_in_turns("ComputeAmortization", open_rate,
+                                                             "make it 180 months"),
+                              "term_months");
+        check(tm2.size() == 1 && tm2.front() == "180",
+              "a term restated in MONTHS supersedes one stated in years");
+    }
+
+    std::printf("\n11. the graph dates each operand separately\n");
+    {
+        // WHY THIS IS IN THE RULE BASE AND NOT A FILTER OVER THE LATEST TURN.
+        // "redo it for $817,400" restates the price and says nothing about the
+        // deposit, so the answer pairs the REVISED price with the ORIGINAL
+        // turn's down payment -- a combination present in neither turn alone.
+        const std::string open_buy =
+            "Amortize the loan on a $796,000 property, a 10% deposit, 5.97%, 30-year.";
+
+        const auto c = md::derive_candidates_in_turns("ComputeAmortization", open_buy,
+                                                      "redo it for $817,400");
+        const auto loan = only(c, "loan_amount");
+        check(loan.size() == 1 && loan.front() == "735660.0",
+              "the revised $817,400 less the ORIGINAL 10% deposit = 735660 (got "
+              + (loan.empty() ? "none" : loan.front()) + ")");
+        const auto home = only(c, "original_home_value");
+        check(home.size() == 1 && home.front() == "817400",
+              "the home value takes the revised GROSS price, not the net loan (got "
+              + (home.empty() ? "none" : home.front()) + ")");
+        const auto rate = only(c, "annual_rate");
+        check(rate.size() == 1 && rate.front() == "0.0597",
+              "a slot the revision did not mention keeps the opening turn's value");
+    }
+
+    std::printf("\n12. 'more' is an increment, and cannot be spent as a price\n");
+    {
+        // THE HIJACK THIS PREVENTS, stated as the test that fails without the
+        // `names_increment` split: while "$750 more a month" is an ordinary
+        // money literal it pairs with the opening turn's "10% down" under the
+        // loan rule and derives 750 - 75 = 675. Both operands are real, the
+        // arithmetic is exact, and the answer is a $675 mortgage -- the graph
+        // combining two literals under a rule that cannot see that "more"
+        // means an increment.
+        const std::string open_buy =
+            "Amortize the loan on a $796,000 property, a 10% deposit, 5.97%, 30-year.";
+
+        const auto c = md::derive_candidates_in_turns("ComputeAmortization", open_buy,
+                                                      "what if I pay $750 more a month?");
+        const auto loan = only(c, "loan_amount");
+        check(loan.size() == 1 && loan.front() == "716400.0",
+              "an INCREMENT does not supersede the price: the loan is still 716400 (got "
+              + (loan.empty() ? "none" : loan.front()) + ")");
+        const auto over = only(c, "monthly_overpayment");
+        check(over.size() == 1 && over.front() == "750",
+              "'$750 more a month' fills the overpayment slot (got "
+              + (over.empty() ? "none" : over.front()) + ")");
+
+        // Both spellings the corpus generates, and the qualifier sits on
+        // either side of the literal.
+        const auto after = only(md::derive_candidates_in_turns(
+                                    "ComputeAmortization", open_buy,
+                                    "now add $300 extra a month"),
+                                "monthly_overpayment");
+        check(after.size() == 1 && after.front() == "300",
+              "'$300 extra a month' -- the qualifier AFTER the literal (got "
+              + (after.empty() ? "none" : after.front()) + ")");
+        const auto before = only(md::derive_candidates(
+                                     "ComputeAmortization",
+                                     "Amortize $300,000 at 5% over 30-year, "
+                                     "paying an extra $250/month"),
+                                 "monthly_overpayment");
+        check(before.size() == 1 && before.front() == "250",
+              "'an extra $250/month' -- the qualifier BEFORE the literal (got "
+              + (before.empty() ? "none" : before.front()) + ")");
+    }
+
+    std::printf("\n13. recency is strictly BETWEEN turns, never within one\n");
+    {
+        // THE PROPERTY THAT KEEPS EVERY SINGLE-TURN ROW UNCHANGED. The
+        // comparison is strictly greater, so two literals stated in the same
+        // breath do not supersede each other -- the sentence really is
+        // ambiguous and the model keeps the selector role it is good at.
+        const auto same_turn = md::derive_candidates(
+            "ComputeAmortization", "Amortize $451,300 at 5.25% or 6.75% over 20-year.");
+        check(only(same_turn, "annual_rate").size() == 2,
+              "two rates in ONE turn stay ambiguous -- both candidates survive");
+
+        // And the empty-latest call is the single-turn call, not a near-miss.
+        const auto via_turns = md::derive_candidates_in_turns(
+            "ComputeAmortization", "Amortize $451,300 at 5.25% or 6.75% over 20-year.", "");
+        check(only(via_turns, "annual_rate") == only(same_turn, "annual_rate"),
+              "an empty latest turn derives exactly what the one-turn call does");
+    }
+
+    std::printf("\n14. a repeated field is not this layer's to touch\n");
+    {
+        // ComputeAmortizationBatch takes parallel ARRAYS, so `term_months`
+        // arrives as "[360,360]". The rule base derives the scalar 360 from
+        // "30-year", `same_value` cannot parse the array and answers false, and
+        // the field fell straight through to the replace path -- swapping a
+        // correct two-element array for a scalar. Nothing in the raw score can
+        // see this: the model is right and the layer breaks it afterwards.
+        const auto c = md::derive_candidates(
+            "ComputeAmortizationBatch",
+            "Compare two offers on a $400,000 loan over 30-year: 6% and 6.5%.");
+        std::map<std::string, std::string> emitted{{"term_months", "[360,360]"}};
+        const auto v = md::reconcile(c, emitted);
+        check(v.replace.empty(),
+              "an array-valued field is left alone, not replaced with a scalar");
+
+        // ...and the scalar case it was derived for still works, so the guard
+        // is a shape test rather than a switch that turns the layer off.
+        std::map<std::string, std::string> scalar{{"term_months", "300"}};
+        const auto c2 = md::derive_candidates("ComputeAmortization",
+                                              "Amortize $400,000 at 6% over 30-year.");
+        const auto v2 = md::reconcile(c2, scalar);
+        check(v2.replace.size() == 1 && v2.replace.front().field == "term_months",
+              "a SCALAR term_months is still corrected to the stated 30 years");
+    }
+
+    std::printf("\n15. only a field in contention may veto a replacement\n");
+    {
+        // THE INCONSISTENCY THIS PINS. `claimed` is tallied over all candidates
+        // while the skips are decided per field afterwards, so a field that is
+        // going to be skipped anyway was still casting a vote -- and its vote
+        // vetoed the one replacement the layer existed to make.
+        const auto c = md::derive_candidates_in_turns(
+            "ComputeAmortization", "Amortize $451,300 at 5.25% over 20-year.", "try 6.75%");
+
+        // Both fields derive the SAME single value, which is the shape that
+        // triggers the contest.
+        check(only(c, "annual_rate").size() == 1 && only(c, "pmi_annual_rate").size() == 1 &&
+                  only(c, "annual_rate").front() == only(c, "pmi_annual_rate").front(),
+              "annual_rate and pmi_annual_rate both derive the one revised rate");
+
+        std::map<std::string, std::string> emitted{
+            {"annual_rate", "0.0525"}, {"pmi_annual_rate", "0.0000"}};
+        const auto v = md::reconcile(c, emitted);
+        check(v.replace.size() == 1 && v.replace.front().field == "annual_rate" &&
+                  v.replace.front().values.front() == "0.0675",
+              "a convention ZERO does not contest, so the stale rate is still corrected");
+
+        // ...and a field genuinely holding the literal DOES contest, so the
+        // guard is narrowed rather than removed.
+        std::map<std::string, std::string> both{
+            {"annual_rate", "0.0525"}, {"pmi_annual_rate", "0.0675"}};
+        check(md::reconcile(c, both).replace.empty(),
+              "two fields genuinely claiming one literal still refuse to choose");
+    }
+
+    std::printf("\n16. the solver never emits what the verifier would refuse\n");
+    {
+        // A derived value re-enters validation, so a replacement outside its
+        // slot's band turns an answer the model got RIGHT into a refusal. This
+        // is the HELOC case: "75%" answering a max-LTV question reached
+        // annual_rate and came back "outside this assistant's interest-rate
+        // range" on twelve rows the model had served perfectly.
+        const auto c = md::derive_candidates_in_turns(
+            "ComputeHeloc",
+            "My home is worth $1,301,200, I owe $745,900. I want to draw $77,800 "
+            "from a HELOC at 8.33% over 10 years.",
+            "75%");
+        std::map<std::string, std::string> emitted{
+            {"annual_rate", "0.0833"}, {"max_ltv_rate", "0.75"}};
+        const auto v = md::reconcile(c, emitted);
+        const bool touches_rate = std::ranges::any_of(
+            v.replace, [](const md::FieldCandidates& f) { return f.field == "annual_rate"; });
+        check(!touches_rate,
+              "a 75% LTV never replaces a stated 8.33% interest rate");
+    }
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

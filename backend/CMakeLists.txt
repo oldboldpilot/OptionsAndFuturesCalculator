@@ -1363,6 +1363,31 @@ else()
     message(STATUS "python3 not found -- CorpusInvariantsTest not registered")
 endif()
 
+# DerivationCorpusSweepTest: prove the derivation layer never CORRUPTS a correct
+# answer, against a corpus generated from the generator itself.
+#
+# Accuracy cannot see this failure. The sweep hands the layer the GOLD params as
+# though the model had emitted them perfectly and reports every field the layer
+# then REWRITES -- and rewriting a correct value is a served regression by
+# construction, because the row still scores raw-exact and serves wrong. A
+# recency rule keyed on percent alone cost 19 holdout rows exactly that way: a
+# HELOC reply of "75%" is a max-LTV, and letting it supersede the stated 8.33%
+# derived annual_rate = 0.7500 on rows the model had answered perfectly.
+# `raw_exact` was byte-identical across that regression; only served_exact moved.
+#
+# The corpus is GENERATED rather than checked in, for the reason
+# CorpusInvariantsTest gives: it is a pure function of (seed, n, the generator),
+# so the gate re-derives itself whenever the corpus changes and cannot go stale
+# beside it.
+if(PYTHON3_FOR_CORPUS_TEST)
+    add_test(
+        NAME DerivationCorpusSweepTest
+        COMMAND ${PYTHON3_FOR_CORPUS_TEST}
+                ${CMAKE_CURRENT_SOURCE_DIR}/../scripts/sweep_corpus.py
+                --gate $<TARGET_FILE:dbg_derivation> 500
+    )
+endif()
+
 # Retry-with-backoff + circuit-breaker orchestration around market_data.cppm's
 # network fetches (fetch_with_resilience, built on SGEE's own
 # sgee.runtime.resilience::BackoffPolicy / CircuitBreaker). Exercises the
@@ -2417,4 +2442,12 @@ foreach(_t IN LISTS _bt_targets)
 endforeach()
 if(TARGET sgee_build_tests)
     add_dependencies(build_tests sgee_build_tests)
+endif()
+# DerivationCorpusSweepTest runs `dbg_derivation`, which does NOT match the
+# `^test_` filter above -- so without this the gate would run whatever binary
+# happened to be on disk. That is precisely the stale-binary trap this file
+# records against `ninja && ctest`, and a gate reading a stale binary passes
+# while proving nothing.
+if(TARGET dbg_derivation)
+    add_dependencies(build_tests dbg_derivation)
 endif()

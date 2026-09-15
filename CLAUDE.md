@@ -393,6 +393,92 @@ model — score `[assistant] raw model output`, which is logged before it runs.
 
 ## Mortgage assistant
 
+### The solver layer: recency in the graph, and two logical defects in `reconcile`
+
+`mortgage_derivation.cppm` lets the model stop doing arithmetic -- it names the
+operation and which literal plays which slot, and sensen's Horn-clause engine
+computes the value. Measured on the 563-row holdout, same v15 GGUF, one engine
+per port, `raw_exact` quoted alongside because it is what proves the model did
+not move:
+
+| arm | raw_exact | served_exact |
+| --- | --- | --- |
+| shipped `5180fba` | 443 | 410 |
+| + recency, ungated | 443 | 395 |
+| + recency, gated on `prior_question` | 443 | 394 |
+| **+ bounds guard + claimed fix** | **443** | **425** |
+
+**EVERY NUMBER BEFORE 2026-09-14 IS INCOMPARABLE WITH EVERY NUMBER AFTER IT.**
+`eval_grpc_mortgage.py` computed `question1` on every path, carried a comment
+saying to echo it back, and did not pass it -- so `prior_question` was `""` on
+every scored call. Echoing it changes the PROMPT, so it changes what the model
+emits: `raw_exact` moved 449 -> 443 on identical weights. It also contradicted
+its own docstring, which predicted the echo would recover 17 ComputeRentalRoi
+rows; it cost 6 raw rows instead.
+
+**Recency lives in the rule base, not around it.** Each literal is emitted with
+the turn that stated it and `kRules` carries `superseded_*` clauses. The
+comparison is strictly greater, so two literals in one turn do not supersede
+each other and every single-turn row is unchanged by construction. The operands
+of a rule are dated INDEPENDENTLY, which is the whole reason it is in the graph:
+"redo it for $817,400" combines the revised price with the ORIGINAL turn's down
+payment, a pairing present in neither turn alone.
+
+**"more" is a role, not a magnitude.** While `$750 more a month` was an ordinary
+`money` fact it paired with the opening turn's `10% down` and derived a **$675
+mortgage** -- two real literals, exact arithmetic, and a rule that could not see
+what "more" meant. `names_increment` routes it to `extra_money`, a kind no loan
+or price rule mentions. Mutation-checked: removing the split reproduces the $675.
+
+**`prior_question` is NOT the discriminator it looks like.** Gating recency on
+"did this service ask a question?" is right semantically and wrong operationally
+-- the field reflects WHAT THE MODEL DID. On a clarification row where the model
+answers instead of asking it is empty, and the gate reads a clarification as a
+revision. Twelve HELOC rows answering "what is your maximum LTV?" with `75%`
+then let that 75 supersede a stated 8.33% and returned `annual_rate = 0.75 is
+outside this assistant's interest-rate range` -- every one a row the model had
+served perfectly.
+
+Two fixes, neither about recency, both narrowing a guard rather than removing it:
+
+- **The solver must never emit what the verifier will refuse.** A replacement
+  re-enters validation, so an out-of-band value does not merely fail to help --
+  it converts a correct answer into a refusal. `reconcile` asks
+  `mv::slot_bound_violation`, the same `detail::bound_violation` G5 itself calls,
+  rather than copying the band.
+- **`claimed` counted fields that were going to be skipped anyway.** The tally
+  was taken over ALL candidates while the skips are decided per field afterwards.
+  On a rate revision both `annual_rate` and `pmi_annual_rate` derive the one new
+  value; the model emitted `pmi_annual_rate` as the convention `0.0000`, which
+  the zero rule skips regardless, yet it counted as a second claimant and vetoed
+  the correct replacement. **This is why recency measured as doing nothing** --
+  0 of 145 rows differed, the guard cancelling the rule exactly. The
+  inconsistency was latent in shipped code and only surfaced when recency made
+  two fields collide on one value.
+
+**A FAILURE CLASS NO ACCURACY METRIC CAN SEE, and the gate that catches it.**
+This layer can take an answer the model got RIGHT and make it wrong or refused.
+Such a row still scores `raw_exact`, so `raw_exact` was byte-identical across a
+19-row served regression. `DerivationCorpusSweepTest` feeds the layer GOLD as
+though the model had emitted it perfectly and reports every field the layer then
+rewrites. It needs no model and no engine, runs in 0.08 s, generates its corpus
+from `CORPUS_MIX` so it re-derives itself when the corpus changes, and is
+mutation-proven both ways. Its limit, stated because it was reached: it models
+the SERVICE's decisions itself, so a divergence between the sweep's model and
+the service's is exactly what it cannot see -- which is the `prior_question`
+defect above.
+
+It also found a defect that was ALREADY IN PRODUCTION:
+`ComputeAmortizationBatch.term_months` is the array `[360,360]`, the rule base
+derives the scalar `360`, `same_value` cannot parse the array and answers false,
+and a correct two-element array was being replaced by a scalar. `reconcile` now
+leaves any non-scalar emitted value alone.
+
+Left undone deliberately: `ComputePayment` loan revisions (`redo it for
+$817,400` with no down payment stated) derive nothing, because no rule maps a
+lone money literal to a loan slot and adding one would turn rows the model
+serves correctly today into refusals.
+
 ### 27 of 27 reachable, verified end to end on 2026-09-05
 
 | operation | production value | independent check |

@@ -597,6 +597,25 @@ export enum class SlotKind {
  * spot-checks the rules that are easy to get backwards. */
 export [[nodiscard]] auto classify_slot(std::string_view field_name) -> SlotKind;
 
+/**
+ * Would G5 refuse `value` in `field`? Nothing, or the refusal it would give.
+ *
+ * Exported so the DERIVATION layer can ask before it replaces anything. A
+ * solver that emits a value its own verifier rejects is worse than one that
+ * stays silent: the model had answered correctly, the solver overwrote it, and
+ * the row came back a refusal. Measured -- a HELOC exchange answering "what is
+ * your maximum LTV?" with "75%" let a recency rule supersede the stated 8.33%,
+ * and twelve rows the model had served perfectly returned
+ * `annual_rate = 0.75 is outside this assistant's interest-rate range`.
+ *
+ * It delegates to the SAME `detail::bound_violation` G5 itself calls, because
+ * two copies of a bound is the mismatch this file already documents in the
+ * other direction: a verifier looser than the engine it guards proves a parse
+ * the engine then refuses.
+ */
+export [[nodiscard]] auto slot_bound_violation(std::string_view field, const Decimal& value)
+    -> std::optional<std::string>;
+
 // ===========================================================================
 // 4. THE MODEL'S OUTPUT, AS GP-ARA's InputDataType.
 // ===========================================================================
@@ -1073,6 +1092,30 @@ export struct NumericLiteral {
      * not see it: grounding is per-field, and nothing said WHICH percent.
      */
     bool names_down_payment = false;
+
+    /**
+     * The words around this literal name an INCREMENT to a recurring payment
+     * ("$750 more a month", "an extra $250/month", "$300/month extra").
+     *
+     * The same adjacency judgement as `names_down_payment` above, and it
+     * exists for the same reason: a number that parses, sits in a real field
+     * and satisfies every bound can still be the WRONG KIND OF NUMBER, and
+     * only the words beside it say so.
+     *
+     * It is load-bearing for the dependency graph rather than decorative.
+     * "what if I pay $750 more a month?" is a REVISION turn, and while its
+     * 750 is an ordinary `money` fact it can pair with the opening turn's
+     * "10% down" under the loan rule and derive a $675 mortgage -- a literal
+     * the user did state, in a field they did mean to change, combined by a
+     * rule that had no way to know "more" meant an increment. Tagging it
+     * routes the 750 to `extra_money`, which no loan or price rule mentions,
+     * so the hijack is structurally impossible instead of merely unlikely.
+     *
+     * That is also what makes RECENCY safe on plain money: once increments
+     * are a separate kind, a later money literal really is a restatement of
+     * an earlier one, and the graph may let it supersede.
+     */
+    bool names_increment = false;
 };
 
 /**
@@ -2267,6 +2310,25 @@ namespace detail {
     return to_lower_copy(text.substr(start, i - start));
 }
 
+/** The alphabetic word immediately BEFORE `pos`, lowercased; empty if none.
+ *  Skips at most three non-alphabetic characters, which covers " $", "(" and
+ *  a hyphen without letting the scan wander into the previous clause -- the
+ *  same tight-window reasoning the down-payment adjacency records. */
+[[nodiscard]] inline auto prev_word(std::string_view text, std::size_t pos) -> std::string {
+    std::size_t i = pos;
+    for (int skipped = 0; i > 0 && !is_alpha(text[i - 1]) && skipped < 3; ++skipped) {
+        --i;
+    }
+    if (i == 0 || !is_alpha(text[i - 1])) {
+        return {};
+    }
+    const std::size_t end = i;
+    while (i > 0 && is_alpha(text[i - 1])) {
+        --i;
+    }
+    return to_lower_copy(text.substr(i, end - i));
+}
+
 }  // namespace detail
 
 auto dated_utterance_rejects_operation(std::string_view operation,
@@ -2438,6 +2500,34 @@ auto lex_numeric_literals(std::string_view text) -> std::vector<NumericLiteral> 
                         break;
                     }
                     if (w.empty()) break;
+                }
+            }
+        }
+
+        // The INCREMENT adjacency, read the same way and in both directions,
+        // because the corpus states it on both sides: "$750 more a month" and
+        // "$300/month extra" put the word AFTER, "paying an extra $250/month"
+        // puts it BEFORE. Two words forward at most -- a wider window starts
+        // matching an increment mentioned in a different clause, and this flag
+        // MOVES a literal to another slot, so a false positive is a wrong
+        // answer rather than a refused one.
+        if (lit.tag == LiteralTag::Money && !lit.names_down_payment) {
+            std::size_t j = i;
+            for (int step = 0; step < 2; ++step) {
+                while (j < text.size() && text[j] == '/') ++j;
+                const std::string w = detail::next_word(text, j);
+                if (w == "more" || w == "extra" || w == "additional") {
+                    lit.names_increment = true;
+                    break;
+                }
+                if (w.empty()) break;
+                while (j < text.size() && (text[j] == ' ' || text[j] == '-' || text[j] == '/')) ++j;
+                while (j < text.size() && detail::is_alpha(text[j])) ++j;
+            }
+            if (!lit.names_increment) {
+                const std::string wp = detail::prev_word(text, lit.offset);
+                if (wp == "extra" || wp == "additional" || wp == "another") {
+                    lit.names_increment = true;
                 }
             }
         }
@@ -2948,6 +3038,11 @@ auto to_string(Outcome outcome) -> std::string_view {
         case Outcome::Indeterminate: return "Indeterminate";
     }
     return "?";
+}
+
+auto slot_bound_violation(std::string_view field, const Decimal& value)
+    -> std::optional<std::string> {
+    return detail::bound_violation(classify_slot(field), field, value);
 }
 
 }  // namespace mortgage_calculator::assistant::verify

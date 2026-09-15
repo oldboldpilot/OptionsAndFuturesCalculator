@@ -2097,6 +2097,22 @@ namespace md = ::mortgage_calculator::assistant::derive;
  * they supplied first time, so `prior_clarification` is concatenated rather than
  * dropped -- dropping it would refuse "37 years" for the one reason the verifier
  * must never refuse anything: that nobody showed it the utterance. */
+/** The grounding text MINUS the latest turn, i.e. everything said earlier.
+ *  `grounding_text` appends "\n" + latest, so this removes exactly that
+ *  suffix -- checked rather than assumed, because a mis-dated literal is a
+ *  wrong answer and an unchanged string is merely the one-turn case. */
+[[nodiscard]] auto utterance_without_latest(std::string_view joined,
+                                            std::string_view latest) -> std::string_view {
+    if (latest.empty() || joined.size() <= latest.size()) {
+        return joined;
+    }
+    const std::size_t cut = joined.size() - latest.size() - 1;
+    if (joined[cut] == '\n' && joined.substr(cut + 1) == latest) {
+        return joined.substr(0, cut);
+    }
+    return joined;
+}
+
 [[nodiscard]] auto grounding_text(std::string_view utterance, std::string_view prior_clarification)
     -> std::string {
     std::string text{utterance};
@@ -2692,7 +2708,16 @@ auto apply_tvm_sign_convention(std::string_view operation,
     return out;
 }
 
+/**
+ * `latest_turn` is the user's MOST RECENT words -- the answer to a clarifying
+ * question -- and is empty on every first-turn call. It travels beside
+ * `user_text` rather than being recovered from it: `grounding_text` joins the
+ * turns with a newline, and an utterance may itself contain one, so splitting
+ * the joined string would silently mis-date a literal. The derivation layer
+ * needs the boundary to decide which statement supersedes which.
+ */
 auto validate_and_populate_params(std::string_view json_text, std::string_view user_text,
+                                  std::string_view latest_turn,
                                   ::mortgage::assistant::ParseResponse& response)
     -> ModelOutputOutcome {
     auto parsed = fastjson::parse(json_text);
@@ -2718,7 +2743,7 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
     // recurse twice.
     if (auto remapped = remap_future_value_to_detailed(obj, operation, user_text);
         remapped.has_value()) {
-        return validate_and_populate_params(*remapped, user_text, response);
+        return validate_and_populate_params(*remapped, user_text, latest_turn, response);
     }
 
     // Graph B, the dated/undated sibling. Placed beside Graph A because it is
@@ -2740,7 +2765,7 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
         // which `dated_utterance_rejects_operation` does not reject.
         if (auto remapped = remap_to_dated_sibling(obj, operation, user_text);
             remapped.has_value()) {
-            return validate_and_populate_params(*remapped, user_text, response);
+            return validate_and_populate_params(*remapped, user_text, latest_turn, response);
         }
         populate_refusal(
             response, ::mortgage::assistant::Refusal::INVALID_PARAMETERS,
@@ -2789,7 +2814,11 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
             emitted.emplace(key, value.is_string() ? std::string{value.as_string()}
                                                    : fastjson::stringify(value));
         }
-        const auto candidates = md::derive_candidates(operation, user_text);
+        // The turns are dated, so a revision supersedes what it revises. On a
+        // first-turn call `latest_turn` is empty and this IS the one-turn
+        // derivation -- see `derive_candidates_in_turns`.
+        const auto candidates = md::derive_candidates_in_turns(
+            operation, utterance_without_latest(user_text, latest_turn), latest_turn);
         const auto verdict = md::reconcile(candidates, emitted);
         if (!verdict.replace.empty()) {
             std::map<std::string, std::string> replacement;
@@ -2815,7 +2844,7 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
                 rewritten += ',';
             }
             rewritten.back() = '}';
-            return validate_and_populate_params(rewritten, user_text, response);
+            return validate_and_populate_params(rewritten, user_text, latest_turn, response);
         }
     }
 
@@ -3091,6 +3120,7 @@ constexpr std::array<std::string_view, 16> kMortgageAdviceSignals{{
 
 auto interpret_model_output(const std::string& raw_text, std::string_view utterance,
                             std::string_view prior_clarification,
+                            std::string_view prior_question,
                             ::mortgage::assistant::ParseResponse& response) -> ModelOutputOutcome {
     // LOG THE RAW OUTPUT FIRST, BEFORE ANY VERIFICATION RUNS.
     //
@@ -3111,8 +3141,27 @@ auto interpret_model_output(const std::string& raw_text, std::string_view uttera
         // The utterance travels with the params block from here down. It is the
         // ONLY object that can falsify a structurally perfect answer, so the
         // params path is the one path that must never be walked without it.
+        // A REVISION SUPERSEDES; AN ANSWER DOES NOT, and `prior_question` is
+        // what tells them apart. A five-turn exchange has two shapes and the
+        // contract already distinguishes them: this service asks a question
+        // only when it could not answer, so a non-empty `prior_question` means
+        // the user's latest words ANSWER it and supply a slot that was missing
+        // -- nothing is being restated. An empty one alongside a non-empty
+        // `prior_clarification` means the previous turn was an ANSWER and the
+        // latest words revise it.
+        //
+        // Measured, and this is why the distinction is drawn rather than
+        // assumed: a HELOC row answers "what is your maximum LTV?" with "75%",
+        // and treating that as a revision let the 75 supersede the stated 8.33%
+        // and derive annual_rate = 0.7500. 19 rows, every one of them served
+        // exactly right by the model beforehand. The same literal is correct in
+        // one slot and catastrophic in another, which is the reason M0 exists
+        // and is not a fact any rule keyed on PERCENT alone can represent.
+        const std::string_view revision =
+            prior_question.empty() ? prior_clarification : std::string_view{};
         return validate_and_populate_params(trim(*block),
-                                            grounding_text(utterance, prior_clarification), response);
+                                            grounding_text(utterance, prior_clarification),
+                                            revision, response);
     }
 
     // NO PARAMS BLOCK IS NOT ROUTED THROUGH THE VERIFIER, DELIBERATELY.
@@ -3325,7 +3374,8 @@ inline constexpr std::array<std::string_view, 4> kAllActionNames{
  */
 [[nodiscard]] auto action_parse_and_verify(Ctx& ctx) -> ExecutionResult<> {
     const auto outcome =
-        interpret_model_output(ctx->model_text, ctx->utterance, ctx->prior_clarification, ctx->response);
+        interpret_model_output(ctx->model_text, ctx->utterance, ctx->prior_clarification,
+                               ctx->prior_question, ctx->response);
     if (outcome == ModelOutputOutcome::Refused) {
         return std::unexpected(sgee::ExecutionError::ActionFailed);
     }

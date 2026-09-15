@@ -88,6 +88,41 @@ struct FieldCandidates {
     -> std::vector<FieldCandidates>;
 
 /**
+ * Candidates for a request the user has since REVISED, latest turn winning.
+ *
+ * A clarifying exchange restates a slot: "Amortize $451,300 at 5.25% over
+ * 20-year." then "try 6.75%". Both figures are the user's own words and both
+ * reach the rule base, so the rate slot derives TWO candidates -- at which
+ * point `reconcile` hands the choice to the model under the >1 rule, and the
+ * model returns the FIRST turn's rate. 17 of the 19 multi-turn single-field
+ * failures on the holdout are that, and not one is an arithmetic error.
+ *
+ * THE FIX IS IN THE GRAPH, NOT AROUND IT. Each literal is emitted with the
+ * turn that stated it and `kRules` carries `superseded_*` clauses saying
+ * "nothing later of this kind supersedes this", so recency is a constraint the
+ * dependency rules solve WITH rather than a filter applied to their output.
+ * That distinction is load-bearing: the operands of a rule are dated
+ * independently, so "redo it for $817,400" combines the revised price with the
+ * ORIGINAL turn's down payment -- a pairing that exists in neither turn alone
+ * and that no post-filter over the latest turn could ever produce.
+ *
+ * The qualifier words matter for the same reason. "what if I pay $750 more a
+ * month?" is a revision, and while its 750 is an ordinary `money` fact it
+ * pairs with the opening turn's "10% down" and derives a $675 mortgage. The
+ * lexer's `names_increment` routes it to `extra_money`, a kind no loan or
+ * price rule mentions, so the hijack is impossible by construction -- and only
+ * once that split exists is recency on plain `money` safe to state at all.
+ *
+ * With `latest` empty -- every first-turn call -- every fact is turn 0, no
+ * `superseded_*` clause can fire, and this IS `derive_candidates`: unchanged
+ * by construction rather than by a branch that happens to agree.
+ */
+[[nodiscard]] auto derive_candidates_in_turns(std::string_view operation,
+                                              std::string_view earlier,
+                                              std::string_view latest)
+    -> std::vector<FieldCandidates>;
+
+/**
  * Reconcile the model's params against the derivation, by the rule above.
  *
  * Returns the fields to REPLACE and the fields to REFUSE, separately, because
@@ -211,31 +246,80 @@ constexpr std::array<std::string_view, 7> kPerMonthRateOperations{
  * hand-written candidate loop.
  */
 constexpr std::string_view kRules = R"PL(
+% --- RECENCY: a later turn SUPERSEDES an earlier statement of the same kind
+% A clarifying exchange arrives CONCATENATED -- "Amortize $451,300 at 5.25%
+% over 20-year." and "try 6.75%" are one text by the time they reach here --
+% so the rate slot legitimately derives both 0.0525 and 0.0675 and the layer
+% hands the choice to the model, which returns the opening turn's. Measured on
+% the 563-row holdout: 17 of the 19 multi-turn single-field failures are that,
+% and not one is an arithmetic error.
+%
+% The missing fact is not another map. It is WHEN each literal was said. Every
+% literal therefore carries its turn, and these clauses say "nothing later of
+% this kind supersedes it" -- recency expressed as a constraint over the facts,
+% where the graph can use it, rather than as a filter wrapped around the solver.
+%
+% STRICTLY GREATER, which is what keeps a single-turn utterance unchanged: two
+% literals in the SAME turn do not supersede each other, so a genuinely
+% ambiguous sentence still derives both and the model keeps the selector role.
+% A first-turn request emits only turn 0 and no clause below can fire.
+superseded_pct(T)   :- pct(_, T2), T2 > T.
+superseded_money(T) :- money(_, T2), T2 > T.
+superseded_extra(T) :- extra_money(_, T2), T2 > T.
+
+% A down payment may be restated as either kind, so these supersede across
+% kinds -- "20% down" revised by "$80,000 down" is one statement replacing
+% another, and a per-kind rule would let both survive.
+superseded_down(T)  :- down_pct(_, T2), T2 > T.
+superseded_down(T)  :- down_money(_, T2), T2 > T.
+
+% Years and months likewise: "over 20-year" revised by "redo it over 180
+% months" fills the same slot from a different kind.
+superseded_term(T)  :- years(_, T2), T2 > T.
+superseded_term(T)  :- months(_, T2), T2 > T.
+
 % --- a rate slot takes a stated percent over its own cadence ------------
 % A percent the lexer tagged as naming a DOWN PAYMENT is excluded, because
 % "20% down" is not an interest rate -- the production utterance that priced a
 % 20% mortgage is the reason M0 exists, and the same exclusion applies here.
-derive(F, V) :- rate_slot(F, D), pct(P), V is P / D.
+derive(F, V) :- rate_slot(F, D), pct(P, T), \+ superseded_pct(T), V is P / D.
 
 % --- a month count from a term stated in years or months ---------------
-derive(F, V) :- months_slot(F), years(Y), V is Y * 12.
-derive(F, V) :- months_slot(F), months(M), V is M.
+derive(F, V) :- months_slot(F), years(Y, T), \+ superseded_term(T), V is Y * 12.
+derive(F, V) :- months_slot(F), months(M, T), \+ superseded_term(T), V is M.
 
 % --- a year count -------------------------------------------------------
-derive(F, V) :- years_slot(F), years(Y), V is Y.
+derive(F, V) :- years_slot(F), years(Y, T), \+ superseded_term(T), V is Y.
 
 % --- GRAPH DEPENDENCY: the loan is the price minus the down payment ----
 % Neither operand is the field's own value; both come from the utterance and
 % the subtraction is exact at scale 10^18. This is the case the model gets
 % wrong by a digit -- 796,000 less 10% emitted as 714,400 rather than 716,400.
-derive(F, V) :- loan_slot(F), money(P), down_pct(D), V is P - (P * D / 100).
-derive(F, V) :- loan_slot(F), money(P), down_money(Dn), P > Dn, V is P - Dn.
+%
+% THE OPERANDS ARE INDEPENDENTLY DATED, which is the point of doing this in the
+% graph rather than over the latest turn alone. "redo it for $817,400" restates
+% the price and says nothing about the deposit, so the new price combines with
+% the ORIGINAL down payment -- a combination no single turn contains.
+derive(F, V) :- loan_slot(F), money(P, Tp), \+ superseded_money(Tp),
+                down_pct(D, Td), \+ superseded_down(Td), V is P - (P * D / 100).
+derive(F, V) :- loan_slot(F), money(P, Tp), \+ superseded_money(Tp),
+                down_money(Dn, Td), \+ superseded_down(Td), P > Dn, V is P - Dn.
 
 % --- GRAPH DEPENDENCY: the home value IS the price ----------------------
 % PMI drops off against the property, not the loan, so this field takes the
 % gross figure where `loan_amount` takes the net one.
-derive(F, V) :- price_slot(F), money(P), down_pct(_), V is P.
-derive(F, V) :- price_slot(F), money(P), down_money(_), V is P.
+derive(F, V) :- price_slot(F), money(P, Tp), \+ superseded_money(Tp),
+                down_pct(_, _), V is P.
+derive(F, V) :- price_slot(F), money(P, Tp), \+ superseded_money(Tp),
+                down_money(_, _), V is P.
+
+% --- an increment is STATED, not computed -------------------------------
+% "$750 more a month" names the overpayment slot in words. `extra_money` is a
+% separate KIND from `money` precisely so it appears in no loan or price rule:
+% without that split the 750 pairs with the opening turn's "10% down" and
+% derives a $675 mortgage, which is the graph combining two real literals under
+% a rule that cannot see that "more" means an increment.
+derive(F, V) :- extra_slot(F), extra_money(M, T), \+ superseded_extra(T), V is M.
 )PL";
 
 /**
@@ -386,10 +470,48 @@ derive(F, V) :- price_slot(F), money(P), down_money(_), V is P.
     return goal;
 }
 
+/**
+ * Append every numeric literal in `text` as a fact tagged with `turn`.
+ *
+ * The turn is what the recency clauses in `kRules` compare. It is an ordinary
+ * argument rather than a separate predicate per turn, so the rule base stays
+ * the same size however many turns arrive.
+ */
+auto emit_literal_facts(std::string_view text, int turn, std::string& facts) -> void {
+    const std::string tail = ", " + std::to_string(turn) + ").\n";
+    for (const auto& lit : mv::lex_numeric_literals(text)) {
+        const std::string v = literal_text(lit);
+        switch (lit.tag) {
+            case mv::LiteralTag::Percent:
+                facts += (lit.names_down_payment ? "down_pct(" : "pct(") + v + tail;
+                break;
+            case mv::LiteralTag::Money:
+                // Three kinds, not two. An increment is neither a price nor a
+                // deposit, and giving it its own predicate is what keeps it out
+                // of the loan and price rules -- see `names_increment`.
+                facts += (lit.names_down_payment ? "down_money("
+                          : lit.names_increment  ? "extra_money("
+                                                 : "money(") + v + tail;
+                break;
+            case mv::LiteralTag::Years:  facts += "years(" + v + tail; break;
+            case mv::LiteralTag::Months: facts += "months(" + v + tail; break;
+            case mv::LiteralTag::Days:   facts += "days(" + v + tail; break;
+            case mv::LiteralTag::Untagged: break;
+        }
+    }
+}
+
 }  // namespace
 
+/** One turn is the degenerate exchange: everything is turn 0, so no recency
+ *  clause in `kRules` can fire and the derivation is what it always was. */
 auto derive_candidates(std::string_view operation, std::string_view user_text)
     -> std::vector<FieldCandidates> {
+    return derive_candidates_in_turns(operation, user_text, {});
+}
+
+auto derive_candidates_in_turns(std::string_view operation, std::string_view earlier,
+                                std::string_view latest) -> std::vector<FieldCandidates> {
     std::vector<FieldCandidates> out;
     const auto fields = mv::fields_of(operation);
     if (fields.empty()) {
@@ -397,20 +519,9 @@ auto derive_candidates(std::string_view operation, std::string_view user_text)
     }
 
     std::string facts;
-    for (const auto& lit : mv::lex_numeric_literals(user_text)) {
-        const std::string v = literal_text(lit);
-        switch (lit.tag) {
-            case mv::LiteralTag::Percent:
-                facts += (lit.names_down_payment ? "down_pct(" : "pct(") + v + ").\n";
-                break;
-            case mv::LiteralTag::Money:
-                facts += (lit.names_down_payment ? "down_money(" : "money(") + v + ").\n";
-                break;
-            case mv::LiteralTag::Years:  facts += "years(" + v + ").\n"; break;
-            case mv::LiteralTag::Months: facts += "months(" + v + ").\n"; break;
-            case mv::LiteralTag::Days:   facts += "days(" + v + ").\n"; break;
-            case mv::LiteralTag::Untagged: break;
-        }
+    emit_literal_facts(earlier, 0, facts);
+    if (!latest.empty()) {
+        emit_literal_facts(latest, 1, facts);
     }
 
     for (const auto& f : fields) {
@@ -427,6 +538,8 @@ auto derive_candidates(std::string_view operation, std::string_view user_text)
                     facts += "loan_slot(" + name + ").\n";
                 } else if (name == "original_home_value" || name == "home_price") {
                     facts += "price_slot(" + name + ").\n";
+                } else if (name == "monthly_overpayment" || name == "extra_monthly_payment") {
+                    facts += "extra_slot(" + name + ").\n";
                 }
                 break;
             default: break;
@@ -480,6 +593,7 @@ auto derive_candidates(std::string_view operation, std::string_view user_text)
     return out;
 }
 
+
 auto reconcile(const std::vector<FieldCandidates>& candidates,
                const std::map<std::string, std::string>& emitted) -> Reconciliation {
     Reconciliation r;
@@ -497,17 +611,57 @@ auto reconcile(const std::vector<FieldCandidates>& candidates,
     // the same value, the model's own assignment says which one meant it. A
     // field already holding that value keeps it; the others are left alone,
     // because nothing in the utterance distinguishes them.
+    // ONLY A FIELD ACTUALLY IN CONTENTION MAY CLAIM A LITERAL, and counting
+    // every candidate here was a real inconsistency: the tally was taken over
+    // ALL candidates while the skip decisions are made PER FIELD below, so a
+    // field that is about to be skipped anyway still got a vote -- and its vote
+    // could veto the one replacement this layer existed to make.
+    //
+    // Measured. On "Amortize $451,300 at 5.25% over 20-year." revised by "try
+    // 6.75%", `annual_rate` and `pmi_annual_rate` both derive the single value
+    // 0.0675. The model emitted `pmi_annual_rate` as the convention 0.0000 --
+    // which the zero rule below skips regardless, because a convention zero is
+    // a statement that the field does not apply -- yet it counted as a second
+    // claimant, `claimed` reached 2, and the CORRECT 0.0675 was refused as
+    // contested. The whole recency rule produced zero behavioural change
+    // because of this line, which is how it was found.
+    //
+    // A field the model left out cannot claim either: this layer never ADDS a
+    // field, so an absent one can never hold the literal it would contest.
     std::map<std::string, int> claimed;
     for (const auto& c : candidates) {
-        if (c.values.size() == 1) {
-            ++claimed[c.values.front()];
+        if (c.values.size() != 1) {
+            continue;
         }
+        const auto held = emitted.find(c.field);
+        if (held == emitted.end()) {
+            continue;               // never replaceable, so never a claimant
+        }
+        const auto held_decimal = mv::parse_strict_decimal(held->second);
+        if (!held_decimal.has_value() || held_decimal->is_zero()) {
+            continue;               // declined by convention, or not a scalar
+        }
+        ++claimed[c.values.front()];
     }
 
     for (const auto& c : candidates) {
         const auto it = emitted.find(c.field);
         if (it == emitted.end()) {
             continue;   // never ADD a field; the field-set contract is G2's
+        }
+        // THE EMITTED VALUE MUST BE A SCALAR DECIMAL for this layer to have
+        // anything to say about it. A REPEATED field arrives as JSON array
+        // text -- ComputeAmortizationBatch's `term_months` is "[360,360]" --
+        // which parses as no decimal at all, so `same_value` answers false and
+        // the field fell through to the replace path, swapping a correct
+        // two-element array for the scalar 360. The rule base derives scalars;
+        // an array is a different shape and `derive_day_offsets` is where this
+        // module handles one. Found by sweeping the corpus with GOLD standing
+        // in for the model's output, which is the only way a layer that
+        // corrupts a CORRECT answer shows up at all -- the row scores
+        // raw-exact and serves wrong, so no raw metric can see it.
+        if (!mv::parse_strict_decimal(it->second).has_value()) {
+            continue;
         }
         if (c.values.size() == 1) {
             const std::string& only_value = c.values.front();
@@ -540,8 +694,26 @@ auto reconcile(const std::vector<FieldCandidates>& candidates,
             // authoritative. It emits at the MODEL'S precision, because the
             // emitted text is what the proto carries -- lengthening it would
             // change the contract rather than correct the value.
+            const std::string replacement = round_to(only_value, places_of(it->second));
+
+            // THE SOLVER MUST NOT EMIT WHAT THE VERIFIER WILL REFUSE, and this
+            // is the guard that was missing. A derived value goes straight back
+            // through validation, so a replacement outside its slot's band does
+            // not merely fail to help -- it converts an answer the model got
+            // RIGHT into a refusal. Measured: a HELOC exchange answering "what
+            // is your maximum LTV?" with "75%" let that 75 reach `annual_rate`,
+            // and twelve perfectly-served rows came back
+            // `annual_rate = 0.75 is outside this assistant's interest-rate
+            // range`. G5 owns the bound and is asked here rather than copied,
+            // for the reason this project already records against two tables of
+            // the same thing drifting apart.
+            const auto as_decimal = mv::parse_strict_decimal(replacement);
+            if (!as_decimal.has_value() ||
+                mv::slot_bound_violation(c.field, *as_decimal).has_value()) {
+                continue;
+            }
             FieldCandidates fixed = c;
-            fixed.values = {round_to(only_value, places_of(it->second))};
+            fixed.values = {replacement};
             r.replace.push_back(std::move(fixed));
             continue;
         }

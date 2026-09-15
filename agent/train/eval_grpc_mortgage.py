@@ -420,7 +420,14 @@ def evaluate(rows: list[dict], stub, tail: RawOutputTail, timeout: float,
             # clarification outcome. Sending "" makes the service substitute a
             # placeholder that is out-of-distribution for every model trained on
             # this corpus; see call()'s docstring.
-            which, served, text, reason = call(stub, utterance, reply, timeout)
+            # `question1` IS the echo this comment describes, and it was computed
+            # on every path and then not passed -- so `prior_question` defaulted
+            # to "" on every scored call and the service saw a placeholder that
+            # appears zero times in the training corpus. It is also the only
+            # thing that tells the service's derivation layer a REVISION from an
+            # ANSWER: empty means the previous turn was an answer. Without it the
+            # HELOC reply "75%" reads as a restatement of the interest rate.
+            which, served, text, reason = call(stub, utterance, reply, timeout, question1)
             raws = tail.drain()
         except grpc.RpcError as e:
             errors += 1
