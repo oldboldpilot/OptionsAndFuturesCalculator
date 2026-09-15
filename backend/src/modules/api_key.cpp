@@ -406,12 +406,30 @@ auto pro_gate_mode() -> GateMode {
 }
 
 auto is_pro(const Identity& identity) noexcept -> bool {
-    // Tier names are policy, not code, so this compares against the two the
-    // database's own CHECK constraint allows (profiles.tier IN ('free','pro')).
-    // Keeping the vocabulary identical across the schema, the key registry and
-    // this check is what stops a subscription that says "pro" somewhere from
-    // meaning nothing here.
-    return identity.tier == "pro" || identity.tier == "partner";
+    // EVERY PAID TIER, NOT THE ONE NAMED "pro". This compared against
+    // `profiles.tier IN ('free','pro')` -- a column CLAUDE.md records as dead,
+    // nothing reads or writes it -- while the tiers people actually buy on
+    // mortgagefvcalculator.com are free < pro < realtor < loan_officer <
+    // business. The consequence was the worst direction a gate can fail: a
+    // Realtor at $29/mo, a Loan Officer at $59/mo and a Business subscriber at
+    // $129/mo each presented a VALID licence, were authenticated, and were
+    // refused the AI assistant -- the feature they were paying MORE than a Pro
+    // subscriber to get. Logged as `pro-gate deny: ... tier=business auth=ok`,
+    // which reads like a rejected credential rather than a gate that does not
+    // know the tier exists.
+    //
+    // A LADDER, not a list of equals, because that is what the tier names mean
+    // and what the client's own TIER_RANK encodes. Anything at or above `pro`
+    // is entitled to everything `pro` is; a tier added above one of these
+    // inherits the entitlement rather than silently losing it, which is the
+    // failure this comment exists to stop recurring.
+    //
+    // `partner` is not on that ladder: it is an OPERATOR credential (the
+    // issued key for a partner site), not a subscription anyone buys, and it
+    // is listed explicitly so that stays visible.
+    static constexpr std::array<std::string_view, 5> kEntitledTiers{
+        "pro", "realtor", "loan_officer", "business", "partner"};
+    return std::ranges::find(kEntitledTiers, identity.tier) != kEntitledTiers.end();
 }
 
 namespace {

@@ -33,12 +33,17 @@
 // restores it to unset and re-proves the Off-mode admit-everyone behaviour,
 // so this file does not leave the process's environment in a state that
 // would surprise a test run after it.
+#include <array>
+#include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <cstdio>
 #include <string>
 #include <string_view>
 
 #include <grpcpp/grpcpp.h>
+#include <openssl/hmac.h>
+#include <openssl/evp.h>
 
 import api_key;
 
@@ -58,6 +63,51 @@ auto check(bool condition, const std::string& what) -> void {
 }
 
 auto section(const char* title) -> void { std::printf("\n=== %s ===\n", title); }
+
+/** base64url without padding, matching `api_key.cpp`'s own encoder.
+ *  Written out here rather than exported from the module: the test must be
+ *  able to mint a licence the way the BILLING WORKER does, independently of
+ *  the code under test, or it would only prove the engine agrees with itself. */
+auto b64url_encode_for_test(std::string_view raw) -> std::string {
+    static constexpr std::string_view kA =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    std::string out;
+    std::size_t i = 0;
+    for (; i + 2 < raw.size(); i += 3) {
+        const std::uint32_t c = (static_cast<unsigned char>(raw[i]) << 16) |
+                                (static_cast<unsigned char>(raw[i + 1]) << 8) |
+                                static_cast<unsigned char>(raw[i + 2]);
+        out.push_back(kA[(c >> 18) & 0x3F]);
+        out.push_back(kA[(c >> 12) & 0x3F]);
+        out.push_back(kA[(c >> 6) & 0x3F]);
+        out.push_back(kA[c & 0x3F]);
+    }
+    if (i + 1 == raw.size()) {
+        const std::uint32_t c = static_cast<unsigned char>(raw[i]) << 16;
+        out.push_back(kA[(c >> 18) & 0x3F]);
+        out.push_back(kA[(c >> 12) & 0x3F]);
+    } else if (i + 2 == raw.size()) {
+        const std::uint32_t c = (static_cast<unsigned char>(raw[i]) << 16) |
+                                (static_cast<unsigned char>(raw[i + 1]) << 8);
+        out.push_back(kA[(c >> 18) & 0x3F]);
+        out.push_back(kA[(c >> 12) & 0x3F]);
+        out.push_back(kA[(c >> 6) & 0x3F]);
+    }
+    return out;
+}
+
+/** HMAC-SHA512 truncated to 256 bits, base64url -- the licence signature. */
+auto hmac_sha512_b64_for_test(std::string_view secret, std::string_view message) -> std::string {
+    std::array<unsigned char, EVP_MAX_MD_SIZE> mac{};
+    unsigned int mac_len = 0;
+    if (HMAC(EVP_sha512(), secret.data(), static_cast<int>(secret.size()),
+             reinterpret_cast<const unsigned char*>(message.data()), message.size(), mac.data(),
+             &mac_len) == nullptr) {
+        return {};
+    }
+    return b64url_encode_for_test(
+        std::string_view{reinterpret_cast<const char*>(mac.data()), 32});
+}
 
 using options_calculator::auth::AssistantSurface;
 using options_calculator::auth::check_assistant_entitlement;
@@ -341,6 +391,104 @@ auto main() -> int {
         check(assistant_status.ok(),
               "PRO_GATE_MODE unset: even a malformed-key ParseOperation call is admitted");
         setenv("PRO_GATE_MODE", "enforce", 1);  // restore for anything run after this binary
+    }
+
+    // -----------------------------------------------------------------
+    section("9. the SUBSCRIPTION round trip: a minted licence is what makes a "
+            "paying customer Pro");
+    {
+        // WHY THIS IS HERE. Every check above starts from a hand-built
+        // `Identity`, which is the right scope for the gate's own decision and
+        // says nothing about how a real subscriber ACQUIRES that identity. The
+        // whole paid path is: the billing worker mints an HMAC-SHA512 licence
+        // with LICENCE_SIGNING_KEY -> `verify_licence` checks it -> the tier it
+        // carries reaches the gate. Nothing exercised that chain, so a licence
+        // format change, a truncation change, or an expiry bug would have been
+        // caught only by a customer being refused what they paid for.
+        //
+        // It needs no network and no Stripe: the secret is ours, so the test
+        // mints its own licences exactly as the worker does.
+        setenv("PRO_GATE_MODE", "enforce", 1);
+        setenv("LICENCE_SIGNING_KEY", "test-signing-secret-not-a-real-key", 1);
+
+        const auto mint = [](std::string_view tier, std::int64_t expires_in) -> std::string {
+            const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                                 std::chrono::system_clock::now().time_since_epoch())
+                                 .count();
+            const std::string payload = std::string{R"({"t":")"} + std::string{tier} +
+                                        R"(","e":)" + std::to_string(now + expires_in) +
+                                        R"(,"s":"regression-test"})";
+            const auto body = b64url_encode_for_test(payload);
+            return "lk_live_" + body + "." + hmac_sha512_b64_for_test(
+                                                  "test-signing-secret-not-a-real-key", body);
+        };
+
+        // ADMIT: a live Pro licence reaches the assistant, which is the thing a
+        // subscriber is paying for.
+        {
+            Identity id;
+            const bool ok = verify_licence(mint("pro", 3600), id);
+            check(ok, "a freshly minted Pro licence verifies");
+            check(id.tier == "pro", "...and carries tier=pro");
+            check(id.authenticated, "...and is authenticated");
+            check(check_assistant_entitlement(id, kMortgageSurface).ok(),
+                  "...so ParseOperation is ADMITTED -- the direction a refuse-only "
+                  "test can never prove");
+        }
+
+        // EVERY BILLABLE TIER, because a tier that verifies but does not admit
+        // is a customer billed and refused. `loan_officer` is the live case:
+        // it was added to the site on 2026-09-14 and nothing here would have
+        // noticed if the gate did not honour it.
+        for (const auto* tier : {"pro", "realtor", "loan_officer", "business"}) {
+            Identity id;
+            const bool ok = verify_licence(mint(tier, 3600), id);
+            check(ok && id.tier == tier,
+                  std::string{"a "} + tier + " licence verifies and keeps its tier");
+            check(check_assistant_entitlement(id, kMortgageSurface).ok(),
+                  std::string{"...and "} + tier + " is admitted to the assistant");
+        }
+
+        // REFUSE, in each direction that matters. A licence layer that admits
+        // any of these is worse than none, because it looks like it is working.
+        {
+            Identity id;
+            check(!verify_licence(mint("pro", -60), id),
+                  "an EXPIRED licence is refused -- the clock is checked, not just the signature");
+        }
+        {
+            Identity id;
+            auto tampered = mint("pro", 3600);
+            tampered[tampered.size() - 1] = (tampered.back() == 'A' ? 'B' : 'A');
+            check(!verify_licence(tampered, id),
+                  "a tampered SIGNATURE is refused");
+        }
+        {
+            // Raise the tier in the payload without re-signing: the exact
+            // forgery the HMAC exists to stop.
+            Identity id;
+            const auto honest = mint("pro", 3600);
+            const auto dot = honest.rfind('.');
+            const auto forged = "lk_live_" +
+                                b64url_encode_for_test(R"({"t":"business","e":99999999999,"s":"x"})") +
+                                honest.substr(dot);
+            check(!verify_licence(forged, id),
+                  "a payload edited to claim a HIGHER tier is refused");
+        }
+        {
+            Identity id;
+            const auto valid = mint("pro", 3600);
+            setenv("LICENCE_SIGNING_KEY", "a-different-secret", 1);
+            check(!verify_licence(valid, id),
+                  "a licence minted with a DIFFERENT secret is refused -- this is the "
+                  "engine and the billing worker disagreeing, and it must fail closed");
+            unsetenv("LICENCE_SIGNING_KEY");
+            check(!verify_licence(valid, id),
+                  "with NO secret set nothing verifies -- an unset secret must never "
+                  "mean accept anything");
+        }
+        setenv("PRO_GATE_MODE", "enforce", 1);
+        unsetenv("LICENCE_SIGNING_KEY");
     }
 
     // -----------------------------------------------------------------
