@@ -314,4 +314,35 @@ VALUES ('public', 'protected_relations', true, true, NULL, NULL,
         'the guard list itself: dropping it disarms every check in migration 08')
 ON CONFLICT (schema_name, table_name) DO NOTHING;
 
+-- ---------------------------------------------------------------------------
+-- The guard tables guard themselves at the ROW level too.
+--
+-- These carry no grants to anon/authenticated/service_role/ofc_app, so nothing
+-- could read them already. RLS with ZERO policies is added anyway, because the
+-- posture is now ASSERTED by a regression test that sweeps every table in the
+-- schema, and "this one is safe for a different reason" is exactly the kind of
+-- exception that rots. Fail-closed by construction: no policy means no row is
+-- visible to any role that is neither the owner nor a superuser.
+--
+-- ENABLE, deliberately NOT FORCE. `guard_mass_delete()` is SECURITY DEFINER and
+-- runs as this table's owner; FORCE would bind the owner too, so a deployment
+-- whose owner is not a superuser would have its own guard unable to read the
+-- guard list -- reintroducing the exact defect SECURITY DEFINER was added to
+-- fix, one layer down.
+-- ---------------------------------------------------------------------------
+DO $guard_rls$
+DECLARE
+    t text;
+BEGIN
+    FOREACH t IN ARRAY ARRAY['protected_relations',
+                             'data_hazard_install_log']
+    LOOP
+        IF to_regclass(format('public.%I', t)) IS NOT NULL THEN
+            EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', t);
+            EXECUTE format('REVOKE ALL ON public.%I FROM PUBLIC', t);
+        END IF;
+    END LOOP;
+END;
+$guard_rls$;
+
 COMMIT;
