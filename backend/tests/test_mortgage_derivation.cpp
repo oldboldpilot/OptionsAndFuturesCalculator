@@ -155,7 +155,38 @@ auto main() -> int {
               "a NON-zero wrong value is still eligible for replacement");
     }
 
-    std::printf("\n7. a dated grid is READ from the utterance, never invented\n");
+    std::printf("\n7. precision: the MODEL'S spelling is the contract\n");
+    {
+        // The corpus writes `rate` to six places -- 5.5%/12 is labelled
+        // 0.004583 -- while the solver computes 0.004583333333333333. Treating
+        // those as different made the layer "correct" a field that was already
+        // right: 31 of 257 derivations disagreed with gold on this alone and
+        // served exact-match fell 397 -> 351 on the holdout.
+        const auto c = md::derive_candidates(
+            "ComputePayment",
+            "$1,498,000 purchase, a $481,000 down payment, 5.5%, 30-year. Monthly payment?");
+        std::map<std::string, std::string> rounded{{"rate", "0.004583"}};
+        check(md::reconcile(c, rounded).replace.empty(),
+              "an exact derivation does not 'correct' a correctly-rounded value");
+
+        // ...and the comparison must be ASYMMETRIC. Rounding both to the
+        // SHORTER of the two lengths let a terminating derivation mask a real
+        // error: 0.0047 against a wrong 0.004667 collapses to 0.0047 at four
+        // places. The model's spelling sets the precision; the derivation is
+        // rounded TO it, never the reverse.
+        const auto p2 = md::derive_candidates(
+            "ComputePayment", "Payment on $323,300 at 5.64% over 30-year?");
+        std::map<std::string, std::string> wrong{{"rate", "0.004667"}};
+        const auto r2 = md::reconcile(p2, wrong);
+        check(r2.replace.size() == 1 && r2.replace.front().field == "rate",
+              "a wrong SIX-place value is still corrected by a FOUR-place derivation");
+        check(!r2.replace.empty() && r2.replace.front().values.front() == "0.004700",
+              "and the replacement is emitted at the MODEL'S precision (got "
+              + (r2.replace.empty() ? std::string{"none"} : r2.replace.front().values.front())
+              + ")");
+    }
+
+    std::printf("\n8. a dated grid is READ from the utterance, never invented\n");
     {
         const auto g = md::derive_day_offsets(
             "These payouts land on specific days, not yearly. I invest $368,500 today and "
@@ -178,7 +209,7 @@ auto main() -> int {
               "a fractional day is refused rather than half-read");
     }
 
-    std::printf("\n8. nothing is derived when nothing is stated\n");
+    std::printf("\n9. nothing is derived when nothing is stated\n");
     {
         const auto c = md::derive_candidates("ComputePayment", "What's my payment?");
         check(only(c, "rate").empty(), "no percent stated -> no rate candidate");

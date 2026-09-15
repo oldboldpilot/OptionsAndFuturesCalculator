@@ -247,10 +247,113 @@ derive(F, V) :- price_slot(F), money(P), down_money(_), V is P.
  * 10^18 -- the same scale sensen.logic computes in -- so parsing both sides
  * and comparing units is exact, with no tolerance to tune.
  */
-[[nodiscard]] auto same_value(std::string_view a, std::string_view b) -> bool {
-    const auto da = mv::parse_strict_decimal(a);
-    const auto db = mv::parse_strict_decimal(b);
-    return da.has_value() && db.has_value() && *da == *db;
+/** Decimal places in a numeric literal's text, 0 if it carries none. */
+[[nodiscard]] auto places_of(std::string_view text) -> int {
+    const auto dot = text.find('.');
+    if (dot == std::string_view::npos) {
+        return 0;
+    }
+    return static_cast<int>(text.size() - dot - 1);
+}
+
+/** `value` rounded half-up to `places`, as text. Fixed point at
+ *  mv::Decimal::kPlaces, which is 15 -- never assume 18. */
+[[nodiscard]] auto round_to(std::string_view value, int places) -> std::string {
+    const auto d = mv::parse_strict_decimal(value);
+    // mv::Decimal::kPlaces, NOT a literal. It is 15, this function was first
+    // written against a hardcoded 18, and the result was wrong by a factor of
+    // a thousand -- 0.004700 rendered as 0.000005. The module exports the
+    // constant for exactly this reason.
+    if (!d.has_value() || places < 0 || places > mv::Decimal::kPlaces) {
+        return std::string{value};
+    }
+    __int128 units = d->units();
+    const bool negative = units < 0;
+    if (negative) {
+        units = -units;
+    }
+    __int128 scale = 1;
+    for (int i = 0; i < mv::Decimal::kPlaces - places; ++i) {
+        scale *= 10;
+    }
+    const __int128 rounded = ((units + scale / 2) / scale) * scale;
+    const mv::Decimal out{negative ? -rounded : rounded};
+    // Render from the units: 10^18 fixed point, trimmed to `places`.
+    __int128 u = out.units();
+    const bool neg = u < 0;
+    if (neg) {
+        u = -u;
+    }
+    __int128 whole = u;
+    for (int i = 0; i < mv::Decimal::kPlaces; ++i) {
+        whole /= 10;
+    }
+    __int128 frac = u;
+    for (int i = 0; i < mv::Decimal::kPlaces - places; ++i) {
+        frac /= 10;
+    }
+    __int128 whole_shifted = whole;
+    for (int i = 0; i < places; ++i) {
+        whole_shifted *= 10;
+    }
+    frac -= whole_shifted;
+    std::string text = neg ? "-" : "";
+    std::string w;
+    if (whole == 0) {
+        w = "0";
+    }
+    while (whole > 0) {
+        w.insert(w.begin(), static_cast<char>('0' + static_cast<int>(whole % 10)));
+        whole /= 10;
+    }
+    text += w;
+    if (places > 0) {
+        std::string f;
+        for (int i = 0; i < places; ++i) {
+            f.insert(f.begin(), static_cast<char>('0' + static_cast<int>(frac % 10)));
+            frac /= 10;
+        }
+        text += '.' + f;
+    }
+    return text;
+}
+
+/**
+ * Do these two decimal texts agree AT THE PRECISION THE MODEL USED?
+ *
+ * Not a tolerance, and the distinction matters. The corpus writes `rate` to six
+ * places -- 5.5%/12 is labelled `0.004583` -- while the solver computes the
+ * exact `0.004583333333333333`. Those are the same number in the contract's own
+ * terms, and comparing them at scale 10^18 made the layer "correct" a field
+ * that was already right.
+ *
+ * Measured before this existed: 31 of 257 single-candidate derivations
+ * disagreed with gold, every one of them this, and served exact-match on the
+ * holdout fell 397 -> 351. The arithmetic was never wrong; the comparison was.
+ *
+ * So the MODEL'S OWN SPELLING sets the precision of the comparison. That is not
+ * a convenience -- the emitted text is what the proto carries and what the
+ * Finance service will parse, so it is the contract, and a solver that silently
+ * lengthens it is changing the answer rather than fixing it.
+ */
+[[nodiscard]] auto same_value(std::string_view derived, std::string_view emitted) -> bool {
+    const auto dd = mv::parse_strict_decimal(derived);
+    const auto de = mv::parse_strict_decimal(emitted);
+    if (!dd.has_value() || !de.has_value()) {
+        return false;
+    }
+    if (*dd == *de) {
+        return true;
+    }
+    // ASYMMETRIC, DELIBERATELY. The first version rounded both to
+    // min(places(derived), places(emitted)) and that is a real defect, not a
+    // rounding nicety: a terminating derivation is SHORT, so `0.0047` against
+    // the model's wrong `0.004667` collapsed to four places, matched, and the
+    // error was masked -- the layer silently stopped correcting the very case
+    // it was built for. The model's spelling is the contract, so the DERIVED
+    // value is rounded TO it and never the reverse.
+    const auto rounded = mv::parse_strict_decimal(round_to(derived, places_of(emitted)));
+    return rounded.has_value() && *rounded == *de;
 }
 
 
@@ -433,10 +536,13 @@ auto reconcile(const std::vector<FieldCandidates>& candidates,
                 // never mentions. Refusing to choose is the whole rule.
                 continue;
             }
-            // Uncontested and different: the solver is authoritative. The
-            // model's job was to say this slot exists and what plays it, never
-            // to do the arithmetic.
-            r.replace.push_back(c);
+            // Uncontested and genuinely different: the solver is
+            // authoritative. It emits at the MODEL'S precision, because the
+            // emitted text is what the proto carries -- lengthening it would
+            // change the contract rather than correct the value.
+            FieldCandidates fixed = c;
+            fixed.values = {round_to(only_value, places_of(it->second))};
+            r.replace.push_back(std::move(fixed));
             continue;
         }
         // Several readings for one field. The model's own number selects
