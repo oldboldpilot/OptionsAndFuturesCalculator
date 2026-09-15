@@ -1495,6 +1495,19 @@ target_compile_definitions(test_mortgage_derivation PRIVATE
     MORTGAGE_FINANCE_PROTO_PATH="${CMAKE_CURRENT_SOURCE_DIR}/proto/finance.proto")
 add_test(NAME MortgageDerivationTest COMMAND test_mortgage_derivation)
 
+# mortgage_explanation: the PMI scenario put into words by the SAME Horn-clause
+# solver the derivation layer uses. It needs no verifier and no proto: it reasons
+# over FACTS the amortisation already produced, which is the property that keeps
+# a number out of the prose unless the engine computed it.
+add_executable(test_mortgage_explanation tests/test_mortgage_explanation.cpp)
+target_sources(test_mortgage_explanation
+    PRIVATE
+    FILE_SET CXX_MODULES FILES
+        src/modules/mortgage_explanation.cppm
+)
+target_link_libraries(test_mortgage_explanation PRIVATE sensen_slim fastjson logger)
+add_test(NAME MortgageExplanationTest COMMAND test_mortgage_explanation)
+
 add_executable(test_mortgage_verification tests/test_mortgage_verification.cpp)
 target_sources(test_mortgage_verification
     PRIVATE
