@@ -191,6 +191,94 @@ END;
 $$;
 
 -- ---------------------------------------------------------------------------
+-- 5. auth.users holds no NULL where gotrue scans a non-nullable Go string.
+--
+--    THIS IS A RESTORE HAZARD, WHICH IS WHY IT BELONGS BESIDE THE ROLE-ATTRIBUTE
+--    CHECK ABOVE RATHER THAN IN A BEHAVIOUR TEST. pg_dump/pg_restore preserve a
+--    NULL exactly, so a database moved between clusters carries it across, and
+--    nothing about the move reports a problem. What reports it is every admin
+--    endpoint answering 500:
+--
+--      {"code":500,"error_code":"unexpected_failure",
+--       "msg":"Database error finding users"}
+--      [ERRO] sql: Scan error on column index 3, name "confirmation_token":
+--             converting NULL to string is unsupported
+--
+--    Found in production on 2026-09-15, inherited from the pre-migration data --
+--    checked against the pre-drop dump of the old database, which carries the
+--    same NULLs, rather than assumed.
+--
+--    The empty string is not a guess. auth.users carries eight such columns and
+--    Supabase gave four of them DEFAULT '' after hitting this; the four without
+--    a default were exactly the four holding NULL. The fix backfills all eight
+--    and defaults all eight, so the next restore cannot reintroduce it.
+--
+--    Sign-in is asserted here too, because the repair touches the digest column:
+--    an account with no secret must keep failing every candidate. That cannot be
+--    checked from the catalog, so what IS checked here is the invariant the
+--    catalog can see -- the column is either empty or a well-formed bcrypt
+--    digest, never anything in between.
+-- ---------------------------------------------------------------------------
+DO $$
+DECLARE
+    col        text;
+    n_null     int;
+    n_defaults int := 0;
+    n_present  int := 0;
+    n_odd      int;
+    cols       text[] := ARRAY['confirmation_token', 'recovery_token',
+                               'email_change', 'email_change_token_new',
+                               'email_change_token_current', 'phone_change',
+                               'phone_change_token', 'reauthentication_token'];
+BEGIN
+    IF to_regclass('auth.users') IS NULL THEN
+        PERFORM pg_temp.expect('auth.users: absent, no gotrue in this database',
+                               true, 'skipped');
+        RETURN;
+    END IF;
+
+    FOREACH col IN ARRAY cols LOOP
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                        WHERE table_schema='auth' AND table_name='users'
+                          AND column_name=col) THEN
+            CONTINUE;
+        END IF;
+        n_present := n_present + 1;
+
+        EXECUTE format('SELECT count(*) FROM auth.users WHERE %I IS NULL', col)
+           INTO n_null;
+        PERFORM pg_temp.expect(
+            format('auth.users.%s has no NULL (gotrue scans it as a string)', col),
+            n_null = 0,
+            format('%s NULL row(s)', n_null));
+
+        IF EXISTS (SELECT 1 FROM information_schema.columns
+                    WHERE table_schema='auth' AND table_name='users'
+                      AND column_name=col AND column_default IS NOT NULL) THEN
+            n_defaults := n_defaults + 1;
+        END IF;
+    END LOOP;
+
+    -- The default is what stops the NEXT restore reintroducing it. Without this
+    -- the check above passes today and says nothing about tomorrow.
+    PERFORM pg_temp.expect(
+        'every gotrue string column defaults, so a restore cannot reintroduce NULL',
+        n_present > 0 AND n_defaults = n_present,
+        format('%s of %s columns carry a default', n_defaults, n_present));
+
+    -- The credential column: empty means "no secret" in gotrue's own model, and
+    -- a real value must be a bcrypt digest. Anything else is neither.
+    SELECT count(*) INTO n_odd FROM auth.users
+     WHERE encrypted_password IS NULL
+        OR (encrypted_password <> '' AND encrypted_password NOT LIKE '$2%');
+    PERFORM pg_temp.expect(
+        'auth.users credential column is empty or a bcrypt digest, never NULL',
+        n_odd = 0,
+        format('%s row(s) neither empty nor bcrypt', n_odd));
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
 -- Report, and FAIL THE PROCESS if anything is red.
 -- ---------------------------------------------------------------------------
 \echo ''
