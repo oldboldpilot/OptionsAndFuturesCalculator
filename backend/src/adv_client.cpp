@@ -10,16 +10,13 @@
  *
  *   ./adv_client <utterance> [prior_clarification] [host:port]
  */
-#include <chrono>
-#include <cstdlib>
-#include <iostream>
-#include <memory>
-#include <string>
+
 
 #include <grpcpp/grpcpp.h>
 #include "assistant.pb.h"
 #include "assistant.grpc.pb.h"
 
+import std;
 auto main(int argc, char** argv) -> int {
     if (argc < 2) {
         std::cerr << "usage: adv_client <utterance> [prior_clarification] [host:port]\n";

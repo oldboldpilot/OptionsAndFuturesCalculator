@@ -37,8 +37,8 @@
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 
-#include <stdexcept>
-#include <string>
+
+import std;
 
 namespace nb = nanobind;
 

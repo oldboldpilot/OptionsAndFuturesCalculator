@@ -14,13 +14,8 @@
 // point of storing a digest is that a stolen configuration file yields nothing
 // usable; a tool that also saved the plaintext would undo that.
 
-#include <cctype>
-#include <cstdint>
-#include <cstdlib>
-#include <iostream>
-#include <string>
-#include <string_view>
-#include <vector>
+
+import std;
 
 import api_key;
 import fastjson;

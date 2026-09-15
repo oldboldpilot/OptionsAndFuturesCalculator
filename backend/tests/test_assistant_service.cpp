@@ -51,14 +51,8 @@
 // PRO_GATE_MODE is set in this process's environment -- see ServiceFixture's
 // own comment for why that specific absence is what every section below
 // relies on.
-#include <array>
-#include <chrono>
 #include <cstdio>
-#include <memory>
-#include <span>
-#include <string>
-#include <string_view>
-#include <utility>
+
 
 #include <grpcpp/grpcpp.h>
 #include "assistant.pb.h"
@@ -70,6 +64,7 @@
 // test rather than a static_cast.
 #include "calculator.pb.h"
 
+import std;
 import assistant_service;
 
 namespace {

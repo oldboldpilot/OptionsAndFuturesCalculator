@@ -1,29 +1,6 @@
 module;
-#include <algorithm>
-#include <array>
-#include <cctype>
-#include <charconv>
-#include <chrono>
-#include <condition_variable>
 #include <cstdint>
-#include <cstdlib>
 #include <cstdio>
-#include <deque>
-#include <exception>
-#include <expected>
-#include <future>
-#include <limits>
-#include <memory>
-#include <mutex>
-#include <optional>
-#include <span>
-#include <stop_token>
-#include <string>
-#include <string_view>
-#include <system_error>
-#include <thread>
-#include <utility>
-#include <vector>
 
 #include <unistd.h>
 
@@ -47,6 +24,8 @@ module;
 #endif
 
 module assistant_service;
+
+import std;
 
 import sensen.llm_pipeline;
 // ComputeBackend enum values and CudaBackend::query()/is_available(), the

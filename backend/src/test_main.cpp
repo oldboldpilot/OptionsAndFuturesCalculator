@@ -1,4 +1,5 @@
-#include <iostream>
+import std;
+
 import calculator.testing;
 import market_data;
 

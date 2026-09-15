@@ -46,22 +46,9 @@
 // files are scoped to finance_service.cpp around sensen's pricers/solvers.
 // backend/sensen/** and backend/external/SGEE/** are untouched and read-only
 // for this file.
-#include <algorithm>
-#include <array>
-#include <chrono>
-#include <cmath>
 #include <cstdio>
-#include <memory>
-#include <span>
-#include <string>
-#include <string_view>
-#include <utility>
-#include <vector>
 
-#include <cstdlib>
-#include <expected>
-#include <map>
-#include <optional>
+
 
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
@@ -70,6 +57,7 @@
 #include "calculator.pb.h"
 #include "calculator.grpc.pb.h"
 
+import std;
 import calculator_service;
 import strategy_store;
 

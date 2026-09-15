@@ -18,21 +18,10 @@
 // Plain hand-rolled check()/section() harness, matching every other test in
 // this tree -- not gtest (sensen's cpp_details.txt rule 39 forbids external
 // test frameworks project-wide).
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <chrono>
-#include <cstdint>
 #include <cstdio>
-#include <cstdlib>
-#include <memory>
-#include <mutex>
-#include <optional>
-#include <string>
-#include <thread>
-#include <unordered_set>
-#include <vector>
 
+
+import std;
 import pg;
 import inference_queue;
 

@@ -46,18 +46,12 @@
 //
 // Usage: ./kv_range_probe <model.gguf> [n_threads] [prompt...]
 
-#include <algorithm>
-#include <cmath>
 #include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <limits>
-#include <map>
-#include <string>
-#include <vector>
+
 
 #include "ggml.h"
 
+import std;
 import sensen.llama_model;
 import sensen.gguf_parser;
 import sensen.llm_interfaces;

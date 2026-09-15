@@ -27,8 +27,6 @@
  * No external test framework (rule 39): a `check()` and two counters.
  */
 #include <cstdio>
-#include <cstdlib>
-#include <string>
 
 #include <grpcpp/grpcpp.h>
 

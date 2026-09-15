@@ -34,14 +34,10 @@
 // Usage:
 //   ./kv_bench_probe <model.gguf> <prompt_tokens> <decode_tokens> [n_threads] [paged|full]
 
-#include <algorithm>
-#include <chrono>
 #include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <string>
-#include <vector>
 
+
+import std;
 import sensen.llama_model;
 import sensen.gguf_parser;
 import sensen.llm_interfaces;

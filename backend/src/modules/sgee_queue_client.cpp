@@ -1,31 +1,10 @@
 module;
-#include <algorithm>
-#include <atomic>
-#include <cctype>
-#include <chrono>
-#include <condition_variable>
-#include <cstdint>
-#include <cstdlib>
-#include <deque>
-#include <fstream>
-#include <functional>
-#include <iterator>
-#include <map>
-#include <memory>
-#include <mutex>
-#include <optional>
-#include <random>
-#include <span>
-#include <stop_token>
-#include <string>
-#include <string_view>
-#include <thread>
-#include <vector>
-
 #include <grpcpp/grpcpp.h>
 #include "task_queue.grpc.pb.h"
 
 module sgee_queue_client;
+
+import std;
 
 import logger;
 import sgee.runtime.resilience;

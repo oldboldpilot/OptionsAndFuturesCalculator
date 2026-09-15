@@ -34,13 +34,10 @@
 // tests/test_option_pricing_service.cpp and tests/test_mortgage_verification.cpp
 // -- not gtest. The sensen coding policy (backend/sensen/config/cpp_details.txt
 // rule 39) forbids external test frameworks project-wide.
-#include <atomic>
-#include <chrono>
 #include <cstdio>
-#include <expected>
-#include <string>
-#include <thread>
 
+
+import std;
 import market_data;
 
 using options_calculator::market_data::FetchAttempt;

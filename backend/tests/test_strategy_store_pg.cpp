@@ -29,17 +29,10 @@
 //
 // It refuses to run without DATABASE_URL rather than passing vacuously, and it
 // deletes only rows whose user_id carries its own test prefix.
-#include <algorithm>
-#include <atomic>
-#include <chrono>
 #include <cstdio>
-#include <cstdlib>
-#include <memory>
-#include <string>
-#include <string_view>
-#include <thread>
-#include <vector>
 
+
+import std;
 import strategy_store;
 import pg;
 

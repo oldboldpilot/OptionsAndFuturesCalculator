@@ -21,16 +21,11 @@
 // to stderr (including the "llama_kv_cache: size = ..." line).
 
 #include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <chrono>
-#include <fstream>
-#include <sstream>
-#include <string>
-#include <vector>
+
 
 #include "llama.h"
 
+import std;
 namespace {
 
 // Verbatim from backend/src/modules/assistant_service.cpp:62-66

@@ -21,7 +21,6 @@
  * tests pin the C++ half; section 0 of the migration pins the SQL half.
  */
 #include <cstdio>
-#include <string>
 
 import std;
 import state_refresh;

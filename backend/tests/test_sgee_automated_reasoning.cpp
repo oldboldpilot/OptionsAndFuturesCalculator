@@ -17,17 +17,8 @@
 //   P5. Mortgage Safety Invariant: response.mutable_params() is populated ONLY when the GP-ARA verification verdict is Proven.
 //       Unsafe and Indeterminate verdicts provably reach the Refused terminal node.
 
-#include <iostream>
-#include <string>
-#include <vector>
-#include <set>
-#include <unordered_set>
-#include <format>
-#include <cstdlib>
-#include <memory>
-#include <algorithm>
-#include <string_view>
-#include <queue>
+
+import std;
 
 import sgee.core.types;
 import sgee.core.blueprint;

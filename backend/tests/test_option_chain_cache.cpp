@@ -3,16 +3,10 @@
 // Tests for option-chain caching, TTL expiration, serve-stale resilience on upstream failure,
 // and hard-cap refusal in market_data.cppm.
 
-#include <atomic>
-#include <chrono>
 #include <cstdio>
-#include <expected>
-#include <memory>
-#include <string>
-#include <string_view>
-#include <system_error>
-#include <vector>
 
+
+import std;
 import market_data;
 
 using namespace options_calculator::market_data;

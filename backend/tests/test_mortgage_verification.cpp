@@ -38,18 +38,10 @@
 //     classifies to a known SlotKind, so a field finance.proto grows later
 //     turns this test red instead of silently becoming an Indeterminate in
 //     production.
-#include <array>
 #include <cstdio>
-#include <cstdlib>
-#include <fstream>
-#include <map>
-#include <set>
-#include <sstream>
-#include <string>
-#include <string_view>
-#include <utility>
-#include <vector>
 
+
+import std;
 import mortgage_verification;
 
 namespace mv = mortgage_calculator::assistant::verify;

@@ -31,17 +31,10 @@
 //
 // Usage: ./kv_gran_probe <model.gguf> [n_threads]
 
-#include <algorithm>
-#include <array>
-#include <cmath>
 #include <cstdio>
-#include <cstdlib>
-#include <limits>
-#include <map>
-#include <set>
-#include <string>
-#include <vector>
 
+
+import std;
 import sensen.llama_model;
 import sensen.gguf_parser;
 import sensen.llm_interfaces;

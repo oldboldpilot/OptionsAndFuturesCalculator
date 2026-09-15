@@ -10,18 +10,9 @@
  */
 
 module;
-#include <array>
-#include <cstddef>
-#include <expected>
-#include <format>
-#include <memory>
-#include <optional>
-#include <string>
-#include <string_view>
-#include <utility>
-#include <vector>
-
 module strategy_store;
+
+import std;
 
 import pg;
 import logger;

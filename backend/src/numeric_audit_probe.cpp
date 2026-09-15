@@ -27,19 +27,12 @@
 // AUDIT_PAD/AUDIT_SHIFT (RoPE padding) and AUDIT_POSITIONS (the per-position
 // sweep) apply to the FIRST utterance only, preserving their original meaning.
 
-#include <algorithm>
-#include <cmath>
 #include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <fstream>
-#include <numeric>
-#include <sstream>
-#include <string>
-#include <vector>
+
 
 #include "llama.h"
 
+import std;
 import sensen.llama_model;
 import sensen.gguf_parser;
 import sensen.llm_interfaces;

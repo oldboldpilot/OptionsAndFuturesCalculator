@@ -39,12 +39,11 @@
 // policy in its constructor, so a setenv after the first instance() call would
 // do nothing and the test would silently measure the wrong policy.
 #include <cstdio>
-#include <cstdlib>
-#include <string>
-#include <string_view>
+
 
 #include <grpcpp/grpcpp.h>
 
+import std;
 import quota;
 
 namespace {

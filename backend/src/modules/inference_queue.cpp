@@ -1,17 +1,7 @@
 module;
-#include <algorithm>
-#include <array>
-#include <charconv>
-#include <chrono>
-#include <cstdint>
-#include <expected>
-#include <format>
-#include <mutex>
-#include <optional>
-#include <string>
-#include <string_view>
-
 module inference_queue;
+
+import std;
 
 import pg;
 import logger;

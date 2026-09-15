@@ -40,19 +40,13 @@
 //   PARITY_PROMPT=<str>  override the user utterance
 //   PARITY_VERBOSE=1     print every tensor, not just the per-layer summary
 
-#include <algorithm>
-#include <cmath>
 #include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <cctype>
-#include <map>
-#include <string>
-#include <vector>
+
 
 #include "ggml.h"
 #include "llama.h"
 
+import std;
 import sensen.llama_model;
 import sensen.gguf_parser;
 import sensen.llm_interfaces;

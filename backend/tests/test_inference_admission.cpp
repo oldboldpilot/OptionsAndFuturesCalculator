@@ -10,17 +10,10 @@
 // Plain hand-rolled check()/section() harness, matching every other test in
 // this tree -- not gtest (config/cpp_details.txt rule 39 forbids external
 // test frameworks project-wide).
-#include <chrono>
-#include <condition_variable>
 #include <cstdio>
-#include <memory>
-#include <mutex>
-#include <optional>
-#include <stop_token>
-#include <string>
-#include <thread>
-#include <vector>
 
+
+import std;
 import inference_admission;
 import sgee_queue_client;
 import inference_queue;

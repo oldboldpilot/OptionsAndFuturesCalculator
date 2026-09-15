@@ -29,13 +29,10 @@
 //
 // Usage: ./kv_equiv_probe <model.gguf> [n_rollout] [n_threads] [prompt_tokens]
 
-#include <algorithm>
-#include <cmath>
 #include <cstdio>
-#include <cstdlib>
-#include <string>
-#include <vector>
 
+
+import std;
 import sensen.llama_model;
 import sensen.gguf_parser;
 import sensen.llm_interfaces;

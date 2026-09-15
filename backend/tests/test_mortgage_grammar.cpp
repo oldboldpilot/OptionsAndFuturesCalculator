@@ -38,20 +38,10 @@
 // EOS gating), and the `params_regex()` projection is handed to sensen's own
 // `RegexGrammar::create` to prove it is a pattern that engine actually
 // compiles and enforces -- not a pattern that merely looks plausible.
-#include <array>
 #include <cstdio>
-#include <cstdlib>
-#include <fstream>
-#include <map>
-#include <optional>
-#include <set>
-#include <span>
-#include <sstream>
-#include <string>
-#include <string_view>
-#include <utility>
-#include <vector>
 
+
+import std;
 import mortgage_grammar;
 import mortgage_verification;
 import sensen.grammar;

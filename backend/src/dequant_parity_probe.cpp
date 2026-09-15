@@ -7,16 +7,13 @@
 //
 // Usage: ./dequant_parity_probe <model.gguf>
 
-#include <cmath>
-#include <cstdint>
 #include <cstdio>
-#include <cstring>
-#include <string>
-#include <vector>
 
 extern "C" {
 #include "ggml.h"
 }
+
+import std;
 
 import sensen.gguf_parser;
 

@@ -4,9 +4,10 @@
 //
 // Usage: ./gguf_requantize_probe <in.gguf> <out.gguf> <ftype:0=f32,1=f16>
 #include <cstdio>
-#include <cstdlib>
+
 #include "llama.h"
 
+import std;
 int main(int argc, char** argv) {
     if (argc < 4) { std::fprintf(stderr, "usage: %s in out ftype\n", argv[0]); return 2; }
     llama_backend_init();

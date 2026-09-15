@@ -28,11 +28,9 @@
  * whole files would fail on every sync and be switched off within a week.
  */
 #include <cstdio>
-#include <filesystem>
-#include <fstream>
-#include <sstream>
-#include <string>
 
+
+import std;
 namespace {
 
 // Injected by CMake -- see the comment on canonical_proto().

@@ -33,19 +33,12 @@
 //      completion was written back by PostgresLeaseSource's own spawned
 //      helper thread (spawn_writeback), not by a raw Queue::complete() call
 //      in the test itself.
-#include <array>
-#include <chrono>
-#include <cstdint>
 #include <cstdio>
-#include <cstdlib>
-#include <memory>
-#include <optional>
-#include <stop_token>
-#include <string>
-#include <thread>
+
 #include <sys/wait.h>
 #include <unistd.h>
 
+import std;
 import pg;
 import inference_queue;
 import inference_admission;
