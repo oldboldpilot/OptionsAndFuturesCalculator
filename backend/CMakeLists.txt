@@ -1532,6 +1532,15 @@ add_executable(test_rental_cash_flow tests/test_rental_cash_flow.cpp)
 target_link_libraries(test_rental_cash_flow PRIVATE sensen_slim fastjson logger)
 add_test(NAME RentalCashFlowTest COMMAND test_rental_cash_flow)
 
+# rental_tax: Schedule E, depreciation and the passive-activity limits. Imports
+# tax_deduction for the brackets, so both modules compile into this target.
+add_executable(test_rental_tax tests/test_rental_tax.cpp)
+target_sources(test_rental_tax PRIVATE FILE_SET CXX_MODULES FILES
+    src/modules/tax_deduction.cppm
+    src/modules/rental_tax.cppm)
+target_link_libraries(test_rental_tax PRIVATE fastjson logger)
+add_test(NAME RentalTaxTest COMMAND test_rental_tax)
+
 add_executable(test_mortgage_verification tests/test_mortgage_verification.cpp)
 target_sources(test_mortgage_verification
     PRIVATE
