@@ -102,6 +102,7 @@ Generate the stubs the same way eval_grpc.py documents for its own:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -551,6 +552,80 @@ def report(res: dict, label: str, n_failures: int) -> None:
             print(f"  served: {f['served']} {f['served_detail'][:120]}")
 
 
+def gold_has_params(row: dict) -> bool:
+    """The SAME predicate `raw_total` counts with -- the gold (last) turn parsing
+    to a params block. Written once and used by both, because a provenance field
+    that answers a slightly different question than the metric it describes is
+    worse than no field: it looks like corroboration."""
+    convo = [t for t in row["conversations"] if t["role"] != "system"]
+    return parse_params_text(convo[-1]["content"]) is not None
+
+
+def holdout_provenance(path: Path, scored: list[dict]) -> dict:
+    """Identify the DATASET a score was measured on.
+
+    WHY THIS EXISTS. On 2026-09-15 a 40-row "regression" was chased through a
+    submodule bisect, a full CCACHE_DISABLE rebuild and a per-row failure diff
+    before the cause turned out to be that two runs read two different files --
+    /tmp/.../val-v15.jsonl (563 gold-params rows) and
+    agent/dataset/data_mortgage/val.jsonl (558). `--label` recorded what the run
+    was CALLED; nothing recorded what it was MEASURED ON, so two incomparable
+    numbers sat side by side looking comparable.
+
+    `gold_has_params` is the tell and it is a property of the INPUT FILE: a model
+    change cannot move it. Recording it next to the sha256 means the next reader
+    sees the denominator move before they start theorising about weights.
+    """
+    return {
+        "path": str(path.resolve()),
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "bytes": path.stat().st_size,
+        "rows_scored": len(scored),
+        "gold_has_params": sum(1 for r in scored if gold_has_params(r)),
+    }
+
+
+def refuse_on_holdout_mismatch(here: dict, priors: list[str], allow: bool) -> None:
+    """Compare THIS run's holdout against each prior result's, and refuse.
+
+    Checked BEFORE the first RPC, deliberately: a mismatch found after a
+    twelve-minute decode is one the reader is invested in explaining away.
+    """
+    for ref in priors:
+        prior = json.loads(Path(ref).read_text())
+        theirs = prior.get("holdout")
+        label = prior.get("label", "?")
+        if theirs is None:
+            msg = (f"{ref} (label {label!r}) predates holdout provenance, so the "
+                   f"dataset it was scored on cannot be established. It is not "
+                   f"comparable to this run by inspection.")
+        elif theirs.get("sha256") == here["sha256"] and \
+                theirs.get("rows_scored") != here["rows_scored"]:
+            # Same FILE, different slice. `--n 100` against a 600-row prior shares
+            # a sha and still divides by a different denominator, which is the
+            # same error this whole mechanism exists to stop -- just one level in.
+            msg = (f"ROW-COUNT MISMATCH against {ref} (label {label!r}): this run "
+                   f"scored {here['rows_scored']} rows of that file, the prior "
+                   f"scored {theirs.get('rows_scored')}. Same dataset, different "
+                   f"denominator -- drop --n, or compare like for like.")
+        elif theirs.get("sha256") != here["sha256"]:
+            msg = (f"HOLDOUT MISMATCH against {ref} (label {label!r}).\n"
+                   f"  this run : {here['path']}\n"
+                   f"             sha256 {here['sha256'][:16]}... "
+                   f"{here['gold_has_params']} gold-params of {here['rows_scored']}\n"
+                   f"  {ref:<9}: {theirs.get('path')}\n"
+                   f"             sha256 {str(theirs.get('sha256'))[:16]}... "
+                   f"{theirs.get('gold_has_params')} gold-params of "
+                   f"{theirs.get('rows_scored')}\n"
+                   f"  These are different datasets. Their scores are not "
+                   f"comparable, and the denominator is the proof.")
+        else:
+            continue
+        if not allow:
+            raise SystemExit("refusing to compare: " + msg)
+        print("WARNING (--allow-holdout-mismatch): " + msg)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--addr", default="localhost:50051")
@@ -578,6 +653,13 @@ def main() -> None:
                          "pass one per model being compared, not one per run.")
     ap.add_argument("--allow-contamination", action="store_true",
                     help="report the overlap and score anyway (default: refuse)")
+    ap.add_argument("--compare-to", action="append", default=[], metavar="PRIOR.JSON",
+                    help="a prior --json-out this run is meant to be compared "
+                         "against. REFUSES before the first RPC if that result was "
+                         "measured on a different holdout file. Repeatable.")
+    ap.add_argument("--allow-holdout-mismatch", action="store_true",
+                    help="warn instead of refusing. Only legitimate when you intend "
+                         "to compare two DATASETS rather than two models.")
     args = ap.parse_args()
 
     if not args.val and not args.file:
@@ -591,6 +673,15 @@ def main() -> None:
     rows = [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
     if args.n:
         rows = rows[:args.n]
+
+    # ---- WHICH DATASET IS THIS? ----
+    provenance = holdout_provenance(path, rows)
+    print(f"holdout   : {provenance['path']}")
+    print(f"            sha256 {provenance['sha256'][:16]}...  "
+          f"{provenance['rows_scored']} rows, "
+          f"{provenance['gold_has_params']} with gold <params>")
+    refuse_on_holdout_mismatch(provenance, args.compare_to,
+                               args.allow_holdout_mismatch)
 
     # ---- the holdout must be held out FOR EVERY MODEL BEING COMPARED ----
     #
@@ -639,7 +730,8 @@ def main() -> None:
     report(res, args.label, args.show_failures)
 
     if args.json_out:
-        Path(args.json_out).write_text(json.dumps({"label": args.label, **res}, indent=2))
+        Path(args.json_out).write_text(json.dumps(
+            {"label": args.label, "holdout": provenance, **res}, indent=2))
 
 
 if __name__ == "__main__":
