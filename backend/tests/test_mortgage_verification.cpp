@@ -1684,6 +1684,64 @@ auto main() -> int {
               "a percent is never tagged as a money increment");
     }
 
+    std::printf("\nthe PMI drop-off threshold: exempt at its convention, GROUNDED otherwise\n");
+    {
+        // PINNED BEFORE THE THRESHOLD BECOMES CALLER-CONFIGURABLE, because all
+        // three directions have to keep holding once more operations carry this
+        // field, and only the first of them is obvious.
+        //
+        // WHY IT IS NOT UNGROUNDED THE WAY `guess` IS, which is the tempting
+        // move: kUngroundedFields exists because "A SEED CANNOT CARRY A WRONG
+        // ANSWER THE WAY A QUANTITY CAN -- it selects a root, it does not state
+        // one." An LTV threshold is the opposite. 0.78 against 0.80 moves the
+        // month PMI stops and the total cost with it, so a hallucinated
+        // threshold is a wrong answer wearing a plausible number, which is
+        // exactly what grounding is for. It stays grounded; only the CONVENTION
+        // value is exempt.
+        const std::string text =
+            "I owe $320,000 at 6.5% with 240 months left, paying $5,378.63/month. Home is worth "
+            "$500,000. If I refinance to 5.25% over 15 years with $4,000 in closing costs paid "
+            "in cash, what's my new payment and break-even?";
+
+        auto refi = [](std::string_view ltv) {
+            return params("ComputeRefinance", {{"current_loan_balance", "320000.00"},
+                                               {"current_monthly_payment", "5378.63"},
+                                               {"current_annual_rate", "0.0650"},
+                                               {"current_remaining_months", "240"},
+                                               {"property_value", "500000.00"},
+                                               {"new_annual_rate", "0.0525"},
+                                               {"new_term_years", "15"},
+                                               {"closing_costs", "4000.00"},
+                                               {"closing_cost_type", "PAID_IN_CASH"},
+                                               {"cash_out_amount", "0.00"},
+                                               {"current_pmi_monthly", "0.00"},
+                                               {"new_pmi_monthly", "0.00"},
+                                               {"pmi_drop_off_ltv", std::string{ltv}},
+                                               {"payments_per_year", "12"}});
+        };
+
+        // 1. The convention. The utterance says nothing about PMI, and 0.80 is
+        //    how the model spells "I am not specifying one".
+        expect_pass(refi("0.80"), text,
+                    "0.80 is exempt as the statutory convention");
+
+        // 2. The exemption does NOT license its neighbours. This is the whole
+        //    `guess = 0.25` lesson: one unlisted constant made ComputeXirr 100%
+        //    unreachable, and the fix there was a FIELD exemption precisely
+        //    because a seed states nothing. Here the opposite must hold -- an
+        //    unstated 0.78 is a threshold nobody asked for and is refused.
+        expect(refi("0.78"), text, mv::Outcome::Unsafe, mv::ReasonCode::UngroundedValue,
+               "an unstated 0.78 is refused, so the 0.80 exemption covers only itself");
+
+        // 3. FLEXIBILITY, which is the point of making it configurable: a
+        //    threshold the user actually STATES must ground from the text. If
+        //    this ever fails, "caller-configurable" is true of the engine and
+        //    false of everything in front of it.
+        const std::string stated = text + " My lender drops PMI at 78% loan-to-value.";
+        expect_pass(refi("0.78"), stated,
+                    "a STATED 78% grounds the threshold from the utterance");
+    }
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

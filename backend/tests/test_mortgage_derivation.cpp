@@ -410,6 +410,41 @@ auto main() -> int {
               "a 75% LTV never replaces a stated 8.33% interest rate");
     }
 
+    std::printf("\n17. every PURCHASE-price field derives the GROSS figure\n");
+    {
+        // `price_slot` is assigned by EXACT NAME in emit_slot_facts, and it
+        // named two of the three fields that mean "the gross purchase price".
+        // A field the rule base never hears about derives NOTHING and says
+        // nothing: there is no unclassified-slot error to trip, the goal simply
+        // has no clause that matches and the graph falls through. That is why
+        // this needed a test rather than a reading of the rule base.
+        //
+        // What the rule encodes: once a deposit is stated, `loan_amount` takes
+        // the NET figure and the price field keeps the GROSS one. PMI drops off
+        // against the PROPERTY, so a price field outside this rule is a PMI
+        // schedule measured against the wrong number -- and on a revision turn
+        // ("redo it for $817,400") it is measured against a stale one.
+        //
+        // ComputeRefinance's `property_value` is deliberately NOT in this list.
+        // It is an appraised value, not a purchase price, and a refinance
+        // utterance states no deposit -- so the rule's own `down_pct` premise
+        // could never hold for it. Including it would add a clause that cannot
+        // fire, which reads exactly like coverage.
+        const std::vector<std::pair<std::string, std::string>> purchase_price_fields{
+            {"ComputeAmortization", "original_home_value"},
+            {"ComputeRentVsBuy",    "property_price"},
+            {"ComputeHomeNpv",      "property_price"},
+        };
+        for (const auto& [op, field] : purchase_price_fields) {
+            const auto cand = md::derive_candidates(
+                op, "A $796,000 property with a 10% deposit at 5.97% over 30 years.");
+            const auto got = only(cand, field);
+            check(got.size() == 1 && std::stod(got.front()) == 796000.0,
+                  op + "." + field + " derives the GROSS 796000 (got "
+                    + (got.empty() ? std::string{"none"} : got.front()) + ")");
+        }
+    }
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

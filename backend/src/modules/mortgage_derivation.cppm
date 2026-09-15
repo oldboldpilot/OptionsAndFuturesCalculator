@@ -534,11 +534,41 @@ auto derive_candidates_in_turns(std::string_view operation, std::string_view ear
             case mv::SlotKind::MonthCount: facts += "months_slot(" + name + ").\n"; break;
             case mv::SlotKind::YearCount:  facts += "years_slot(" + name + ").\n"; break;
             case mv::SlotKind::Money:
-                if (name == "loan_amount" || name == "present_value") {
+                // These three sets are the rule base's whole vocabulary of
+                // money ROLES, and membership is by exact name. A money field
+                // outside all three derives NOTHING -- there is no
+                // unclassified-slot error to trip, the goal simply matches no
+                // clause and the graph falls through in silence. So each set
+                // has to be swept as a CLASS whenever the proto grows a
+                // synonym, which is how `property_price` sat outside
+                // kPurchasePriceFields while meaning exactly what
+                // `original_home_value` means.
+                //
+                // kPurchasePriceFields is the GROSS purchase price: with a
+                // deposit stated, `loan_amount` takes the net figure and these
+                // keep the gross one. PMI drops off against the property, so a
+                // price field missing from here is a PMI schedule measured
+                // against the wrong number -- and on a revision turn, against a
+                // stale one.
+                //
+                // `property_value` (ComputeRefinance) is deliberately ABSENT.
+                // It is an appraised value rather than a purchase price, and a
+                // refinance utterance states no deposit, so the price rule's
+                // own `down_pct`/`down_money` premise can never hold for it.
+                // Listing it would add a clause that cannot fire, which reads
+                // exactly like coverage.
+                static constexpr std::array<std::string_view, 2> kLoanSlotFields{
+                    "loan_amount", "present_value"};
+                static constexpr std::array<std::string_view, 3> kPurchasePriceFields{
+                    "original_home_value", "home_price", "property_price"};
+                static constexpr std::array<std::string_view, 2> kExtraSlotFields{
+                    "monthly_overpayment", "extra_monthly_payment"};
+
+                if (std::ranges::contains(kLoanSlotFields, name)) {
                     facts += "loan_slot(" + name + ").\n";
-                } else if (name == "original_home_value" || name == "home_price") {
+                } else if (std::ranges::contains(kPurchasePriceFields, name)) {
                     facts += "price_slot(" + name + ").\n";
-                } else if (name == "monthly_overpayment" || name == "extra_monthly_payment") {
+                } else if (std::ranges::contains(kExtraSlotFields, name)) {
                     facts += "extra_slot(" + name + ").\n";
                 }
                 break;
