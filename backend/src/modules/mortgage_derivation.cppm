@@ -102,6 +102,30 @@ struct Reconciliation {
     std::vector<std::string> ambiguous;     ///< several candidates, model matches none
 };
 
+/**
+ * The day-offset grid an utterance states, as a JSON array, or nothing.
+ *
+ * "$131,852.19 after 394 days; $70,114 after 725 days" -> `[0,394,725]`. The
+ * leading 0 is the outlay at t=0, which every dated series in this corpus
+ * carries and no utterance states in days.
+ *
+ * WHY THIS IS A FOLD AND NOT A HORN CLAUSE. Every other derivation here is an
+ * arithmetic relation between one literal and one field, which is exactly what
+ * a rule base expresses well. This is an ORDERED COLLECTION of every literal
+ * carrying one tag, and expressing "gather these, in this order" in Prolog
+ * would be ceremony around a loop -- the rule base earns its place on the
+ * relations, not on everything.
+ *
+ * It exists because refusing was right for the reason given and wrong about
+ * the facts. `dated_utterance_rejects_operation` refuses ComputeNpv on a dated
+ * series because remapping would need a `dates` array the model never emitted,
+ * and inventing one is fabrication. Measured on the v15 holdout: in 4 of 4
+ * such failures the grid is stated in the utterance in full. Nothing is
+ * invented by reading it, so the objection does not apply and the refusal can
+ * become a repair.
+ */
+[[nodiscard]] auto derive_day_offsets(std::string_view user_text) -> std::optional<std::string>;
+
 [[nodiscard]] auto reconcile(const std::vector<FieldCandidates>& candidates,
                              const std::map<std::string, std::string>& emitted)
     -> Reconciliation;
@@ -426,5 +450,48 @@ auto reconcile(const std::vector<FieldCandidates>& candidates,
     return r;
 }
 
+
+auto derive_day_offsets(std::string_view user_text) -> std::optional<std::string> {
+    std::vector<std::string> days;
+    for (const auto& lit : mv::lex_numeric_literals(user_text)) {
+        if (lit.tag != mv::LiteralTag::Days) {
+            continue;
+        }
+        std::string t;
+        for (const char c : lit.text) {
+            if (c != ',' && c != '$' && c != '%') {
+                t.push_back(c);
+            }
+        }
+        // A day offset is a whole number of days; "1.5 days" is not a grid
+        // point this contract can carry, and half-reading one would be worse
+        // than declining the whole utterance.
+        if (t.empty() || t.find('.') != std::string::npos) {
+            return std::nullopt;
+        }
+        days.push_back(std::move(t));
+    }
+    if (days.size() < 2) {
+        // One dated flow is not a grid. A lone cash flow sits at t=0 and its
+        // present value IS its face value -- the same exemption
+        // sensen::check_dated_span makes, for the same reason.
+        return std::nullopt;
+    }
+    // STRICTLY INCREASING, checked rather than assumed: an unsorted or repeated
+    // grid means the reading is wrong, not that the series is unusual.
+    for (std::size_t i = 1; i < days.size(); ++i) {
+        if (days[i].size() < days[i - 1].size() ||
+            (days[i].size() == days[i - 1].size() && days[i] <= days[i - 1])) {
+            return std::nullopt;
+        }
+    }
+    std::string out = "[0";
+    for (const auto& d : days) {
+        out += ',';
+        out += d;
+    }
+    out += ']';
+    return out;
+}
 
 }  // namespace mortgage_calculator::assistant::derive

@@ -1180,7 +1180,7 @@ endif()
 
 # Core engine binary
 add_executable(calculator_engine src/main.cpp src/issue_key.cpp src/modules/calculator_service.cpp src/modules/finance_service.cpp src/modules/quota.cpp src/modules/api_key.cpp src/modules/assistant_service.cpp src/modules/mortgage_assistant_service.cpp src/modules/inference_queue.cpp src/modules/inference_admission.cpp src/modules/sgee_queue_client.cpp src/modules/strategy_store.cpp src/modules/state_refresh.cpp)
-target_sources(calculator_engine PUBLIC FILE_SET CXX_MODULES FILES src/modules/calculator_service.cppm src/modules/market_data.cppm src/modules/finance_service.cppm src/modules/quota.cppm src/modules/api_key.cppm src/modules/fips_mode.cppm src/modules/state_refresh.cppm src/modules/strategy_catalogue.cppm src/modules/assistant_verification.cppm src/modules/assistant_service.cppm src/modules/mortgage_verification.cppm src/modules/mortgage_grammar.cppm src/modules/mortgage_assistant_service.cppm src/modules/pg.cppm src/modules/inference_queue.cppm src/modules/sgee_queue_client.cppm src/modules/inference_admission.cppm src/modules/strategy_store.cppm)
+target_sources(calculator_engine PUBLIC FILE_SET CXX_MODULES FILES src/modules/calculator_service.cppm src/modules/market_data.cppm src/modules/finance_service.cppm src/modules/quota.cppm src/modules/api_key.cppm src/modules/fips_mode.cppm src/modules/state_refresh.cppm src/modules/strategy_catalogue.cppm src/modules/assistant_verification.cppm src/modules/assistant_service.cppm src/modules/mortgage_verification.cppm src/modules/mortgage_derivation.cppm src/modules/mortgage_grammar.cppm src/modules/mortgage_assistant_service.cppm src/modules/pg.cppm src/modules/inference_queue.cppm src/modules/sgee_queue_client.cppm src/modules/inference_admission.cppm src/modules/strategy_store.cppm)
 target_link_libraries(calculator_engine PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto sgee)
 # PostgreSQL::PostgreSQL is linked into calculator_engine further down, right
 # after find_package(PostgreSQL REQUIRED) runs (see that comment block) --
@@ -1823,6 +1823,8 @@ target_sources(test_mortgage_assistant_service
     FILE_SET CXX_MODULES FILES
         src/modules/mortgage_assistant_service.cppm
         src/modules/mortgage_verification.cppm
+        # Graph C imports this; a target compiling the service must carry it.
+        src/modules/mortgage_derivation.cppm
         src/modules/mortgage_grammar.cppm
         src/modules/strategy_catalogue.cppm
         src/modules/assistant_verification.cppm

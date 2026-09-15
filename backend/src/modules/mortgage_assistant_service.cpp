@@ -47,6 +47,7 @@ import quota;
 import api_key;
 import assistant_verification;
 import mortgage_verification;
+import mortgage_derivation;
 import mortgage_grammar;
 import inference_admission;
 import inference_queue;
@@ -2007,6 +2008,7 @@ enum class ModelOutputOutcome : std::uint8_t { Success, Refused };
 // the user's own words as an explicit argument, can falsify it.
 
 namespace mv = ::mortgage_calculator::assistant::verify;
+namespace md = ::mortgage_calculator::assistant::derive;
 
 /**
  * Collapses the verifier's twelve reason codes onto this contract's four.
@@ -2370,6 +2372,59 @@ auto apply_tvm_sign_convention(std::string_view operation,
 }
 
 /**
+ * Graph B, cell B1: an undated operation on a DATED series becomes its dated
+ * sibling, with the grid READ FROM THE UTTERANCE.
+ *
+ * This started as a pure refusal and should not have. The objection was that
+ * remapping ComputeNpv to ComputeXnpv needs a `dates` array the model never
+ * emitted, and inventing one is fabrication -- true, and the reason Graph A is
+ * allowed to remap is precisely that every value it writes is already in the
+ * utterance. Measured on the v15 holdout: in 4 of 4 such failures the day grid
+ * IS stated in the utterance, in full. So the objection was sound and the
+ * facts were not, and the same rule that forbade the repair now permits it.
+ *
+ * Nothing else changes: `values` and `rate` are the model's own, the grid is
+ * the lexer's, and the rewritten object re-enters the identical validation and
+ * grounding. Where the grid is NOT recoverable -- an evenly-spaced series, a
+ * lone flow, an out-of-order or fractional reading -- this returns nullopt and
+ * the caller refuses exactly as before. Repair where it is derivable, refusal
+ * where it is not.
+ */
+[[nodiscard]] auto remap_to_dated_sibling(const fastjson::json_value& obj,
+                                          std::string_view operation,
+                                          std::string_view user_text)
+    -> std::optional<std::string> {
+    std::string_view dated;
+    if (operation == "ComputeNpv") {
+        dated = "ComputeXnpv";
+    } else if (operation == "ComputeIrr") {
+        dated = "ComputeXirr";
+    } else {
+        return std::nullopt;
+    }
+    const auto grid = md::derive_day_offsets(user_text);
+    if (!grid.has_value()) {
+        return std::nullopt;   // not recoverable -> the caller refuses, as before
+    }
+    if (!obj.contains("values")) {
+        return std::nullopt;   // nothing to date
+    }
+
+    std::string out = R"({"operation":")" + std::string{dated} + R"(",)";
+    for (const auto& [key, value] : obj.as_object()) {
+        if (key == "operation" || key == "dates") {
+            continue;
+        }
+        out += '"' + key + R"(":)";
+        out += value.is_string() ? ('"' + std::string{value.as_string()} + '"')
+                                 : fastjson::stringify(value);
+        out += ',';
+    }
+    out += R"("dates":)" + *grid + "}";
+    return out;
+}
+
+/**
  * Turns the model's `<params>` JSON into a FinanceParams, or into the refusal
  * that says why it could not be.
  *
@@ -2679,6 +2734,14 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
     // and satisfy every bound -- they simply discount evenly-spaced periods for
     // a caller who stated days, and nothing in the response says so.
     if (mv::dated_utterance_rejects_operation(operation, user_text)) {
+        // Cell B1 first: where the grid is stated, this is a repair rather
+        // than a refusal. The rewritten object re-enters this same function,
+        // and cannot recurse twice -- the result names a DATED operation,
+        // which `dated_utterance_rejects_operation` does not reject.
+        if (auto remapped = remap_to_dated_sibling(obj, operation, user_text);
+            remapped.has_value()) {
+            return validate_and_populate_params(*remapped, user_text, response);
+        }
         populate_refusal(
             response, ::mortgage::assistant::Refusal::INVALID_PARAMETERS,
             "This request gives the cash flows on stated days, which " + operation +
@@ -2700,6 +2763,60 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
                          "\"" + operation +
                              "\" is not one of the finance operations this assistant covers.");
         return ModelOutputOutcome::Refused;
+    }
+
+    // Graph C: the model interprets, the solver computes.
+    //
+    // Measured against production minutes after v15 went live, on the very
+    // defect this model was trained to fix: it now DERIVES the loan instead of
+    // emitting the gross price -- the fix working -- and gets the arithmetic
+    // wrong. "a $796,000 home with 10% down" produced loan_amount 658400 where
+    // the answer is 716400, and grounding refused it. Honest, and not an
+    // answer. The solver returns 716400 exactly, because sensen.logic computes
+    // in exact decimal at the same scale as BigDecimal.
+    //
+    // A REPLACEMENT JSON and nothing else, exactly as Graph A: the rewritten
+    // object re-enters this same function and faces the identical validation,
+    // grounding and refusal paths. One level of recursion at most -- after the
+    // substitution every replaced field equals its derivation, so `reconcile`
+    // returns nothing on the second pass and the remap cannot fire again.
+    if (!obj.as_object().empty()) {
+        std::map<std::string, std::string> emitted;
+        for (const auto& [key, value] : obj.as_object()) {
+            if (key == "operation") {
+                continue;
+            }
+            emitted.emplace(key, value.is_string() ? std::string{value.as_string()}
+                                                   : fastjson::stringify(value));
+        }
+        const auto candidates = md::derive_candidates(operation, user_text);
+        const auto verdict = md::reconcile(candidates, emitted);
+        if (!verdict.replace.empty()) {
+            std::map<std::string, std::string> replacement;
+            for (const auto& f : verdict.replace) {
+                replacement.emplace(f.field, f.values.front());
+            }
+            std::string rewritten = R"({"operation":")" + operation + R"(",)";
+            for (const auto& [key, value] : obj.as_object()) {
+                if (key == "operation") {
+                    continue;
+                }
+                const auto sub = replacement.find(key);
+                rewritten += '"' + key + R"(":)";
+                if (sub != replacement.end()) {
+                    // Quoted iff the model quoted it, so the wire type the
+                    // proto declares is preserved and (5) still validates it.
+                    rewritten += value.is_string() ? ('"' + sub->second + '"') : sub->second;
+                } else {
+                    rewritten += value.is_string()
+                                     ? ('"' + std::string{value.as_string()} + '"')
+                                     : fastjson::stringify(value);
+                }
+                rewritten += ',';
+            }
+            rewritten.back() = '}';
+            return validate_and_populate_params(rewritten, user_text, response);
+        }
     }
 
     // (4) -- reject unknown keys BEFORE filling anything in, so a response

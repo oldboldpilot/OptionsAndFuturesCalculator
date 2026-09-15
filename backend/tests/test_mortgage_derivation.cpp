@@ -155,7 +155,30 @@ auto main() -> int {
               "a NON-zero wrong value is still eligible for replacement");
     }
 
-    std::printf("\n7. nothing is derived when nothing is stated\n");
+    std::printf("\n7. a dated grid is READ from the utterance, never invented\n");
+    {
+        const auto g = md::derive_day_offsets(
+            "These payouts land on specific days, not yearly. I invest $368,500 today and "
+            "expect back $131,852.19 after 394 days; $70,114.00 after 725 days.");
+        check(g.has_value() && *g == "[0,394,725]",
+              "the grid is [0,394,725] -- the leading 0 is the outlay at t=0 (got "
+              + g.value_or("none") + ")");
+
+        // The refusal these enable must stay a refusal when the grid ISN'T there.
+        check(!md::derive_day_offsets("I invest $100,000 today and expect back year 1: $50,000.")
+                   .has_value(),
+              "an evenly-spaced series yields no grid");
+        check(!md::derive_day_offsets("Pay it back after 365 days.").has_value(),
+              "ONE dated flow is not a grid -- a lone flow sits at t=0 and its PV is its face value");
+        check(!md::derive_day_offsets("$10 after 700 days; $20 after 300 days").has_value(),
+              "an out-of-order grid is refused: the reading is wrong, not the series unusual");
+        check(!md::derive_day_offsets("$10 after 300 days; $20 after 300 days").has_value(),
+              "a repeated offset is refused");
+        check(!md::derive_day_offsets("$10 after 1.5 days; $20 after 700 days").has_value(),
+              "a fractional day is refused rather than half-read");
+    }
+
+    std::printf("\n8. nothing is derived when nothing is stated\n");
     {
         const auto c = md::derive_candidates("ComputePayment", "What's my payment?");
         check(only(c, "rate").empty(), "no percent stated -> no rate candidate");
