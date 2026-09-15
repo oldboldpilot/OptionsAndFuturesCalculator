@@ -1526,6 +1526,12 @@ target_sources(test_tax_deduction PRIVATE FILE_SET CXX_MODULES FILES
 target_link_libraries(test_tax_deduction PRIVATE fastjson logger)
 add_test(NAME TaxDeductionTest COMMAND test_tax_deduction)
 
+# test_rental_cash_flow: the investor view -- vacancy, itemised expenses and a
+# HELOC that funded the deposit. Calls sensen directly, like test_pmi_policy.
+add_executable(test_rental_cash_flow tests/test_rental_cash_flow.cpp)
+target_link_libraries(test_rental_cash_flow PRIVATE sensen_slim fastjson logger)
+add_test(NAME RentalCashFlowTest COMMAND test_rental_cash_flow)
+
 add_executable(test_mortgage_verification tests/test_mortgage_verification.cpp)
 target_sources(test_mortgage_verification
     PRIVATE
