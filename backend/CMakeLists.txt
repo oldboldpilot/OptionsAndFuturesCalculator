@@ -1461,6 +1461,27 @@ target_sources(dbg_derivation PRIVATE FILE_SET CXX_MODULES FILES
     src/modules/mortgage_derivation.cppm)
 target_link_libraries(dbg_derivation PRIVATE sensen_slim fastjson logger)
 
+# Two consistency checkers over rule systems this project spreads across files
+# no compiler reads together -- the mortgage assistant's per-operation coverage,
+# and mortgagefvcalculator.com's monetization workflow. Both ask the Horn-clause
+# engine "which member of this family has no rule", which is the defect shape
+# every coverage miss recorded in CLAUDE.md has taken.
+#
+# THEY LIVE HERE BECAUSE THIS IS THE ONLY TREE THAT CAN BUILD THEM. The facts
+# they consume are GENERATED -- scripts/emit_assistant_facts.py in this repo,
+# nest-egg-loan/scripts/emit-workflow-facts.mjs in the other -- and both
+# emitters were committed while their readers existed only in an untracked
+# worktree. A generator whose only consumer is uncommitted is a generator
+# nothing gates.
+#
+# Deliberately NOT registered with add_test: each needs a generated facts file,
+# and a check that passes because its input was missing is worse than no check.
+add_executable(assistant_check tests/assistant_check.cpp)
+target_link_libraries(assistant_check PRIVATE sensen_slim fastjson logger)
+
+add_executable(workflow_check tests/workflow_check.cpp)
+target_link_libraries(workflow_check PRIVATE sensen_slim fastjson logger)
+
 add_executable(test_mortgage_derivation tests/test_mortgage_derivation.cpp)
 target_sources(test_mortgage_derivation
     PRIVATE
@@ -2451,3 +2472,15 @@ endif()
 if(TARGET dbg_derivation)
     add_dependencies(build_tests dbg_derivation)
 endif()
+
+# assistant_check / workflow_check are not ctest targets -- each needs a
+# GENERATED facts file, and a check that passes because its input was missing is
+# worse than no check. They are still built here, because a binary nothing
+# compiles rots exactly the way a binary nothing commits does: both of these
+# sat untracked in a worktree while their generators sat in version control,
+# gated by nothing.
+foreach(_t assistant_check workflow_check)
+    if(TARGET ${_t})
+        add_dependencies(build_tests ${_t})
+    endif()
+endforeach()
