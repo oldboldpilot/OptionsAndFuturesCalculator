@@ -1517,6 +1517,15 @@ add_executable(test_pmi_policy tests/test_pmi_policy.cpp)
 target_link_libraries(test_pmi_policy PRIVATE sensen_slim fastjson logger)
 add_test(NAME PmiPolicyTest COMMAND test_pmi_policy)
 
+# tax_deduction: what the mortgage interest deduction is WORTH, per tax year.
+# It imports only std -- the statutory limits are arithmetic over a table, not
+# finance -- so it links no sensen module and carries no libpq.
+add_executable(test_tax_deduction tests/test_tax_deduction.cpp)
+target_sources(test_tax_deduction PRIVATE FILE_SET CXX_MODULES FILES
+    src/modules/tax_deduction.cppm)
+target_link_libraries(test_tax_deduction PRIVATE fastjson logger)
+add_test(NAME TaxDeductionTest COMMAND test_tax_deduction)
+
 add_executable(test_mortgage_verification tests/test_mortgage_verification.cpp)
 target_sources(test_mortgage_verification
     PRIVATE
