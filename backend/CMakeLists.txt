@@ -1508,6 +1508,15 @@ target_sources(test_mortgage_explanation
 target_link_libraries(test_mortgage_explanation PRIVATE sensen_slim fastjson logger)
 add_test(NAME MortgageExplanationTest COMMAND test_mortgage_explanation)
 
+# test_pmi_policy: the byte-identity gate over the PMI cancellation refactor,
+# plus the new basis/threshold behaviour. It links sensen_slim and calls
+# sensen::calculate_mortgage_amortization DIRECTLY rather than through the
+# service, because what is being gated is the engine's arithmetic and a service
+# round trip would only add ways for the comparison to be about something else.
+add_executable(test_pmi_policy tests/test_pmi_policy.cpp)
+target_link_libraries(test_pmi_policy PRIVATE sensen_slim fastjson logger)
+add_test(NAME PmiPolicyTest COMMAND test_pmi_policy)
+
 add_executable(test_mortgage_verification tests/test_mortgage_verification.cpp)
 target_sources(test_mortgage_verification
     PRIVATE
