@@ -221,14 +221,81 @@ Changing the URL alone fails on the checksum; changing the checksum alone fetche
 the old file and fails the same way. Both are Railway build variables, so a model
 swap needs no code change and no commit.
 
-## Publishing a model
+## Publishing a model — the CURRENT procedure
 
-**Superseded — see the status banner at the top of this page.** The private HF
-repository this procedure targets was deleted on 2026-08-05 and the mortgage
-GGUF was never uploaded to it. The steps are kept only because step 0 and step 2
-express the invariant any replacement must also satisfy: **the file you MEASURED
-and the file that is SERVED have to be provably the same bytes, and an upload is
-a place they can stop being.** Read them for that; do not follow them as-is.
+Verified end to end on 2026-09-14, publishing v15. The HuggingFace steps that
+used to be here are kept below, struck through, because their step 0 and step 2
+state the invariant this one also satisfies.
+
+The bucket is S3-compatible and **addressed differently from how `MODEL_URL`
+reads**, which costs a wrong turn if you infer it: the URL is
+`https://model-artifacts-afghinsxp.t3.storageapi.dev/<key>`, so a naive parse
+takes the object key for the bucket. The real addressing is
+endpoint `https://t3.storageapi.dev`, bucket `model-artifacts-afghinsxp`, key
+the final path element.
+
+There is no `aws` CLI and no system `boto3` on the build host; create a venv.
+
+```bash
+python3 -m venv /tmp/upload-venv && /tmp/upload-venv/bin/pip install -q boto3
+
+# Credentials live on the SERVICE, not in config/.env.
+V=$(railway variables --service options-calculator-backend --kv)
+export AWS_ACCESS_KEY_ID=$(echo "$V" | grep '^BUCKET_ACCESS_KEY_ID=' | cut -d= -f2-)
+export AWS_SECRET_ACCESS_KEY=$(echo "$V" | grep '^BUCKET_SECRET_ACCESS_KEY=' | cut -d= -f2-)
+
+# 0. Checksum the file you are about to upload, from that file.
+sha256sum mortgage-v15-Q8_0.gguf
+
+# 1. Upload BESIDE the current model, under its own version key. Never over it.
+#    v6 went up beside v2 for this reason and it is what makes rollback a
+#    variable change rather than a re-upload.
+/tmp/upload-venv/bin/python -c "
+import boto3
+boto3.client('s3', endpoint_url='https://t3.storageapi.dev', region_name='auto') \
+     .upload_file('mortgage-v15-Q8_0.gguf',
+                  'model-artifacts-afghinsxp',
+                  'mortgagefv-assistant-v15-q8_0.gguf')"
+
+# 2. RE-DOWNLOAD AND RE-CHECKSUM. This number, the round-tripped one, is what
+#    gets pinned -- not the one from step 0. If they differ the UPLOAD is the
+#    problem; re-upload, never "correct" the checksum to match what is served.
+#    A truncated or re-encoded GGUF still loads and then answers fluently and
+#    wrongly. There is no crash to notice.
+/tmp/upload-venv/bin/python -c "
+import boto3, hashlib
+b=boto3.client('s3', endpoint_url='https://t3.storageapi.dev', region_name='auto') \
+      .get_object(Bucket='model-artifacts-afghinsxp',
+                  Key='mortgagefv-assistant-v15-q8_0.gguf')['Body']
+h=hashlib.sha256()
+while c:=b.read(1<<22): h.update(c)
+print(h.hexdigest())"
+
+# 3. SAVE THE ROLLBACK FIRST, then pin and deploy.
+railway variables --service options-calculator-backend --kv \
+  | grep -E '^MORTGAGE_MODEL_(URL|SHA256)=' > rollback.env
+railway variables --service options-calculator-backend \
+  --set 'MORTGAGE_MODEL_URL=https://model-artifacts-afghinsxp.t3.storageapi.dev/mortgagefv-assistant-v15-q8_0.gguf' \
+  --set 'MORTGAGE_MODEL_SHA256=<the round-tripped sha>' --skip-deploys
+bash scripts/railway_deploy.sh
+```
+
+Measured on v15: upload 19 s, round-trip verify 20 s, 639,447,136 bytes,
+checksum identical in both directions.
+
+**Read the rollback back before you trust it.** v12's saved
+`MORTGAGE_MODEL_SHA256` was `b7a0f6cb…`, which is exactly what
+`railway ssh -- sha256sum /app/model/mortgage-assistant.gguf` had reported from
+the running container hours earlier. That agreement is what makes the saved
+value provably the thing that was serving, rather than a value someone typed.
+
+### Superseded: the HuggingFace procedure
+
+The private HF repository this targeted was deleted on 2026-08-05 and the
+mortgage GGUF was never uploaded to it. Kept because step 0 and step 2 express
+the invariant the procedure above also satisfies: **the file you MEASURED and
+the file that is SERVED have to be provably the same bytes, and an upload is a
+place they can stop being.**
 
 ```bash
 # 0. Checksum what you are about to upload, from the file you are about to
