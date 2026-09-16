@@ -1807,6 +1807,59 @@ auto main() -> int {
                "a bare 8% does NOT become 0.92 -- the lexer tag is the evidence");
     }
 
+    std::printf("\n29. a TAX rate is not an INTEREST rate, and the band that "
+                "refused 31%% of the corpus\n");
+    {
+        // `annual_tax_rate` ends in "rate", so it fell to SlotKind::Rate and
+        // was judged against the 30% MORTGAGE-INTEREST band. Measured on the
+        // training corpus: 205 of 659 ComputeDetailedAmortization rows carry a
+        // tax rate above 0.30 -- 31.1% -- every one a correct parse with a
+        // label the utterance states outright, refused on bounds alone. The
+        // top US federal bracket is 37%, so this is ordinary, not exotic.
+        const std::string text =
+            "Give me the detailed amortization on a $420,000 loan at 6.25% over 30 years, "
+            "I'm in the 34% tax bracket and I put $84,000 down on a $504,000 house.";
+
+        const auto detailed = [](std::string_view tax) {
+            return params("ComputeDetailedAmortization",
+                          {{"loan_amount", "420000.00"}, {"annual_rate", "0.0625"},
+                           {"term_months", "360"}, {"monthly_overpayment", "0.00"},
+                           {"pmi_annual_rate", "0.0000"},
+                           {"original_home_value", "504000.00"},
+                           {"annual_tax_rate", std::string{tax}}});
+        };
+
+        expect_pass(detailed("0.3400"),
+                    text, "a 34% marginal tax rate is admitted");
+
+        // AND THE BAND STILL BINDS WHERE IT WAS WRITTEN FOR. Widening the rate
+        // band instead of reclassifying the field would have made a 34%
+        // MORTGAGE admissible as a side effect -- the verifier-looser-than-the
+        // -engine failure this file records elsewhere.
+        const std::string usury =
+            "Give me the detailed amortization on a $420,000 loan at 34% over 30 years, "
+            "I'm in the 22% tax bracket and I put $84,000 down on a $504,000 house.";
+        expect(params("ComputeDetailedAmortization",
+                      {{"loan_amount", "420000.00"}, {"annual_rate", "0.3400"},
+                       {"term_months", "360"}, {"monthly_overpayment", "0.00"},
+                       {"pmi_annual_rate", "0.0000"},
+                       {"original_home_value", "504000.00"},
+                       {"annual_tax_rate", "0.2200"}}),
+               usury, mv::Outcome::Unsafe, mv::ReasonCode::OutOfRange,
+               "while a 34% MORTGAGE is still refused -- the field was "
+               "reclassified, the interest band was not widened");
+
+        // A marginal rate above 100% is not a bracket, it is a typo. Capped at
+        // 1.0 rather than left on the general 1.5 ratio ceiling, which exists
+        // for an LTV on an underwater loan and has no analogue here.
+        const std::string absurd =
+            "Give me the detailed amortization on a $420,000 loan at 6.25% over 30 years, "
+            "I'm in the 140% tax bracket and I put $84,000 down on a $504,000 house.";
+        expect(detailed("1.4000"), absurd, mv::Outcome::Unsafe,
+               mv::ReasonCode::OutOfRange,
+               "and a tax rate above 100% is refused, grounded or not");
+    }
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

@@ -371,6 +371,7 @@ def evaluate(rows: list[dict], stub, tail: RawOutputTail, timeout: float,
     outcomes_nonparam: dict[str, int] = {}
     asked_ok = asked_total = 0        # clarification rows: first call should ASK
     answered_ok = answered_total = 0  # modification rows: first call should ANSWER
+    row_verdicts: list[dict] = []     # per-row, for pairing two models
     asked_raw_ok = [0]                # the same two, measured on the raw output
     raw_block_invalid = [0]           # <params> emitted but not parseable as JSON
     answered_raw_ok = [0]
@@ -467,6 +468,27 @@ def evaluate(rows: list[dict], stub, tail: RawOutputTail, timeout: float,
             comparable = got
         else:
             comparable = drop_excluded(got)
+        # PER-ROW VERDICTS, so two models can be PAIRED.
+        #
+        # Without these a comparison has only totals, and a difference of
+        # totals cannot distinguish "the new model fixed 40 rows and broke 28"
+        # from "it changed nothing twice". McNemar needs the pairing, this
+        # file's own instructions demand McNemar, and on 2026-09-15 the v16/v15
+        # comparison could not run one because only aggregates were written.
+        #
+        # Keyed by the row's INDEX IN THE HOLDOUT, which is stable only within
+        # one holdout file -- `holdout_provenance` already refuses to compare
+        # two runs whose sha256 differs, which is what makes the index safe to
+        # pair on.
+        row_verdicts.append({
+            "row": idx,
+            "operation": (want or {}).get("operation", ""),
+            "raw_exact": comparable == want,
+            "served_exact": served is not None
+                            and served == {"operation": (want or {}).get("operation", ""),
+                                           **gold_as_served(want)},
+            "outcome": which,
+        })
         if comparable == want:
             raw_exact += 1
         else:
@@ -497,6 +519,7 @@ def evaluate(rows: list[dict], stub, tail: RawOutputTail, timeout: float,
         "answered_ok": answered_ok, "answered_total": answered_total,
         "answered_raw_ok": answered_raw_ok[0],
         "errors": errors, "failures": failures,
+        "row_verdicts": row_verdicts,
     }
 
 
@@ -626,6 +649,67 @@ def refuse_on_holdout_mismatch(here: dict, priors: list[str], allow: bool) -> No
         print("WARNING (--allow-holdout-mismatch): " + msg)
 
 
+def paired_mcnemar(now: dict, prior: dict, label: str, prior_path: str) -> None:
+    """Compare two models ROW BY ROW, not total against total.
+
+    A difference of totals cannot tell "fixed 40, broke 28" from "changed
+    nothing twice", and the two call for opposite decisions. This is the test
+    the project's own retrain instructions have demanded since the v6 decision
+    turned on 40 lost / 28 gained being p = 0.182 -- a net -12 that is not a
+    regression however it reads.
+
+    Exact binomial on the discordant pairs, not the chi-square approximation:
+    b + c here is routinely under 25, where chi-square is not trustworthy, and
+    an exact test needs no special-casing to stay honest at small counts.
+    """
+    mine = {r["row"]: r for r in now.get("row_verdicts", [])}
+    theirs = {r["row"]: r for r in prior.get("row_verdicts", [])}
+    shared = sorted(set(mine) & set(theirs))
+
+    print(f"\n=== paired: {label} vs {prior.get('label', prior_path)} ===")
+    if not shared:
+        # Says WHY rather than printing a silent zero. An older result file
+        # written before per-row verdicts existed has none, and "0 shared rows"
+        # otherwise reads as two disjoint holdouts, which is a different and
+        # much more alarming problem.
+        print("  no per-row verdicts in common -- was the prior run scored by a")
+        print("  build that predates `row_verdicts`? Re-score it to pair.")
+        return
+
+    for field in ("raw_exact", "served_exact"):
+        gained = [i for i in shared if mine[i][field] and not theirs[i][field]]
+        lost = [i for i in shared if theirs[i][field] and not mine[i][field]]
+        b, c = len(gained), len(lost)
+
+        # Two-sided exact binomial on b of (b + c) at p = 0.5.
+        n = b + c
+        if n == 0:
+            p_value = 1.0
+        else:
+            from math import comb
+            tail = sum(comb(n, k) for k in range(0, min(b, c) + 1))
+            p_value = min(1.0, 2.0 * tail / (2 ** n))
+
+        verdict = "no significant change" if p_value > 0.05 else (
+            "IMPROVED" if b > c else "REGRESSED")
+        print(f"  {field:12s} gained {b:4d}   lost {c:4d}   net {b - c:+5d}   "
+              f"p = {p_value:.4f}   {verdict}")
+
+        # Which OPERATIONS moved. A net of zero can hide one operation gaining
+        # everything another lost, which is the trade the r16-vs-r64 work
+        # turned on.
+        if gained or lost:
+            by_op: dict[str, list[int]] = {}
+            for i in gained:
+                by_op.setdefault(mine[i]["operation"], [0, 0])[0] += 1
+            for i in lost:
+                by_op.setdefault(mine[i]["operation"], [0, 0])[1] += 1
+            moved = sorted(by_op.items(), key=lambda kv: kv[1][1] - kv[1][0], reverse=True)
+            for op, (g, l) in moved[:8]:
+                if g or l:
+                    print(f"      {op or '(none)':32s} +{g:<4d} -{l}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--addr", default="localhost:50051")
@@ -728,6 +812,9 @@ def main() -> None:
     dt = time.time() - t0
     print(f"[{len(rows)} rows, {dt:.1f}s, {dt / max(len(rows), 1) * 1000:.0f} ms/row]")
     report(res, args.label, args.show_failures)
+
+    for prior_path in args.compare_to:
+        paired_mcnemar(res, json.loads(Path(prior_path).read_text()), args.label, prior_path)
 
     if args.json_out:
         Path(args.json_out).write_text(json.dumps(

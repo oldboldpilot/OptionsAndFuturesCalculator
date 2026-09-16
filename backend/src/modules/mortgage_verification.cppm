@@ -1713,9 +1713,13 @@ constexpr __int128 kMaxRatioUnits = (static_cast<__int128>(150) * Decimal::kScal
  *  a list so the next share field is a row rather than a second rule. */
 constexpr std::array<std::string_view, 1> kShareComplementFields{"occupancy_rate"};
 
-constexpr std::array<std::string_view, 5> kUnitCappedRatioFields{
+constexpr std::array<std::string_view, 6> kUnitCappedRatioFields{
     "down_payment_percent", "origination_fee_percent", "discount_points_percent",
     "title_settlement_percent", "transfer_tax_percent",
+    // A marginal tax rate above 100% is not a bracket, it is a typo. Capped at
+    // 1.0 rather than left on the general 1.5 ratio ceiling, which exists for
+    // an LTV on an underwater loan and has no analogue here.
+    "annual_tax_rate",
 };
 constexpr __int128 kMaxUnitRatioUnits = Decimal::kScale;
 /** 1200 months / 100 years -- the horizon the misuse spec fixes for this
@@ -1911,8 +1915,25 @@ auto classify_slot(std::string_view f) -> SlotKind {
     // SHARE of the year, and `management_fee_rate` is a share of collected
     // rent; neither is a rate of interest. Named explicitly rather than matched
     // by suffix, because the suffix is exactly what is misleading here.
-    static constexpr std::array<std::string_view, 2> kShareRateFields{
-        "occupancy_rate", "management_fee_rate"};
+    // `annual_tax_rate` IS A MARGINAL INCOME TAX RATE AND NOT A RATE OF
+    // INTEREST, and classifying it as one refused 205 of the 659
+    // ComputeDetailedAmortization rows in the corpus -- 31.1% -- on bounds
+    // alone. Every one was a correct parse carrying a label the utterance
+    // states outright.
+    //
+    // The suffix is what misleads: it ends in "rate", so it fell to
+    // SlotKind::Rate and was judged against the 30% MORTGAGE-INTEREST band. A
+    // 30% mortgage is absurd and the band is right for what it was written
+    // for; a 34% marginal tax rate is ordinary, and the top US federal bracket
+    // is 37%. Two different quantities sharing a word.
+    //
+    // It joins the unit-capped ratios rather than merely widening the rate
+    // band, because those are two different claims: "a tax rate may exceed
+    // 30%" is true, and "a mortgage may charge 37% interest" is not. Widening
+    // the band would have made the second one true as a side effect -- the
+    // verifier-looser-than-the-engine failure this file already records.
+    static constexpr std::array<std::string_view, 3> kShareRateFields{
+        "occupancy_rate", "management_fee_rate", "annual_tax_rate"};
     if (f.find("ltv") != std::string_view::npos || detail::ends_with(f, "_percent") ||
         detail::is_one_of(kShareRateFields, f)) {
         return SlotKind::Ratio;
