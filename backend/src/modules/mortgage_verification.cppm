@@ -765,6 +765,36 @@ export enum class ReasonCode {
  * value. So the drop has to happen on the SERVING side, not in the training
  * data alone.
  */
+/**
+ * Is `field` being TAUGHT to a new model while the service still drops it?
+ *
+ * `operation_excludes_field` answers "does the service forward this?" and four
+ * artifacts ask it: the service's dispatch, the corpus generator, the grammar,
+ * and this verifier. In the steady state that single question is the right one
+ * for all four. There is exactly one state in which it is not.
+ *
+ * While a field is being taught, the two halves come apart:
+ *
+ *   may the model EMIT it?     yes -- the corpus teaches it, the grammar must
+ *                              accept it, or the new model's own output is
+ *                              rejected before anything can use it
+ *   does the service FORWARD?  no -- not until a model that emits it is
+ *                              deployed, because G2b requires every declared
+ *                              field and the CURRENT model has never seen one
+ *
+ * Deleting the exclusion first refuses every request of that operation the
+ * moment it deploys; teaching without this predicate makes the grammar reject
+ * the very rows the corpus was just taught. So the in-flight set is named, and
+ * it is the same list `build_mortgage_dataset.py`'s TEACHING_AHEAD_OF_SERVICE
+ * carries -- `test_corpus_invariants.py` asserts the two agree.
+ *
+ * EMPTY IS THE STEADY STATE. A non-empty entry means a retrain is outstanding;
+ * when the new model is proven to emit these on a disjoint holdout, the
+ * matching `kOperationExcludedFields` rows come out and this list empties.
+ */
+export [[nodiscard]] auto field_is_taught_ahead(std::string_view operation,
+                                                std::string_view field) -> bool;
+
 export [[nodiscard]] auto operation_excludes_field(std::string_view operation,
                                                    std::string_view field) -> bool;
 
@@ -1682,7 +1712,28 @@ constexpr std::array<VariantInertField, 13> kVariantInertFields{{
     return false;
 }
 
-constexpr std::array<ConventionValue, 49> kConventionValues{{
+constexpr std::array<ConventionValue, 52> kConventionValues{{
+    // WHAT THE HOUSE COSTS TO KEEP, at the convention zero. Added 2026-09-16
+    // with the corpus that teaches them on ComputeDetailedAmortization.
+    //
+    // These three were EXCLUDED until now, so they never reached grounding and
+    // needed no exemption. The moment the corpus teaches them the zero becomes
+    // an ordinary emitted value, and an utterance that says nothing about
+    // upkeep grounds nothing for it:
+    //
+    //   "annual_repairs" = 0.00 does not correspond to anything in the request
+    //   (the nearest figure you gave is 5.96)
+    //
+    // 192 of 1916 generated rows, caught by GroundingCorpusSweepTest the first
+    // time the new corpus was swept -- which is the gate doing exactly the job
+    // it was written for a few hours earlier. "EVERY new field needs one" is
+    // the rent-vs-buy lesson, and this is the fourth time it has applied.
+    //
+    // Zero means NOT MODELLED, never "this house needs no repairs". A stated
+    // budget still has to ground like any other figure.
+    {.field = "annual_repairs", .value = "0.00"},
+    {.field = "annual_insurance", .value = "0.00"},
+    {.field = "annual_cost_growth", .value = "0.0000"},
     // ComputeRentVsBuy / ComputeHomeNpv: the optional inputs added with the
     // amortising model. An utterance that never mentions closing costs, selling
     // costs or inflation grounds none of them, and without an exemption the
@@ -1935,6 +1986,25 @@ auto Decimal::to_string() const -> std::string {
         out += frac_text;
     }
     return out;
+}
+
+// Fields the CORPUS teaches that the SERVICE still drops. See
+// `field_is_taught_ahead`. Empty is the steady state.
+struct TaughtAhead {
+    std::string_view operation;
+    std::string_view field;
+};
+constexpr std::array<TaughtAhead, 3> kTeachingAheadOfService{{
+    {.operation = "ComputeDetailedAmortization", .field = "annual_repairs"},
+    {.operation = "ComputeDetailedAmortization", .field = "annual_insurance"},
+    {.operation = "ComputeDetailedAmortization", .field = "annual_cost_growth"},
+}};
+
+auto field_is_taught_ahead(std::string_view operation, std::string_view field) -> bool {
+    for (const auto& e : kTeachingAheadOfService) {
+        if (e.field == field && e.operation == operation) { return true; }
+    }
+    return false;
 }
 
 auto operation_excludes_field(std::string_view operation, std::string_view field) -> bool {

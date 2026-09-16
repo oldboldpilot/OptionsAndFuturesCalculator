@@ -687,7 +687,12 @@ auto Schema::build(GrammarOptions options) -> std::expected<Schema, std::string>
             // file that no longer matched its own generator. A stale fixture
             // hiding a real disagreement is the same shape as a dead allow-list
             // entry reading like coverage.
-            if (mv::operation_excludes_field(id, f.field)) {
+            // A field being TAUGHT to a new model stays in the grammar even
+            // though the service drops it: the new model WILL emit it, and a
+            // grammar that rejects it would refuse that model's own output
+            // before anything could use it. See mv::field_is_taught_ahead.
+            if (mv::operation_excludes_field(id, f.field) &&
+                !mv::field_is_taught_ahead(id, f.field)) {
                 continue;
             }
             auto shape = detail::shape_for(f);
@@ -736,7 +741,8 @@ auto validate_label_space(const Schema& schema) -> std::expected<void, std::stri
         // a key every other layer agrees is absent.
         std::vector<mv::FieldSpec> declared;
         for (const auto& f : mv::fields_of(ids[i])) {
-            if (!mv::operation_excludes_field(ids[i], f.field)) {
+            if (!mv::operation_excludes_field(ids[i], f.field) ||
+                mv::field_is_taught_ahead(ids[i], f.field)) {
                 declared.push_back(f);
             }
         }

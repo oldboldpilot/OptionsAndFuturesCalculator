@@ -96,6 +96,39 @@ auto split_tabs(const std::string& line) -> std::vector<std::string> {
     return false;
 }
 
+
+/**
+ * One gold value as the MODEL would have written it on the wire.
+ *
+ * `fastjson::stringify` is a JSON serializer, not a wire formatter, and it
+ * renders the number 100000 as `1e+05`. The verifier's grammar refuses that --
+ * correctly, because no model emits it -- so the sweep reported a corpus row as
+ * ungroundable when the only thing wrong was this function:
+ *
+ *   "1e+05" in field "cost" is not a bare decimal this contract accepts
+ *
+ * on a row whose utterance plainly says $100,000. The corpus stores `cost` as a
+ * JSON number; the model emits a decimal string; the gate has to compare what
+ * the SERVICE would see. Formatting an integral value with no exponent and no
+ * trailing `.0` is what closes that gap.
+ */
+[[nodiscard]] auto as_wire_text(const fastjson::json_value& v) -> std::string {
+    if (v.is_string()) { return std::string{v.as_string()}; }
+    if (v.is_number()) {
+        const double d = v.as_number();
+        if (d == std::floor(d) && std::fabs(d) < 1e15) {
+            return std::format("{}", static_cast<std::int64_t>(d));
+        }
+        // Enough places for a rate like 0.0631 and for money's two, without the
+        // trailing zeros a fixed width would add to an already-exact value.
+        auto s = std::format("{:.6f}", d);
+        while (s.size() > 1 && s.back() == '0') { s.pop_back(); }
+        if (!s.empty() && s.back() == '.') { s.pop_back(); }
+        return s;
+    }
+    return fastjson::stringify(v);
+}
+
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
@@ -135,13 +168,9 @@ auto main(int argc, char** argv) -> int {
             ef.name = k;
             if (v.is_array()) {
                 ef.repeated = true;
-                for (const auto& e : v.as_array()) {
-                    ef.values.push_back(e.is_string() ? std::string{e.as_string()}
-                                                      : fastjson::stringify(e));
-                }
+                for (const auto& e : v.as_array()) { ef.values.push_back(as_wire_text(e)); }
             } else {
-                ef.values.push_back(v.is_string() ? std::string{v.as_string()}
-                                                  : fastjson::stringify(v));
+                ef.values.push_back(as_wire_text(v));
             }
             input.fields.push_back(std::move(ef));
         }

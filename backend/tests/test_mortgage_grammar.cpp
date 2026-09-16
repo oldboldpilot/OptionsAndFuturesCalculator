@@ -546,7 +546,7 @@ auto main() -> int {
                                 : ("validate_label_space FAILED: " + valid.error()));
         check(schema.operation_count() == 28,
               "28 operations (schema has " + std::to_string(schema.operation_count()) + ")");
-        check(schema.field_count() == 201,
+        check(schema.field_count() == 204,
               "201 fields (schema has " + std::to_string(schema.field_count()) + ")");
     }
 
@@ -580,8 +580,14 @@ auto main() -> int {
             // val.jsonl predated the `guess` exclusion and still carried
             // "guess":0.1, so a grammar demanding that key was satisfied by a
             // fixture its own generator would no longer produce.
+            // A field being TAUGHT to a new model is emittable even though the
+            // service still drops it -- see mv::field_is_taught_ahead. Asking
+            // only "does the service forward it?" would reject the very rows
+            // the corpus was just taught, which is what this test did the first
+            // time repairs were added to ComputeDetailedAmortization: 503 of
+            // 566 gold objects rejected, every one of them correct.
             const auto visible = [](const std::string& op, const std::string& f) {
-                return !mv::operation_excludes_field(op, f);
+                return !mv::operation_excludes_field(op, f) || mv::field_is_taught_ahead(op, f);
             };
 
             std::size_t proto_fields = 0;

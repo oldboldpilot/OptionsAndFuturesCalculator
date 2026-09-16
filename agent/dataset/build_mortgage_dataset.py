@@ -312,9 +312,32 @@ OP_EXCLUDED_FIELDS: dict[str, set[str]] = {
         "current_mortgage_annual_rate", "current_mortgage_remaining_months",
         "annual_repairs", "annual_insurance", "annual_property_tax", "monthly_hoa",
     },
+    # BEING TAUGHT RIGHT NOW, so this entry is DELIBERATELY SHORTER than its C++
+    # twin, and that divergence is the phase-1 state of the procedure
+    # `kOperationExcludedFields` describes: teach the corpus, retrain, prove the
+    # new model emits them on a disjoint holdout, THEN delete the C++ rows.
+    #
+    # The two halves cannot move together here, and it is worth saying why: the
+    # C++ side must keep dropping annual_repairs/annual_insurance/
+    # annual_cost_growth until a model that EMITS them is deployed, because G2b
+    # requires every declared field and v18 has never seen one. Removing the C++
+    # rows first refuses every ComputeDetailedAmortization request the moment it
+    # deploys. Removing this side first is harmless -- it only lets the corpus
+    # teach a field the service is still dropping.
+    #
+    # `test_corpus_exclusion_phase` pins exactly which fields may differ, so the
+    # gap is a declared state with an end condition rather than drift.
+    "ComputeDetailedAmortization": {
+        "heloc_drawn_amount", "heloc_annual_rate", "heloc_term_years",
+    },
+}
+
+# The fields this corpus teaches that the SERVICE still drops. Empty is the
+# steady state; a non-empty set means a retrain is outstanding, and the entry
+# names the model that has to ship before the C++ rows come out.
+TEACHING_AHEAD_OF_SERVICE: dict[str, set[str]] = {
     "ComputeDetailedAmortization": {
         "annual_repairs", "annual_insurance", "annual_cost_growth",
-        "heloc_drawn_amount", "heloc_annual_rate", "heloc_term_years",
     },
 }
 
@@ -643,6 +666,32 @@ def make_amortization_extraction(rng: random.Random) -> dict:
     # comment. When not mentioned, home_value defaults to loan_amount (no
     # PMI, the same "not stated -> base case" convention used everywhere
     # else in this file for monthly_overpayment/payments_per_year/timing).
+    # WHAT THE HOUSE COSTS TO KEEP, decided before it is phrased, for the same
+    # reason `mention_pmi` is: sampling a budget and then deciding whether to
+    # say it produces a label the utterance does not state, which is the
+    # label-not-derivable-from-its-input defect this corpus has paid for four
+    # times.
+    #
+    # Taught ONLY on ComputeDetailedAmortization, because that is the operation
+    # whose request declares annual_repairs/annual_insurance/annual_cost_growth.
+    # Plain ComputeAmortization has no such fields, so a repair clause there
+    # would teach the model to emit a key the message does not have.
+    #
+    # Repairs are the cost the site's own users asked for most insistently and
+    # the one the assistant could not speak at all: the fields reached the wire
+    # on 2026-09-15 and were listed in kOperationExcludedFields the same day,
+    # because requiring a model that had never seen them would refuse every
+    # detailed request. Teaching them here is step one of the order that table
+    # states -- teach, retrain, prove on a disjoint holdout, THEN delete the
+    # exclusions. Never the other way round.
+    mention_repairs = rng.random() < 0.40
+    repairs = round_money(rng.triangular(800, 12_000, 3_600)) if mention_repairs else 0.0
+    insurance = round_money(rng.triangular(600, 4_500, 1_700)) if mention_repairs else 0.0
+    # Growth is stated less often than the budget itself, so the model has to
+    # read the two independently rather than as one block that always co-occurs.
+    mention_growth = mention_repairs and rng.random() < 0.45
+    cost_growth = round(rng.uniform(0.01, 0.06), 4) if mention_growth else 0.0
+
     mention_pmi = rng.random() < 0.35
     if mention_pmi:
         ltv = rng.uniform(0.8001, 0.97)
@@ -659,6 +708,20 @@ def make_amortization_extraction(rng: random.Random) -> dict:
     if mention_pmi:
         base += (f". Home is worth {phrase_money(home_value)}, PMI runs "
                  f"{phrase_pct(pmi)} a year")
+    if mention_repairs and op == "ComputeDetailedAmortization":
+        base += rng.choice([
+            f". Budget {phrase_money(repairs)} a year for repairs and "
+            f"{phrase_money(insurance)} for insurance",
+            f". I set aside {phrase_money(repairs)} a year for maintenance, "
+            f"insurance is {phrase_money(insurance)}",
+            f". Upkeep runs {phrase_money(repairs)} a year and insurance "
+            f"{phrase_money(insurance)}",
+        ])
+        if mention_growth:
+            base += rng.choice([
+                f", and those costs rise about {phrase_pct(cost_growth)} a year",
+                f", rising {phrase_pct(cost_growth)} a year",
+            ])
     base += "."
     if op == "ComputeDetailedAmortization":
         # Vary the cue and let it lead sometimes. A single fixed clause always in
@@ -681,6 +744,9 @@ def make_amortization_extraction(rng: random.Random) -> dict:
                + (f". Home is worth {phrase_money(home_value)}, PMI {phrase_pct(pmi)}/yr"
                   if mention_pmi else "")
                + (f", tax rate {phrase_pct(tax_rate)}" if op == "ComputeDetailedAmortization" else "")
+               + (f", repairs {phrase_money(repairs)}/yr, insurance {phrase_money(insurance)}/yr"
+                  if (mention_repairs and op == "ComputeDetailedAmortization") else "")
+               + (f", costs rising {phrase_pct(cost_growth)}/yr" if mention_growth else "")
                + ".")
     if op == "ComputeDetailedAmortization":
         # Lead with the deduction in the compact template too, so the cue is not
@@ -693,6 +759,14 @@ def make_amortization_extraction(rng: random.Random) -> dict:
            "pmi_annual_rate": rate_str(pmi, 4), "original_home_value": money_str(home_value)}
     if op == "ComputeDetailedAmortization":
         obj["annual_tax_rate"] = rate_str(tax_rate, 4)
+        # Emitted ALWAYS once the operation is detailed, at the convention zero
+        # when the utterance says nothing -- the same shape rent-vs-buy uses.
+        # A field the model sometimes omits is the `prepaid_interest_days`
+        # defect: 48% of training rows omitted it and inference omitted it
+        # NEVER, because omission is not something this model learns.
+        obj["annual_repairs"] = money_str(repairs)
+        obj["annual_insurance"] = money_str(insurance)
+        obj["annual_cost_growth"] = rate_str(cost_growth, 4)
     return convo(("system", SYSTEM), ("user", user),
                  ("assistant", params_block(op, obj)))
 
@@ -1793,6 +1867,13 @@ def make_clarification(rng: random.Random) -> dict:
                "pmi_annual_rate": rate_str(0, 4), "original_home_value": money_str(loan)}
         if detailed:
             obj["annual_tax_rate"] = rate_str(tax_rate, 4)
+            # The convention zero: this row's utterance never mentions upkeep,
+            # and a field the model sometimes omits is the
+            # `prepaid_interest_days` defect -- 48% of training rows omitted it
+            # and inference omitted it NEVER.
+            obj["annual_repairs"] = money_str(0)
+            obj["annual_insurance"] = money_str(0)
+            obj["annual_cost_growth"] = rate_str(0, 4)
 
     elif scenario == "heloc_ltv":
         op = "ComputeHeloc"
@@ -1893,6 +1974,9 @@ def make_modification(rng: random.Random) -> dict:
                  "pmi_annual_rate": rate_str(0, 4), "original_home_value": money_str(loan)}
         if detailed:
             first["annual_tax_rate"] = rate_str(tax_rate, 4)
+            first["annual_repairs"] = money_str(0)
+            first["annual_insurance"] = money_str(0)
+            first["annual_cost_growth"] = rate_str(0, 4)
         tax_clause = f" I'm in the {phrase_pct(tax_rate)} tax bracket." if detailed else ""
         first_user = (f"Amortize {phrase_money(loan)} at {phrase_pct(annual_rate)} over "
                       f"{phrase_years(term)}.{tax_clause}")

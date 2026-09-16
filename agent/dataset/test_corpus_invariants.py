@@ -309,5 +309,56 @@ check("question1, _ = call(stub, utterance" in _harness or
       ", question1, _ = call(stub, utterance" in _harness,
       "question1 is bound from the FIRST call's clarification, not a constant")
 
+# ---------------------------------------------------------------------------
+# THE EXCLUSION LISTS MAY DIVERGE, BUT ONLY BY WHAT IS BEING TAUGHT RIGHT NOW.
+#
+# `OP_EXCLUDED_FIELDS` here and `kOperationExcludedFields` in
+# mortgage_verification.cppm are two halves of one decision and normally move
+# together. There is exactly one state in which they legitimately differ: while
+# a field is being TAUGHT to a new model and the service must still drop it,
+# because G2b requires every declared field and the deployed model has never
+# seen it. Removing the C++ row first refuses every request of that operation
+# the moment it deploys; removing this one first is harmless.
+#
+# So the gap is allowed, named, and bounded. `TEACHING_AHEAD_OF_SERVICE` is the
+# declaration, and this check proves the two lists differ by EXACTLY that set --
+# no more (which would be drift) and no less (which would mean a field is
+# declared as in-flight while nothing is teaching it).
+#
+# The end condition is written into the name: when the retrained model is proven
+# to emit these on a disjoint holdout, the C++ rows come out, this dict goes
+# empty, and the two lists match again.
+_cppm = (Path(__file__).resolve().parent.parent.parent
+         / "backend" / "src" / "modules" / "mortgage_verification.cppm").read_text()
+
+def _cpp_excluded(op: str) -> set[str]:
+    """`{.operation = "X", .field = "y"}` rows of kOperationExcludedFields."""
+    import re as _re
+    return {m.group(1) for m in _re.finditer(
+        r'\{\.operation\s*=\s*"' + _re.escape(op) + r'"\s*,\s*\.field\s*=\s*"([^"]+)"\}', _cppm)}
+
+# Positive control: the extractor finds something, or every check below is
+# vacuous the moment the table is reformatted.
+check(len(_cpp_excluded("ComputeRentVsBuy")) > 0,
+      "kOperationExcludedFields parsed out of the .cppm")
+
+for _op in set(G.OP_EXCLUDED_FIELDS) | set(_cpp_ops := {"ComputeDetailedAmortization",
+                                                        "ComputeRentVsBuy", "ComputeHeloc"}):
+    _py = G.OP_EXCLUDED_FIELDS.get(_op, set())
+    _cpp = _cpp_excluded(_op)
+    _allowed = G.TEACHING_AHEAD_OF_SERVICE.get(_op, set())
+    check(_cpp - _py == _allowed,
+          f"{_op}: the service drops exactly the taught-ahead set beyond the corpus; "
+          f"cpp-only={sorted(_cpp - _py)} declared={sorted(_allowed)}")
+    check(_py - _cpp == set(),
+          f"{_op}: the corpus excludes nothing the service does not; "
+          f"corpus-only={sorted(_py - _cpp)}")
+
+# A field cannot be declared in-flight AND taught as absent: if we say we are
+# teaching it, the generator must be able to emit it.
+for _op, _fields in G.TEACHING_AHEAD_OF_SERVICE.items():
+    check(_fields <= G.op_field_names(_op),
+          f"{_op}: every taught-ahead field is emittable by the generator")
+
 print(f"\n{CHECKS} checks, {FAILURES} failures")
 sys.exit(0 if FAILURES == 0 else 1)
