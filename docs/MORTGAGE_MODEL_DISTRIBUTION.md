@@ -66,17 +66,82 @@ belongs with the service that owns it
 
 | | value |
 | --- | --- |
-| file | `mortgagefv-assistant-v6-q8_0.gguf` |
+| file | `mortgagefv-assistant-v18-q8_0.gguf` |
 | size | 639,447,136 bytes |
-| sha256 | `22c182e87519b3fd8b22ed9d1f5057d7af2eecc35ec7b12478db42a226843870` |
+| sha256 | `a4439a6be8b8ba8003b731076fc1e935372b574730d61bbc6f0e44d1aa210748` |
 | format | Q8_0 GGUF, Qwen3-0.6B |
-| bucket key | `mortgagefv-assistant-v6-q8_0.gguf` |
+| bucket key | `mortgagefv-assistant-v18-q8_0.gguf` |
 | served from | `MORTGAGE_MODEL_PATH` (`/app/model/mortgage-assistant.gguf` in the image) |
-| promoted | 2026-08-20, deployment `8ccc41d1` |
+| promoted | 2026-09-16 |
 
-**v6 is the model of record as of 2026-08-20. v2
-(`269efd32a5533ff94fc31975f0cbee2c46ba47863a924a0745886fdbc3b413fe`) is the
-rollback target and is still in the bucket under `mortgagefv-assistant-q8_0.gguf`.**
+**v18 is the model of record as of 2026-09-16. v15 is the rollback target and is saved in the bucket under `mortgagefv-assistant-v15-q8_0.gguf`.**
+
+(This table previously recorded v6 as of 2026-08-20, while production subsequently served v15. Note also that the local `config/.env` pin was found matching v2 while Railway actually served v15, so the local `.env` is not evidence of what production runs — Railway's service variables are.)
+
+### Model evaluation and promotion: v15 vs v17 vs v18 (measured 2026-09-16)
+
+All three models scored on the SAME holdout: `agent/dataset/data_mortgage/val.jsonl`,
+sha256 `849e8a349a2470b6...`, 600 rows scored, 558 with params gold, 0 errors,
+one engine asserted on `:50051`, through the real `ParseOperation` RPC on the
+Q8_0 GGUF (`eval_grpc_mortgage.py`):
+
+| model | raw_exact | served_exact |
+| --- | --- | --- |
+| v15 (deployed) | 375/558 | 368 |
+| v17 | 405/558 | 387 |
+| v18 (promoted) | 411/558 | 393 |
+
+Paired exact-binomial McNemar:
+- **v15 vs v18 raw:** gained 36, lost 72, net −36 for v15, **p = 0.0007 REGRESSED** (v18 net +36)
+- **v15 vs v18 served:** gained 40, lost 59, net −19 for v15, **p = 0.0699**
+- **v17 vs v18 raw:** net −6 for v17, **p = 0.5811** (no significant change)
+- **v17 vs v18 served:** net −6 for v17, **p = 0.5446** (no significant change)
+
+So v18 **SIGNIFICANTLY beats the model that was deployed** (v15), and does **NOT
+significantly differ from v17** (which was never deployed).
+
+Per-operation gains, v15 → v18 raw:
+- `ComputeRentalCashFlow` **+30** (v15 could not serve it at all)
+- `ComputeDetailedAmortization` **+13**
+- `ComputeFutureValueDetailed` **+8**
+- `ComputeRentVsBuy` **+7**
+
+**The one regression direction v17 → v18, stated honestly:** `ComputePayment`
+51/62 → 33/62 raw, and `ComputeRefinance` 31 → 26. Against v15 this is not a
+regression; it is recorded because it is real and because a future retrain
+should watch it.
+
+**Clarification rows:** BOTH v17 and v18 are near-zero on clarification rows
+(`asked_ok` 1/90 for v17 and 0/90 for v18) where v15's earlier measurement was
+far higher — a shared regression, not a v18-specific one, and still open.
+
+### Promotion procedure and verification (2026-09-16)
+
+Promotion procedure executed exactly as prescribed below:
+1. Uploaded BESIDE v15 under its own key (`mortgagefv-assistant-v18-q8_0.gguf`).
+   Upload took 18.9 s, 639,447,136 bytes.
+2. Round-trip re-downloaded and re-checksummed: identical
+   (`a4439a6be8b8ba8003b731076fc1e935372b574730d61bbc6f0e44d1aa210748`).
+3. Rollback saved first and verified against the local v15 file, then pinned and
+   deployed via Railway service variables.
+
+**VERIFIED IN THE CONTAINER, not by a variable or a healthcheck:**
+```bash
+railway ssh -- sha256sum /app/model/mortgage-assistant.gguf
+# -> a4439a6be8b8ba8003b731076fc1e935372b574730d61bbc6f0e44d1aa210748  /app/model/mortgage-assistant.gguf
+```
+
+**Functionally verified:**
+- A `ComputeRentalCashFlow` utterance now parses live, including `occupancy_rate 0.90`
+  derived from "10% vacancy" (the complement map), which v15 scored 0 on.
+- Two grounding defects fixed in `mortgage_verification.cppm` verified live after deploy:
+  the undiscounted payback utterance now returns params `{discounted: false, rate: 0}`
+  instead of a refusal.
+
+**Earlier promotion history, kept for the record:**
+v6 was promoted as the model of record on 2026-08-20 (deployment `8ccc41d1`),
+with v2 (`269efd32a5533ff94fc31975f0cbee2c46ba47863a924a0745886fdbc3b413fe`) as
+the rollback target in the bucket under `mortgagefv-assistant-q8_0.gguf`.
 
 v6 gains `ComputeClosingCosts` — **39/42 numerically correct on held-out rows
 against v2's 0/42**, which is not a weaker score but an absent capability: the
@@ -223,7 +288,8 @@ swap needs no code change and no commit.
 
 ## Publishing a model — the CURRENT procedure
 
-Verified end to end on 2026-09-14, publishing v15. The HuggingFace steps that
+Verified end to end on 2026-09-14 publishing v15, and executed on 2026-09-16
+publishing v18. The HuggingFace steps that
 used to be here are kept below, struck through, because their step 0 and step 2
 state the invariant this one also satisfies.
 
@@ -281,7 +347,10 @@ bash scripts/railway_deploy.sh
 ```
 
 Measured on v15: upload 19 s, round-trip verify 20 s, 639,447,136 bytes,
-checksum identical in both directions.
+checksum identical in both directions. Executed on 2026-09-16 for v18: upload
+18.9 s, 639,447,136 bytes, round-trip checksum identical
+(`a4439a6be8b8ba8003b731076fc1e935372b574730d61bbc6f0e44d1aa210748`),
+verified in container via `railway ssh -- sha256sum`.
 
 **Read the rollback back before you trust it.** v12's saved
 `MORTGAGE_MODEL_SHA256` was `b7a0f6cb…`, which is exactly what
@@ -343,8 +412,10 @@ railway up --detach --service options-calculator-backend
 - **Compare `sha256sum` against the pinned value before calling anything "the
   deployed model."** The options project spent an entire session measuring a file
   production was not serving.
-- **Verify through gRPC-Web.** Native gRPC does not survive the Railway ingress —
-  it fails with `Stream removed` and no request reaches the container at all.
+- **Verify through gRPC-Web or via the TCP proxy.** Native gRPC via the custom
+  domain edge fails because Railway strips HTTP/2 trailers (see CLAUDE.md), but
+  native gRPC now works against production via the Railway TCP proxy
+  (`tokaido.proxy.rlwy.net:34513`, TLS, trailers intact).
 - **Watch resident memory.** A second Q8_0 model is roughly another 640 MB
   resident plus its KV cache, in a container that already holds one. If the two
   do not fit, the empty-`MORTGAGE_MODEL_URL` build is a real, supported fallback

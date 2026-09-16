@@ -965,15 +965,74 @@ neither is a supported image.
 
 Two things to hold on to before trusting its output:
 
-- **THE MODEL OF RECORD IS v12 as of 2026-08-28** — QLoRA rank **64**, alpha 64,
-  4 epochs, on the grounded corpus. It measures **400/508 = 78.7% raw params
-  exact-match** on a 543-row holdout proven disjoint from every training set
-  involved. It replaced v6 (`22c182e8…`), which measured **276/508 = 54.3%** on
-  that same holdout: paired, v12 fixes **135** rows and breaks **11**.
-  `ComputeRefinance` 9/38 → **38/38**, `ComputeDetailedAmortization` 23/48 →
-  **48/48**, `ComputeHeloc` 27/30 → **30/30**, and `ComputeRentVsBuy` **0/18 →
-  8/18** — the previous model could not serve that operation at all. Sole
-  regression: `ComputeDepreciation` −1.
+- **THE MODEL OF RECORD IS v18 as of 2026-09-16** (promoted from v15). This
+  section previously recorded v12 as of 2026-08-28 — that was STALE; production
+  subsequently served v15, and the local `config/.env` pin was found matching
+  v2 while Railway actually served v15, so the local `.env` is not evidence of
+  what production runs: Railway's service variables are.
+
+  All three models scored on the SAME holdout:
+  `agent/dataset/data_mortgage/val.jsonl`, sha256 `849e8a349a2470b6...`, 600
+  rows scored, 558 with params gold, 0 errors, one engine asserted on `:50051`,
+  through the real `ParseOperation` RPC on the Q8_0 GGUF (`eval_grpc_mortgage.py`):
+
+  | model | raw_exact | served_exact |
+  | --- | --- | --- |
+  | v15 (deployed) | 375/558 | 368 |
+  | v17 | 405/558 | 387 |
+  | v18 (promoted) | 411/558 | 393 |
+
+  Paired exact-binomial McNemar:
+  - **v15 vs v18 raw:** gained 36, lost 72, net −36 for v15, **p = 0.0007 REGRESSED** (v18 net +36)
+  - **v15 vs v18 served:** gained 40, lost 59, net −19 for v15, **p = 0.0699**
+  - **v17 vs v18 raw:** net −6 for v17, **p = 0.5811** (no significant change)
+  - **v17 vs v18 served:** net −6 for v17, **p = 0.5446** (no significant change)
+
+  So v18 **SIGNIFICANTLY beats the model that was deployed** (v15), and does **NOT
+  significantly differ from v17** (which was never deployed).
+
+  Per-operation, v15 → v18 raw:
+  - `ComputeRentalCashFlow` **+30** (v15 could not serve it at all)
+  - `ComputeDetailedAmortization` **+13**
+  - `ComputeFutureValueDetailed` **+8**
+  - `ComputeRentVsBuy` **+7**
+
+  **The one regression direction v17 → v18, stated honestly:** `ComputePayment`
+  51/62 → 33/62 raw, and `ComputeRefinance` 31 → 26. Against v15 this is not a
+  regression; it is recorded because it is real and because a future retrain
+  should watch it.
+
+  **Clarification rows:** BOTH v17 and v18 are near-zero on clarification rows
+  (`asked_ok` 1/90 for v17 and 0/90 for v18) where v15's earlier measurement
+  was far higher — a shared regression, not a v18-specific one, and still open.
+
+  **Promotion procedure executed exactly as `docs/MORTGAGE_MODEL_DISTRIBUTION.md`
+  prescribes:**
+  - Uploaded BESIDE v15 under its own key (`mortgagefv-assistant-v18-q8_0.gguf`).
+    Upload took 18.9 s, 639,447,136 bytes.
+  - Round-trip re-downloaded and re-checksummed (identical:
+    `a4439a6be8b8ba8003b731076fc1e935372b574730d61bbc6f0e44d1aa210748`).
+  - Rollback saved first and verified against the local v15 file, then pinned
+    and deployed.
+
+  **VERIFIED IN THE CONTAINER, not by a variable or a healthcheck:**
+  ```bash
+  railway ssh -- sha256sum /app/model/mortgage-assistant.gguf
+  # -> a4439a6be8b8ba8003b731076fc1e935372b574730d61bbc6f0e44d1aa210748  /app/model/mortgage-assistant.gguf
+  ```
+  And functionally: a `ComputeRentalCashFlow` utterance now parses live,
+  including `occupancy_rate 0.90` derived from "10% vacancy" (the complement
+  map), which v15 scored 0 on.
+
+  **The earlier promotion history, kept for the record:** v12 was promoted on
+  2026-08-28 — QLoRA rank **64**, alpha 64, 4 epochs, on the grounded corpus. It
+  measured **400/508 = 78.7% raw params exact-match** on a 543-row holdout
+  proven disjoint from every training set involved. It replaced v6
+  (`22c182e8…`), which measured **276/508 = 54.3%** on that same holdout: paired,
+  v12 fixes **135** rows and breaks **11**. `ComputeRefinance` 9/38 → **38/38**,
+  `ComputeDetailedAmortization` 23/48 → **48/48**, `ComputeHeloc` 27/30 →
+  **30/30**, and `ComputeRentVsBuy` **0/18 → 8/18** — the previous model could
+  not serve that operation at all. Sole regression: `ComputeDepreciation` −1.
 
   **RANK 16 WAS THE CEILING, and every earlier score in this file was measured
   against it.** Holding the corpus fixed and varying only the adapter:
@@ -1145,6 +1204,76 @@ without loosening the other: annual/annual passes, monthly/monthly passes,
 monthly-rate-with-`periods=30` refused, annual-rate-with-`periods=360` refused.
 Mutation-checked — restoring the hardcoded x12 reproduces the production message
 verbatim AND flips the mismatched pair back to `Proven`.
+
+### Two grounding defects fixed: undiscounted payback rate and em dash sign
+
+Found by pairing the RAW verdict against the SERVED one — the only view that can
+see this class. The model is right, the user gets a refusal, and `raw_exact`
+counts the row as correct, so no accuracy number moves. On the 600-row holdout
+there were **64** such rows; **23** were refusals and the rest are documented
+service transformations the harness does not model.
+
+Two defects fixed in `mortgage_verification.cppm` on 2026-09-16:
+
+1. **An UNDISCOUNTED payback has no rate.** `ComputePaybackPeriod` carries
+   `discounted` and `rate` as a pair; with discounting off the engine never
+   reads the rate, so the corpus teaches `rate: 0.0`. Grounding is per field, so
+   nothing asked what the zero meant. Measured against production:
+
+   ```
+   "I'm putting $35,300 into equipment for my rental that saves me about $3,900 a year. how many years until it pays for itself?"
+   -> "rate" = 0 does not correspond to anything in the request
+      (the nearest figure you gave is 3900)
+   ```
+
+   with the model's output BYTE-IDENTICAL to the gold. **17 of 28 holdout rows**
+   failed this way — every undiscounted one; the 11 that passed are the 11
+   stating a discount rate.
+
+   **NOT fixed via `kConventionValues`, which is (field, value) and GLOBAL:**
+   `{"rate", "0"}` would exempt a zero rate on `ComputePayment` and every other
+   TVM operation, where a fabricated zero prices a 0% loan. The licence is the
+   model's own `discounted: false`, scoped three ways (operation, exactly-zero
+   value, sibling field), each asserted.
+
+2. **An em dash is not a minus sign.** `"Break out the deductible interest --
+   35.55% bracket"` lexed `-35.55`, so map M2 offered `-0.3555` and the correct
+   `0.3555` matched nothing:
+
+   ```
+   "annual_tax_rate" = 0.3555 does not correspond to anything in the request
+   (the nearest figure you gave is 0.86)
+   ```
+
+   It spanned three operations and both literal tags — percent on
+   `ComputeDetailedAmortization` and `ComputeClosingCosts`, money on
+   `ComputeAmortizationBatch` — which is what marks it one LEXER defect rather
+   than three generator ones. The single hyphen is untouched: carrying a real
+   minus is what stops `"-$250,000"` and `"$250,000"` being the same literal.
+
+Both verified live after deploy: the payback utterance now returns params
+`{discounted: false, rate: 0}` instead of a refusal.
+
+### GroundingCorpusSweepTest: the gate that should have caught both
+
+`mortgage_verification.cppm` has claimed this property in a comment since
+2026-08-05: the misuse spec's WU-M2 criterion, "every extraction label in the
+generated training set grounds against its own utterance", with the four
+families that legitimately do not, counted. **NOTHING EVER RAN IT.** The
+criterion was checked once by hand and the corpus then moved underneath it.
+
+New: **`GroundingCorpusSweepTest`** (`backend/tests/dbg_grounding.cpp`, registered
+in `backend/CMakeLists.txt`, driven by `scripts/sweep_corpus.py --gate`). It is
+`dbg_derivation`'s twin one layer down: no model, no checkpoint, no GPU, because
+the corpus already contains the answer the model is being trained to give. It
+generates from `CORPUS_MIX` so it re-derives itself when the corpus changes and
+cannot go stale beside it.
+
+It found the em-dash defect within a minute of first running.
+Result: **2911 rows, 0 refused.** Known-ungroundable families are DECLARED with
+reasons so a new one fails rather than joining them quietly.
+`GROUNDING_WHY=1` makes it print the literals the lexer found and how each field
+classified.
 
 ## Security posture: what is enforced, and what is only claimed
 
@@ -1437,6 +1566,54 @@ appeared to come from three places. Section 23 of
 `test_finance_service_validation.cpp` closed it and failed 7 checks immediately:
 every engine-level refusal reached clients as `FAILED_PRECONDITION` rather than
 `INVALID_ARGUMENT`, because `fail()` maps engine errors that way.
+
+### ExplainMortgage declared a HELOC and read none of it
+
+`ExplainMortgageRequest` declares `heloc_drawn_amount`, `heloc_annual_rate` and
+`heloc_term_years`. The handler read none of them, so a caller who modelled a
+draw got an explanation of a scenario WITHOUT it — no refusal, nothing saying
+so. Every one of the five tables was correct; none of them can see whether one
+line in `finance_service.cpp` reads the field.
+
+Fixed, and the HELOC's interest is now ITEMISED: `total_cost_of_ownership`
+includes it, so an itemisation whose parts do not reach the total they sit under
+is not an explanation.
+
+Verified live: point 8 of the explanation reads
+`"Interest on the HELOC: $19513.130659765329063914."`
+and a request with no HELOC correctly emits no HELOC sentence.
+
+### A protobuf reflection sweep over the descriptor: section 28 of test_finance_service_validation.cpp
+
+A field can be in the proto, in the label space, in the slot classifier, in the
+descriptor the client encodes against, and STILL be dropped — because the only
+thing that makes it arrive is one line in `finance_service.cpp` reading it.
+Nothing above that line can see that line's absence.
+
+Section 28 of `backend/tests/test_finance_service_validation.cpp` is a
+**PROTOBUF REFLECTION SWEEP**. For each of `DetailedAmortizationRequest`,
+`RefinanceRequest` and `ExplainMortgageRequest` it takes a baseline every field
+can influence, perturbs ONE field, and requires the response to change. A field
+that cannot change any answer is unread or inert, and inertness must be DECLARED
+with a reason rather than discovered.
+
+It sweeps the **DESCRIPTOR**, not a list — a list here would be a sixth
+hand-maintained copy of the contract and would omit the newest field. It found
+the dropped HELOC fields in `ExplainMortgageRequest` above, plus
+`annual_cost_growth` and `pmi_drop_off_ltv` which were read at four call sites
+and had no service-level assertion anywhere.
+
+Two lessons recorded in the test and carried into the docs:
+
+- **A "dropped field" is first a hypothesis about the BASELINE.** The sweep
+  reported `current_pmi_monthly` / `new_pmi_monthly` as unread; the baseline was
+  300k against a 400k value, already under the 80% PMI drop-off, so both are
+  genuinely inert there. The fix was the baseline (raising LTV to 85%), not an
+  exemption.
+- **The sweep catches a DROPPED field; only a signed assertion catches a
+  MISROUTED one.** Wiring `annual_cost_growth` into the repairs slot still moved
+  the response digest, and "flat 0.0 -> rising 1.43" satisfied a bare ratio
+  check. The flat total is now pinned to its closed form first.
 
 ### The assistant was not broken. The CORPUS was, and it took three retrains to prove it
 
@@ -3751,6 +3928,7 @@ engine linked at `rc=0` before that fix.
   vitest 4 pulls in. The build itself does not require it; the test suite does.
 - **Backend Docker Build:** `docker build -t options-backend backend/`
 - **Backend Tests:** `ninja -C backend/build build_tests && ctest --test-dir backend/build`
+  (ctest is **116/116**, up from 115 with `GroundingCorpusSweepTest`).
 
   **`ninja && ctest` is WRONG here and fails silently in the dangerous
   direction.** SGEE is embedded with `add_subdirectory(... EXCLUDE_FROM_ALL)`,
