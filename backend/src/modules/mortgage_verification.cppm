@@ -194,7 +194,7 @@ namespace detail {
 // its own OPERATIONS dict (parse_finance_proto + build_operations, the
 // same IN_SCOPE_SECTIONS and EXCLUDE_RPCS). The test re-parses the .proto
 // and fails if this table has drifted from it in either direction.
-constexpr std::array<FieldSpec, 221> kLabelSpace{{
+constexpr std::array<FieldSpec, 224> kLabelSpace{{
     {.operation = "ComputeAmortization", .field = "loan_amount", .proto_type = "string", .repeated = false},
     {.operation = "ComputeAmortization", .field = "annual_rate", .proto_type = "string", .repeated = false},
     {.operation = "ComputeAmortization", .field = "term_months", .proto_type = "int32", .repeated = false},
@@ -251,6 +251,9 @@ constexpr std::array<FieldSpec, 221> kLabelSpace{{
     {.operation = "ComputeDetailedAmortization", .field = "annual_repairs", .proto_type = "string", .repeated = false},
     {.operation = "ComputeDetailedAmortization", .field = "annual_insurance", .proto_type = "string", .repeated = false},
     {.operation = "ComputeDetailedAmortization", .field = "annual_cost_growth", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeDetailedAmortization", .field = "heloc_drawn_amount", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeDetailedAmortization", .field = "heloc_annual_rate", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeDetailedAmortization", .field = "heloc_term_years", .proto_type = "int32", .repeated = false},
     {.operation = "ComputeFutureValue", .field = "rate", .proto_type = "string", .repeated = false},
     {.operation = "ComputeFutureValue", .field = "periods", .proto_type = "int32", .repeated = false},
     {.operation = "ComputeFutureValue", .field = "payment", .proto_type = "string", .repeated = false},
@@ -1437,7 +1440,7 @@ struct ExcludedField {
     std::string_view operation;
     std::string_view field;
 };
-constexpr std::array<ExcludedField, 20> kOperationExcludedFields{{
+constexpr std::array<ExcludedField, 23> kOperationExcludedFields{{
     {.operation = "ComputeXirr", .field = "rate"},   // "ignored by XIRR"
     {.operation = "ComputeXnpv", .field = "guess"},  // "XIRR only"
     {.operation = "ComputeRate", .field = "guess"},  // "omit for the engine's own starting guess"
@@ -1493,6 +1496,9 @@ constexpr std::array<ExcludedField, 20> kOperationExcludedFields{{
     {.operation = "ComputeDetailedAmortization", .field = "annual_repairs"},
     {.operation = "ComputeDetailedAmortization", .field = "annual_insurance"},
     {.operation = "ComputeDetailedAmortization", .field = "annual_cost_growth"},
+    {.operation = "ComputeDetailedAmortization", .field = "heloc_drawn_amount"},
+    {.operation = "ComputeDetailedAmortization", .field = "heloc_annual_rate"},
+    {.operation = "ComputeDetailedAmortization", .field = "heloc_term_years"},
 }};
 
 /**

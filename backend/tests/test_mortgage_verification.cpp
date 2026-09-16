@@ -447,7 +447,11 @@ auto proto_label_space(const std::string& text)
     static const std::set<std::string> kExcluded{"ConvertInterestRate", "ComputeFisherRate",
                                                  "ComputeRentVsBuyBatch",
                                                  "RefreshStateAssumptions",
-                                                 "GetStateAssumptions"};
+                                                 "GetStateAssumptions",
+                                                 // A REPORTING call, not an
+                                                 // utterance: it describes a
+                                                 // scenario already computed.
+                                                 "ExplainMortgage"};
 
     std::map<std::string, std::vector<std::string>> out;
 

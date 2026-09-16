@@ -16,6 +16,7 @@ import sensen.options;
 import sensen.portfolio;
 import sensen.linear_algebra;
 import logger;
+import mortgage_explanation;
 import quota;
 import state_refresh;
 import api_key;
@@ -1522,8 +1523,38 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
                                              .annual_insurance = d_ins,
                                              .annual_growth = d_growth};
 
+        // A HELOC carried ALONGSIDE this mortgage. Amortised independently --
+        // it is secured elsewhere, so it never touches this loan's balance,
+        // its interest split or its PMI.
+        READ_DECIMAL_SAFE(d_heloc, request->heloc_drawn_amount(), "heloc_drawn_amount");
+        READ_DECIMAL_SAFE(d_heloc_rate, request->heloc_annual_rate(), "heloc_annual_rate");
+        if (d_heloc.is_negative() || d_heloc_rate.is_negative()) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "HELOC amount and rate cannot be negative");
+        }
+        if (request->heloc_term_years() < 0 || request->heloc_term_years() > 100) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "heloc_term_years must be between 0 and 100");
+        }
+        if (d_heloc.is_positive() && request->heloc_term_years() == 0) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "heloc_drawn_amount needs heloc_term_years: a draw with no "
+                          "repayment term costs nothing, which makes borrowing look free");
+        }
+
         auto [schedule, summary] = sensen::calculate_detailed_mortgage_amortization(
             loan, rate, request->term_months(), extra, pmi, home, tax, {}, carrying);
+
+        std::vector<sensen::AmortizationRow> heloc_rows;
+        sensen::BigDecimal heloc_interest_total{0};
+        sensen::BigDecimal heloc_paid_total{0};
+        if (d_heloc.is_positive()) {
+            auto [hr, hs] = sensen::calculate_mortgage_amortization(
+                d_heloc, d_heloc_rate, request->heloc_term_years() * 12);
+            heloc_rows = std::move(hr);
+            heloc_interest_total = hs.total_interest_paid;
+            heloc_paid_total = hs.total_payments_paid;
+        }
 
         for (const auto& row : schedule) {
             auto& r = *response->add_schedule();
@@ -1538,6 +1569,12 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
             r.set_end_balance(row.end_balance.to_string());
             r.set_repairs_paid(row.repairs_paid.to_string());
             r.set_insurance_paid(row.insurance_paid.to_string());
+            // Positional: row.period is 1-based and the HELOC may be shorter
+            // than the mortgage, so it simply stops rather than being padded.
+            const std::size_t hi = static_cast<std::size_t>(row.period) - 1;
+            r.set_heloc_payment(hi < heloc_rows.size()
+                                    ? heloc_rows[hi].scheduled_payment.to_string()
+                                    : sensen::BigDecimal(0).to_string());
         }
         auto& s = *response->mutable_summary();
         s.set_total_principal_paid(summary.total_principal_paid.to_string());
@@ -1547,7 +1584,10 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         s.set_total_tax_savings(summary.total_tax_savings.to_string());
         s.set_total_repairs_paid(summary.total_repairs_paid.to_string());
         s.set_total_insurance_paid(summary.total_insurance_paid.to_string());
-        s.set_total_cost_of_ownership(summary.total_cost_of_ownership.to_string());
+        s.set_total_cost_of_ownership(
+            summary.total_cost_of_ownership.add(heloc_paid_total).to_string());
+        s.set_total_heloc_interest_paid(heloc_interest_total.to_string());
+        s.set_total_heloc_paid(heloc_paid_total.to_string());
         s.set_actual_term_months(summary.actual_term_months);
         return Status::OK;
     }
@@ -3519,6 +3559,140 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
      * schedule and no solve, so it is the cheapest thing on the real-estate
      * surface rather than being priced like its neighbours.
      */
+    /**
+     * The scenario, in words, DERIVED from the schedule it just computed.
+     *
+     * Runs the amortisation twice when there is an overpayment -- once as
+     * asked and once without it -- because "what did the extra payment buy"
+     * is the question people actually ask and a single schedule cannot answer
+     * it. The second run is the baseline the explainer compares against.
+     *
+     * Every sentence then comes out of a Horn-clause derivation over those
+     * figures. Nothing here writes prose and nothing here holds a number the
+     * amortisation did not produce, which is what makes the output auditable
+     * rather than merely fluent.
+     */
+    auto ExplainMortgage(ServerContext* context,
+                         const sensen::finance::ExplainMortgageRequest* request,
+                         sensen::finance::ExplainMortgageResponse* response) -> Status override {
+        if (request == nullptr || response == nullptr) {
+            return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
+        }
+        CHARGE("ExplainMortgage", quota::cost_amortization(request->term_months()));
+
+        REQUIRE_DECIMAL_SAFE(loan, request->loan_amount(), "loan_amount");
+        REQUIRE_DECIMAL_SAFE(rate, request->annual_rate(), "annual_rate");
+        READ_DECIMAL_SAFE(extra, request->monthly_overpayment(), "monthly_overpayment");
+        READ_DECIMAL_SAFE(pmi, request->pmi_annual_rate(), "pmi_annual_rate");
+        READ_DECIMAL_SAFE(home, request->original_home_value(), "original_home_value");
+        READ_DECIMAL_SAFE(tax, request->annual_tax_rate(), "annual_tax_rate");
+        READ_DECIMAL_SAFE(repairs, request->annual_repairs(), "annual_repairs");
+        READ_DECIMAL_SAFE(insurance, request->annual_insurance(), "annual_insurance");
+        READ_DECIMAL_SAFE(growth, request->annual_cost_growth(), "annual_cost_growth");
+        READ_DECIMAL_SAFE(ltv, request->pmi_drop_off_ltv(), "pmi_drop_off_ltv");
+        READ_DECIMAL_SAFE(appr, request->annual_appreciation(), "annual_appreciation");
+
+        if (request->term_months() <= 0 || request->term_months() > 1200) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "term_months must be between 1 and 1200");
+        }
+        if (auto s = check_compound_growth_safe(rate.to_double(), 12, request->term_months(),
+                                                "annual_rate");
+            !s.ok()) {
+            return s;
+        }
+
+        // A zero threshold would mean PMI forever, which is the opposite of
+        // what an omitted field should do -- the same reason PmiTermination
+        // defaults it rather than trusting a proto3 scalar.
+        sensen::PmiTermination policy{};
+        if (ltv.is_positive()) { policy.threshold_ltv = ltv; }
+        if (appr.is_positive()) {
+            policy.annual_appreciation = appr;
+            policy.basis = sensen::PmiBasis::AppreciatedValue;
+        }
+        const sensen::CarryingCosts carrying{.annual_repairs = repairs,
+                                             .annual_insurance = insurance,
+                                             .annual_growth = growth};
+
+        auto [rows, sum] = sensen::calculate_detailed_mortgage_amortization(
+            loan, rate, request->term_months(), extra, pmi, home, tax, policy, carrying);
+
+        const auto pmi_stop = [](const auto& sched) {
+            int last = 0;
+            for (const auto& r : sched) {
+                if (r.pmi_paid.is_positive()) { last = r.period; }
+            }
+            return last;
+        };
+
+        // The BASELINE: the same loan with no overpayment. Only computed when
+        // there IS one -- otherwise the comparison is between a schedule and
+        // itself, and the explainer correctly says nothing about it.
+        int baseline_stop = 0;
+        if (extra.is_positive()) {
+            auto [brows, bsum] = sensen::calculate_detailed_mortgage_amortization(
+                loan, rate, request->term_months(), sensen::BigDecimal(0), pmi, home, tax,
+                policy, {});
+            baseline_stop = pmi_stop(brows);
+        }
+
+        namespace ex = mortgage_calculator::assistant::explain;
+        ex::PmiFacts facts{};
+        facts.monthly_premium = rows.empty() ? "0" : rows.front().pmi_paid.to_string();
+        facts.ends_month = pmi_stop(rows);
+        facts.total_paid = sum.total_pmi_paid.to_string();
+        facts.threshold_ltv = policy.threshold_ltv.to_string();
+        facts.basis_value = (home.is_positive() ? home : loan).to_string();
+        facts.term_months = request->term_months();
+        facts.monthly_overpayment = extra.to_string();
+        facts.baseline_ends_month = baseline_stop;
+
+        auto points = ex::explain_pmi(facts);
+
+        // The OUTPUT-driven half: the totals, itemised, with the empty columns
+        // silently dropped. A caller who modelled no repairs gets no sentence
+        // about repairs rather than "repairs: $0".
+        ex::ResultView view{};
+        view.operation = "ComputeDetailedAmortization";
+        const auto money = [](std::string_view name, std::string_view label,
+                              const sensen::BigDecimal& v, ex::ZeroMeaning z) {
+            return ex::ResultField{.name = std::string{name},
+                                   .label = std::string{label},
+                                   .value = v.to_string(),
+                                   .unit = ex::Unit::Money,
+                                   .zero = z};
+        };
+        view.fields = {
+            money("total_interest_paid", "Interest over the life of the loan",
+                  sum.total_interest_paid, ex::ZeroMeaning::Real),
+            money("total_repairs_paid", "Repairs and maintenance",
+                  sum.total_repairs_paid, ex::ZeroMeaning::Absent),
+            money("total_insurance_paid", "Your own insurance cover",
+                  sum.total_insurance_paid, ex::ZeroMeaning::Absent),
+            money("total_tax_savings", "Tax saved on the interest deduction",
+                  sum.total_tax_savings, ex::ZeroMeaning::Absent),
+            money("total_cost_of_ownership", "What the house costs in total",
+                  sum.total_cost_of_ownership, ex::ZeroMeaning::Real),
+        };
+        for (auto& p : ex::explain_result(view)) { points.push_back(std::move(p)); }
+
+        // Renumbered ACROSS both halves, after they are joined. Each half
+        // numbers from 1 on its own, and an export printing "1, 2, 1, 2"
+        // beside five sentences is worse than no numbering at all.
+        int n = 0;
+        for (auto& p : points) {
+            ++n;
+            auto* out = response->add_points();
+            out->set_topic(p.topic);
+            out->set_text(p.text);
+            out->set_item(n);
+            out->set_field(p.field);
+            out->set_value(p.value);
+        }
+        return Status::OK;
+    }
+
     auto ComputeClosingCosts(ServerContext* context,
                              const sensen::finance::ClosingCostsRequest* request,
                              sensen::finance::ClosingCostsResponse* response) -> Status override {

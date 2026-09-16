@@ -238,7 +238,11 @@ auto parse_proto(const std::string& text) -> ProtoView {
     static const std::set<std::string> kExcluded{"ConvertInterestRate", "ComputeFisherRate",
                                                  "ComputeRentVsBuyBatch",
                                                  "RefreshStateAssumptions",
-                                                 "GetStateAssumptions"};
+                                                 "GetStateAssumptions",
+                                                 // A REPORTING call, not an
+                                                 // utterance: it describes a
+                                                 // scenario already computed.
+                                                 "ExplainMortgage"};
 
     ProtoView view;
     const auto svc = text.find("service Finance {");

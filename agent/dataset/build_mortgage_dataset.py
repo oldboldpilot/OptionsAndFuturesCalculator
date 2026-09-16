@@ -223,8 +223,12 @@ IN_SCOPE_SECTIONS = {
 #     data; the other reads that reference table. Neither is a question a
 #     homeowner asks, and admitting them would give the model a label whose
 #     arguments no utterance grounds.
+#   ExplainMortgage -- a REPORTING call, not an utterance. It takes a scenario
+#     the caller has ALREADY computed and returns prose about it, so nothing a
+#     person says maps to it; putting it in the label space would ask the model
+#     to choose between computing an answer and describing one.
 EXCLUDE_RPCS = {"ConvertInterestRate", "ComputeFisherRate", "ComputeRentVsBuyBatch",
-                "RefreshStateAssumptions", "GetStateAssumptions"}
+                "RefreshStateAssumptions", "GetStateAssumptions", "ExplainMortgage"}
 
 
 def build_operations(parsed: dict) -> dict[str, dict]:
@@ -310,6 +314,7 @@ OP_EXCLUDED_FIELDS: dict[str, set[str]] = {
     },
     "ComputeDetailedAmortization": {
         "annual_repairs", "annual_insurance", "annual_cost_growth",
+        "heloc_drawn_amount", "heloc_annual_rate", "heloc_term_years",
     },
 }
 

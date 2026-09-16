@@ -54,8 +54,19 @@ agent/dataset/out/
 .dev.vars
 **/.dev.vars
 
-# Generated training datasets (regenerate deterministically with --seed)
+# Generated training datasets (regenerate deterministically with --seed).
+#
+# The GLOB matters. This was `agent/dataset/data_mortgage/` -- the exact
+# directory, trailing slash -- and every PRESERVED SNAPSHOT beside it was
+# therefore tracked. Those snapshots are the whole working method of a retrain:
+# `data_mortgage.pre-rentalcashflow-20260916T000150Z/` exists so
+# `--assert-disjoint-from` can prove a holdout was not in the previous model's
+# train split, and one gets created every time the corpus changes. 12,000 rows
+# and 11 MB each, all regenerable from the generator at that commit.
+#
+# Caught by `git add -A agent` sweeping one into a commit about something else.
 agent/dataset/data_mortgage/
+agent/dataset/data_mortgage.*/
 
 # Issued API keys in plaintext. Never committed; hand to the customer and delete.
 config/keys/

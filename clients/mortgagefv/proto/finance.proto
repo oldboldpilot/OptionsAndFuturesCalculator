@@ -89,6 +89,7 @@ service Finance {
   rpc ComputeRentVsBuyBatch (RentVsBuyBatchRequest) returns (RentVsBuyBatchResponse);
   rpc ComputeHomeNpv (HomeNpvRequest) returns (HomeNpvResponse);
   rpc ComputeClosingCosts (ClosingCostsRequest) returns (ClosingCostsResponse);
+  rpc ExplainMortgage (ExplainMortgageRequest) returns (ExplainMortgageResponse);
   rpc RefreshStateAssumptions (RefreshStateAssumptionsRequest) returns (RefreshStateAssumptionsResponse);
   rpc GetStateAssumptions (GetStateAssumptionsRequest) returns (GetStateAssumptionsResponse);
 
@@ -273,6 +274,50 @@ message DetailedAmortizationRequest {
   // deductible at all is a matter of the caller's jurisdiction and filing
   // position; this service applies the rate it is given and does not opine.
   string annual_tax_rate = 7;
+
+  // --- what the HOUSE costs to keep, beside what the LOAN costs ------------
+  //
+  // A mortgage calculator that quotes P&I and stops describes the cheapest
+  // year an owner will ever have. Repairs are the single largest omitted cost
+  // of owning, they do not amortise, and they do not stop when the loan does.
+  //
+  // BESIDE the payment, never inside it: folding them in would corrupt the
+  // interest/principal split and every figure derived from it, so they are
+  // reported on their own rows and in their own totals.
+  //
+  // `annual_insurance` is the OWNER's cover -- a new-build warranty, a
+  // structural or defects policy -- and is deliberately separate from
+  // `pmi_annual_rate`. PMI protects the LENDER and cancels at the LTV
+  // threshold; this protects the OWNER against the building and cancels for
+  // no one. One "insurance" line would make a cost that ends look like a cost
+  // that does not.
+  //
+  // All optional; "0"/empty means NOT MODELLED and the schedule is unchanged.
+  string annual_repairs = 8;
+  string annual_insurance = 9;
+  // Yearly increase applied to both, compounding at the YEAR boundary. Zero is
+  // supported and is the wrong answer by habit over a 360-month term: holding
+  // a repair budget flat for thirty years prices the last year's roof at the
+  // first year's money, and the error grows with exactly the horizon the
+  // schedule exists to show.
+  string annual_cost_growth = 10;
+
+  // --- a HELOC carried ALONGSIDE this mortgage ----------------------------
+  //
+  // The mirror of ComputeHeloc showing the first mortgage. Both screens ask
+  // the same question from opposite ends -- "what do I actually owe each
+  // month" -- and an owner who reaches it from the mortgage side should not
+  // have to rebuild their scenario on another page to see the answer.
+  //
+  // The HELOC is secured elsewhere and amortises independently, so it never
+  // touches THIS loan's balance, its interest split, or its PMI. It appears as
+  // its own per-row payment and its own totals.
+  //
+  // All optional. A draw needs `heloc_term_years`: a draw with no repayment
+  // term costs nothing, which is the shape that makes borrowing look free.
+  string heloc_drawn_amount = 11;
+  string heloc_annual_rate = 12;
+  int32 heloc_term_years = 13;
 }
 
 message DetailedAmortizationRow {
@@ -285,6 +330,13 @@ message DetailedAmortizationRow {
   string pmi_paid = 7;
   string tax_savings = 8;
   string end_balance = 9;
+  // Carrying costs for this month. Zero throughout when not modelled, which
+  // is what keeps every figure above unchanged for an existing caller.
+  string repairs_paid = 10;
+  string insurance_paid = 11;
+  // The HELOC's payment this month, or zero once its own term ends. Separate
+  // from `scheduled_payment`, which is THIS loan's.
+  string heloc_payment = 12;
 }
 
 message DetailedMortgageSummary {
@@ -294,6 +346,15 @@ message DetailedMortgageSummary {
   string total_payments_paid = 4;
   string total_tax_savings = 5;
   int32 actual_term_months = 6;
+  string total_repairs_paid = 7;
+  string total_insurance_paid = 8;
+  // Debt service PLUS carrying costs. Reported beside total_payments_paid
+  // rather than folded into it, because that figure is what went TO THE
+  // LENDER and other things are derived from it. Two totals answering two
+  // questions beat one answering neither.
+  string total_cost_of_ownership = 9;
+  string total_heloc_interest_paid = 10;
+  string total_heloc_paid = 11;
 }
 
 message DetailedAmortizationResponse {
@@ -1257,6 +1318,63 @@ message RiskContributionResponse {
 // getting it wrong produces a plausible number rather than an error:
 // origination and discount points are percentages of the LOAN, while title and
 // transfer tax are percentages of the PURCHASE PRICE.
+// ---------------------------------------------------------------------------
+// ExplainMortgage -- the scenario, in words, derived rather than written.
+//
+// Every sentence comes from a Horn-clause derivation over facts the schedule
+// ALREADY produced: `mortgage_explanation.cppm` runs sensen's logic engine and
+// a number reaches prose only as a clause argument. There is no model here and
+// no template with a number substituted in -- the layer cannot invent a figure
+// because it never holds one that the amortisation did not compute.
+//
+// ITEMISED, AND THAT IS THE POINT. A paragraph of correct sentences is
+// unauditable if the reader cannot tell WHICH figure each one describes. Every
+// point carries its display ordinal, the machine name of the output line, and
+// that line's value VERBATIM -- so an export can print "3." beside the
+// sentence and link it back to row 3 of the summary, and a test can assert the
+// number in the prose is the number in the result rather than that the
+// sentence agrees with itself.
+// ---------------------------------------------------------------------------
+message ExplainMortgageRequest {
+  // The scenario to explain. Same fields as ComputeDetailedAmortization, so a
+  // caller explains exactly what it just computed rather than restating it.
+  string loan_amount = 1;
+  string annual_rate = 2;
+  int32 term_months = 3;
+  string monthly_overpayment = 4;
+  string pmi_annual_rate = 5;
+  string original_home_value = 6;
+  string annual_tax_rate = 7;
+  string annual_repairs = 8;
+  string annual_insurance = 9;
+  string annual_cost_growth = 10;
+  string heloc_drawn_amount = 11;
+  string heloc_annual_rate = 12;
+  int32 heloc_term_years = 13;
+  // PMI cancellation policy: the LTV that ends it, and whether it is measured
+  // against the ORIGINAL value or an appreciating one.
+  string pmi_drop_off_ltv = 14;
+  string annual_appreciation = 15;
+}
+
+message ExplanationPoint {
+  // Stable identifier -- a dotted name like "pmi.termination". Callers key on
+  // this, never on the sentence, which changes when the wording improves.
+  string topic = 1;
+  string text = 2;
+  // 1-based display ordinal. The number an export prints beside the sentence.
+  int32 item = 3;
+  // The output line this point is about, and its figure exactly as computed.
+  // Together they are the LINK BACK: an export can anchor the sentence to the
+  // row carrying `field`, and a reader can check the prose against the table.
+  string field = 4;
+  string value = 5;
+}
+
+message ExplainMortgageResponse {
+  repeated ExplanationPoint points = 1;
+}
+
 message ClosingCostsRequest {
   string home_price = 1;
   string down_payment_percent = 2;         // 0.10 for 10%; loan = price - down

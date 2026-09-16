@@ -2468,6 +2468,188 @@ auto main() -> int {
     }
 
     // =======================================================================
+    section("24e. ExplainMortgage: the scenario in words, traceable to figures");
+    // =======================================================================
+    //
+    // Every sentence is a Horn-clause derivation over facts the schedule
+    // ALREADY produced. There is no model and no template with a number
+    // substituted in -- the layer never holds a figure the amortisation did
+    // not compute, which is what makes the output auditable rather than
+    // merely fluent.
+    {
+        const auto base = []() {
+            sensen::finance::ExplainMortgageRequest r;
+            r.set_loan_amount("300000.00");
+            r.set_annual_rate("0.065");
+            r.set_term_months(360);
+            r.set_pmi_annual_rate("0.006");
+            r.set_original_home_value("330000.00");
+            return r;
+        };
+        const auto run = [&](const sensen::finance::ExplainMortgageRequest& req,
+                             sensen::finance::ExplainMortgageResponse& resp) {
+            auto ctx = make_context();
+            return stub.ExplainMortgage(ctx.get(), req, &resp);
+        };
+
+        sensen::finance::ExplainMortgageResponse r;
+        check(run(base(), r).ok(), "a scenario is explained");
+        check(r.points_size() > 0, "and produces points");
+
+        // ITEMISED 1..N WITH NO GAPS, across BOTH halves. The PMI derivation
+        // and the output-driven totals each number from 1 on their own; an
+        // export printing "1, 2, 1, 2" beside five sentences is worse than no
+        // numbering at all.
+        bool numbered = true;
+        for (int i = 0; i < r.points_size(); ++i) {
+            if (r.points(i).item() != i + 1) { numbered = false; }
+        }
+        check(numbered, "items run 1..N with no gaps and no restart");
+
+        // THE LINK BACK. A sentence an export cannot anchor to a row is a
+        // sentence the reader has to take on trust.
+        bool anchored = true;
+        for (const auto& p : r.points()) {
+            if (p.topic().empty() || p.text().empty()) { anchored = false; }
+        }
+        check(anchored, "each carries a stable topic and a sentence");
+
+        bool traceable = false;
+        for (const auto& p : r.points()) {
+            if (!p.field().empty() && !p.value().empty()) { traceable = true; }
+        }
+        check(traceable,
+              "and the output-driven points name their line and its figure, "
+              "so an export can link the sentence to the row");
+
+        // THE FIGURES ARE THE SCHEDULE'S OWN. Compared against what
+        // ComputeDetailedAmortization returns for the identical scenario --
+        // if the explainer could reshape a number, this is where it shows.
+        sensen::finance::DetailedAmortizationRequest dreq;
+        dreq.set_loan_amount("300000.00");
+        dreq.set_annual_rate("0.065");
+        dreq.set_term_months(360);
+        dreq.set_pmi_annual_rate("0.006");
+        dreq.set_original_home_value("330000.00");
+        sensen::finance::DetailedAmortizationResponse dres;
+        auto dctx = make_context();
+        check(stub.ComputeDetailedAmortization(dctx.get(), dreq, &dres).ok(),
+              "the same scenario computes");
+        bool matches = true;
+        for (const auto& p : r.points()) {
+            if (p.field() == "total_interest_paid" &&
+                p.value() != dres.summary().total_interest_paid()) {
+                matches = false;
+            }
+        }
+        check(matches,
+              "a carried value is VERBATIM from the schedule, not re-rendered");
+
+        // EMPTY COLUMNS ARE NOT EXPLAINED. A caller who modelled no repairs
+        // gets no sentence about repairs, rather than "repairs: $0".
+        bool mentions_repairs = false;
+        for (const auto& p : r.points()) {
+            if (p.field() == "total_repairs_paid") { mentions_repairs = true; }
+        }
+        check(!mentions_repairs, "an unmodelled repair budget is silence, not a zero");
+
+        auto costed = base();
+        costed.set_annual_repairs("3600.00");
+        sensen::finance::ExplainMortgageResponse c;
+        check(run(costed, c).ok(), "with repairs it still explains");
+        bool now_mentions = false;
+        for (const auto& p : c.points()) {
+            if (p.field() == "total_repairs_paid") { now_mentions = true; }
+        }
+        check(now_mentions, "and NOW it says what they cost");
+
+        // WHAT THE OVERPAYMENT BOUGHT. Needs two schedules -- the one asked
+        // for and the one without it -- so a single run cannot answer it, and
+        // the service computes the baseline only when there is an overpayment.
+        auto over = base();
+        over.set_monthly_overpayment("400.00");
+        sensen::finance::ExplainMortgageResponse o;
+        check(run(over, o).ok(), "an overpayment scenario explains");
+        bool says_pulled_forward = false;
+        for (const auto& p : o.points()) {
+            if (p.topic() == "pmi.overpayment") { says_pulled_forward = true; }
+        }
+        check(says_pulled_forward,
+              "and says what the extra payment BOUGHT -- a question one "
+              "schedule cannot answer");
+    }
+
+    // =======================================================================
+    section("24d. ComputeDetailedAmortization: the house, and a HELOC beside it");
+    // =======================================================================
+    //
+    // The mirror of 24c. Both screens ask the same question from opposite ends
+    // -- "what do I actually owe each month" -- and an owner who reaches it
+    // from the mortgage side should not have to rebuild their scenario
+    // elsewhere to see the answer.
+    {
+        const auto base = []() {
+            sensen::finance::DetailedAmortizationRequest r;
+            r.set_loan_amount("300000.00");
+            r.set_annual_rate("0.065");
+            r.set_term_months(360);
+            r.set_original_home_value("375000.00");
+            r.set_annual_tax_rate("0.22");
+            return r;
+        };
+        const auto run = [&](const sensen::finance::DetailedAmortizationRequest& req,
+                             sensen::finance::DetailedAmortizationResponse& resp) {
+            auto ctx = make_context();
+            return stub.ComputeDetailedAmortization(ctx.get(), req, &resp);
+        };
+
+        sensen::finance::DetailedAmortizationResponse plain;
+        check(run(base(), plain).ok(), "the plain schedule answers");
+        check(std::fabs(std::stod(plain.summary().total_repairs_paid())) < 0.01,
+              "omitted repairs are zero, not a guess at a national average");
+
+        // Repairs and the OWNER's insurance, beside the payment.
+        auto costed = base();
+        costed.set_annual_repairs("3600.00");
+        costed.set_annual_insurance("900.00");
+        sensen::finance::DetailedAmortizationResponse c;
+        check(run(costed, c).ok(), "the house's own costs are accepted");
+        check(std::fabs(std::stod(c.schedule(0).repairs_paid()) - 300.0) < 0.01,
+              "3,600 a year is charged as 300 a month, not 3,600 in month one");
+        check(std::stod(c.summary().total_cost_of_ownership()) >
+                  std::stod(c.summary().total_payments_paid()),
+              "cost of ownership exceeds what went to the lender");
+        // THE LOAN IS UNTOUCHED. Carrying costs sit beside the payment; folding
+        // them in would corrupt the interest/principal split.
+        check(c.summary().total_interest_paid() == plain.summary().total_interest_paid(),
+              "and the loan's own interest is byte-identical");
+
+        // A HELOC carried alongside.
+        auto withHeloc = costed;
+        withHeloc.set_heloc_drawn_amount("50000.00");
+        withHeloc.set_heloc_annual_rate("0.085");
+        withHeloc.set_heloc_term_years(10);
+        sensen::finance::DetailedAmortizationResponse h;
+        check(run(withHeloc, h).ok(), "a HELOC beside the mortgage is accepted");
+        check(std::stod(h.schedule(0).heloc_payment()) > 0,
+              "it shows as its own per-row payment");
+        check(std::fabs(std::stod(h.schedule(120).heloc_payment())) < 0.01,
+              "and STOPS at month 121 when its own 10-year term ends, while the "
+              "mortgage runs on");
+        check(h.summary().total_interest_paid() == plain.summary().total_interest_paid(),
+              "the HELOC is secured elsewhere, so THIS loan's interest is unchanged");
+        check(std::stod(h.summary().total_heloc_interest_paid()) > 0,
+              "while the HELOC carries its own interest total");
+
+        auto bad = base();
+        bad.set_heloc_drawn_amount("50000.00");
+        sensen::finance::DetailedAmortizationResponse ig;
+        check(run(bad, ig).error_code() == grpc::StatusCode::INVALID_ARGUMENT,
+              "a draw with no term is refused: it would cost nothing, which "
+              "makes borrowing look free");
+    }
+
+    // =======================================================================
     section("24c. ComputeHeloc: BOTH debts, or the draw looks affordable");
     // =======================================================================
     //
