@@ -730,6 +730,8 @@ export enum class ReasonCode {
     InvalidEnumValue, ///< G2: enum constant not in that enum's closed set
     MalformedNumber,  ///< strict decimal grammar violated
     UngroundedValue,  ///< G3: value is not derivable from anything the user said
+    UnstatedField,    ///< G3/G5, refined: the user never stated this field AT ALL, so
+                      ///< the honest answer is a QUESTION rather than a refusal
     OutOfRange,       ///< G5: product-scope bound violated
     Unclassified,     ///< verifier gap -> Indeterminate
 };
@@ -790,6 +792,10 @@ export struct VerificationFacts {
     bool incomplete = false; ///< a rule could not be evaluated -> Indeterminate
     ReasonCode reason = ReasonCode::None;
     std::string detail;
+    /** The field the rule failed ON, when there is one. Carried so the service
+     *  can tell "you never told me the term" from "you told me and it came
+     *  back mangled" -- two failures that need opposite responses. */
+    std::string field;
 };
 
 export enum class Outcome { Proven, Unsafe, Indeterminate };
@@ -798,6 +804,8 @@ export struct VerificationVerdict {
     Outcome outcome = Outcome::Indeterminate; ///< fail-closed default construction
     ReasonCode reason = ReasonCode::None;
     std::string message;
+    /** The field the verdict is ABOUT, empty when it is not about one. */
+    std::string field;
 };
 
 // ===========================================================================
@@ -1263,6 +1271,47 @@ export [[nodiscard]] auto dated_utterance_rejects_operation(std::string_view ope
  * field names to know what kind of quantity each value is.
  * `verify_mortgage_output` enforces that ordering.
  */
+/**
+ * Did the utterance state ANYTHING that could have filled `field`?
+ *
+ * The difference between the two ways a value fails, and they need opposite
+ * responses:
+ *
+ *   - the user SAID a figure for this slot and the model mangled it. That is
+ *     the documented dangerous failure -- `present_value = 304000.00` against a
+ *     495,000 utterance, which parses, satisfies every bound, names a real
+ *     field and prices a different loan. It must stay a REFUSAL.
+ *   - the user said nothing that could fill this slot at all. Then the model
+ *     invented the value because the question was under-specified, and the
+ *     honest answer is to ASK.
+ *
+ * Decided on the lexer's TAGS, not on magnitudes. A Years-tagged "30" is not
+ * the user stating an interest rate however convenient 0.30 would be, and a
+ * Money-tagged "$495,000" IS the user stating a present value even when the
+ * model came back with 304000. An UNTAGGED literal is permissive everywhere,
+ * because a bare number genuinely is ambiguous and this must fail toward the
+ * refusal it already gives.
+ *
+ * Measured against production on 2026-09-16, before this existed:
+ *
+ *   "What's the payment on a $420,000 loan at 6.5%?"
+ *   -> "periods" = 180 does not correspond to anything in the request
+ *      (the nearest figure you gave is 6.5)
+ *
+ * The term is simply absent -- the corpus teaches a QUESTION here ("Over how
+ * many years?") and the deployed model answers anyway. v15 asked on 15 of 90
+ * such rows, v17 on 1 and v18 on 0, so the capability is gone and only a
+ * retrain brings it back. The serving layer already knows, though: it refused
+ * on exactly the missing field. This turns that knowledge into the question.
+ */
+export [[nodiscard]] auto utterance_states_nothing_for(std::string_view field,
+                                                       std::string_view user_text) -> bool;
+
+/** The question to ask when `field` was never stated, or empty when this
+ *  contract has no natural wording for it. */
+export [[nodiscard]] auto clarifying_question(std::string_view operation,
+                                              std::string_view field) -> std::string;
+
 export [[nodiscard]] auto ground_emitted_values(const MortgageParamsInput& input,
                                                 std::string_view user_text) -> VerificationVerdict;
 
@@ -3150,6 +3199,7 @@ auto MortgageParamsDomain::translate(const MortgageParamsInput& in) const -> Ver
                 f.violated = true;
                 f.reason = ReasonCode::OutOfRange;
                 f.detail = *bad;
+                f.field = emitted.name;
                 return f;
             }
         }
@@ -3177,6 +3227,7 @@ auto verify_mortgage_params(const MortgageParamsInput& input) -> VerificationVer
         verdict.outcome = Outcome::Unsafe;
         verdict.reason = facts.reason;
         verdict.message = facts.detail;
+        verdict.field = facts.field;
         return verdict;
     }
     verdict.outcome = Outcome::Proven;
@@ -3294,6 +3345,7 @@ auto ground_emitted_values(const MortgageParamsInput& input, std::string_view us
                 }
                 verdict.outcome = Outcome::Unsafe;
                 verdict.reason = ReasonCode::UngroundedValue;
+                verdict.field = emitted.name;
                 verdict.message =
                     "\"" + emitted.name + "\" = " + raw +
                     " does not correspond to anything in the request" +
@@ -3312,6 +3364,106 @@ auto ground_emitted_values(const MortgageParamsInput& input, std::string_view us
 // The composed gate.
 // ---------------------------------------------------------------------------
 
+auto utterance_states_nothing_for(std::string_view field, std::string_view user_text) -> bool {
+    const auto kind = classify_slot(field);
+    // An unclassified slot is already Indeterminate upstream; claiming the user
+    // said nothing about it would put a question in front of a verifier gap.
+    if (kind == SlotKind::Unclassified) { return false; }
+    // Enumerations and booleans are not numbers and no literal bears on them.
+    if (kind == SlotKind::Enumeration || kind == SlotKind::Boolean) { return false; }
+
+    for (const auto& lit : lex_numeric_literals(user_text)) {
+        // Untagged is compatible with everything, deliberately: a bare number
+        // is ambiguous, and the ambiguous case must fall through to the refusal
+        // this function exists to NARROW rather than to widen.
+        if (lit.tag == LiteralTag::Untagged) { return false; }
+        switch (kind) {
+            case SlotKind::Money:
+                if (lit.tag == LiteralTag::Money) { return false; }
+                break;
+            case SlotKind::Rate:
+            case SlotKind::Ratio:
+            case SlotKind::Dimensionless:
+                if (lit.tag == LiteralTag::Percent) { return false; }
+                break;
+            case SlotKind::MonthCount:
+            case SlotKind::YearCount:
+            case SlotKind::PeriodIndex:
+            case SlotKind::Frequency:
+                if (lit.tag == LiteralTag::Years || lit.tag == LiteralTag::Months) {
+                    return false;
+                }
+                break;
+            case SlotKind::DayOffsets:
+                if (lit.tag == LiteralTag::Days) { return false; }
+                break;
+            default:
+                return false;
+        }
+    }
+    return true;
+}
+
+auto clarifying_question(std::string_view operation, std::string_view field) -> std::string {
+    // The WORDING comes from the corpus's own clarification rows, so the
+    // question a user sees here is the question the model was trained to ask.
+    // Two sources for one sentence would drift, and the corpus is the one that
+    // also teaches the model what the reply means.
+    (void)operation;
+    if (field == "periods" || field == "term_months" || field == "loan_term_years" ||
+        field == "new_term_years" || field == "repayment_term_years") {
+        return "Over how many years?";
+    }
+    if (field == "years" || field == "recovery_period") { return "Over how many years?"; }
+    if (field == "annual_rate" || field == "rate" || field == "loan_annual_rate" ||
+        field == "new_annual_rate" || field == "current_annual_rate") {
+        return "What's the interest rate?";
+    }
+    if (field == "max_ltv_rate") { return "What's the maximum loan-to-value?"; }
+    if (field == "periodic_operating_expenses" || field == "annual_other_expenses") {
+        return "What do operating expenses run per month -- taxes, insurance, maintenance?";
+    }
+    if (field == "loan_amount" || field == "present_value" || field == "property_price" ||
+        field == "property_value" || field == "home_value") {
+        return "How much is the loan or the property worth?";
+    }
+    if (field == "down_payment") { return "How much are you putting down?"; }
+    if (field == "monthly_gross_rent" || field == "periodic_gross_rent") {
+        return "What does it rent for?";
+    }
+    // No natural wording: the caller keeps the refusal rather than asking a
+    // question built out of a field name, which reads like a stack trace.
+    return {};
+}
+
+/**
+ * Reclassify "this value is wrong" as "you never told me this" when the
+ * utterance contains nothing that could have filled the slot.
+ *
+ * Applied to BOTH the bounds verdict and the grounding verdict, because an
+ * invented value lands in whichever of them happens to catch it first and the
+ * user's experience is identical either way. Measured: an absent term produced
+ * a G3 refusal ("periods" = 180 does not correspond to anything) and an absent
+ * rate produced a G5 one (annual_rate = 0.6 is outside this assistant's
+ * interest-rate range) on utterances of the same shape.
+ *
+ * It NARROWS only. Every refusal it does not touch is the refusal that was
+ * there before, and a field with no natural question keeps its refusal too --
+ * a question assembled from a proto field name reads like a stack trace.
+ */
+[[nodiscard]] auto refine_unstated(VerificationVerdict v, std::string_view user_text)
+    -> VerificationVerdict {
+    if (v.outcome == Outcome::Proven) { return v; }
+    if (v.reason != ReasonCode::UngroundedValue && v.reason != ReasonCode::OutOfRange) {
+        return v;
+    }
+    if (v.field.empty()) { return v; }
+    if (!utterance_states_nothing_for(v.field, user_text)) { return v; }
+    if (clarifying_question("", v.field).empty()) { return v; }
+    v.reason = ReasonCode::UnstatedField;
+    return v;
+}
+
 auto verify_mortgage_output(const MortgageParamsInput& input, std::string_view user_text)
     -> VerificationVerdict {
     VerificationVerdict verdict;
@@ -3327,11 +3479,13 @@ auto verify_mortgage_output(const MortgageParamsInput& input, std::string_view u
     }
 
     // ---- G1 + G2 + G5 ----
-    const auto structural = verify_mortgage_params(input);
-    if (structural.outcome != Outcome::Proven) return structural;
+    auto structural = verify_mortgage_params(input);
+    if (structural.outcome != Outcome::Proven) {
+        return refine_unstated(std::move(structural), user_text);
+    }
 
     // ---- G3 ----
-    return ground_emitted_values(input, user_text);
+    return refine_unstated(ground_emitted_values(input, user_text), user_text);
 }
 
 // ---------------------------------------------------------------------------
@@ -3350,6 +3504,7 @@ auto to_string(ReasonCode code) -> std::string_view {
         case ReasonCode::InvalidEnumValue: return "InvalidEnumValue";
         case ReasonCode::MalformedNumber: return "MalformedNumber";
         case ReasonCode::UngroundedValue: return "UngroundedValue";
+        case ReasonCode::UnstatedField: return "UnstatedField";
         case ReasonCode::OutOfRange: return "OutOfRange";
         case ReasonCode::Unclassified: return "Unclassified";
     }

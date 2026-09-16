@@ -2072,6 +2072,89 @@ auto main() -> int {
         check(both, "an em dash followed by an explicitly signed -1000 still lexes negative");
     }
 
+    // =======================================================================
+    section("A field the user never stated is a QUESTION, not a refusal");
+    // =======================================================================
+    // v15 asked a clarifying question on 15 of 90 holdout rows that call for
+    // one; v17 on 1 and v18 on 0. The capability is gone from the weights and
+    // only a retrain brings it back -- but the serving layer never needed it,
+    // because it already knows WHICH field is missing: it just refused on that
+    // field. Measured against production before this existed:
+    //
+    //   "What's the payment on a $420,000 loan at 6.5%?"
+    //   -> "periods" = 180 does not correspond to anything in the request
+    //      (the nearest figure you gave is 6.5)
+    //
+    // where the corpus teaches "Over how many years?" on exactly this shape.
+    //
+    // THE DISCRIMINATOR IS THE LEXER'S TAGS, and it has to be, because the
+    // opposite case must keep its refusal: a value that contradicts something
+    // the user DID say is the documented dangerous failure, and a question
+    // would hide it. Both directions are asserted, and the second is the one
+    // that matters.
+    {
+        // --- ASK: nothing in the utterance could be a term. ---
+        const std::string no_term = "What's the payment on a $420,000 loan at 6.5%?";
+        check(mv::utterance_states_nothing_for("periods", no_term),
+              "no Years/Months literal -> `periods` was never stated");
+        auto invented = params("ComputePayment", {{"rate", "0.005417"},
+                                                  {"periods", "180"},
+                                                  {"present_value", "420000.00"},
+                                                  {"future_value", "0.00"},
+                                                  {"timing", "END_OF_PERIOD"}});
+        auto v = mv::verify_mortgage_output(invented, no_term);
+        check(v.reason == mv::ReasonCode::UnstatedField,
+              "... so the verdict is UnstatedField, not UngroundedValue");
+        check(v.field == "periods", "... naming the field that was missing");
+        check(mv::clarifying_question("ComputePayment", "periods") == "Over how many years?",
+              "... and the question is the corpus's own wording");
+
+        // --- ASK: an absent RATE arrives as a BOUNDS failure, not a grounding
+        // one, on an utterance of the same shape. Both paths are refined or
+        // half the cases keep a message the user cannot act on.
+        const std::string no_rate =
+            "Show me the amortization schedule for a $350,000 loan over 30 years.";
+        check(mv::utterance_states_nothing_for("annual_rate", no_rate),
+              "a Years-tagged 30 is NOT the user stating an interest rate");
+        auto bad_rate = params("ComputeAmortization", {{"loan_amount", "350000.00"},
+                                                       {"annual_rate", "0.6000"},
+                                                       {"term_months", "360"},
+                                                       {"monthly_overpayment", "0.00"},
+                                                       {"pmi_annual_rate", "0.0000"},
+                                                       {"original_home_value", "350000.00"}});
+        auto v2 = mv::verify_mortgage_output(bad_rate, no_rate);
+        check(v2.reason == mv::ReasonCode::UnstatedField,
+              "an out-of-range rate on an utterance with no percent is UnstatedField too");
+
+        // --- REFUSE: the documented dangerous failure, unchanged. -----------
+        // 495,000 is Money-tagged and `present_value` is a Money slot, so the
+        // user DID state something for this field and the model came back with
+        // a different loan. A question here would hide a corrupted value.
+        const std::string stated = "What's the payment on a $495,000 loan at 6% over 30 years?";
+        check(!mv::utterance_states_nothing_for("present_value", stated),
+              "a Money literal means `present_value` WAS stated");
+        auto corrupted = params("ComputePayment", {{"rate", "0.005"},
+                                                   {"periods", "360"},
+                                                   {"present_value", "304000.00"},
+                                                   {"future_value", "0.00"},
+                                                   {"timing", "END_OF_PERIOD"}});
+        auto v3 = mv::verify_mortgage_output(corrupted, stated);
+        check(v3.outcome != mv::Outcome::Proven, "the corrupted value is still caught");
+        check(v3.reason == mv::ReasonCode::UngroundedValue,
+              "... and stays a REFUSAL -- it contradicts a figure the user gave");
+
+        // --- REFUSE: a field with no natural question keeps its refusal. ----
+        // A question assembled from a proto field name reads like a stack
+        // trace, so the table returning empty is a decision, not a gap.
+        check(mv::clarifying_question("ComputeDepreciation", "convention").empty(),
+              "a field with no natural wording yields no question");
+
+        // --- The UNTAGGED literal is permissive, so the ambiguous case falls
+        // back to the refusal this narrowing exists to avoid widening.
+        check(!mv::utterance_states_nothing_for("periods", "payment on 420000 at 6.5 over 30"),
+              "a bare untagged number could be anything, so nothing is declared unstated");
+    }
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

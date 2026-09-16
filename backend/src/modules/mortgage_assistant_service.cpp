@@ -1988,7 +1988,7 @@ auto populate_clarification(::mortgage::assistant::ParseResponse& response, std:
  * FinanceParams; Unsafe and Indeterminate must refuse" a graph edge rather
  * than only an in-function early return.
  */
-enum class ModelOutputOutcome : std::uint8_t { Success, Refused };
+enum class ModelOutputOutcome : std::uint8_t { Success, Refused, Clarified };
 
 // ---------------------------------------------------------------------------
 // GP-ARA mandatory verification stage
@@ -2982,6 +2982,40 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
         verification_us, mv::to_string(verdict.outcome), mv::to_string(verdict.reason));
 
     if (verdict.outcome != mv::Outcome::Proven) {
+        // A FIELD THE USER NEVER STATED IS A QUESTION, NOT A REFUSAL.
+        //
+        // The verifier separates the two cases and only this one is reclassified:
+        // nothing in the utterance could have filled the slot, so the model did
+        // not mangle a stated figure -- it invented one because the request was
+        // under-specified. The other case, a value that contradicts something
+        // the user DID say, keeps its refusal; that is the documented dangerous
+        // failure (`present_value = 304000.00` against a 495,000 utterance) and
+        // turning it into a question would hide it.
+        //
+        // Measured against production on 2026-09-16:
+        //
+        //   "What's the payment on a $420,000 loan at 6.5%?"
+        //   -> "periods" = 180 does not correspond to anything in the request
+        //      (the nearest figure you gave is 6.5)
+        //
+        // The corpus teaches a question on exactly this shape ("Over how many
+        // years?"). v15 asked on 15 of 90 such rows, v17 on 1, v18 on 0 -- the
+        // capability is gone from the weights and only a retrain restores it.
+        // The serving layer does not need it: it already knows WHICH field is
+        // missing, because it just refused on that field.
+        //
+        // `prior_clarification` carries the answer back, so the second turn is
+        // the contract that already exists rather than a new one.
+        if (verdict.reason == mv::ReasonCode::UnstatedField) {
+            auto question = mv::clarifying_question(operation, verdict.field);
+            if (!question.empty()) {
+                logger::Logger::getInstance().debug(
+                    "mortgage assistant: {} never stated \"{}\" -- asking instead of refusing",
+                    operation, verdict.field);
+                populate_clarification(response, std::move(question));
+                return ModelOutputOutcome::Clarified;
+            }
+        }
         populate_refusal(response, map_verification_reason(verdict.reason),
                          verdict.message.empty()
                              ? "The assistant's parameters could not be verified against your "
