@@ -1806,6 +1806,31 @@ constexpr std::array<Field, 6> kFields_ComputeRentalRoi{{
     {"periods_per_year", Kind::Int, {}},
 }};
 
+constexpr std::array<Field, 22> kFields_ComputeRentalCashFlow{{
+    {"property_price", Kind::Decimal, {}},
+    {"down_payment", Kind::Decimal, {}},
+    {"closing_costs", Kind::Decimal, {}},
+    {"loan_annual_rate", Kind::Decimal, {}},
+    {"loan_term_years", Kind::Int, {}},
+    {"monthly_gross_rent", Kind::Decimal, {}},
+    {"annual_rent_increase", Kind::Decimal, {}},
+    {"occupancy_rate", Kind::Decimal, {}},
+    {"annual_property_tax", Kind::Decimal, {}},
+    {"annual_insurance", Kind::Decimal, {}},
+    {"annual_repairs", Kind::Decimal, {}},
+    {"annual_capex_reserve", Kind::Decimal, {}},
+    {"monthly_hoa", Kind::Decimal, {}},
+    {"management_fee_rate", Kind::Decimal, {}},
+    {"annual_other_expenses", Kind::Decimal, {}},
+    {"annual_expense_increase", Kind::Decimal, {}},
+    {"annual_appreciation", Kind::Decimal, {}},
+    {"selling_cost_percent", Kind::Decimal, {}},
+    {"years", Kind::Int, {}},
+    {"heloc_drawn_amount", Kind::Decimal, {}},
+    {"heloc_annual_rate", Kind::Decimal, {}},
+    {"heloc_term_years", Kind::Int, {}},
+}};
+
 constexpr std::array<Field, 4> kFields_ComputeXirr{{
     {"rate", Kind::Double, {}},
     {"values", Kind::RepeatedDouble, {}},
@@ -1820,7 +1845,7 @@ constexpr std::array<Field, 4> kFields_ComputeXnpv{{
     {"guess", Kind::Double, {}},
 }};
 
-constexpr std::array<Operation, 27> kOperations{{
+constexpr std::array<Operation, 28> kOperations{{
     {"ComputeAmortization", "AmortizationRequest", kFields_ComputeAmortization},
     {"ComputeAmortizationBatch", "AmortizationBatchRequest", kFields_ComputeAmortizationBatch},
     {"ComputeClosingCosts", "ClosingCostsRequest", kFields_ComputeClosingCosts},
@@ -1845,6 +1870,7 @@ constexpr std::array<Operation, 27> kOperations{{
     {"ComputeRate", "RateRequest", kFields_ComputeRate},
     {"ComputeRefinance", "RefinanceRequest", kFields_ComputeRefinance},
     {"ComputeRentVsBuy", "RentVsBuyRequest", kFields_ComputeRentVsBuy},
+    {"ComputeRentalCashFlow", "RentalCashFlowRequest", kFields_ComputeRentalCashFlow},
     {"ComputeRentalRoi", "RentalRoiRequest", kFields_ComputeRentalRoi},
     {"ComputeXirr", "DatedCashFlowRequest", kFields_ComputeXirr},
     {"ComputeXnpv", "DatedCashFlowRequest", kFields_ComputeXnpv},

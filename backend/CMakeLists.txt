@@ -1540,6 +1540,21 @@ add_executable(test_rent_vs_buy_costs tests/test_rent_vs_buy_costs.cpp)
 target_link_libraries(test_rent_vs_buy_costs PRIVATE sensen_slim fastjson logger)
 add_test(NAME RentVsBuyCostsTest COMMAND test_rent_vs_buy_costs)
 
+# test_label_space_drift: the FOURTH table, which had no check at all and was
+# the one that drifted. It reads `kOperations` out of the service .cpp as text
+# -- the table is not in a module interface, and a derived check against the
+# real artifact beats a hand-written list that can drift exactly as the thing
+# it checks just did. The source root is passed so it does not depend on cwd.
+add_executable(test_label_space_drift tests/test_label_space_drift.cpp)
+target_sources(test_label_space_drift
+    PRIVATE
+    FILE_SET CXX_MODULES FILES
+        src/modules/mortgage_verification.cppm
+)
+target_link_libraries(test_label_space_drift PRIVATE sensen_slim fastjson logger)
+add_test(NAME LabelSpaceDriftTest
+         COMMAND test_label_space_drift ${CMAKE_CURRENT_SOURCE_DIR})
+
 # test_pmi_policy: the byte-identity gate over the PMI cancellation refactor,
 # plus the new basis/threshold behaviour. It links sensen_slim and calls
 # sensen::calculate_mortgage_amortization DIRECTLY rather than through the
