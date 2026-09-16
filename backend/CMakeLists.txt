@@ -1388,6 +1388,27 @@ if(PYTHON3_FOR_CORPUS_TEST)
     )
 endif()
 
+# GroundingCorpusSweepTest: the same sweep, one layer down -- prove the GROUNDING
+# gate never refuses a label the corpus itself teaches.
+#
+# `mortgage_verification.cppm` has claimed this property in a comment since
+# 2026-08-05 (the misuse spec's WU-M2 criterion) and nothing ever ran it. The
+# criterion was checked once by hand and the corpus then moved underneath it.
+#
+# What that cost, measured 2026-09-16: `ComputePaybackPeriod` teaches
+# `rate: 0.0` for an UNDISCOUNTED payback -- the convention meaning "no
+# discounting", which the engine never reads -- and grounding refused it as an
+# ungrounded zero. 17 of 28 holdout rows, with the model's output byte-identical
+# to the gold. `raw_exact` scored every one of them correct.
+if(PYTHON3_FOR_CORPUS_TEST)
+    add_test(
+        NAME GroundingCorpusSweepTest
+        COMMAND ${PYTHON3_FOR_CORPUS_TEST}
+                ${CMAKE_CURRENT_SOURCE_DIR}/../scripts/sweep_corpus.py
+                --gate $<TARGET_FILE:dbg_grounding> 500
+    )
+endif()
+
 # Retry-with-backoff + circuit-breaker orchestration around market_data.cppm's
 # network fetches (fetch_with_resilience, built on SGEE's own
 # sgee.runtime.resilience::BackoffPolicy / CircuitBreaker). Exercises the
@@ -1453,6 +1474,12 @@ target_sources(bench_derivation PRIVATE FILE_SET CXX_MODULES FILES
     src/modules/mortgage_verification.cppm
     src/modules/mortgage_derivation.cppm)
 target_link_libraries(bench_derivation PRIVATE sensen_slim fastjson logger)
+
+add_executable(dbg_grounding tests/dbg_grounding.cpp)
+target_sources(dbg_grounding PRIVATE FILE_SET CXX_MODULES FILES
+    sensen/src/gp_ara_interfaces.cppm
+    src/modules/mortgage_verification.cppm)
+target_link_libraries(dbg_grounding PRIVATE sensen_slim fastjson logger)
 
 add_executable(dbg_derivation tests/dbg_derivation.cpp)
 target_sources(dbg_derivation PRIVATE FILE_SET CXX_MODULES FILES

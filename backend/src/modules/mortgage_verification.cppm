@@ -2500,6 +2500,60 @@ inline constexpr std::array<std::string_view, 2> kNettedLoanFields{"present_valu
     return false;
 }
 
+/**
+ * A ZERO THAT ONE OTHER FIELD LICENSES: `rate = 0` on an UNDISCOUNTED payback.
+ *
+ * `ComputePaybackPeriod` carries `discounted` and `rate` as a pair, and the
+ * pair is only meaningful together -- exactly the relationship
+ * `infer_periods_per_year` already handles for a rate and its period count.
+ * With `discounted: false` the engine never looks at `rate`, so the corpus
+ * teaches the convention zero and the model emits it, correctly.
+ *
+ * Grounding then refused it, because grounding is per field and nothing asked
+ * what the zero MEANT: measured against production on 2026-09-16,
+ *
+ *     "$35,300 into equipment ... saves about $3,900 a year. how many years
+ *      until it pays for itself?"
+ *     -> "rate" = 0 does not correspond to anything in the request
+ *        (the nearest figure you gave is 3900)
+ *
+ * with the model's output byte-identical to the gold. 17 of 28 holdout rows --
+ * every undiscounted one. The 11 that passed are the 11 that state a discount
+ * rate. A failure no accuracy metric sees: `raw_exact` counts these as correct
+ * and the user gets a refusal.
+ *
+ * WHY NOT `kConventionValues`. That table is (field, value) and GLOBAL, so
+ * `{"rate", "0"}` would exempt a zero rate on ComputePayment, ComputePresentValue
+ * and every other TVM operation -- where a fabricated zero prices a 0% loan and
+ * is precisely the corrupted-value failure this gate exists to catch. The
+ * exemption has to be licensed by something, and here the licence is the
+ * model's own declaration that there is no discounting.
+ *
+ * SCOPED THREE WAYS, so it cannot become a magnitude heuristic:
+ *   - the operation must be ComputePaybackPeriod;
+ *   - the value must be EXACTLY zero (a stated 3.14% still grounds or is
+ *     refused on its own merits);
+ *   - `discounted` must be emitted and false. A discounted payback with a zero
+ *     rate is still refused, which is the case that would otherwise silently
+ *     drop the discounting the user asked for.
+ */
+[[nodiscard]] inline auto zero_rate_licensed_by_undiscounted(
+    const MortgageParamsInput& input, std::string_view field, const Decimal& value) -> bool {
+    if (input.operation != "ComputePaybackPeriod") { return false; }
+    if (field != "rate") { return false; }
+    if (!value.is_zero()) { return false; }
+    for (const auto& f : input.fields) {
+        if (f.name != "discounted") { continue; }
+        if (f.values.size() != 1) { return false; }
+        // Emitted as JSON, so the text is `false` -- not a decimal. Compared as
+        // text deliberately: parsing it as a number here would make `0` and
+        // `false` interchangeable and widen the licence to a shape the corpus
+        // never teaches.
+        return f.values.front() == "false";
+    }
+    return false;  // `discounted` absent licenses nothing.
+}
+
 [[nodiscard]] inline auto is_convention_value(std::string_view field, const Decimal& value) -> bool {
     for (const auto& c : kConventionValues) {
         if (c.field != field) continue;
@@ -2650,7 +2704,31 @@ auto lex_numeric_literals(std::string_view text) -> std::vector<NumericLiteral> 
             if (back > 0 && text[back - 1] == ' ') --back;
             if (back > 0 && text[back - 1] == '$') --back;
             if (back > 0 && text[back - 1] == ' ') --back;
-            if (back > 0 && text[back - 1] == '-') negative_prefix = true;
+            if (back > 0 && text[back - 1] == '-') {
+                // A DOUBLE hyphen is an em dash, not a sign, and reading it as
+                // one negates the next figure in the sentence.
+                //
+                // Measured by GroundingCorpusSweepTest on 2026-09-16: 12 of 500
+                // generated rows were refused against their own gold, every one
+                // of them this. "Break out the deductible interest -- 35.55%
+                // bracket" lexed -35.55, so M2 offered -0.3555 and the correct
+                // 0.3555 matched nothing:
+                //
+                //   "annual_tax_rate" = 0.3555 does not correspond to anything
+                //   in the request (the nearest figure you gave is 0.86)
+                //
+                // It spanned three operations and both tags -- percent on
+                // ComputeDetailedAmortization and ComputeClosingCosts, money on
+                // ComputeAmortizationBatch -- which is what marks it as a lexer
+                // defect rather than three generator ones.
+                //
+                // The SINGLE hyphen is untouched. Carrying a real minus is what
+                // stops "-$250,000" and "$250,000" being the same literal, and
+                // that guard is the reason this walk-back exists at all; the
+                // fix narrows the dash out rather than dropping the sign.
+                const bool em_dash = back >= 2 && text[back - 2] == '-';
+                negative_prefix = !em_dash;
+            }
         }
 
         NumericLiteral lit;
@@ -3161,6 +3239,12 @@ auto ground_emitted_values(const MortgageParamsInput& input, std::string_view us
             // and not from being a plausible rate. See kUngroundedFields.
             if (detail::is_ungrounded_field(emitted.name)) continue;
             if (detail::is_convention_value(emitted.name, *parsed)) continue;
+            // A zero rate on an UNDISCOUNTED payback: the pair says "no
+            // discounting", and the engine never reads the rate. Licensed by
+            // `discounted: false`, not by the field or the magnitude.
+            if (detail::zero_rate_licensed_by_undiscounted(input, emitted.name, *parsed)) {
+                continue;
+            }
             // A cadence stated as a WORD ("compounded quarterly") grounds its
             // count. See cadence_word_grounds for why this is not folded into
             // kConventionValues.

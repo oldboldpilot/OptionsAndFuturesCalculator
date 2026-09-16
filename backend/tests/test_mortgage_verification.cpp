@@ -1925,6 +1925,153 @@ auto main() -> int {
               "exclusion is per operation, not per field name");
     }
 
+    // =======================================================================
+    section("An UNDISCOUNTED payback: the zero rate one other field licenses");
+    // =======================================================================
+    // Measured against production on 2026-09-16, with the model's output
+    // BYTE-IDENTICAL to the gold:
+    //
+    //   "I'm putting $35,300 into equipment for my rental that saves me about
+    //    $3,900 a year. how many years until it pays for itself?"
+    //   -> "rate" = 0 does not correspond to anything in the request
+    //      (the nearest figure you gave is 3900)
+    //
+    // 17 of the 28 ComputePaybackPeriod rows in the holdout -- every
+    // undiscounted one. The 11 that passed are the 11 stating a discount rate.
+    //
+    // THIS IS THE FAILURE CLASS NO ACCURACY METRIC CAN SEE. `raw_exact` counts
+    // all 17 as correct, because the model IS correct; the user gets a refusal
+    // anyway. It only shows up by pairing the raw verdict against the served
+    // one, which is how it was found.
+    //
+    // `discounted` and `rate` are meaningful only together -- with discounting
+    // off the engine never reads the rate -- so the corpus teaches the
+    // convention zero. The licence is the model's own `discounted: false`, not
+    // the field and not the magnitude, and all three directions are asserted
+    // because an exemption that cannot be shown to be SCOPED is a hole.
+    {
+        const std::string undiscounted =
+            "I'm putting $35,300 into equipment for my rental that saves me about "
+            "$3,900 a year. how many years until it pays for itself?";
+
+        auto ok = with_list(params("ComputePaybackPeriod", {{"discounted", "false"},
+                                                           {"rate", "0.0"}}),
+                            "values", {"-35300", "3900", "3900", "3900", "3900"});
+        auto v1 = mv::ground_emitted_values(ok, undiscounted);
+        check(v1.outcome == mv::Outcome::Proven,
+              "an undiscounted payback's rate = 0 GROUNDS: " + v1.message);
+
+        // Scope 1 -- `discounted: true` withdraws the licence. This is the case
+        // that matters: a zero rate there silently drops the discounting the
+        // user asked for, and the answer is a different number.
+        auto lying = with_list(params("ComputePaybackPeriod", {{"discounted", "true"},
+                                                              {"rate", "0.0"}}),
+                               "values", {"-35300", "3900", "3900"});
+        check(mv::ground_emitted_values(lying, undiscounted).outcome != mv::Outcome::Proven,
+              "... but a DISCOUNTED payback with a zero rate is still refused");
+
+        // Scope 2 -- another operation is untouched. kConventionValues is
+        // global (field, value), so a naive {"rate", "0"} entry would have
+        // exempted this too, and a fabricated zero prices a 0% loan.
+        auto tvm = params("ComputePayment", {{"rate", "0.0"},
+                                             {"periods", "360"},
+                                             {"present_value", "300000.00"},
+                                             {"future_value", "0.00"},
+                                             {"timing", "END_OF_PERIOD"}});
+        check(mv::ground_emitted_values(
+                  tvm, "$300,000 at 6.5% over 30 years -- what's the payment?")
+                      .outcome != mv::Outcome::Proven,
+              "... and ComputePayment's rate = 0 is STILL refused against a stated 6.5%");
+
+        // Scope 3 -- a NON-zero rate on the same operation is judged normally,
+        // so the licence did not turn `rate` into an ungrounded field.
+        auto invented = with_list(params("ComputePaybackPeriod", {{"discounted", "false"},
+                                                                  {"rate", "0.0725"}}),
+                                  "values", {"-35300", "3900", "3900"});
+        check(mv::ground_emitted_values(invented, undiscounted).outcome != mv::Outcome::Proven,
+              "... and an INVENTED 7.25% on the same request is refused as before");
+
+        // The admit direction on a stated rate, so the whole operation is not
+        // simply being waved through.
+        const std::string discounted_text =
+            "$14,500 out of pocket for new windows that saves me about $1,400 a year. "
+            "Using a 3.14% discount rate, how many years until it pays for itself?";
+        auto real = with_list(params("ComputePaybackPeriod", {{"discounted", "true"},
+                                                              {"rate", "0.0314"}}),
+                              "values", {"-14500", "1400", "1400"});
+        check(mv::ground_emitted_values(real, discounted_text).outcome == mv::Outcome::Proven,
+              "a STATED discount rate still grounds on its own merits");
+    }
+
+    // =======================================================================
+    section("An em dash is not a minus sign");
+    // =======================================================================
+    // Found by GroundingCorpusSweepTest the day it was written: 12 of 500
+    // generated rows refused against their OWN GOLD, every one of them this.
+    //
+    //   "Break out the deductible interest -- 35.55% bracket."
+    //   -> lexed -35.55, so M2 offered -0.3555
+    //   -> "annual_tax_rate" = 0.3555 does not correspond to anything in the
+    //      request (the nearest figure you gave is 0.86)
+    //
+    // Three operations and both literal tags -- percent on
+    // ComputeDetailedAmortization and ComputeClosingCosts, money on
+    // ComputeAmortizationBatch -- which is what makes it one lexer defect
+    // rather than three generator ones.
+    //
+    // BOTH DIRECTIONS, because the fix narrows a guard that exists for a
+    // reason. Carrying a real minus is what stops "-$250,000" and "$250,000"
+    // being the same literal; a model that drops the sign would otherwise be
+    // grounded against the digits and returned Proven, pricing the opposite of
+    // what was asked.
+    {
+        const std::string dash =
+            "Amortization schedule for a $440,100 loan at 4.54% over 30-year, paying an "
+            "extra $500/month. Home is worth $487,200, PMI runs 0.86% a year. Break out "
+            "the deductible interest -- 35.55% bracket.";
+        auto lits = mv::lex_numeric_literals(dash);
+        bool saw_negative = false;
+        bool saw_positive_bracket = false;
+        for (const auto& l : lits) {
+            if (l.value.is_negative()) { saw_negative = true; }
+            if (l.value.to_string().rfind("35.55", 0) == 0) { saw_positive_bracket = true; }
+        }
+        check(!saw_negative, "an em dash before a figure produces NO negative literal");
+        check(saw_positive_bracket, "the 35.55% bracket is lexed as a POSITIVE 35.55");
+
+        auto ok = params("ComputeDetailedAmortization",
+                         {{"loan_amount", "440100.00"},
+                          {"annual_rate", "0.0454"},
+                          {"term_months", "360"},
+                          {"monthly_overpayment", "500.00"},
+                          {"pmi_annual_rate", "0.0086"},
+                          {"original_home_value", "487200.00"},
+                          {"annual_tax_rate", "0.3555"}});
+        auto v = mv::ground_emitted_values(ok, dash);
+        check(v.outcome == mv::Outcome::Proven,
+              "and the row grounds against its own utterance: " + v.message);
+
+        // The guard the fix must NOT have removed: a single leading hyphen is
+        // still a sign, on money and with the '$' between it and the digits.
+        for (const auto& [text, why] : std::vector<std::pair<std::string, std::string>>{
+                 {"a -$250,000 position", "-$250,000 keeps its sign"},
+                 {"a -250000 position", "-250000 keeps its sign"}}) {
+            bool negative = false;
+            for (const auto& l : mv::lex_numeric_literals(text)) {
+                if (l.value.is_negative()) { negative = true; }
+            }
+            check(negative, why);
+        }
+
+        // And the em dash does not swallow a genuinely negative figure that
+        // follows it with its own sign attached.
+        bool both = false;
+        for (const auto& l : mv::lex_numeric_literals("cash flows -- -1000 then 5200")) {
+            if (l.value.is_negative()) { both = true; }
+        }
+        check(both, "an em dash followed by an explicitly signed -1000 still lexes negative");
+    }
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }
