@@ -235,6 +235,33 @@ message AmortizationRequest {
   string monthly_overpayment = 4;
   string pmi_annual_rate = 5;
   string original_home_value = 6;   // PMI drops off against this, not the loan
+
+  // --- what the HOUSE costs to keep, on the STANDARD schedule -------------
+  //
+  // These six exist on DetailedAmortizationRequest and did not exist here,
+  // and that asymmetry was a real hole rather than a tidy separation. A
+  // person asking for "the amortization schedule, and I budget $3,600 a year
+  // for repairs" is not asking for a tax analysis, which is the only thing
+  // the DETAILED operation adds -- so the assistant either had to name the
+  // detailed operation for a request that does not mention tax, or drop the
+  // repairs entirely. Measured on 2026-09-16 it dropped them: the utterance
+  // parsed as ComputeAmortization and the repair budget appeared nowhere in
+  // the answer, silently.
+  //
+  // Same contract as the detailed message, deliberately, so a caller moving
+  // between the two operations does not have to relearn the field names:
+  // "0"/empty means NOT MODELLED and every existing figure is unchanged.
+  string annual_repairs = 7;
+  string annual_insurance = 8;
+  string annual_cost_growth = 9;
+
+  // A HELOC carried ALONGSIDE this mortgage, amortised on its own term and
+  // reported separately -- never folded into the first mortgage's payment,
+  // which would corrupt the interest/principal split and everything derived
+  // from it.
+  string heloc_drawn_amount = 10;
+  string heloc_annual_rate = 11;
+  int32 heloc_term_years = 12;
 }
 
 message AmortizationRow {
@@ -246,6 +273,14 @@ message AmortizationRow {
   string principal_paid = 6;
   string pmi_paid = 7;
   string end_balance = 8;
+  // Carrying costs for this month, mirroring DetailedAmortizationRow. Zero
+  // throughout when not modelled, which is what keeps every figure above
+  // byte-identical for a caller that sends none of the new request fields.
+  string repairs_paid = 9;
+  string insurance_paid = 10;
+  // The HELOC's payment this month, or zero once its own term ends. Separate
+  // from `scheduled_payment`, which is THIS loan's.
+  string heloc_payment = 11;
 }
 
 message MortgageSummary {
@@ -256,6 +291,15 @@ message MortgageSummary {
   // Shorter than term_months when overpayments retire the loan early. This is
   // the answer to "when am I actually done", which the requested term is not.
   int32 actual_term_months = 5;
+  string total_repairs_paid = 6;
+  string total_insurance_paid = 7;
+  // Debt service PLUS carrying costs. Reported BESIDE total_payments_paid
+  // rather than folded into it, because that figure is what went TO THE
+  // LENDER and other things are derived from it. Two totals answering two
+  // questions beat one answering neither.
+  string total_cost_of_ownership = 8;
+  string total_heloc_interest_paid = 9;
+  string total_heloc_paid = 10;
 }
 
 message AmortizationResponse {

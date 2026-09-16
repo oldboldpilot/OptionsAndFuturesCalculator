@@ -194,13 +194,19 @@ namespace detail {
 // its own OPERATIONS dict (parse_finance_proto + build_operations, the
 // same IN_SCOPE_SECTIONS and EXCLUDE_RPCS). The test re-parses the .proto
 // and fails if this table has drifted from it in either direction.
-constexpr std::array<FieldSpec, 224> kLabelSpace{{
+constexpr std::array<FieldSpec, 230> kLabelSpace{{
     {.operation = "ComputeAmortization", .field = "loan_amount", .proto_type = "string", .repeated = false},
     {.operation = "ComputeAmortization", .field = "annual_rate", .proto_type = "string", .repeated = false},
     {.operation = "ComputeAmortization", .field = "term_months", .proto_type = "int32", .repeated = false},
     {.operation = "ComputeAmortization", .field = "monthly_overpayment", .proto_type = "string", .repeated = false},
     {.operation = "ComputeAmortization", .field = "pmi_annual_rate", .proto_type = "string", .repeated = false},
     {.operation = "ComputeAmortization", .field = "original_home_value", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeAmortization", .field = "annual_repairs", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeAmortization", .field = "annual_insurance", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeAmortization", .field = "annual_cost_growth", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeAmortization", .field = "heloc_drawn_amount", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeAmortization", .field = "heloc_annual_rate", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeAmortization", .field = "heloc_term_years", .proto_type = "int32", .repeated = false},
     {.operation = "ComputeAmortizationBatch", .field = "loan_amounts", .proto_type = "double", .repeated = true},
     {.operation = "ComputeAmortizationBatch", .field = "annual_rates", .proto_type = "double", .repeated = true},
     {.operation = "ComputeAmortizationBatch", .field = "term_months", .proto_type = "int32", .repeated = true},
@@ -1220,6 +1226,32 @@ export struct NumericLiteral {
     bool names_increment = false;
 
     /**
+     * The words around this literal name a COST OF KEEPING THE HOUSE --
+     * repairs, maintenance, upkeep, or the owner's insurance ("Budget $3,600 a
+     * year for repairs", "Upkeep runs $3,600 a year", "insurance is $1,700").
+     *
+     * Same judgement as `names_increment`, opposite problem. An overpayment
+     * and a repair budget are BOTH money, both recurring, and both sit in
+     * SlotKind::Money, so nothing structural tells them apart -- and the
+     * corpus states them in one breath. Measured against production on
+     * 2026-09-16, on a phrasing the corpus itself teaches:
+     *
+     *   "...34% tax bracket. Budget $3,600 a year for repairs and $1,700 for
+     *    insurance."
+     *   -> monthly_overpayment = 3600.00   <- the repair budget, as an
+     *                                         overpayment on the LOAN
+     *      annual_repairs      = 1700.00   <- the insurance figure, twice
+     *      annual_insurance    = 1700.00
+     *
+     * Every one of those numbers is in the utterance, so grounding admitted
+     * all of them: it is per field, and nothing asked WHICH number belongs in
+     * which slot. That is the 20%-down defect exactly, in money rather than
+     * percent -- an answer that parses, satisfies every bound, and pays
+     * $3,600 a month off a mortgage the user never said they would overpay.
+     */
+    bool names_upkeep = false;
+
+    /**
      * The words around this literal name a VACANCY ("assume 8% vacancy",
      * "budget 5% vacancy").
      *
@@ -1519,7 +1551,7 @@ struct ExcludedField {
     std::string_view operation;
     std::string_view field;
 };
-constexpr std::array<ExcludedField, 20> kOperationExcludedFields{{
+constexpr std::array<ExcludedField, 26> kOperationExcludedFields{{
     {.operation = "ComputeXirr", .field = "rate"},   // "ignored by XIRR"
     {.operation = "ComputeXnpv", .field = "guess"},  // "XIRR only"
     {.operation = "ComputeRate", .field = "guess"},  // "omit for the engine's own starting guess"
@@ -1595,6 +1627,24 @@ constexpr std::array<ExcludedField, 20> kOperationExcludedFields{{
     // fails G3 and the whole parse dies. Removing these rows against v18 would
     // therefore have converted working requests into refusals, which is why
     // the order is not negotiable.
+    // ComputeAmortization's six new fields, IN FLIGHT. They reached the proto,
+    // the engine and this label space on 2026-09-16 so that the STANDARD
+    // schedule can carry what the house costs to keep and a second lien --
+    // until then a plain amortization request had nowhere to put a repair
+    // budget and silently dropped it.
+    //
+    // G2b requires every declared field, and v19 has never seen one of these
+    // on THIS operation, so without these rows every standard amortization
+    // parse refuses the moment this deploys. Same phase-1 state, same order as
+    // the detailed operation's carrying costs went through a day earlier:
+    // teach the corpus, retrain, prove the new model emits them on a disjoint
+    // holdout, THEN delete these six. Never the other way round.
+    {.operation = "ComputeAmortization", .field = "annual_repairs"},
+    {.operation = "ComputeAmortization", .field = "annual_insurance"},
+    {.operation = "ComputeAmortization", .field = "annual_cost_growth"},
+    {.operation = "ComputeAmortization", .field = "heloc_drawn_amount"},
+    {.operation = "ComputeAmortization", .field = "heloc_annual_rate"},
+    {.operation = "ComputeAmortization", .field = "heloc_term_years"},
     {.operation = "ComputeDetailedAmortization", .field = "heloc_drawn_amount"},
     {.operation = "ComputeDetailedAmortization", .field = "heloc_annual_rate"},
     {.operation = "ComputeDetailedAmortization", .field = "heloc_term_years"},
@@ -2023,7 +2073,19 @@ struct TaughtAhead {
 // exists for recurs every time a field reaches the wire ahead of a model that
 // can fill it: the grammar must admit what the corpus teaches while the service
 // still drops it, or the corpus cannot be taught at all.
-constexpr std::array<TaughtAhead, 0> kTeachingAheadOfService{};
+constexpr std::array<TaughtAhead, 3> kTeachingAheadOfService{{
+    // ONLY the carrying costs. The three heloc_* fields on ComputeAmortization
+    // are excluded PERMANENTLY, exactly as they are on
+    // ComputeDetailedAmortization: they are on the wire and the engine reads
+    // them, so the web app and the API can model a second lien, but no
+    // sentence a person says states a HELOC draw, rate and term alongside a
+    // mortgage schedule. Requiring them of the model would make it invent
+    // three numbers the utterance cannot supply -- the label-not-derivable
+    // defect this corpus has paid for four times.
+    {.operation = "ComputeAmortization", .field = "annual_repairs"},
+    {.operation = "ComputeAmortization", .field = "annual_insurance"},
+    {.operation = "ComputeAmortization", .field = "annual_cost_growth"},
+}};
 
 auto field_is_taught_ahead(std::string_view operation, std::string_view field) -> bool {
     for (const auto& e : kTeachingAheadOfService) {
@@ -2298,6 +2360,23 @@ namespace detail {
     // 0.08 sits comfortably inside the rate band, so nothing downstream would
     // have caught it.
     if (kind == SlotKind::Rate && lit.names_vacancy) return out;
+
+    // M0 again, in money. A figure the words call REPAIRS is not an
+    // overpayment on the loan, and unlike the two rules above this one cannot
+    // be scoped by SlotKind: `monthly_overpayment` and `annual_repairs` are
+    // both Money, which is exactly why nothing caught it. It is scoped by
+    // FIELD instead, which `expand_candidates` already receives.
+    //
+    // Subtractive, like every M0 rule: it only REMOVES a candidate, so the
+    // worst a false positive can do is refuse an answer. The direction matters
+    // because the failure it replaces is silent -- an overpayment the user
+    // never asked for retires the loan years early and changes every figure
+    // downstream, and nothing in the response says where the number came from.
+    if (lit.names_upkeep &&
+        (field_name == "monthly_overpayment" || field_name == "extra_monthly_payment" ||
+         field_name == "extra_payments")) {
+        return out;
+    }
 
     const auto push = [&out](std::optional<Decimal> d) {
         if (d.has_value()) out.push_back(*d);
@@ -2978,6 +3057,58 @@ auto lex_numeric_literals(std::string_view text) -> std::vector<NumericLiteral> 
                 const std::string wp = detail::prev_word(text, lit.offset);
                 if (wp == "extra" || wp == "additional" || wp == "another") {
                     lit.names_increment = true;
+                }
+            }
+        }
+
+        // The UPKEEP adjacency. Read in both directions because the three
+        // spellings the corpus teaches put the word on different sides:
+        //   "Budget $3,600 a year for repairs"      -> before AND after
+        //   "I set aside $3,600 a year for maintenance, insurance is $1,700"
+        //   "Upkeep runs $3,600 a year and insurance $1,700"
+        //
+        // THE SENTENCE BOUNDARY IS LOAD-BEARING, not tidiness. The full
+        // utterance is "...paying an extra $250/month. Budget $3,600 a year
+        // for repairs...", where "Budget" sits TWO WORDS after the 250. A
+        // window that crosses the full stop tags the overpayment as upkeep and
+        // removes it from the only slot it belongs in -- turning the fix into
+        // a new bug on the very phrasing that motivated it. So both scans stop
+        // at '.' and ';'.
+        //
+        // An increment wins outright: "an extra $250 a month for repairs" is
+        // an overpayment earmarked for repairs, and the earmark does not stop
+        // it being an overpayment.
+        if (lit.tag == LiteralTag::Money && !lit.names_increment && !lit.names_down_payment) {
+            const auto is_upkeep_word = [](std::string_view w) {
+                return w == "repairs" || w == "repair" || w == "maintenance" ||
+                       w == "upkeep" || w == "insurance" || w == "budget";
+            };
+            std::size_t j = i;
+            for (int step = 0; step < 4 && !lit.names_upkeep; ++step) {
+                while (j < text.size() && (text[j] == '/' || text[j] == ' ' ||
+                                           text[j] == '-' || text[j] == ',')) {
+                    ++j;
+                }
+                if (j < text.size() && (text[j] == '.' || text[j] == ';')) break;
+                const std::string w = detail::next_word(text, j);
+                if (w.empty()) break;
+                if (is_upkeep_word(w)) lit.names_upkeep = true;
+                while (j < text.size() && detail::is_alpha(text[j])) ++j;
+            }
+            if (!lit.names_upkeep) {
+                std::size_t back = lit.offset;
+                for (int step = 0; step < 3 && !lit.names_upkeep; ++step) {
+                    const std::string wp = detail::prev_word(text, back);
+                    if (wp.empty()) break;
+                    if (is_upkeep_word(wp)) { lit.names_upkeep = true; break; }
+                    // Step back over this word and the run before it, stopping
+                    // at a boundary for the reason above.
+                    while (back > 0 && !detail::is_alpha(text[back - 1])) {
+                        if (text[back - 1] == '.' || text[back - 1] == ';') { back = 0; break; }
+                        --back;
+                    }
+                    while (back > 0 && detail::is_alpha(text[back - 1])) --back;
+                    if (back == 0) break;
                 }
             }
         }

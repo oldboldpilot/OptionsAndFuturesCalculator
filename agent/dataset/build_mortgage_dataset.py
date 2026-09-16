@@ -327,6 +327,12 @@ OP_EXCLUDED_FIELDS: dict[str, set[str]] = {
     #
     # `test_corpus_exclusion_phase` pins exactly which fields may differ, so the
     # gap is a declared state with an end condition rather than drift.
+    "ComputeAmortization": {
+        # Same reason as the detailed operation just below: on the wire and
+        # read by the engine so the app can model a second lien, never asked
+        # of the model because no utterance states one.
+        "heloc_drawn_amount", "heloc_annual_rate", "heloc_term_years",
+    },
     "ComputeDetailedAmortization": {
         "heloc_drawn_amount", "heloc_annual_rate", "heloc_term_years",
     },
@@ -335,7 +341,15 @@ OP_EXCLUDED_FIELDS: dict[str, set[str]] = {
 # The fields this corpus teaches that the SERVICE still drops. Empty is the
 # steady state; a non-empty set means a retrain is outstanding, and the entry
 # names the model that has to ship before the C++ rows come out.
-TEACHING_AHEAD_OF_SERVICE: dict[str, set[str]] = {}
+TEACHING_AHEAD_OF_SERVICE: dict[str, set[str]] = {
+    # The STANDARD schedule gains what the house costs to keep, 2026-09-16.
+    # The C++ side must keep dropping these until a model that EMITS them on
+    # ComputeAmortization is deployed, because G2b requires every declared
+    # field and v19 has never seen one here.
+    "ComputeAmortization": {
+        "annual_repairs", "annual_insurance", "annual_cost_growth",
+    },
+}
 
 
 def op_field_names(op: str) -> set[str]:
@@ -704,7 +718,13 @@ def make_amortization_extraction(rng: random.Random) -> dict:
     if mention_pmi:
         base += (f". Home is worth {phrase_money(home_value)}, PMI runs "
                  f"{phrase_pct(pmi)} a year")
-    if mention_repairs and op == "ComputeDetailedAmortization":
+    # NO LONGER detailed-only. ComputeAmortization gained the same three fields
+    # on 2026-09-16, because "the amortization schedule, and I budget $3,600 a
+    # year for repairs" is not a request for a TAX analysis -- which is the
+    # only thing the detailed operation adds. Teaching the clause on one
+    # operation and not the other is what made the model drop the repair
+    # budget silently on the standard schedule.
+    if mention_repairs:
         base += rng.choice([
             f". Budget {phrase_money(repairs)} a year for repairs and "
             f"{phrase_money(insurance)} for insurance",
@@ -740,8 +760,13 @@ def make_amortization_extraction(rng: random.Random) -> dict:
                + (f". Home is worth {phrase_money(home_value)}, PMI {phrase_pct(pmi)}/yr"
                   if mention_pmi else "")
                + (f", tax rate {phrase_pct(tax_rate)}" if op == "ComputeDetailedAmortization" else "")
+               # The op condition came off with the clause above: a plain
+               # ComputeAmortization row carries the same three fields now, so
+               # gating the COMPACT spelling on the operation left the label
+               # stating a repair budget the utterance did not -- three rows
+               # the grounding sweep refused as its own gold.
                + (f", repairs {phrase_money(repairs)}/yr, insurance {phrase_money(insurance)}/yr"
-                  if (mention_repairs and op == "ComputeDetailedAmortization") else "")
+                  if mention_repairs else "")
                + (f", costs rising {phrase_pct(cost_growth)}/yr" if mention_growth else "")
                + ".")
     if op == "ComputeDetailedAmortization":
@@ -755,14 +780,18 @@ def make_amortization_extraction(rng: random.Random) -> dict:
            "pmi_annual_rate": rate_str(pmi, 4), "original_home_value": money_str(home_value)}
     if op == "ComputeDetailedAmortization":
         obj["annual_tax_rate"] = rate_str(tax_rate, 4)
-        # Emitted ALWAYS once the operation is detailed, at the convention zero
-        # when the utterance says nothing -- the same shape rent-vs-buy uses.
-        # A field the model sometimes omits is the `prepaid_interest_days`
-        # defect: 48% of training rows omitted it and inference omitted it
-        # NEVER, because omission is not something this model learns.
-        obj["annual_repairs"] = money_str(repairs)
-        obj["annual_insurance"] = money_str(insurance)
-        obj["annual_cost_growth"] = rate_str(cost_growth, 4)
+    # BOTH operations, which is the point of the 2026-09-16 change. The tax
+    # rate above is what actually separates them; what the house costs to keep
+    # is not, and teaching these on one operation only is what made the model
+    # drop a stated repair budget whenever it named the standard schedule.
+    #
+    # Emitted ALWAYS, at the convention zero when the utterance says nothing --
+    # a field the model sometimes omits is the `prepaid_interest_days` defect:
+    # 48% of training rows omitted it and inference omitted it NEVER, because
+    # omission is not something this model learns.
+    obj["annual_repairs"] = money_str(repairs)
+    obj["annual_insurance"] = money_str(insurance)
+    obj["annual_cost_growth"] = rate_str(cost_growth, 4)
     return convo(("system", SYSTEM), ("user", user),
                  ("assistant", params_block(op, obj)))
 
@@ -1783,7 +1812,14 @@ def make_down_payment_extraction(rng: random.Random) -> dict:
                # The home VALUE is the price, not the loan -- PMI drops off
                # against it. This is the one field where the gross figure is
                # correct, and getting it wrong is invisible without PMI.
-               "original_home_value": money_str(price)}
+               "original_home_value": money_str(price),
+               # Carrying costs at the convention zero: a down-payment
+               # utterance states a price and a deposit, never a repair
+               # budget. Emitted anyway because ComputeAmortization declares
+               # them and G2b requires every declared field.
+               "annual_repairs": money_str(0),
+               "annual_insurance": money_str(0),
+               "annual_cost_growth": rate_str(0, 4)}
         user = rng.choice([
             f"Amortization schedule for a {phrase_money(price)} home with {down_phrase} "
             f"at {phrase_pct(annual_rate)} for {phrase_years(term)}.",
@@ -1863,13 +1899,14 @@ def make_clarification(rng: random.Random) -> dict:
                "pmi_annual_rate": rate_str(0, 4), "original_home_value": money_str(loan)}
         if detailed:
             obj["annual_tax_rate"] = rate_str(tax_rate, 4)
-            # The convention zero: this row's utterance never mentions upkeep,
-            # and a field the model sometimes omits is the
-            # `prepaid_interest_days` defect -- 48% of training rows omitted it
-            # and inference omitted it NEVER.
-            obj["annual_repairs"] = money_str(0)
-            obj["annual_insurance"] = money_str(0)
-            obj["annual_cost_growth"] = rate_str(0, 4)
+        # BOTH operations carry the carrying costs since 2026-09-16. The
+        # convention zero: this row's utterance never mentions upkeep, and a
+        # field the model sometimes omits is the `prepaid_interest_days`
+        # defect -- 48% of training rows omitted it and inference omitted it
+        # NEVER.
+        obj["annual_repairs"] = money_str(0)
+        obj["annual_insurance"] = money_str(0)
+        obj["annual_cost_growth"] = rate_str(0, 4)
 
     elif scenario == "heloc_ltv":
         op = "ComputeHeloc"
@@ -1970,9 +2007,9 @@ def make_modification(rng: random.Random) -> dict:
                  "pmi_annual_rate": rate_str(0, 4), "original_home_value": money_str(loan)}
         if detailed:
             first["annual_tax_rate"] = rate_str(tax_rate, 4)
-            first["annual_repairs"] = money_str(0)
-            first["annual_insurance"] = money_str(0)
-            first["annual_cost_growth"] = rate_str(0, 4)
+        first["annual_repairs"] = money_str(0)
+        first["annual_insurance"] = money_str(0)
+        first["annual_cost_growth"] = rate_str(0, 4)
         tax_clause = f" I'm in the {phrase_pct(tax_rate)} tax bracket." if detailed else ""
         first_user = (f"Amortize {phrase_money(loan)} at {phrase_pct(annual_rate)} over "
                       f"{phrase_years(term)}.{tax_clause}")

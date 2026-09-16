@@ -546,8 +546,22 @@ auto main() -> int {
                                 : ("validate_label_space FAILED: " + valid.error()));
         check(schema.operation_count() == 28,
               "28 operations (schema has " + std::to_string(schema.operation_count()) + ")");
-        check(schema.field_count() == 204,
-              "201 fields (schema has " + std::to_string(schema.field_count()) + ")");
+        // 204 -> 207 on 2026-09-16: ComputeAmortization gained
+        // annual_repairs/annual_insurance/annual_cost_growth so the STANDARD
+        // schedule can carry what the house costs to keep. Its three heloc_*
+        // fields are NOT counted -- they are excluded from the label space for
+        // the same reason the detailed operation's are, so the grammar never
+        // offers them.
+        //
+        // The expected number is named ONCE and the message reads it. It used
+        // to be written twice and the literal in the message said "201" while
+        // the constant said 204 -- a failure that reports the wrong expected
+        // value sends the reader looking for three fields that were never
+        // missing.
+        constexpr int kExpectedFields = 207;
+        check(schema.field_count() == kExpectedFields,
+              std::to_string(kExpectedFields) + " fields (schema has " +
+                  std::to_string(schema.field_count()) + ")");
     }
 
     // ---------------------------------------------------------------------

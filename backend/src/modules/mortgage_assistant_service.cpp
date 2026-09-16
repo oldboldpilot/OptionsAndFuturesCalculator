@@ -1552,13 +1552,24 @@ constexpr std::array<std::string_view, 2> kClosingCostTypeValues{{"PAID_IN_CASH"
 constexpr std::array<std::string_view, 2> kComponentValues{{"INTEREST", "PRINCIPAL"}};
 constexpr std::array<std::string_view, 4> kMethodValues{{"STRAIGHT_LINE", "SUM_OF_YEARS_DIGITS", "DECLINING_BALANCE", "MACRS"}};
 
-constexpr std::array<Field, 6> kFields_ComputeAmortization{{
+constexpr std::array<Field, 12> kFields_ComputeAmortization{{
     {"loan_amount", Kind::Decimal, {}},
     {"annual_rate", Kind::Decimal, {}},
     {"term_months", Kind::Int, {}},
     {"monthly_overpayment", Kind::Decimal, {}},
     {"pmi_annual_rate", Kind::Decimal, {}},
     {"original_home_value", Kind::Decimal, {}},
+    // The six that let the STANDARD schedule carry the house's own costs.
+    // Added HERE at the same time as everywhere else, deliberately: this table
+    // was missed when the detailed operation gained the same fields and the
+    // omission was invisible until the exclusion lifted, refusing every
+    // detailed parse in production. Once was enough.
+    {"annual_repairs", Kind::Decimal, {}},
+    {"annual_insurance", Kind::Decimal, {}},
+    {"annual_cost_growth", Kind::Decimal, {}},
+    {"heloc_drawn_amount", Kind::Decimal, {}},
+    {"heloc_annual_rate", Kind::Decimal, {}},
+    {"heloc_term_years", Kind::Int, {}},
 }};
 
 constexpr std::array<Field, 6> kFields_ComputeAmortizationBatch{{
