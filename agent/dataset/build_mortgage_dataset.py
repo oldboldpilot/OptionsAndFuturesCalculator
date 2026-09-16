@@ -335,11 +335,7 @@ OP_EXCLUDED_FIELDS: dict[str, set[str]] = {
 # The fields this corpus teaches that the SERVICE still drops. Empty is the
 # steady state; a non-empty set means a retrain is outstanding, and the entry
 # names the model that has to ship before the C++ rows come out.
-TEACHING_AHEAD_OF_SERVICE: dict[str, set[str]] = {
-    "ComputeDetailedAmortization": {
-        "annual_repairs", "annual_insurance", "annual_cost_growth",
-    },
-}
+TEACHING_AHEAD_OF_SERVICE: dict[str, set[str]] = {}
 
 
 def op_field_names(op: str) -> set[str]:

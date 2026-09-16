@@ -1853,7 +1853,21 @@ auto main() -> int {
                            {"term_months", "360"}, {"monthly_overpayment", "0.00"},
                            {"pmi_annual_rate", "0.0000"},
                            {"original_home_value", "504000.00"},
-                           {"annual_tax_rate", std::string{tax}}});
+                           {"annual_tax_rate", std::string{tax}},
+                           // The carrying costs came out of
+                           // kOperationExcludedFields when v19 was promoted, so
+                           // G2b now REQUIRES them here as it does every other
+                           // declared field. They are the convention zeros
+                           // because this utterance says nothing about upkeep,
+                           // which is exactly what the model emits for it --
+                           // measured 27/27 on the v19 holdout. Omitting them
+                           // is no longer a valid parse, and the three checks
+                           // below failed with
+                           // `"annual_repairs" ... was not emitted` until this
+                           // fixture caught up.
+                           {"annual_repairs", "0.00"},
+                           {"annual_insurance", "0.00"},
+                           {"annual_cost_growth", "0.0000"}});
         };
 
         expect_pass(detailed("0.3400"),
@@ -1871,7 +1885,15 @@ auto main() -> int {
                        {"term_months", "360"}, {"monthly_overpayment", "0.00"},
                        {"pmi_annual_rate", "0.0000"},
                        {"original_home_value", "504000.00"},
-                       {"annual_tax_rate", "0.2200"}}),
+                       {"annual_tax_rate", "0.2200"},
+                       // Required since the carrying costs left
+                       // kOperationExcludedFields. They must be present for
+                       // this check to reach the BOUNDS gate at all -- without
+                       // them it refuses on MissingField, which would pass a
+                       // sloppier assertion for entirely the wrong reason.
+                       {"annual_repairs", "0.00"},
+                       {"annual_insurance", "0.00"},
+                       {"annual_cost_growth", "0.0000"}}),
                usury, mv::Outcome::Unsafe, mv::ReasonCode::OutOfRange,
                "while a 34% MORTGAGE is still refused -- the field was "
                "reclassified, the interest band was not widened");

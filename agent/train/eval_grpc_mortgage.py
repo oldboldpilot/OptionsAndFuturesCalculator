@@ -286,6 +286,62 @@ def encode_like_service(value) -> str:
     return str(value)
 
 
+def served_mismatch_shape(served: dict, want_served: dict) -> str:
+    """How a SERVED object differs from gold, as a shape rather than a verdict.
+
+    WHY THIS EXISTS, and why it does not simply mirror the service's rules.
+    `served_exact` compares the service's answer to the gold label byte for
+    byte, and the service deliberately TRANSFORMS its answer on the way out:
+    it drops `kOperationExcludedFields` and `kVariantInertFields` before
+    building the params map, and it flips the sign of `payment` on
+    ComputeRate/ComputePeriods for the TVM convention the Finance RPC
+    documents. All three are correct and intentional, and every one of them
+    makes a perfect parse compare unequal.
+
+    Measured on the v19 run, 2026-09-16: ComputeRate scored **13/13 raw and
+    0/13 served**, which cannot be a property of a model. So did
+    ComputePeriods (9/9 -> 0/9), ComputeAmortizationBatch (7/7 -> 0/7) and
+    ComputeDepreciation (7/10 -> 0/10). `served_exact` was understating the
+    user experience on every operation the service translates, which is the
+    `drop_excluded` trap this file already documents -- applied to the raw
+    comparison and forgotten on the served one.
+
+    The fix is NOT to reimplement the three rules here. This repository's
+    standing lesson is that a contract copied into a second place drifts and
+    has no mechanism to keep it honest -- the five-tables rule, and the
+    client's hand-written ALLOWED_OPERATIONS that refused thirteen live
+    operations. So this classifies the DIFFERENCE instead, which is derived
+    from the two objects in front of it and stays correct when a rule changes:
+
+      exact           -- equal
+      dropped-fields  -- served is a strict SUBSET of gold and agrees on every
+                         shared key: the service removed fields, nothing
+                         disagrees
+      sign            -- identical except that one numeric field differs only
+                         by a leading minus
+      extra-fields    -- served carries a key gold does not
+      value           -- a genuine disagreement on a shared key
+
+    Only `value` and `extra-fields` are model errors. The others are read
+    beside `served_exact`, never folded into it silently.
+    """
+    if served == want_served:
+        return "exact"
+    s_keys, w_keys = set(served), set(want_served)
+    if s_keys - w_keys:
+        return "extra-fields"
+    shared_agree = all(served[k] == want_served[k] for k in s_keys & w_keys)
+    if s_keys < w_keys and shared_agree:
+        return "dropped-fields"
+    differing = [k for k in s_keys & w_keys if served[k] != want_served[k]]
+    if differing and all(
+            str(served[k]).lstrip("-") == str(want_served[k]).lstrip("-")
+            and str(served[k]) != str(want_served[k])
+            for k in differing):
+        return "sign" if s_keys == w_keys else "sign+dropped-fields"
+    return "value"
+
+
 def gold_as_served(gold: dict) -> dict:
     return {k: encode_like_service(v) for k, v in gold.items() if k != "operation"}
 
@@ -487,6 +543,9 @@ def evaluate(rows: list[dict], stub, tail: RawOutputTail, timeout: float,
             "served_exact": served is not None
                             and served == {"operation": (want or {}).get("operation", ""),
                                            **gold_as_served(want)},
+            "served_shape": served_mismatch_shape(
+                served, {"operation": (want or {}).get("operation", ""),
+                         **gold_as_served(want)}) if served is not None else "",
             "outcome": which,
         })
         if comparable == want:
@@ -558,11 +617,84 @@ def report(res: dict, label: str, n_failures: int) -> None:
         for k, v in sorted(res["refusal_shapes"].items(), key=lambda kv: -kv[1]):
             print(f"    {v:4}  {k}")
     print(f"  served params exactly matching gold: {res['served_exact']}/{res['raw_total']}")
+    shapes: dict[str, int] = {}
+    for rv in res.get("row_verdicts", []):
+        if rv.get("served_shape"):
+            shapes[rv["served_shape"]] = shapes.get(rv["served_shape"], 0) + 1
+    if shapes:
+        # `dropped-fields` and `sign` are the service's OWN documented
+        # translations, not model errors -- see served_mismatch_shape. They are
+        # reported beside the exact count and never folded into it, because a
+        # metric that forgives silently is how the excluded-field trap got
+        # here in the first place.
+        print("  served vs gold, by difference SHAPE "
+              "(dropped-fields/sign are service translations, not model errors):")
+        for k in ("exact", "dropped-fields", "sign", "sign+dropped-fields",
+                  "extra-fields", "value"):
+            if k in shapes:
+                print(f"    {shapes[k]:4}  {k}")
+        agree = sum(shapes.get(k, 0) for k in
+                    ("exact", "dropped-fields", "sign", "sign+dropped-fields"))
+        print(f"  served agreeing with gold up to service translation: "
+              f"{agree}/{res['raw_total']}")
     if res["outcomes_nonparam"]:
         print(f"  (of the {res['raw_nonparam_total']} rows whose gold is prose: "
               f"{dict(res['outcomes_nonparam'])})")
     if res["errors"]:
         print(f"RPC errors: {res['errors']}")
+
+    print("\n-- 3. PER-OPERATION, raw AND served")
+    per: dict[str, list[int]] = {}
+    for rv in res.get("row_verdicts", []):
+        slot = per.setdefault(rv["operation"], [0, 0, 0])
+        slot[0] += 1
+        slot[1] += bool(rv["raw_exact"])
+        slot[2] += bool(rv["served_exact"])
+    # Sorted by the RAW shortfall, so the operation most in need of attention
+    # leads. Served is printed beside it because the two answer different
+    # questions and a gap between them is itself the finding: a large raw
+    # shortfall with a small served one means the serving layer is carrying the
+    # model, and the reverse means serving is destroying correct parses.
+    for op, (n, r, s) in sorted(per.items(), key=lambda kv: kv[1][1] - kv[1][0]):
+        flag = ""
+        if n and r and not s:
+            flag = "   <- serving loses EVERY correct parse"
+        elif n and s > r:
+            flag = f"   <- serving recovers {s - r}"
+        print(f"  {op:32s} raw {r:3d}/{n:<3d}  served {s:3d}/{n:<3d}{flag}")
+
+    # OPERATION-NAME CONFUSION.
+    #
+    # WHY THIS EXISTS. A per-operation line reading "ComputeFutureValueDetailed
+    # 0/44" is a number, not a diagnosis, and the two readings it admits call for
+    # opposite fixes: the model may be extracting the wrong VALUES, or it may be
+    # naming the wrong OPERATION with the values essentially right. Measured on
+    # 2026-09-16, that 0/44 was 44 of 44 naming the plain sibling
+    # `ComputeFutureValue` -- an operation-choice failure, which
+    # mortgage_verification.cppm states outright that it cannot decide ("G1
+    # proves the operation EXISTS; nothing here proves it is the one the user
+    # meant"). Nothing in this report said so, so the zero was read as lost
+    # extraction capability and sent a diagnosis in the wrong direction for a
+    # day. The confusion is one dict comprehension away from the failure list
+    # that was already being collected.
+    confusion: dict[tuple[str, str], int] = {}
+    for f in res["failures"]:
+        want = (f.get("want") or {}).get("operation")
+        got = (f.get("got") or {}).get("operation")
+        if want and got and want != got:
+            confusion[(want, got)] = confusion.get((want, got), 0) + 1
+    if confusion:
+        print("\n-- 4. OPERATION-NAME CONFUSION (the model named a DIFFERENT operation)")
+        for (want, got), n in sorted(confusion.items(), key=lambda kv: -kv[1]):
+            # A sibling pair is one name containing the other, which is the
+            # shape this family fails in: *Detailed* dropped, or a dated
+            # operation named as its undated twin.
+            sibling = " SIBLING" if (want in got or got in want) else ""
+            print(f"  {n:4d}  {want} -> {got}{sibling}")
+        named = sum(confusion.values())
+        wrong = res["raw_total"] - res["raw_exact"]
+        print(f"  {named} of {wrong} raw failures are the wrong OPERATION, "
+              f"not wrong values.")
 
     if res["failures"]:
         print(f"\n-- raw failures (first {n_failures})")

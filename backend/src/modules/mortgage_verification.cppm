@@ -1519,7 +1519,7 @@ struct ExcludedField {
     std::string_view operation;
     std::string_view field;
 };
-constexpr std::array<ExcludedField, 23> kOperationExcludedFields{{
+constexpr std::array<ExcludedField, 20> kOperationExcludedFields{{
     {.operation = "ComputeXirr", .field = "rate"},   // "ignored by XIRR"
     {.operation = "ComputeXnpv", .field = "guess"},  // "XIRR only"
     {.operation = "ComputeRate", .field = "guess"},  // "omit for the engine's own starting guess"
@@ -1572,9 +1572,29 @@ constexpr std::array<ExcludedField, 23> kOperationExcludedFields{{
     {.operation = "ComputeHeloc", .field = "annual_insurance"},
     {.operation = "ComputeHeloc", .field = "annual_property_tax"},
     {.operation = "ComputeHeloc", .field = "monthly_hoa"},
-    {.operation = "ComputeDetailedAmortization", .field = "annual_repairs"},
-    {.operation = "ComputeDetailedAmortization", .field = "annual_insurance"},
-    {.operation = "ComputeDetailedAmortization", .field = "annual_cost_growth"},
+    // annual_repairs / annual_insurance / annual_cost_growth WERE here, and
+    // came out on 2026-09-16 when v19 was promoted. That is the last step of
+    // the order this comment prescribes -- teach, retrain, prove on a disjoint
+    // holdout, THEN delete -- and the proof is worth recording because the
+    // obvious measurement is the wrong one.
+    //
+    // Decoding is grammar-constrained, so BOTH v18 and v19 emit these three
+    // keys on every detailed parse: the keys are forced by the schema and say
+    // nothing about what the model learned. What matters is the VALUES, and
+    // restricted to rows where the model actually named
+    // ComputeDetailedAmortization, on 63 holdout rows disjoint from both
+    // models' training sets:
+    //
+    //     v18   43/46 correct   -- 3 WRONG, every one on a row that states a
+    //                              repairs budget: never taught them, so it
+    //                              invents a plausible figure
+    //     v19   27/27 correct   -- none wrong, stated or silent
+    //
+    // A wrong value here is not a wrong answer, it is a REFUSAL: grounding
+    // exempts these fields only at the convention zero, so an invented 3600
+    // fails G3 and the whole parse dies. Removing these rows against v18 would
+    // therefore have converted working requests into refusals, which is why
+    // the order is not negotiable.
     {.operation = "ComputeDetailedAmortization", .field = "heloc_drawn_amount"},
     {.operation = "ComputeDetailedAmortization", .field = "heloc_annual_rate"},
     {.operation = "ComputeDetailedAmortization", .field = "heloc_term_years"},
@@ -1994,11 +2014,16 @@ struct TaughtAhead {
     std::string_view operation;
     std::string_view field;
 };
-constexpr std::array<TaughtAhead, 3> kTeachingAheadOfService{{
-    {.operation = "ComputeDetailedAmortization", .field = "annual_repairs"},
-    {.operation = "ComputeDetailedAmortization", .field = "annual_insurance"},
-    {.operation = "ComputeDetailedAmortization", .field = "annual_cost_growth"},
-}};
+// EMPTY is the steady state, and it means no retrain is outstanding. The three
+// ComputeDetailedAmortization carrying-cost fields lived here from 2026-09-15
+// until v19 was promoted on 2026-09-16; see kOperationExcludedFields for the
+// measurement that licensed removing them.
+//
+// The mechanism stays even though the table is empty, because the situation it
+// exists for recurs every time a field reaches the wire ahead of a model that
+// can fill it: the grammar must admit what the corpus teaches while the service
+// still drops it, or the corpus cannot be taught at all.
+constexpr std::array<TaughtAhead, 0> kTeachingAheadOfService{};
 
 auto field_is_taught_ahead(std::string_view operation, std::string_view field) -> bool {
     for (const auto& e : kTeachingAheadOfService) {
