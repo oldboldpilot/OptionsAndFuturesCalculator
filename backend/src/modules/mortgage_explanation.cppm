@@ -87,6 +87,22 @@ struct PmiFacts {
 struct ExplanationPoint {
     std::string topic;
     std::string text;
+
+    // --- the itemisation, so a sentence can be traced to the figure it is about
+    //
+    // A paragraph of correct sentences is still unauditable if the reader
+    // cannot tell WHICH output each one describes. These three carry that:
+    // `item` numbers the point for display ("3."), and `field`/`value` name
+    // the exact output line and the exact figure it was built from.
+    //
+    // `value` is the figure VERBATIM, not re-rendered from `text`. That makes
+    // the pair checkable: a caller -- or a test -- can assert the number in
+    // the sentence is the number in the result, which is the property that
+    // stops prose and figures drifting apart. Reading it back out of the
+    // English would only prove the sentence agrees with itself.
+    int item = 0;              ///< 1-based display ordinal; 0 = not itemised
+    std::string field;         ///< machine name of the output line
+    std::string value;         ///< that line's figure, exactly as computed
 };
 
 /** Topic identifiers, named so callers and tests do not spell them by hand. */
@@ -103,6 +119,111 @@ inline constexpr std::string_view kTopicOverpayment  = "pmi.overpayment";
  * supported answer rather than a failure.
  */
 [[nodiscard]] auto explain_pmi(const PmiFacts& facts) -> std::vector<ExplanationPoint>;
+
+// ---------------------------------------------------------------------------
+// The OUTPUT-DRIVEN explainer
+// ---------------------------------------------------------------------------
+//
+// `explain_pmi` above is hand-written: one struct, one rule base, one
+// vocabulary, all specific to mortgage insurance. That does not scale past the
+// feature it was written for -- rental cash flow, the interest deduction, the
+// rental tax position and affordability would each need their own copy, and
+// each copy is another place for a sentence to drift from the number it
+// describes.
+//
+// This explains a RESULT instead. The caller hands over the fields an
+// operation actually produced and gets back itemised points covering the ones
+// that carry data. Nothing here knows what a rental is.
+//
+// A FIELD WITH NO DATA IS NOT EXPLAINED, and deciding what "no data" means is
+// the whole of the design:
+//
+//   * absent        -- the operation did not produce the field at all.
+//   * empty         -- produced, but with no value in it.
+//   * zero, where zero MEANS absent.
+//
+// That last one is the case worth stating, because a zero is not self-
+// describing. `heloc_drawn_amount = 0` says "there is no HELOC in this
+// scenario" and a sentence about it is noise; `total_profit = 0` says the
+// investor breaks exactly even, which is the finding. Both are the literal
+// `0`. So a field declares what ITS zero means and the caller cannot forget
+// to, because `ZeroMeaning` has no default that is right for both.
+//
+// This mirrors a rule the project already relies on rather than inventing one:
+// `kConventionValues` exempts an INPUT zero from grounding precisely because a
+// zero there means "not this shape". An input zero is `Absent`. A computed
+// output zero is `Real`.
+
+/** What a literal zero means in a given field. There is deliberately no
+ *  default: the two readings produce different explanations and guessing
+ *  between them is how a real finding gets dropped. */
+enum class ZeroMeaning : std::uint8_t {
+    Absent,   ///< zero means "not part of this scenario" -- say nothing
+    Real,     ///< zero is the computed answer -- say it
+};
+
+/** How to place a figure in a sentence. It never changes the figure. */
+enum class Unit : std::uint8_t {
+    Money, Rate, Share, Months, Years, Count, Plain,
+};
+
+/**
+ * One field of an operation's result.
+ *
+ * `value` is carried as the string the engine produced. It is never parsed
+ * into a double and re-rendered -- that is a second place for a number to be
+ * reshaped, and this module's entire claim is that it cannot reshape one.
+ * Sign and magnitude are read by comparing characters, not by arithmetic.
+ */
+struct ResultField {
+    std::string name;                               ///< machine name, e.g. "total_profit"
+    std::string label;                              ///< human label, e.g. "total profit"
+    std::string value;                              ///< exactly as computed
+    Unit unit = Unit::Money;
+    ZeroMeaning zero = ZeroMeaning::Absent;
+    bool produced = true;                           ///< false = the operation did not emit it
+};
+
+/** The result to explain. `operation` prefixes every topic, so points from two
+ *  operations never collide in a caller keying on topic. */
+struct ResultView {
+    std::string operation;
+    std::vector<ResultField> fields;
+
+    /**
+     * `{dependent, prerequisite}`: explain `dependent` only if `prerequisite`
+     * carries data.
+     *
+     * WITHOUT THIS, DROPPING EMPTY COLUMNS IS NOT ENOUGH TO STOP A FALSE
+     * SENTENCE. A rental with no HELOC still carries a `heloc_annual_rate`,
+     * and a rate is a perfectly ordinary non-zero number -- so field-by-field
+     * filtering keeps it and the explanation announces the interest rate of a
+     * loan that does not exist. The prerequisite is `heloc_drawn_amount`, and
+     * it is absent, which is the only thing that can settle it.
+     *
+     * Declared by the caller rather than known here, so this module still
+     * knows nothing about rentals -- and resolved through the Horn-clause
+     * engine rather than a loop, because the relation is TRANSITIVE: a field
+     * behind a suppressed field is itself suppressed, and that is a closure,
+     * not a check.
+     */
+    std::vector<std::pair<std::string, std::string>> depends_on;
+};
+
+/**
+ * Itemised points for the fields that carry data, in the order given.
+ *
+ * Order is the CALLER's, preserved exactly: the result struct already lists its
+ * fields in the order a reader wants them, and re-sorting here would put this
+ * module in the business of deciding what matters.
+ */
+[[nodiscard]] auto explain_result(const ResultView& view) -> std::vector<ExplanationPoint>;
+
+/** The fields that would be explained, without rendering them. Exposed because
+ *  it is the half worth asserting directly: a test for "the empty columns are
+ *  skipped" should not have to read English to find out. */
+[[nodiscard]] auto carrying_data(const ResultView& view) -> std::vector<std::string>;
+
 
 }  // namespace mortgage_calculator::assistant::explain
 
@@ -329,7 +450,167 @@ auto explain_pmi(const PmiFacts& facts) -> std::vector<ExplanationPoint> {
 
     std::vector<ExplanationPoint> out;
     out.reserve(ranked.size());
-    for (auto& [r, p] : ranked) { out.push_back(std::move(p)); }
+    // Numbered AFTER the sort, deliberately: the ordinal is what the reader
+    // sees beside the sentence, so numbering before ordering would print
+    // "1, 3, 2" and make the itemisation worse than none.
+    for (auto& [r, p] : ranked) {
+        p.item = static_cast<int>(out.size()) + 1;
+        out.push_back(std::move(p));
+    }
+    return out;
+}
+
+namespace detail {
+
+/** Zero by INSPECTION, not by arithmetic: "0", "-0.00", "0.000000" are all
+ *  zero and none of them is parsed. Parsing would re-render, and re-rendering
+ *  a figure is the one thing this module must not do. */
+[[nodiscard]] auto is_zero(std::string_view v) -> bool {
+    bool saw_digit = false;
+    for (const char ch : v) {
+        if (ch == '-' || ch == '+' || ch == '.' || ch == ' ') { continue; }
+        if (ch < '0' || ch > '9') { return false; }
+        saw_digit = true;
+        if (ch != '0') { return false; }
+    }
+    return saw_digit;
+}
+
+[[nodiscard]] auto is_negative(std::string_view v) -> bool {
+    return !v.empty() && v.front() == '-' && !is_zero(v);
+}
+
+/** A field carries data unless it was never produced, is empty, or is a zero
+ *  whose zero means absence. */
+[[nodiscard]] auto has_data(const ResultField& f) -> bool {
+    if (!f.produced || f.value.empty()) { return false; }
+    return !(is_zero(f.value) && f.zero == ZeroMeaning::Absent);
+}
+
+/** A term the Horn engine will accept as an atom: lower-case, underscores. */
+[[nodiscard]] auto atomise(std::string_view name) -> std::string {
+    std::string out;
+    out.reserve(name.size());
+    for (const char ch : name) {
+        if ((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '_') {
+            out.push_back(ch);
+        } else if (ch >= 'A' && ch <= 'Z') {
+            out.push_back(static_cast<char>(ch - 'A' + 'a'));
+        } else {
+            out.push_back('_');
+        }
+    }
+    if (out.empty() || (out.front() >= '0' && out.front() <= '9')) { out.insert(out.begin(), 'f'); }
+    return out;
+}
+
+/**
+ * Transitive suppression, in the rule base rather than around it.
+ *
+ * `absent/1` is asserted for every field that carries no data. A field is
+ * suppressed when its prerequisite is absent OR when its prerequisite is
+ * itself suppressed -- the second clause is the recursive one, and it is why
+ * this is a solver call and not a loop over pairs.
+ */
+constexpr std::string_view kSuppressionRules = R"PL(
+suppressed(F) :- depends(F, P), absent(P).
+suppressed(F) :- depends(F, P), suppressed(P).
+)PL";
+
+/** The prose. The ONLY place English lives, and it can do nothing to a figure
+ *  but place it and name its unit. */
+[[nodiscard]] auto say_field(const ResultField& f) -> std::string {
+    const std::string v = tidy(f.value);
+    switch (f.unit) {
+        case Unit::Money:
+            return is_negative(v)
+                       ? f.label + ": a shortfall of $" + std::string{std::string_view{v}.substr(1)} + "."
+                       : f.label + ": $" + v + ".";
+        case Unit::Rate:   return f.label + ": " + v + " a year.";
+        case Unit::Share:  return f.label + ": " + v + " of the total.";
+        case Unit::Months: return f.label + ": " + v + " months.";
+        case Unit::Years:  return f.label + ": " + v + " years.";
+        case Unit::Count:  return f.label + ": " + v + ".";
+        case Unit::Plain:  return f.label + ": " + v + ".";
+    }
+    return {};
+}
+
+}  // namespace detail
+
+auto carrying_data(const ResultView& view) -> std::vector<std::string> {
+    // Stage 1: presence. A field with no data cannot be a prerequisite for
+    // anything, so this has to settle before suppression is asked about.
+    std::vector<std::string> absent;
+    for (const auto& f : view.fields) {
+        if (!detail::has_data(f)) { absent.push_back(detail::atomise(f.name)); }
+    }
+
+    // Stage 2: suppression, through the solver. Skipped entirely when the
+    // caller declared no dependencies -- an empty relation can suppress
+    // nothing, and building a program to prove that wastes the call.
+    std::vector<std::string> suppressed;
+    if (!view.depends_on.empty()) {
+        std::string program;
+        for (const auto& a : absent) { program += "absent(" + a + ").\n"; }
+        for (const auto& [dep, pre] : view.depends_on) {
+            program += "depends(" + detail::atomise(dep) + ", " + detail::atomise(pre) + ").\n";
+        }
+        auto facts = sensen::logic::read_program(program);
+        auto rules = sensen::logic::read_program(std::string{detail::kSuppressionRules});
+        if (facts && rules) {
+            sensen::logic::Program prog = std::move(*facts);
+            prog.insert(prog.end(), rules->begin(), rules->end());
+
+            // The trailing period is REQUIRED -- `read_term` parses a clause,
+            // and without it the goal does not parse, `solve` is never
+            // reached, and suppression silently does nothing. That failure is
+            // invisible from the outside: "nothing was suppressed" and "the
+            // goal would not parse" produce the identical empty list.
+            auto goal_term = sensen::logic::read_term("suppressed(F).");
+            if (goal_term) {
+                if (auto sols = sensen::logic::solve(prog, {*goal_term}, 1024)) {
+                    for (const auto& sub : *sols) {
+                        const std::string r = sensen::logic::to_string(
+                            sensen::logic::apply_substitution(sub, *goal_term));
+                        const auto open = r.find('(');
+                        if (open == std::string::npos || r.back() != ')') { continue; }
+                        suppressed.push_back(r.substr(open + 1, r.size() - open - 2));
+                    }
+                }
+            }
+        }
+        // A rule base that will not parse suppresses NOTHING. It does not fall
+        // back to explaining everything quietly -- it explains everything
+        // loudly, which is the direction a reader can see.
+    }
+
+    std::vector<std::string> out;
+    for (const auto& f : view.fields) {
+        if (!detail::has_data(f)) { continue; }
+        const std::string atom = detail::atomise(f.name);
+        if (std::ranges::find(suppressed, atom) != suppressed.end()) { continue; }
+        out.push_back(f.name);
+    }
+    return out;
+}
+
+auto explain_result(const ResultView& view) -> std::vector<ExplanationPoint> {
+    const auto keep = carrying_data(view);
+
+    std::vector<ExplanationPoint> out;
+    out.reserve(keep.size());
+    for (const auto& f : view.fields) {
+        if (std::ranges::find(keep, f.name) == keep.end()) { continue; }
+        std::string text = detail::say_field(f);
+        if (text.empty()) { continue; }
+        out.push_back(ExplanationPoint{
+            .topic = view.operation.empty() ? f.name : view.operation + "." + f.name,
+            .text = std::move(text),
+            .item = static_cast<int>(out.size()) + 1,
+            .field = f.name,
+            .value = f.value});
+    }
     return out;
 }
 
