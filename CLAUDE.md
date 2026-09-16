@@ -3059,10 +3059,32 @@ which is the shape mortgagefvcalculator.com uses:
 **Moving the prose off the calculator screens while leaving the ads on them
 would have recreated the violation**, so `/` and `/calculator/*` joined
 `NO_AD_ROUTES`. What settled that direction was measuring the reference rather
-than reasoning about it: **mortgagefvcalculator.com serves zero AdSense** — no
-`adsbygoogle` anywhere on it — which is precisely why its own calculator screen
-can be 730 words of pure interface. Ad-free is what makes a text-light tool
-screen legitimate.
+than reasoning about it: at the time, **mortgagefvcalculator.com served zero
+AdSense** — no `adsbygoogle` anywhere on it — which is precisely why its own
+calculator screen can be 730 words of pure interface. Ad-free is what makes a
+text-light tool screen legitimate.
+
+**THAT SENTENCE IS NOW STALE ABOUT THE SIBLING AND STILL TRUE ABOUT THE RULE,
+and the distinction is the point.** Measured 2026-09-15: mortgagefvcalculator.com
+carries `AdSlot`, `BottomAnchorAd` and `AdSenseLoader`, and it serves Google
+units — on `/guides/<state>`, `/scenarios/<slug>`, `/tools/rent-vs-buy/<state>`,
+`/tools/npv-calculator/<state>`, `/mortgage-calculator/<state>/<city>`,
+`/mortgage-glossary` and `/methodology`. So "the sibling is ad-free" is no
+longer an available argument for anything.
+
+What it did instead is the stronger version of the same rule, and it is worth
+copying rather than re-deriving: `src/lib/ad-policy.ts` is an ALLOWLIST that
+fails closed, its calculator routes are all deliberately absent — *a calculator
+is not content* — and those screens keep earning through the site's OWN
+affiliate markup, which the policy does not reach. Its `/rates/<scenario>`
+family is excluded on a MEASUREMENT (49 URLs, 242 words, the count identical
+between `/rates/7-percent-on-400k` and `/rates/5-percent-on-200k`) rather than
+on taste. That is the same conclusion this file reached, arrived at
+independently, so the conclusion survives its supporting fact expiring.
+
+**Do not cite the sibling's ad posture again without re-measuring it.** This
+claim was true when written, was never re-checked, and was still being quoted
+as evidence a month after it stopped being true.
 
 `/calculator/long-call` and `/calculator/iron-condor` are therefore **byte
 identical again at 763 words**, which was the original violation and is now
