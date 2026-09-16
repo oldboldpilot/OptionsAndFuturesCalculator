@@ -259,3 +259,103 @@ operation the document is about.
 4. **Consider that 415 rows of a 22-field operation may be too few to name it
    and too many to be free.** The operation was not learned AND the budget was
    spent.
+
+
+---
+
+# v17 — 2026-09-15. It worked, and the paired test says so
+
+**v17 BEATS v15 ON BOTH MEASURES, AND ComputeRentalCashFlow WENT 0/32 -> 29/32.**
+This is the first comparison in this project run as a proper paired test rather
+than as a difference of totals.
+
+## What changed, and why v16 could not have worked
+
+After adding the exclusions for the new RentVsBuy fields the corpus was
+regenerated and compared:
+
+```
+train.jsonl   current 7d0bc596...   regenerated 7d0bc596...   SAME
+```
+
+Byte-identical. v16 had already been trained on exactly that corpus, so
+retraining with the same seed and recipe would have reproduced v16's regression
+and learned nothing. **A retrain is only worth the GPU time if the corpus
+changed where the defect is.**
+
+One change was made, from the measurement rather than from taste:
+`ComputeRentalCashFlow` carries **22 fields** and its confusable sibling
+`ComputeRentalRoi` carries **6**, and both sat at weight 0.036. Equal weight is
+not equal exposure. v16 scored 0/16 on it -- every row answered
+`ComputeRentalRoi`, and the refusals named RentalRoi's OWN fields
+(`periodic_mortgage_payment`, `periods_per_year`), which is what proves the
+model chose the wrong OPERATION rather than fumbling a field.
+
+Weight raised 0.036 -> 0.060, taken from amortization so the total is unchanged
+and no other row type is diluted as a side effect. Corpus: 705 train / 32 val
+rental rows, train∩val overlap 0, 28 operations, 11/600 contaminated against
+v15's train split.
+
+## The comparison
+
+Both models scored through the real RPC on sensen, one engine asserted on
+`:50051`, on the IDENTICAL 561-gold-row holdout. v15 was RE-SCORED rather than
+compared against its earlier number, because the corpus revision reshuffled the
+split and the old figure describes a different holdout.
+
+| | v15 | **v17** |
+| --- | --- | --- |
+| raw params exact | 389/561 = 69.3% | **423/561 = 75.4%** |
+| served matching gold | 398/561 | **422/561** |
+| served as params | 473/600 = 78.8% | **498/600 = 83.0%** |
+| `ComputeRentalCashFlow` | **0/32** | **29/32 raw, 25/32 served** |
+
+Paired exact-binomial McNemar over per-row verdicts:
+
+```
+raw_exact     gained 64  lost 30  net +34  p = 0.0006  IMPROVED
+served_exact  gained 50  lost 26  net +24  p = 0.0079  IMPROVED
+```
+
+Per operation:
+
+```
+ComputeRentalCashFlow       +29   -0     ComputeHeloc                 +1  -10
+ComputeAmortization         +11   -2     ComputeDetailedAmortization  +0   -8
+ComputeRefinance             +6   -0     ComputePaybackPeriod         +0   -3
+ComputeRentVsBuy             +5   -0     ComputeInterestPayment       +0   -1
+```
+
+## The regression, stated rather than buried
+
+**ComputeHeloc lost 10 of 31 rows -- a 32% regression on that operation**, and
+ComputeDetailedAmortization lost 8 of 24. The net is strongly positive and
+significant, and these two are the price. Anyone reading only the headline
+would not know a third of HELOC parses moved the wrong way.
+
+`asked-when-ambiguous` also collapsed 32/89 -> 1/89: v17 almost never asks a
+clarifying question. `answered-when-stated` is 66/66 for both, and non-params
+rows are 39/39 for both, so the prose-gold rows are unaffected -- but v17 is
+markedly less willing to ask, which is the opposite of v16's failure and worth
+watching rather than celebrating.
+
+## NOT PROMOTED, and why
+
+Promotion needs the GGUF on the private artifact host and
+`MORTGAGE_MODEL_URL` / `MORTGAGE_MODEL_SHA256` changed on the Railway service.
+Both require handling credentials this repository deliberately does not carry,
+and the owner's standing instruction is to stay out of them. The model is
+built, validated and proven; the swap is the owner's to make.
+
+```
+artifact : ~/qlora-out/mortgage-v17-Q8_0.gguf   (GPU server)
+local    : backend/models/mortgagefv-assistant-v17-q8_0.gguf
+sha256   : 0ce84e1c317e7248ce582c01783968b8c633e68d08b73e3094b0f475faedbb04
+           (round-tripped after copying -- the checksum that counts is taken
+            where the bytes are served)
+recipe   : QLoRA r=64 alpha=64, 4 epochs, 804 steps, 440 s, seq_len 512
+           derived from p99=470, extend_vocab false, export_errors []
+           train_loss 0.201, eval_loss 0.140
+```
+
+`docs/STRATEGY_ASSISTANT_PIPELINE.md` section 4 has the swap procedure.
