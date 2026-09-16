@@ -326,6 +326,39 @@ message HelocRequest {
   string annual_rate = 5;
   int32 repayment_term_years = 6;
   int32 payments_per_year = 7;      // 12 monthly, 26 bi-weekly
+
+  // --- the FIRST mortgage, so both debts can be seen together --------------
+  //
+  // A HELOC is a SECOND lien and nobody carries one alone: the borrower owes
+  // this payment AND the mortgage payment, in the same month, out of the same
+  // income. Answering with the HELOC's payment by itself is arithmetically
+  // correct and practically useless -- it is the number that makes a draw look
+  // affordable.
+  //
+  // Both optional. Supply them and the response carries BOTH amortization
+  // schedules plus the combined monthly obligation; omit them and the response
+  // is exactly what it was before these fields existed.
+  //
+  // `current_mortgage_balance` above is already the opening balance, so only
+  // the rate and the remaining term are new.
+  string current_mortgage_annual_rate = 8;
+  int32 current_mortgage_remaining_months = 9;
+
+  // --- what the HOUSE costs to keep ----------------------------------------
+  //
+  // Two debts are still not the monthly obligation. An owner deciding whether
+  // to draw on their equity has to find the mortgage payment, the HELOC
+  // payment, AND the roof, the insurer and the county -- out of one income, in
+  // the same month. A figure that stops at debt service is the one that makes
+  // a draw look affordable, which is the same defect as quoting the HELOC
+  // payment alone, one level up.
+  //
+  // All optional; "0"/empty means NOT MODELLED, and `total_monthly_obligation`
+  // then equals debt service alone.
+  string annual_repairs = 10;
+  string annual_insurance = 11;
+  string annual_property_tax = 12;
+  string monthly_hoa = 13;
 }
 
 message HelocResponse {
@@ -333,6 +366,37 @@ message HelocResponse {
   string available_equity = 1;
   string draw_period_payment = 2;      // interest only
   string repayment_period_payment = 3; // fully amortizing
+
+  // --- both debts, side by side --------------------------------------------
+  //
+  // Populated ONLY when the first mortgage's rate and remaining term were
+  // supplied. Empty otherwise, so an existing caller sees exactly what it saw
+  // before -- the same contract the rent-vs-buy legacy path keeps.
+  repeated AmortizationRow mortgage_schedule = 4;
+  repeated AmortizationRow heloc_schedule = 5;
+  MortgageSummary mortgage_summary = 6;
+  MortgageSummary heloc_summary = 7;
+
+  // The number the borrower actually has to find each month while BOTH run:
+  // first-mortgage payment plus the HELOC's amortizing payment. Reported
+  // rather than left to the caller to add, because the two schedules can end
+  // in different months and a caller adding the wrong pair of rows gets a
+  // figure that looks right.
+  string combined_monthly_payment = 8;
+  // The month the FIRST mortgage retires, and the month the HELOC does.
+  // Unequal in general: a 15-year HELOC on a mortgage with 22 years left
+  // leaves seven years of mortgage-only payments, and the combined figure
+  // above applies only while both are live.
+  int32 mortgage_ends_month = 9;
+  int32 heloc_ends_month = 10;
+
+  // Debt service PLUS what the house costs to keep: the number the owner has
+  // to find each month while both debts run. Reported beside
+  // `combined_monthly_payment` rather than replacing it, because the two
+  // answer different questions -- what the LENDERS take, and what the MONTH
+  // takes. Equal when no carrying costs were supplied.
+  string monthly_carrying_costs = 11;
+  string total_monthly_obligation = 12;
 }
 
 message RefinanceRequest {

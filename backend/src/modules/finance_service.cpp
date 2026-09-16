@@ -1504,8 +1504,26 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
             return s;
         }
 
+        // What the HOUSE costs to keep. Optional, and omitted means NOT
+        // MODELLED -- an absent repair budget stays zero rather than becoming
+        // a guess at a national average.
+        READ_DECIMAL_SAFE(d_repairs, request->annual_repairs(), "annual_repairs");
+        READ_DECIMAL_SAFE(d_ins, request->annual_insurance(), "annual_insurance");
+        READ_DECIMAL_SAFE(d_growth, request->annual_cost_growth(), "annual_cost_growth");
+        for (const auto& [v, name] : {std::pair{d_repairs, "annual_repairs"},
+                                      std::pair{d_ins, "annual_insurance"},
+                                      std::pair{d_growth, "annual_cost_growth"}}) {
+            if (v.is_negative()) {
+                return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                              std::string{name} + " cannot be negative");
+            }
+        }
+        const sensen::CarryingCosts carrying{.annual_repairs = d_repairs,
+                                             .annual_insurance = d_ins,
+                                             .annual_growth = d_growth};
+
         auto [schedule, summary] = sensen::calculate_detailed_mortgage_amortization(
-            loan, rate, request->term_months(), extra, pmi, home, tax);
+            loan, rate, request->term_months(), extra, pmi, home, tax, {}, carrying);
 
         for (const auto& row : schedule) {
             auto& r = *response->add_schedule();
@@ -1518,6 +1536,8 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
             r.set_pmi_paid(row.pmi_paid.to_string());
             r.set_tax_savings(row.tax_savings.to_string());
             r.set_end_balance(row.end_balance.to_string());
+            r.set_repairs_paid(row.repairs_paid.to_string());
+            r.set_insurance_paid(row.insurance_paid.to_string());
         }
         auto& s = *response->mutable_summary();
         s.set_total_principal_paid(summary.total_principal_paid.to_string());
@@ -1525,6 +1545,9 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         s.set_total_pmi_paid(summary.total_pmi_paid.to_string());
         s.set_total_payments_paid(summary.total_payments_paid.to_string());
         s.set_total_tax_savings(summary.total_tax_savings.to_string());
+        s.set_total_repairs_paid(summary.total_repairs_paid.to_string());
+        s.set_total_insurance_paid(summary.total_insurance_paid.to_string());
+        s.set_total_cost_of_ownership(summary.total_cost_of_ownership.to_string());
         s.set_actual_term_months(summary.actual_term_months);
         return Status::OK;
     }
@@ -1686,6 +1709,120 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         response->set_available_equity(s.available_equity.to_string());
         response->set_draw_period_payment(s.draw_period_payment.to_string());
         response->set_repayment_period_payment(s.repayment_period_payment.to_string());
+
+        // --- BOTH DEBTS, WHEN THE CALLER GIVES US THE FIRST MORTGAGE --------
+        //
+        // A HELOC is a SECOND lien and nobody carries one alone. The borrower
+        // owes this payment AND the mortgage payment, in the same month, out
+        // of the same income -- so answering with the HELOC's payment by
+        // itself is arithmetically correct and practically useless. It is the
+        // number that makes a draw look affordable.
+        //
+        // Opt-in: absent rate or term leaves every field below empty, so a
+        // caller that predates them sees exactly what it saw before.
+        const bool want_both = !request->current_mortgage_annual_rate().empty() &&
+                               request->current_mortgage_remaining_months() > 0;
+        if (want_both) {
+            READ_DECIMAL_SAFE(m_rate, request->current_mortgage_annual_rate(),
+                              "current_mortgage_annual_rate");
+            if (m_rate.is_negative()) {
+                return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                              "current_mortgage_annual_rate cannot be negative");
+            }
+            const int m_months = request->current_mortgage_remaining_months();
+            if (m_months > 1200) {
+                return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                              "current_mortgage_remaining_months exceeds 1200 (100 years)");
+            }
+            if (auto st = check_compound_growth_safe(m_rate.to_double(), 12, m_months,
+                                                     "current_mortgage_annual_rate");
+                !st.ok()) {
+                return st;
+            }
+
+            // The mortgage schedule runs on its REMAINING balance and its
+            // REMAINING term -- not on the original loan, which this message
+            // never carried and which would produce a payment the borrower
+            // stopped making years ago.
+            const auto [m_rows, m_sum] =
+                sensen::calculate_mortgage_amortization(balance, m_rate, m_months);
+            // The HELOC amortises over its own repayment term at its own rate.
+            // Independent schedules, deliberately: they are separate debts and
+            // one does not pay down the other.
+            const int h_months = request->repayment_term_years() * 12;
+            const auto [h_rows, h_sum] =
+                sensen::calculate_mortgage_amortization(drawn, rate, h_months);
+
+            const auto copy_rows = [](const auto& rows, auto* out) {
+                for (const auto& r : rows) {
+                    auto* dst = out->Add();
+                    dst->set_period(r.period);
+                    dst->set_start_balance(r.start_balance.to_string());
+                    dst->set_scheduled_payment(r.scheduled_payment.to_string());
+                    dst->set_extra_payment(r.extra_payment.to_string());
+                    dst->set_interest_paid(r.interest_paid.to_string());
+                    dst->set_principal_paid(r.principal_paid.to_string());
+                    dst->set_pmi_paid(r.pmi_paid.to_string());
+                    dst->set_end_balance(r.end_balance.to_string());
+                }
+            };
+            copy_rows(m_rows, response->mutable_mortgage_schedule());
+            copy_rows(h_rows, response->mutable_heloc_schedule());
+
+            const auto fill_summary = [](const auto& sm, auto* out) {
+                out->set_total_principal_paid(sm.total_principal_paid.to_string());
+                out->set_total_interest_paid(sm.total_interest_paid.to_string());
+                out->set_total_pmi_paid(sm.total_pmi_paid.to_string());
+                out->set_total_payments_paid(sm.total_payments_paid.to_string());
+                out->set_actual_term_months(sm.actual_term_months);
+            };
+            fill_summary(m_sum, response->mutable_mortgage_summary());
+            fill_summary(h_sum, response->mutable_heloc_summary());
+
+            // What has to be found each month while BOTH are live. Computed
+            // from the FIRST row of each schedule rather than by adding two
+            // summaries: the schedules can end in different months, and a
+            // caller pairing the wrong rows gets a figure that looks right.
+            const auto first_payment = [](const auto& rows) {
+                return rows.empty() ? sensen::BigDecimal(0) : rows.front().scheduled_payment;
+            };
+            response->set_combined_monthly_payment(
+                first_payment(m_rows).add(first_payment(h_rows)).to_string());
+            response->set_mortgage_ends_month(m_sum.actual_term_months);
+            response->set_heloc_ends_month(h_sum.actual_term_months);
+        }
+
+        // --- what the HOUSE costs to keep, debts or no debts ---------------
+        //
+        // Computed outside the `want_both` branch deliberately: an owner who
+        // did not describe their first mortgage still owns the roof, and the
+        // carrying figure is meaningful on its own.
+        READ_DECIMAL_SAFE(h_repairs, request->annual_repairs(), "annual_repairs");
+        READ_DECIMAL_SAFE(h_ins, request->annual_insurance(), "annual_insurance");
+        READ_DECIMAL_SAFE(h_tax, request->annual_property_tax(), "annual_property_tax");
+        READ_DECIMAL_SAFE(h_hoa, request->monthly_hoa(), "monthly_hoa");
+        for (const auto& [v, name] : {std::pair{h_repairs, "annual_repairs"},
+                                      std::pair{h_ins, "annual_insurance"},
+                                      std::pair{h_tax, "annual_property_tax"},
+                                      std::pair{h_hoa, "monthly_hoa"}}) {
+            if (v.is_negative()) {
+                return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                              std::string{name} + " cannot be negative");
+            }
+        }
+        const sensen::BigDecimal carrying =
+            h_repairs.add(h_ins).add(h_tax)
+                .divide(sensen::BigDecimal(12)).value_or(sensen::BigDecimal(0))
+                .add(h_hoa);
+        response->set_monthly_carrying_costs(carrying.to_string());
+        // Debt service plus the house. When the first mortgage was not
+        // described, debt service is the HELOC's own amortizing payment --
+        // still the honest total for what this request described.
+        const sensen::BigDecimal debt_service =
+            response->combined_monthly_payment().empty()
+                ? s.repayment_period_payment
+                : sensen::BigDecimal(response->combined_monthly_payment());
+        response->set_total_monthly_obligation(debt_service.add(carrying).to_string());
         return Status::OK;
     }
 

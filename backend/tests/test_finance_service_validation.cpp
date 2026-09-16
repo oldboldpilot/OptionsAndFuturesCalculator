@@ -2468,6 +2468,146 @@ auto main() -> int {
     }
 
     // =======================================================================
+    section("24c. ComputeHeloc: BOTH debts, or the draw looks affordable");
+    // =======================================================================
+    //
+    // A HELOC is a SECOND lien and nobody carries one alone. The borrower owes
+    // the HELOC payment AND the mortgage payment, in the same month, out of
+    // the same income -- so answering with the HELOC's payment by itself is
+    // arithmetically correct and practically useless. It is precisely the
+    // number that makes a draw look affordable.
+    {
+        const auto base = []() {
+            sensen::finance::HelocRequest r;
+            r.set_home_value("500000.00");
+            r.set_current_mortgage_balance("300000.00");
+            r.set_max_ltv_rate("0.85");
+            r.set_drawn_amount("75000.00");
+            r.set_annual_rate("0.0850");
+            r.set_repayment_term_years(15);
+            r.set_payments_per_year(12);
+            return r;
+        };
+        const auto run = [&](const sensen::finance::HelocRequest& req,
+                             sensen::finance::HelocResponse& resp) {
+            auto ctx = make_context();
+            return stub.ComputeHeloc(ctx.get(), req, &resp);
+        };
+
+        sensen::finance::HelocResponse plain;
+        check(run(base(), plain).ok(), "the HELOC alone still answers");
+        check(!plain.available_equity().empty() && !plain.repayment_period_payment().empty(),
+              "and returns what it always returned");
+        // OPT-IN, PROVEN. A caller that predates these fields must see exactly
+        // what it saw before -- the same contract rent-vs-buy's legacy path
+        // keeps, and the reason that one survived a model change.
+        check(plain.mortgage_schedule().empty() && plain.heloc_schedule().empty(),
+              "with NO schedules, because the first mortgage was not described");
+        check(plain.combined_monthly_payment().empty(),
+              "and no combined payment invented from a mortgage we know nothing about");
+
+        auto both = base();
+        both.set_current_mortgage_annual_rate("0.0625");
+        both.set_current_mortgage_remaining_months(264);   // 22 years left
+        sensen::finance::HelocResponse r;
+        check(run(both, r).ok(), "describing the first mortgage is accepted");
+        check(r.mortgage_schedule_size() == 264,
+              "the mortgage schedule runs its REMAINING term, not the original 360");
+        check(r.heloc_schedule_size() == 180,
+              "and the HELOC amortises over its own 15 years");
+        check(r.repayment_period_payment() == plain.repayment_period_payment(),
+              "the HELOC's own figures are UNCHANGED by describing the mortgage");
+
+        // The mortgage schedule opens on the REMAINING balance. Using the
+        // original loan would price a payment the borrower stopped making
+        // years ago -- and this message never carried the original amount.
+        // Compared as a NUMBER. BigDecimal renders eighteen places, so the
+        // string is "300000.000000000000000000" and equality against
+        // "300000.00" tests this test's idea of the format -- the third time
+        // that slip has appeared in this session's work.
+        check(std::fabs(std::stod(r.mortgage_schedule(0).start_balance()) - 300000.0) < 0.01,
+              "it opens on the balance still owed");
+
+        const double m0 = std::stod(r.mortgage_schedule(0).scheduled_payment());
+        const double h0 = std::stod(r.heloc_schedule(0).scheduled_payment());
+        check(std::fabs(std::stod(r.combined_monthly_payment()) - (m0 + h0)) < 0.01,
+              "the combined payment is what has to be found each month while BOTH run");
+        check(std::stod(r.combined_monthly_payment()) > m0,
+              "which is strictly more than the mortgage alone -- the point of "
+              "showing them together");
+
+        // THE SCHEDULES END IN DIFFERENT MONTHS, and the combined figure
+        // applies only while both are live. A 15-year HELOC against a mortgage
+        // with 22 years left leaves seven years of mortgage-only payments.
+        check(r.heloc_ends_month() == 180 && r.mortgage_ends_month() == 264,
+              "each debt reports its own final month -- 180 and 264, not one horizon");
+        check(r.mortgage_ends_month() > r.heloc_ends_month(),
+              "so the borrower keeps paying the mortgage after the HELOC is gone");
+
+        check(std::stod(r.mortgage_summary().total_interest_paid()) > 0 &&
+                  std::stod(r.heloc_summary().total_interest_paid()) > 0,
+              "and both carry their own interest total");
+
+        // TWO DEBTS ARE STILL NOT THE MONTHLY OBLIGATION. An owner deciding
+        // whether to draw has to find the mortgage payment, the HELOC payment
+        // AND the roof, the insurer and the county -- out of one income, in
+        // the same month. Stopping at debt service is the same defect as
+        // quoting the HELOC payment alone, one level up.
+        auto costed = both;
+        costed.set_annual_repairs("3600.00");
+        costed.set_annual_insurance("1800.00");
+        costed.set_annual_property_tax("6000.00");
+        costed.set_monthly_hoa("150.00");
+        sensen::finance::HelocResponse c;
+        check(run(costed, c).ok(), "the house's own costs are accepted");
+
+        // (3600 + 1800 + 6000)/12 + 150 = 950 + 150 = 1100
+        check(std::fabs(std::stod(c.monthly_carrying_costs()) - 1100.0) < 0.01,
+              "annual costs are charged monthly and HOA is already monthly");
+        check(std::fabs(std::stod(c.total_monthly_obligation()) -
+                        (std::stod(c.combined_monthly_payment()) + 1100.0)) < 0.01,
+              "the total obligation is both debts PLUS the house");
+        check(std::stod(c.total_monthly_obligation()) >
+                  std::stod(c.combined_monthly_payment()),
+              "which is strictly more than debt service -- the point of showing it");
+        check(c.combined_monthly_payment() == r.combined_monthly_payment(),
+              "and the DEBT figure is unchanged: the two answer different "
+              "questions, what the lenders take and what the month takes");
+
+        // Meaningful WITHOUT the first mortgage too: an owner who did not
+        // describe their mortgage still owns the roof.
+        auto costs_only = base();
+        costs_only.set_annual_repairs("3600.00");
+        sensen::finance::HelocResponse co;
+        check(run(costs_only, co).ok(), "carrying costs alone are accepted");
+        check(std::fabs(std::stod(co.monthly_carrying_costs()) - 300.0) < 0.01,
+              "and reported even with no mortgage schedule to attach them to");
+
+        // Omitted means NOT MODELLED, and the total collapses to debt service.
+        check(std::fabs(std::stod(r.monthly_carrying_costs())) < 0.01,
+              "an omitted repair budget is zero, not a national average");
+        check(std::fabs(std::stod(r.total_monthly_obligation()) -
+                        std::stod(r.combined_monthly_payment())) < 0.01,
+              "so the obligation collapses to debt service alone");
+
+        // Refusals rather than plausible answers.
+        auto bad = both;
+        bad.set_annual_repairs("-1.00");
+        sensen::finance::HelocResponse neg;
+        check(run(bad, neg).error_code() == grpc::StatusCode::INVALID_ARGUMENT,
+              "a negative repair budget is refused");
+        bad = both;
+        bad.set_current_mortgage_annual_rate("-0.01");
+        sensen::finance::HelocResponse ignored;
+        check(run(bad, ignored).error_code() == grpc::StatusCode::INVALID_ARGUMENT,
+              "a negative mortgage rate is refused");
+        bad = both;
+        bad.set_current_mortgage_remaining_months(1201);
+        check(run(bad, ignored).error_code() == grpc::StatusCode::INVALID_ARGUMENT,
+              "and a remaining term beyond a century is refused");
+    }
+
+    // =======================================================================
     section("25. ComputeXnpv / ComputeXirr: DAYS on the wire, SECONDS in the engine");
     // =======================================================================
     //

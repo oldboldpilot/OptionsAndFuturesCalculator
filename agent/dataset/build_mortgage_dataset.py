@@ -300,6 +300,17 @@ OP_EXCLUDED_FIELDS: dict[str, set[str]] = {
         "annual_repairs", "pmi_annual_rate", "monthly_overpayment",
         "heloc_drawn_amount", "heloc_annual_rate", "heloc_term_years",
     },
+    # ComputeHeloc's first-mortgage inputs, mirroring the C++ table. A HELOC
+    # utterance states the mortgage BALANCE and almost never its rate or
+    # remaining term, so teaching them would make the model invent two numbers
+    # the sentence cannot supply.
+    "ComputeHeloc": {
+        "current_mortgage_annual_rate", "current_mortgage_remaining_months",
+        "annual_repairs", "annual_insurance", "annual_property_tax", "monthly_hoa",
+    },
+    "ComputeDetailedAmortization": {
+        "annual_repairs", "annual_insurance", "annual_cost_growth",
+    },
 }
 
 
@@ -1039,8 +1050,23 @@ def make_rental_cash_flow_extraction(rng: random.Random) -> dict:
 
     if vacancy_pct == 0:
         occupancy_phrase = rng.choice([
-            "assume it is occupied year round",
-            "assume full occupancy",
+            # THE NUMBER HAS TO BE IN THE UTTERANCE. Both spellings said
+            # "occupied year round" and "full occupancy" and labelled
+            # occupancy_rate = 1.0000 -- 126 rows whose label appears nowhere
+            # in their own input. Grounding then refused every one of them,
+            # measured on the v17 holdout: 4 of 32 rental rows died on
+            # `"occupancy_rate" = 1.0000 does not correspond to anything in
+            # the request`.
+            #
+            # That is the `phrase_money` and `prepaid_interest_days` defect a
+            # fourth time: a label the model cannot derive from what it was
+            # given, so it invents something plausible and the gate refuses it.
+            # The fix is the same one that worked twice before -- fix the
+            # GENERATOR, not the gate. Exempting 1.0000 as a convention would
+            # have let a stated "8% vacancy" be overwritten by a full-occupancy
+            # assumption, which is the hole that direction always opens.
+            "assume 100% occupancy",
+            "assume it is let 100% of the year",
         ])
     else:
         occupancy_phrase = rng.choice([
@@ -1727,18 +1753,41 @@ def make_clarification(rng: random.Random) -> dict:
                "timing": "END_OF_PERIOD"}
 
     elif scenario == "amortization_rate":
-        op = "ComputeAmortization"
+        # 50/50 HERE TOO, and the reason is the whole of the defect.
+        #
+        # `make_amortization_extraction` splits these two operations 50/50 on
+        # purpose -- they differ by ONE clause and ONE field, and under a
+        # majority prior the cheapest thing a model can do is ignore the clause
+        # and always answer the commoner one. That was measured: v7 had 24 of
+        # 24 detailed failures naming ComputeAmortization.
+        #
+        # The multi-turn generators then emitted ComputeAmortization 998 times
+        # and ComputeDetailedAmortization ZERO times, which put the corpus back
+        # at 3.5:1 overall and reinstated exactly the prior the split removed.
+        # Measured on the v17 holdout: 8 of 24 detailed rows answered
+        # ComputeAmortization, and the refusals name no field at all, because
+        # the parse is structurally fine and simply about the wrong operation.
+        op = rng.choices(["ComputeAmortization", "ComputeDetailedAmortization"],
+                         [0.5, 0.5])[0]
+        detailed = op == "ComputeDetailedAmortization"
         loan, annual_rate, term = sample_loan_scenario(rng)
+        tax_rate = round(rng.uniform(0.15, 0.37), 4)
+        # STATED in the utterance, never only in the label -- the bracket is
+        # the one thing that distinguishes the two operations, so a model that
+        # cannot read it here cannot tell them apart anywhere.
+        tax_clause = f" I'm in the {phrase_pct(tax_rate)} tax bracket." if detailed else ""
         user = rng.choice([
             f"Show me the amortization schedule for a {phrase_money(loan)} loan "
-            f"over {phrase_years(term)}.",
-            f"Amortize {phrase_money(loan)} over {phrase_years(term)}.",
+            f"over {phrase_years(term)}.{tax_clause}",
+            f"Amortize {phrase_money(loan)} over {phrase_years(term)}.{tax_clause}",
         ])
         ask = rng.choice(["What's the interest rate?", "Which rate should I use?"])
         follow = phrase_pct(annual_rate)
         obj = {"loan_amount": money_str(loan), "annual_rate": rate_str(annual_rate, 4),
                "term_months": term, "monthly_overpayment": money_str(0),
                "pmi_annual_rate": rate_str(0, 4), "original_home_value": money_str(loan)}
+        if detailed:
+            obj["annual_tax_rate"] = rate_str(tax_rate, 4)
 
     elif scenario == "heloc_ltv":
         op = "ComputeHeloc"
@@ -1826,13 +1875,22 @@ def make_modification(rng: random.Random) -> dict:
         followup = rng.choice([f"what about {phrase_money(new_loan)} instead?",
                                f"redo it for {phrase_money(new_loan)}"])
     else:
-        op = "ComputeAmortization"
+        # 50/50, for the reason spelled out in make_clarification above: the
+        # multi-turn rows were 998 ComputeAmortization to 0 detailed, which
+        # rebuilt the majority prior the extraction split exists to remove.
+        op = rng.choices(["ComputeAmortization", "ComputeDetailedAmortization"],
+                         [0.5, 0.5])[0]
+        detailed = op == "ComputeDetailedAmortization"
         loan, annual_rate, term = sample_loan_scenario(rng)
+        tax_rate = round(rng.uniform(0.15, 0.37), 4)
         first = {"loan_amount": money_str(loan), "annual_rate": rate_str(annual_rate, 4),
                  "term_months": term, "monthly_overpayment": money_str(0),
                  "pmi_annual_rate": rate_str(0, 4), "original_home_value": money_str(loan)}
+        if detailed:
+            first["annual_tax_rate"] = rate_str(tax_rate, 4)
+        tax_clause = f" I'm in the {phrase_pct(tax_rate)} tax bracket." if detailed else ""
         first_user = (f"Amortize {phrase_money(loan)} at {phrase_pct(annual_rate)} over "
-                      f"{phrase_years(term)}.")
+                      f"{phrase_years(term)}.{tax_clause}")
         second = dict(first)
         if kind == "amortization_rate":
             new_rate = round(annual_rate + rng.choice([-0.01, -0.005, 0.005, 0.01, 0.015]), 4)

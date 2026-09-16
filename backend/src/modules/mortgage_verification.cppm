@@ -194,7 +194,7 @@ namespace detail {
 // its own OPERATIONS dict (parse_finance_proto + build_operations, the
 // same IN_SCOPE_SECTIONS and EXCLUDE_RPCS). The test re-parses the .proto
 // and fails if this table has drifted from it in either direction.
-constexpr std::array<FieldSpec, 212> kLabelSpace{{
+constexpr std::array<FieldSpec, 221> kLabelSpace{{
     {.operation = "ComputeAmortization", .field = "loan_amount", .proto_type = "string", .repeated = false},
     {.operation = "ComputeAmortization", .field = "annual_rate", .proto_type = "string", .repeated = false},
     {.operation = "ComputeAmortization", .field = "term_months", .proto_type = "int32", .repeated = false},
@@ -245,6 +245,12 @@ constexpr std::array<FieldSpec, 212> kLabelSpace{{
     {.operation = "ComputeDetailedAmortization", .field = "pmi_annual_rate", .proto_type = "string", .repeated = false},
     {.operation = "ComputeDetailedAmortization", .field = "original_home_value", .proto_type = "string", .repeated = false},
     {.operation = "ComputeDetailedAmortization", .field = "annual_tax_rate", .proto_type = "string", .repeated = false},
+    // What the HOUSE costs to keep, on the standard mortgage schedule.
+    // Declared, classified, excluded -- the deployed model was never taught
+    // them, and an utterance about a mortgage rarely states a repair budget.
+    {.operation = "ComputeDetailedAmortization", .field = "annual_repairs", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeDetailedAmortization", .field = "annual_insurance", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeDetailedAmortization", .field = "annual_cost_growth", .proto_type = "string", .repeated = false},
     {.operation = "ComputeFutureValue", .field = "rate", .proto_type = "string", .repeated = false},
     {.operation = "ComputeFutureValue", .field = "periods", .proto_type = "int32", .repeated = false},
     {.operation = "ComputeFutureValue", .field = "payment", .proto_type = "string", .repeated = false},
@@ -263,6 +269,19 @@ constexpr std::array<FieldSpec, 212> kLabelSpace{{
     {.operation = "ComputeHeloc", .field = "annual_rate", .proto_type = "string", .repeated = false},
     {.operation = "ComputeHeloc", .field = "repayment_term_years", .proto_type = "int32", .repeated = false},
     {.operation = "ComputeHeloc", .field = "payments_per_year", .proto_type = "int32", .repeated = false},
+    // The FIRST mortgage, so both debts can be shown together. Declared and
+    // classified here, excluded from what the model must emit -- the same
+    // decision as the rent-vs-buy owner costs, for the same reason: G2b
+    // requires every declared field, and the deployed model was never taught
+    // these two.
+    {.operation = "ComputeHeloc", .field = "current_mortgage_annual_rate", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeHeloc", .field = "current_mortgage_remaining_months", .proto_type = "int32", .repeated = false},
+    // What the HOUSE costs to keep, on the HELOC screen. Declared, classified
+    // and excluded, for the reason the two fields above give.
+    {.operation = "ComputeHeloc", .field = "annual_repairs", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeHeloc", .field = "annual_insurance", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeHeloc", .field = "annual_property_tax", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeHeloc", .field = "monthly_hoa", .proto_type = "string", .repeated = false},
     {.operation = "ComputeHomeFutureValue", .field = "current_property_value", .proto_type = "string", .repeated = false},
     {.operation = "ComputeHomeFutureValue", .field = "annual_appreciation_rate", .proto_type = "string", .repeated = false},
     {.operation = "ComputeHomeFutureValue", .field = "current_loan_balance", .proto_type = "string", .repeated = false},
@@ -1418,7 +1437,7 @@ struct ExcludedField {
     std::string_view operation;
     std::string_view field;
 };
-constexpr std::array<ExcludedField, 11> kOperationExcludedFields{{
+constexpr std::array<ExcludedField, 20> kOperationExcludedFields{{
     {.operation = "ComputeXirr", .field = "rate"},   // "ignored by XIRR"
     {.operation = "ComputeXnpv", .field = "guess"},  // "XIRR only"
     {.operation = "ComputeRate", .field = "guess"},  // "omit for the engine's own starting guess"
@@ -1457,6 +1476,23 @@ constexpr std::array<ExcludedField, 11> kOperationExcludedFields{{
     {.operation = "ComputeRentVsBuy", .field = "heloc_drawn_amount"},
     {.operation = "ComputeRentVsBuy", .field = "heloc_annual_rate"},
     {.operation = "ComputeRentVsBuy", .field = "heloc_term_years"},
+
+    // ComputeHeloc's first-mortgage inputs. Same decision, same reason: on the
+    // wire and reachable from the UI and the API, not required of a model that
+    // has never seen them. A HELOC utterance states the mortgage BALANCE
+    // ("$106,600 mortgage balance") and almost never its rate or remaining
+    // term, so requiring them would make the model invent two numbers the
+    // sentence cannot supply -- the label-not-derivable defect this corpus has
+    // already paid for four times.
+    {.operation = "ComputeHeloc", .field = "current_mortgage_annual_rate"},
+    {.operation = "ComputeHeloc", .field = "current_mortgage_remaining_months"},
+    {.operation = "ComputeHeloc", .field = "annual_repairs"},
+    {.operation = "ComputeHeloc", .field = "annual_insurance"},
+    {.operation = "ComputeHeloc", .field = "annual_property_tax"},
+    {.operation = "ComputeHeloc", .field = "monthly_hoa"},
+    {.operation = "ComputeDetailedAmortization", .field = "annual_repairs"},
+    {.operation = "ComputeDetailedAmortization", .field = "annual_insurance"},
+    {.operation = "ComputeDetailedAmortization", .field = "annual_cost_growth"},
 }};
 
 /**
@@ -1984,9 +2020,16 @@ auto classify_slot(std::string_view f) -> SlotKind {
         detail::is_one_of(kShareRateFields, f)) {
         return SlotKind::Ratio;
     }
+    // `_growth` joins `_increase` and `_return` as a SUFFIX rather than as a
+    // named field: they are the same thing said three ways, and adding
+    // `annual_cost_growth` by name would leave the next `*_growth` field
+    // Unclassified -> Indeterminate, which refuses every parse of its
+    // operation and reads exactly like a bad model. The suffix list is the
+    // class; a name would have been the instance.
     if (detail::ends_with(f, "rate") || detail::ends_with(f, "rates") ||
         detail::ends_with(f, "appreciation") || detail::ends_with(f, "_increase") ||
-        detail::ends_with(f, "_return") || f == "guess") {
+        detail::ends_with(f, "_return") || detail::ends_with(f, "_growth") ||
+        f == "guess") {
         return SlotKind::Rate;
     }
 

@@ -273,6 +273,33 @@ message DetailedAmortizationRequest {
   // deductible at all is a matter of the caller's jurisdiction and filing
   // position; this service applies the rate it is given and does not opine.
   string annual_tax_rate = 7;
+
+  // --- what the HOUSE costs to keep, beside what the LOAN costs ------------
+  //
+  // A mortgage calculator that quotes P&I and stops describes the cheapest
+  // year an owner will ever have. Repairs are the single largest omitted cost
+  // of owning, they do not amortise, and they do not stop when the loan does.
+  //
+  // BESIDE the payment, never inside it: folding them in would corrupt the
+  // interest/principal split and every figure derived from it, so they are
+  // reported on their own rows and in their own totals.
+  //
+  // `annual_insurance` is the OWNER's cover -- a new-build warranty, a
+  // structural or defects policy -- and is deliberately separate from
+  // `pmi_annual_rate`. PMI protects the LENDER and cancels at the LTV
+  // threshold; this protects the OWNER against the building and cancels for
+  // no one. One "insurance" line would make a cost that ends look like a cost
+  // that does not.
+  //
+  // All optional; "0"/empty means NOT MODELLED and the schedule is unchanged.
+  string annual_repairs = 8;
+  string annual_insurance = 9;
+  // Yearly increase applied to both, compounding at the YEAR boundary. Zero is
+  // supported and is the wrong answer by habit over a 360-month term: holding
+  // a repair budget flat for thirty years prices the last year's roof at the
+  // first year's money, and the error grows with exactly the horizon the
+  // schedule exists to show.
+  string annual_cost_growth = 10;
 }
 
 message DetailedAmortizationRow {
@@ -285,6 +312,10 @@ message DetailedAmortizationRow {
   string pmi_paid = 7;
   string tax_savings = 8;
   string end_balance = 9;
+  // Carrying costs for this month. Zero throughout when not modelled, which
+  // is what keeps every figure above unchanged for an existing caller.
+  string repairs_paid = 10;
+  string insurance_paid = 11;
 }
 
 message DetailedMortgageSummary {
@@ -294,6 +325,13 @@ message DetailedMortgageSummary {
   string total_payments_paid = 4;
   string total_tax_savings = 5;
   int32 actual_term_months = 6;
+  string total_repairs_paid = 7;
+  string total_insurance_paid = 8;
+  // Debt service PLUS carrying costs. Reported beside total_payments_paid
+  // rather than folded into it, because that figure is what went TO THE
+  // LENDER and other things are derived from it. Two totals answering two
+  // questions beat one answering neither.
+  string total_cost_of_ownership = 9;
 }
 
 message DetailedAmortizationResponse {
@@ -326,6 +364,39 @@ message HelocRequest {
   string annual_rate = 5;
   int32 repayment_term_years = 6;
   int32 payments_per_year = 7;      // 12 monthly, 26 bi-weekly
+
+  // --- the FIRST mortgage, so both debts can be seen together --------------
+  //
+  // A HELOC is a SECOND lien and nobody carries one alone: the borrower owes
+  // this payment AND the mortgage payment, in the same month, out of the same
+  // income. Answering with the HELOC's payment by itself is arithmetically
+  // correct and practically useless -- it is the number that makes a draw look
+  // affordable.
+  //
+  // Both optional. Supply them and the response carries BOTH amortization
+  // schedules plus the combined monthly obligation; omit them and the response
+  // is exactly what it was before these fields existed.
+  //
+  // `current_mortgage_balance` above is already the opening balance, so only
+  // the rate and the remaining term are new.
+  string current_mortgage_annual_rate = 8;
+  int32 current_mortgage_remaining_months = 9;
+
+  // --- what the HOUSE costs to keep ----------------------------------------
+  //
+  // Two debts are still not the monthly obligation. An owner deciding whether
+  // to draw on their equity has to find the mortgage payment, the HELOC
+  // payment, AND the roof, the insurer and the county -- out of one income, in
+  // the same month. A figure that stops at debt service is the one that makes
+  // a draw look affordable, which is the same defect as quoting the HELOC
+  // payment alone, one level up.
+  //
+  // All optional; "0"/empty means NOT MODELLED, and `total_monthly_obligation`
+  // then equals debt service alone.
+  string annual_repairs = 10;
+  string annual_insurance = 11;
+  string annual_property_tax = 12;
+  string monthly_hoa = 13;
 }
 
 message HelocResponse {
@@ -333,6 +404,37 @@ message HelocResponse {
   string available_equity = 1;
   string draw_period_payment = 2;      // interest only
   string repayment_period_payment = 3; // fully amortizing
+
+  // --- both debts, side by side --------------------------------------------
+  //
+  // Populated ONLY when the first mortgage's rate and remaining term were
+  // supplied. Empty otherwise, so an existing caller sees exactly what it saw
+  // before -- the same contract the rent-vs-buy legacy path keeps.
+  repeated AmortizationRow mortgage_schedule = 4;
+  repeated AmortizationRow heloc_schedule = 5;
+  MortgageSummary mortgage_summary = 6;
+  MortgageSummary heloc_summary = 7;
+
+  // The number the borrower actually has to find each month while BOTH run:
+  // first-mortgage payment plus the HELOC's amortizing payment. Reported
+  // rather than left to the caller to add, because the two schedules can end
+  // in different months and a caller adding the wrong pair of rows gets a
+  // figure that looks right.
+  string combined_monthly_payment = 8;
+  // The month the FIRST mortgage retires, and the month the HELOC does.
+  // Unequal in general: a 15-year HELOC on a mortgage with 22 years left
+  // leaves seven years of mortgage-only payments, and the combined figure
+  // above applies only while both are live.
+  int32 mortgage_ends_month = 9;
+  int32 heloc_ends_month = 10;
+
+  // Debt service PLUS what the house costs to keep: the number the owner has
+  // to find each month while both debts run. Reported beside
+  // `combined_monthly_payment` rather than replacing it, because the two
+  // answer different questions -- what the LENDERS take, and what the MONTH
+  // takes. Equal when no carrying costs were supplied.
+  string monthly_carrying_costs = 11;
+  string total_monthly_obligation = 12;
 }
 
 message RefinanceRequest {
