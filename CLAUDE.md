@@ -1000,11 +1000,22 @@ Two things to hold on to before trusting its output:
   **The one regression direction v17 → v18, stated honestly:** `ComputePayment`
   51/62 → 33/62 raw, and `ComputeRefinance` 31 → 26. Against v15 this is not a
   regression; it is recorded because it is real and because a future retrain
-  should watch it.
+  should watch it. **Update (2026-09-16):** the `ComputePayment` regression was
+  **substantially this missing question rather than lost capability**. Asking
+  means turn two now carries a real `prior_question`, so the model finally sees
+  the two-turn shape the corpus trained it on. That recovered `ComputePayment`
+  from 33/62 to **48/62** (above v15's 43 and near v17's 51).
 
-  **Clarification rows:** BOTH v17 and v18 are near-zero on clarification rows
-  (`asked_ok` 1/90 for v17 and 0/90 for v18) where v15's earlier measurement
-  was far higher — a shared regression, not a v18-specific one, and still open.
+  **Clarification rows:** BOTH v17 and v18 were near-zero on clarification rows
+  (`asked_ok` 1/90 for v17 and 0/90 for v18; v15 asked on 15/90 like-for-like
+  on `849e8a349a2470b6`, where an earlier quoted 32/89 was measured on a
+  different holdout and is incomparable). Only a retrain restores the model's
+  own asking. **This regression is NO LONGER OPEN:** it was fixed in the serving
+  layer without a retrain on 2026-09-16. The serving layer already knows which
+  field is missing because it just refused on it, restoring asking when it
+  should from 0/90 to **49/90** on v18, lifting raw 411 → **428/558** and served
+  393 → **413** (see "A field the user never stated is a question, not a refusal"
+  below).
 
   **Promotion procedure executed exactly as `docs/MORTGAGE_MODEL_DISTRIBUTION.md`
   prescribes:**
@@ -1274,6 +1285,86 @@ Result: **2911 rows, 0 refused.** Known-ungroundable families are DECLARED with
 reasons so a new one fails rather than joining them quietly.
 `GROUNDING_WHY=1` makes it print the literals the lexer found and how each field
 classified.
+
+### A field the user never stated is a question, not a refusal
+
+**The capability is gone from the weights:** v15 asked a clarifying question on
+15 of 90 holdout rows that call for one, v17 on 1, v18 on 0. (A previously quoted
+"32/89" for v15 was measured on a DIFFERENT holdout and is incomparable; 15/90 is
+the like-for-like figure on `849e8a349a2470b6`.) Only a retrain restores the
+model's own asking.
+
+**The serving layer never needed it.** It already knows WHICH field is missing,
+because it just refused on that field. Measured against production before the
+fix:
+
+```
+"What's the payment on a $420,000 loan at 6.5%?"
+-> "periods" = 180 does not correspond to anything in the request
+   (the nearest figure you gave is 6.5)
+```
+
+where the corpus teaches "Over how many years?" on exactly that shape.
+
+**THE DISCRIMINATOR IS THE LEXER'S TAGS, and it must be, because the opposite
+case has to keep its refusal:**
+- no literal of a compatible TAG -> the user never stated it -> ASK
+- a compatible literal exists    -> the model mangled it     -> REFUSE
+
+A Years-tagged "30" is not the user stating an interest rate. An UNTAGGED
+literal is permissive everywhere, because a bare number is genuinely ambiguous
+and this must fail toward the refusal it narrows rather than widen it. The case
+that must stay a refusal is the documented dangerous failure:
+`present_value = 304000.00` against a 495,000 utterance, which parses, satisfies
+every bound, names a real field and prices a different loan.
+
+**Applied to the BOUNDS verdict as well as the grounding one**, because an
+absent term arrives as G3 ("periods" does not correspond) and an absent rate as
+G5 (`annual_rate = 0.6` is outside this assistant's interest-rate range) on
+utterances of the same shape. A field with no natural wording keeps its
+refusal -- a question assembled from a proto field name reads like a stack
+trace.
+
+New: `ReasonCode::UnstatedField`, `VerificationVerdict::field`,
+`mv::utterance_states_nothing_for()`, `mv::clarifying_question()`, and
+`ModelOutputOutcome::Clarified` in `mortgage_assistant_service.cpp`.
+
+**MEASURED on the 600-row holdout**, same engine, same weights, serving layer
+only:
+
+| arm | raw | served | asks when it should |
+| --- | --- | --- | --- |
+| v18 | 411/558 | 393 | 0/90 |
+| **v18 + this fix** | **428/558** | **413** | **49/90** |
+
+Paired: raw +17 gained and ZERO lost, p = 0.0000; served +20, p = 0.0000.
+`answered-when-stated` stays 70/70, so nothing began asking on a complete
+request.
+
+**RAW MOVED ON A SERVING-ONLY CHANGE, which should be impossible, and that is
+the finding worth recording.** Asking means turn two now carries a real
+`prior_question`, so the model finally sees the two-turn shape the corpus
+trained it on. This file already records the same effect in the other
+direction -- echoing `prior_question` moved raw 449 -> 443 on identical weights.
+Here it is worth +17, almost all of it `ComputePayment`: 33/62 -> 48/62, above
+v15's 43 and near v17's 51. So the `ComputePayment` regression recorded against
+v18 was **substantially this missing question rather than lost capability** --
+the v18 promotion note is updated accordingly rather than deleted.
+
+Per-operation raw across all four arms (n = 558 paired rows):
+- **total:** v15 375, v17 405, v18 411, v18+fix 428
+- **served:** v15 368, v17 387, v18 393, v18+fix 413
+- **`ComputePayment` (n=62):** v15 43, v17 51, v18 33, v18+fix 48
+
+**Verified live after deploy (deployment `2df30e70`):** three under-specified
+utterances return clarifications ("Over how many years?", "What's the interest
+rate?", "Over how many years?"), a fully-stated one still returns params, and the
+two-turn exchange completes -- `prior_clarification` "30 years" yields
+`periods 360, rate 0.005417, present_value 420000.00`.
+
+`ctest` is **116/116**. Mutation-checked both directions: disabling the refinement
+reproduces both production messages; making every field look unstated fails the
+assertion that a corrupted value STAYS a refusal.
 
 ## Security posture: what is enforced, and what is only claimed
 
