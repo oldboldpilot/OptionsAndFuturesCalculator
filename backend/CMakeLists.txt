@@ -1508,6 +1508,38 @@ target_sources(test_mortgage_explanation
 target_link_libraries(test_mortgage_explanation PRIVATE sensen_slim fastjson logger)
 add_test(NAME MortgageExplanationTest COMMAND test_mortgage_explanation)
 
+# test_result_explanation: the OUTPUT-driven explainer. It asserts the two
+# things that decide whether "skip the empty columns" is safe -- that an INPUT
+# zero is silence and a COMPUTED zero is a finding -- plus the transitive
+# suppression that stops a HELOC's interest rate being explained when there is
+# no HELOC, which per-field filtering keeps because a rate is an ordinary
+# non-zero number.
+add_executable(test_result_explanation tests/test_result_explanation.cpp)
+target_sources(test_result_explanation
+    PRIVATE
+    FILE_SET CXX_MODULES FILES
+        src/modules/mortgage_explanation.cppm
+)
+target_link_libraries(test_result_explanation PRIVATE sensen_slim fastjson logger)
+add_test(NAME ResultExplanationTest COMMAND test_result_explanation)
+
+# test_carrying_costs: repairs and the owner's own insurance on an ordinary
+# mortgage. Its first assertion is the one that matters -- the loan schedule is
+# byte-identical when the costs are not asked for, so an optional feature is
+# proven optional rather than assumed to be.
+add_executable(test_carrying_costs tests/test_carrying_costs.cpp)
+target_link_libraries(test_carrying_costs PRIVATE sensen_slim fastjson logger)
+add_test(NAME CarryingCostsTest COMMAND test_carrying_costs)
+
+# test_rent_vs_buy_costs: repairs, PMI and its cancellation, an overpayment
+# that pulls that cancellation forward, and a HELOC-funded deposit. Its
+# sharpest assertion is section 5 -- the renter's portfolio must open with the
+# buyer's OWN cash, because investing the borrowed part hands the renter money
+# nobody had and makes buying look worse with every figure still plausible.
+add_executable(test_rent_vs_buy_costs tests/test_rent_vs_buy_costs.cpp)
+target_link_libraries(test_rent_vs_buy_costs PRIVATE sensen_slim fastjson logger)
+add_test(NAME RentVsBuyCostsTest COMMAND test_rent_vs_buy_costs)
+
 # test_pmi_policy: the byte-identity gate over the PMI cancellation refactor,
 # plus the new basis/threshold behaviour. It links sensen_slim and calls
 # sensen::calculate_mortgage_amortization DIRECTLY rather than through the
