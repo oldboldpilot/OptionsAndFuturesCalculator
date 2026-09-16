@@ -808,6 +808,53 @@ message RentVsBuyRequest {
   // Annual inflation rate as a decimal (e.g. "0.025" for 2.5%/yr).
   // Optional; default is "0" when empty.
   string annual_inflation_rate = 15;
+
+  // --- costs only an OWNER meets -------------------------------------------
+  //
+  // AMORTISING PATH ONLY. The legacy composite already conflates every one of
+  // these into one number, so honouring them beside it would double-count;
+  // `decide_rent_vs_buy_shape` refuses that combination outright.
+  //
+  // Every field is optional and "0"/empty means NOT MODELLED. They are added
+  // rather than folded into monthly_taxes_ins_maintenance because each moves
+  // the comparison in the same direction -- against buying -- and a caller who
+  // cannot see them separately cannot question them.
+
+  // Budgeted repairs for a year, escalated by annual_inflation_rate. Distinct
+  // from monthly_taxes_ins_maintenance, which is a composite a caller may
+  // already hold; this is the line an owner can actually argue with.
+  // Optional; default "0" (not modelled).
+  string annual_repairs = 16;
+
+  // Mortgage insurance as a decimal fraction of the ORIGINAL loan per year
+  // (e.g. "0.006"). It CANCELS at the LTV threshold rather than running for
+  // the term, which is why it cannot be folded into the carrying figure: a
+  // cost that ends and a cost that does not are different shapes over thirty
+  // years, and only the first is pulled forward by an overpayment.
+  // Optional; default "0" (no mortgage insurance).
+  string pmi_annual_rate = 17;
+
+  // Extra principal each month. Modelled here for what it does to the field
+  // above: it retires the balance sooner, so PMI cancels sooner, so the
+  // monthly cost falls -- an interaction that needs the schedule and the
+  // threshold in one loop. Optional; default "0".
+  string monthly_overpayment = 18;
+
+  // A HELOC funding part of the cash to close, and its own repayment.
+  //
+  // THE RENTER'S PORTFOLIO OPENS WITH THE BUYER'S OWN CASH, NOT THE BORROWED
+  // PART. The comparison asks "what if that money went into a portfolio
+  // instead", and money raised on a HELOC was never available to do that -- a
+  // renter who did not buy has no HELOC to draw on. Sending a draw therefore
+  // REDUCES the renter's opening balance, which is the whole point of stating
+  // it. Optional; default "0" (no HELOC).
+  string heloc_drawn_amount = 19;
+  // Nominal annual rate on the draw, decimal fraction. Optional; default "0".
+  string heloc_annual_rate = 20;
+  // Repayment term in years. It amortises independently of the mortgage and is
+  // secured elsewhere, so it never touches the mortgage balance. Zero means no
+  // HELOC repayment is modelled. Optional; default 0.
+  int32 heloc_term_years = 21;
 }
 
 message RentVsBuyResponse {
@@ -850,6 +897,20 @@ message RentVsBuyResponse {
   string real_buying_advantage = 16;
   string real_owner_terminal_wealth = 17;
   string real_renter_terminal_wealth = 18;
+
+  // --- what the owner paid that the renter did not -------------------------
+  //
+  // Itemised rather than left inside total_cost_of_buying alone, because
+  // "buying costs $40,000 more" is an answer nobody can act on and "$31,000 of
+  // it is repairs and mortgage insurance" is. Populated ONLY on the amortising
+  // path; empty on the legacy path, which models none of them.
+  string total_repairs_paid = 19;
+  string total_pmi_paid = 20;
+  string total_heloc_interest_paid = 21;
+  // The month mortgage insurance stopped: 0 if it never started, the horizon
+  // if it never cancelled. This is the figure an overpayment is judged by, and
+  // it is an int rather than a date because the schedule is in months.
+  int32 pmi_ends_month = 22;
 }
 
 // ---------------------------------------------------------------------------

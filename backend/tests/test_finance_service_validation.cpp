@@ -2327,6 +2327,147 @@ auto main() -> int {
     }
 
     // =======================================================================
+    section("24b. ComputeRentVsBuy: the costs only an OWNER meets");
+    // =======================================================================
+    //
+    // Repairs, mortgage insurance, an overpayment and a HELOC reached the WIRE
+    // on 2026-09-15. They had been in sensen and gated there since the same
+    // day, and unreachable from every client: correct, tested, and callable by
+    // nobody. `RentVsBuyRequest` had 15 fields and the engine took 21.
+    //
+    // Each one moves the comparison in the SAME direction -- against buying --
+    // so omitting them was never neutral, and the error grew with exactly the
+    // horizon the comparison exists to show.
+    {
+        const auto base = []() {
+            sensen::finance::RentVsBuyRequest r;
+            r.set_property_price("400000.00");
+            r.set_down_payment("40000.00");
+            r.set_annual_home_appreciation("0.0300");
+            r.set_current_monthly_rent("2200.00");
+            r.set_annual_rent_increase("0.0300");
+            r.set_annual_investment_return("0.0700");
+            r.set_years(10);
+            r.set_loan_annual_rate("0.0650");
+            r.set_loan_term_years(30);
+            r.set_monthly_taxes_ins_maintenance("650.00");
+            r.set_closing_costs_buy("8000.00");
+            return r;
+        };
+        const auto run = [&](const sensen::finance::RentVsBuyRequest& req,
+                             sensen::finance::RentVsBuyResponse& resp) {
+            auto ctx = make_context();
+            return stub.ComputeRentVsBuy(ctx.get(), req, &resp);
+        };
+
+        sensen::finance::RentVsBuyResponse plain;
+        check(run(base(), plain).ok(), "the reference scenario answers");
+        // Compared as a NUMBER, not as the string "0.00". BigDecimal renders
+        // eighteen places, so the exact spelling is "0.000000000000000000" --
+        // asserting the literal tested this test's idea of the format rather
+        // than the value it cares about.
+        check(plain.total_repairs_paid().empty() ||
+                  std::fabs(std::stod(plain.total_repairs_paid())) < 1e-9,
+              "omitted repairs report zero, not a guess at a national average");
+        check(plain.pmi_ends_month() == 0,
+              "and with no mortgage insurance there is no cancellation month");
+
+        {   // repairs reach the engine and move the answer
+            auto req = base();
+            req.set_annual_repairs("4800.00");
+            sensen::finance::RentVsBuyResponse r;
+            check(run(req, r).ok(), "a repair budget is accepted");
+            check(!r.total_repairs_paid().empty() && r.total_repairs_paid() != "0.00",
+                  "repairs are accumulated and reported as their own line");
+            check(r.total_cost_of_buying() > plain.total_cost_of_buying(),
+                  "buying costs more once the roof is in the model");
+            check(std::fabs(r.total_rent_paid().empty() ? 0.0 : std::stod(r.total_rent_paid()) -
+                            std::stod(plain.total_rent_paid())) < 0.5,
+                  "and the RENTER pays exactly what they paid before -- a "
+                  "landlord's repairs are not the tenant's bill");
+        }
+
+        {   // PMI cancels, and an overpayment pulls that date forward
+            auto req = base();
+            req.set_pmi_annual_rate("0.0060");
+            sensen::finance::RentVsBuyResponse a;
+            check(run(req, a).ok(), "mortgage insurance is accepted");
+            check(a.pmi_ends_month() > 0 && a.pmi_ends_month() < 120,
+                  "it STOPS inside the horizon rather than running for the term");
+
+            req.set_monthly_overpayment("400.00");
+            sensen::finance::RentVsBuyResponse b;
+            check(run(req, b).ok(), "an overpayment is accepted");
+            check(b.pmi_ends_month() < a.pmi_ends_month(),
+                  "and pulls the cancellation forward -- the interaction no "
+                  "separate PMI calculator can show");
+            check(std::stod(b.total_pmi_paid()) < std::stod(a.total_pmi_paid()),
+                  "so less mortgage insurance is paid in total");
+        }
+
+        {   // a HELOC costs interest and is refused without a term
+            auto req = base();
+            req.set_heloc_drawn_amount("30000.00");
+            req.set_heloc_annual_rate("0.0850");
+            sensen::finance::RentVsBuyResponse bad;
+            auto s = run(req, bad);
+            check(s.error_code() == grpc::StatusCode::INVALID_ARGUMENT &&
+                      s.error_message().find("heloc_term_years") != std::string::npos,
+                  "a draw with NO repayment term is refused: it would reduce the "
+                  "cash invested and then cost nothing, understating buying");
+
+            req.set_heloc_term_years(10);
+            sensen::finance::RentVsBuyResponse good;
+            check(run(req, good).ok(), "and is accepted once a term is given");
+            check(!good.total_heloc_interest_paid().empty() &&
+                      std::stod(good.total_heloc_interest_paid()) > 0,
+                  "the draw costs interest, reported on its own line");
+            check(std::fabs(std::stod(good.final_loan_balance()) -
+                            std::stod(plain.final_loan_balance())) < 1.0,
+                  "and never touches the MORTGAGE balance -- it is secured elsewhere");
+        }
+
+        {   // THE SILENT DROP THIS GUARD EXISTS FOR
+            //
+            // The legacy composite already conflates repairs and mortgage
+            // insurance into its one number. Before these fields joined the
+            // amortising group signal, pairing them with the composite took the
+            // LEGACY path and discarded them -- a 200 OK computed from a model
+            // that never saw the repairs the caller just stated.
+            auto req = base();
+            req.clear_loan_annual_rate();
+            req.clear_loan_term_years();
+            req.clear_monthly_taxes_ins_maintenance();
+            req.clear_closing_costs_buy();
+            req.set_monthly_piti_and_maintenance("3200.00");
+            req.set_annual_repairs("4800.00");
+            sensen::finance::RentVsBuyResponse r;
+            auto s = run(req, r);
+            check(s.error_code() == grpc::StatusCode::INVALID_ARGUMENT,
+                  "the legacy composite paired with annual_repairs is REFUSED, "
+                  "not answered from a model that drops the repairs");
+        }
+
+        {   // refusals rather than plausible answers
+            const auto refused = [&](auto&& mutate, const char* what) {
+                auto req = base();
+                mutate(req);
+                sensen::finance::RentVsBuyResponse r;
+                auto s = run(req, r);
+                check(s.error_code() == grpc::StatusCode::INVALID_ARGUMENT, what);
+            };
+            refused([](auto& r) { r.set_annual_repairs("-100.00"); },
+                    "a negative repair budget is refused");
+            refused([](auto& r) { r.set_pmi_annual_rate("-0.01"); },
+                    "a negative mortgage-insurance rate is refused");
+            refused([](auto& r) { r.set_monthly_overpayment("-50.00"); },
+                    "a negative overpayment is refused");
+            refused([](auto& r) { r.set_heloc_term_years(101); },
+                    "a HELOC term beyond a century is refused");
+        }
+    }
+
+    // =======================================================================
     section("25. ComputeXnpv / ComputeXirr: DAYS on the wire, SECONDS in the engine");
     // =======================================================================
     //

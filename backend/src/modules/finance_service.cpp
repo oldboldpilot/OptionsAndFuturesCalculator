@@ -2765,6 +2765,19 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
             classify_decimal_field(request->selling_cost_percent()),
             classify_decimal_field(request->annual_inflation_rate()),
             request->loan_term_years() != 0 ? FieldSignal::Positive : FieldSignal::Absent,
+            // The owner-only costs belong in this group for the reason the
+            // comment above gives, not as an afterthought. The legacy
+            // composite already conflates repairs and mortgage insurance into
+            // its one number, so a request pairing it with `annual_repairs`
+            // would otherwise take the legacy path and DISCARD the repairs --
+            // the exact silent drop this join was written to stop, repeated on
+            // the fields added after it.
+            classify_decimal_field(request->annual_repairs()),
+            classify_decimal_field(request->pmi_annual_rate()),
+            classify_decimal_field(request->monthly_overpayment()),
+            classify_decimal_field(request->heloc_drawn_amount()),
+            classify_decimal_field(request->heloc_annual_rate()),
+            request->heloc_term_years() != 0 ? FieldSignal::Positive : FieldSignal::Absent,
         });
 
         // One decision, taken once, from a total function over the pair. The
@@ -2890,6 +2903,55 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         input.selling_cost_percent = sell_pct;
         input.annual_inflation_rate = inflation_rate;
 
+        // --- owner-only costs, all optional, empty/zero meaning not modelled --
+        READ_DECIMAL_SAFE(repairs, request->annual_repairs(), "annual_repairs");
+        READ_DECIMAL_SAFE(pmi_rate, request->pmi_annual_rate(), "pmi_annual_rate");
+        READ_DECIMAL_SAFE(overpay, request->monthly_overpayment(), "monthly_overpayment");
+        READ_DECIMAL_SAFE(heloc_amt, request->heloc_drawn_amount(), "heloc_drawn_amount");
+        READ_DECIMAL_SAFE(heloc_rate, request->heloc_annual_rate(), "heloc_annual_rate");
+
+        if (repairs.is_negative()) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "annual_repairs cannot be negative");
+        }
+        if (pmi_rate.is_negative()) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "pmi_annual_rate cannot be negative");
+        }
+        if (overpay.is_negative()) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "monthly_overpayment cannot be negative");
+        }
+        if (heloc_amt.is_negative()) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "heloc_drawn_amount cannot be negative");
+        }
+        if (heloc_rate.is_negative()) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "heloc_annual_rate cannot be negative");
+        }
+        if (request->heloc_term_years() < 0 || request->heloc_term_years() > 100) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "heloc_term_years must be between 0 and 100");
+        }
+        // A draw with nothing to repay it over is a statement with half its
+        // meaning missing: the money reduces the buyer's own cash and then
+        // costs nothing, which flatters buying by the whole of the interest.
+        // Refused rather than defaulted to a term nobody chose.
+        if (heloc_amt.is_positive() && request->heloc_term_years() == 0) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "heloc_drawn_amount needs heloc_term_years: a draw with no "
+                          "repayment term reduces the cash invested and costs nothing, "
+                          "which understates the cost of buying");
+        }
+
+        input.annual_repairs = repairs;
+        input.pmi_annual_rate = pmi_rate;
+        input.monthly_overpayment = overpay;
+        input.heloc_drawn_amount = heloc_amt;
+        input.heloc_annual_rate = heloc_rate;
+        input.heloc_term_years = request->heloc_term_years();
+
         const auto r = sensen::calculate_rent_vs_buy(input);
         if (!r) {
             // Map engine validation failure to INVALID_ARGUMENT rather than letting
@@ -2920,6 +2982,14 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         response->set_real_buying_advantage(r->real_buying_advantage.to_string());
         response->set_real_owner_terminal_wealth(r->real_owner_terminal_wealth.to_string());
         response->set_real_renter_terminal_wealth(r->real_renter_terminal_wealth.to_string());
+
+        // Itemised owner costs. Reported beside the totals rather than only
+        // inside them: "buying costs $40,000 more" is not actionable and
+        // "$31,000 of it is repairs and mortgage insurance" is.
+        response->set_total_repairs_paid(r->total_repairs_paid.to_string());
+        response->set_total_pmi_paid(r->total_pmi_paid.to_string());
+        response->set_total_heloc_interest_paid(r->total_heloc_interest_paid.to_string());
+        response->set_pmi_ends_month(r->pmi_ends_month);
 
         return Status::OK;
     }

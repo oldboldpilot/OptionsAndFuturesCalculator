@@ -280,6 +280,26 @@ OP_EXCLUDED_FIELDS: dict[str, set[str]] = {
     "ComputeIrr": {"guess"},   # IrrRequest.guess -- a seed, omit for the default
     "ComputeXnpv": {"guess"},  # DatedCashFlowRequest.guess -- "XIRR only"
     "ComputeRate": {"guess"},  # RateRequest.guess -- "omit for the engine's own starting guess"
+
+    # ComputeRentVsBuy's owner-only costs: repairs, mortgage insurance, an
+    # overpayment and a HELOC. On the WIRE since 2026-09-15 and reachable from
+    # the UI and the API; NOT taught here, and the two facts belong together.
+    #
+    # G2b requires every declared field, so teaching six fields the corpus has
+    # no utterances for would make the model emit invented values that grounding
+    # then refuses -- the `phrase_money` and `prepaid_interest_days` defect a
+    # third time. Excluding them keeps the label a model can actually derive
+    # from what it was given.
+    #
+    # THIS SET MIRRORS `kOperationExcludedFields` IN mortgage_verification.cppm
+    # AND MUST MOVE WITH IT. The C++ side drops these before the verifier; this
+    # side stops the corpus requiring them. They are two halves of one decision,
+    # and `DerivationCorpusSweepTest` fails the moment they disagree -- which is
+    # how this entry came to be written.
+    "ComputeRentVsBuy": {
+        "annual_repairs", "pmi_annual_rate", "monthly_overpayment",
+        "heloc_drawn_amount", "heloc_annual_rate", "heloc_term_years",
+    },
 }
 
 
@@ -2460,8 +2480,20 @@ def stream_seed(master: int, name: str) -> int:
 # is the same defect as the hand-written operation allow-list that drifted to
 # refusing thirteen of twenty-seven live operations.
 CORPUS_MIX = [
-    (0.116, make_amortization_extraction),
-    (0.036, make_rental_cash_flow_extraction),
+    # ComputeRentalCashFlow CARRIES 22 FIELDS AND ITS CONFUSABLE SIBLING
+    # CARRIES 6, so equal weight was not equal exposure. Measured on the v16
+    # holdout: ComputeRentalCashFlow scored 0/16 -- every row answered
+    # `ComputeRentalRoi`, the older and narrower operation -- while
+    # ComputeRentalRoi itself scored 13/13. The refusals name RentalRoi's own
+    # fields (`periodic_mortgage_payment`, `periods_per_year`), which is what
+    # proves the model chose the wrong OPERATION rather than fumbling a field.
+    #
+    # Raised from 0.036 to 0.060, taken from amortization, which remains the
+    # largest single block by a wide margin. The total is unchanged, so no
+    # other row type is diluted as a side effect -- the mistake that would
+    # make the next comparison unattributable.
+    (0.092, make_amortization_extraction),
+    (0.060, make_rental_cash_flow_extraction),
     (0.081, make_tvm_solver_extraction),
     (0.054, make_cashflow_extraction),
     (0.045, make_refinance_extraction),

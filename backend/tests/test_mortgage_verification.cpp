@@ -532,13 +532,36 @@ auto main() -> int {
 
             bool all_match = true;
             std::string first_mismatch;
-            for (const auto& [op, fields] : from_proto) {
+            for (const auto& [op, all_proto_fields] : from_proto) {
+                // EXCLUDED FIELDS ARE NOT PART OF THE EMITTABLE LABEL SPACE, so
+                // the comparison is against what the model may emit rather than
+                // against every field the message declares. `mortgage_grammar`'s
+                // own copy of this gate already skips them; this one did not,
+                // so adding a field the service DROPS before the verifier ever
+                // sees it failed here while the system was entirely consistent.
+                //
+                // Keeping the skip in both places is the point -- two gates
+                // asking the same question of the same artifact must agree
+                // about what the question is, or the one that is wrong reads
+                // as a real defect.
+                std::vector<std::string> fields;
+                for (const auto& f : all_proto_fields) {
+                    if (!mv::operation_excludes_field(op, f)) { fields.push_back(f); }
+                }
                 if (!mv::is_known_operation(op)) {
                     all_match = false;
                     first_mismatch = "module is missing operation " + op;
                     break;
                 }
-                const auto module_fields = mv::fields_of(op);
+                // BOTH SIDES, or the comparison is asymmetric and the error
+                // simply moves to whichever operation excludes something else.
+                // Filtering only the proto made ComputeIrr fail instead --
+                // 1 against 2 -- which looks like a new defect and is the same
+                // one, half-fixed.
+                std::vector<mv::FieldSpec> module_fields;
+                for (const auto& f : mv::fields_of(op)) {
+                    if (!mv::operation_excludes_field(op, f.field)) { module_fields.push_back(f); }
+                }
                 if (module_fields.size() != fields.size()) {
                     all_match = false;
                     first_mismatch = op + ": proto has " + std::to_string(fields.size()) +
@@ -1858,6 +1881,44 @@ auto main() -> int {
         expect(detailed("1.4000"), absurd, mv::Outcome::Unsafe,
                mv::ReasonCode::OutOfRange,
                "and a tax rate above 100% is refused, grounded or not");
+    }
+
+    std::printf("\n30. the rent-vs-buy owner costs: classified now, speakable later\n");
+    {
+        // Declared in the label space and excluded from what the model must
+        // emit. Gate 0 already proves they CLASSIFY; this proves they classify
+        // to the RIGHT slot, which is the half that decides whether a value is
+        // bounded as money, as a rate, or as a count of years.
+        struct Expect { const char* field; mv::SlotKind kind; const char* why; };
+        const std::array<Expect, 6> kExpected{{
+            {"annual_repairs", mv::SlotKind::Money, "a yearly budget in currency"},
+            {"pmi_annual_rate", mv::SlotKind::Rate, "a rate of insurance on the loan"},
+            {"monthly_overpayment", mv::SlotKind::Money, "extra principal, in currency"},
+            {"heloc_drawn_amount", mv::SlotKind::Money, "a sum drawn, in currency"},
+            {"heloc_annual_rate", mv::SlotKind::Rate, "interest on the draw"},
+            {"heloc_term_years", mv::SlotKind::YearCount, "a repayment term in years"},
+        }};
+        for (const auto& e : kExpected) {
+            check(mv::classify_slot(e.field) == e.kind,
+                  std::string{e.field} + " is " + e.why);
+        }
+
+        // The service DROPS them before the verifier, so nothing the deployed
+        // model emits in these slots can reach grounding. Asserted directly,
+        // because it is what protects a model that was never taught them.
+        for (const auto& e : kExpected) {
+            check(mv::operation_excludes_field("ComputeRentVsBuy", e.field),
+                  std::string{"ComputeRentVsBuy drops "} + e.field +
+                      " until a retrain proves the model emits it");
+        }
+
+        // AND THE EXCLUSION IS SCOPED. `annual_repairs` is a REQUIRED field of
+        // ComputeRentalCashFlow, where the model was taught it and grounds it
+        // today -- excluding it there would silently drop a stated repair
+        // budget from the investor model.
+        check(!mv::operation_excludes_field("ComputeRentalCashFlow", "annual_repairs"),
+              "but ComputeRentalCashFlow still requires annual_repairs -- the "
+              "exclusion is per operation, not per field name");
     }
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);

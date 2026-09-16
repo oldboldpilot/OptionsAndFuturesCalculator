@@ -194,7 +194,7 @@ namespace detail {
 // its own OPERATIONS dict (parse_finance_proto + build_operations, the
 // same IN_SCOPE_SECTIONS and EXCLUDE_RPCS). The test re-parses the .proto
 // and fails if this table has drifted from it in either direction.
-constexpr std::array<FieldSpec, 206> kLabelSpace{{
+constexpr std::array<FieldSpec, 212> kLabelSpace{{
     {.operation = "ComputeAmortization", .field = "loan_amount", .proto_type = "string", .repeated = false},
     {.operation = "ComputeAmortization", .field = "annual_rate", .proto_type = "string", .repeated = false},
     {.operation = "ComputeAmortization", .field = "term_months", .proto_type = "int32", .repeated = false},
@@ -365,6 +365,25 @@ constexpr std::array<FieldSpec, 206> kLabelSpace{{
     {.operation = "ComputeRentVsBuy", .field = "closing_costs_buy", .proto_type = "string", .repeated = false},
     {.operation = "ComputeRentVsBuy", .field = "selling_cost_percent", .proto_type = "string", .repeated = false},
     {.operation = "ComputeRentVsBuy", .field = "annual_inflation_rate", .proto_type = "string", .repeated = false},
+    // The owner-only costs. DECLARED AND CLASSIFIED HERE, EXCLUDED IN
+    // `kOperationExcludedFields` -- the two are not in tension.
+    //
+    // Declaring them puts their slot kinds and bounds under the same gates as
+    // every other field: Gate 0 asserts each one classifies, the bound checks
+    // apply, and the M-maps that would ground them are exercised. Excluding
+    // them keeps the DEPLOYED model, which was never taught these six, from
+    // being required to emit them by G2b -- which is how this exact operation
+    // came to refuse 100% of assistant traffic on 2026-08-27.
+    //
+    // So the grounding is built and tested BEFORE the model can speak them,
+    // and turning them on is deleting six rows from the exclusion table rather
+    // than writing new rules under time pressure after a retrain.
+    {.operation = "ComputeRentVsBuy", .field = "annual_repairs", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeRentVsBuy", .field = "pmi_annual_rate", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeRentVsBuy", .field = "monthly_overpayment", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeRentVsBuy", .field = "heloc_drawn_amount", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeRentVsBuy", .field = "heloc_annual_rate", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeRentVsBuy", .field = "heloc_term_years", .proto_type = "int32", .repeated = false},
     {.operation = "ComputeRentalRoi", .field = "property_value", .proto_type = "string", .repeated = false},
     {.operation = "ComputeRentalRoi", .field = "total_cash_invested", .proto_type = "string", .repeated = false},
     {.operation = "ComputeRentalRoi", .field = "periodic_gross_rent", .proto_type = "string", .repeated = false},
@@ -1399,7 +1418,7 @@ struct ExcludedField {
     std::string_view operation;
     std::string_view field;
 };
-constexpr std::array<ExcludedField, 5> kOperationExcludedFields{{
+constexpr std::array<ExcludedField, 11> kOperationExcludedFields{{
     {.operation = "ComputeXirr", .field = "rate"},   // "ignored by XIRR"
     {.operation = "ComputeXnpv", .field = "guess"},  // "XIRR only"
     {.operation = "ComputeRate", .field = "guess"},  // "omit for the engine's own starting guess"
@@ -1411,6 +1430,33 @@ constexpr std::array<ExcludedField, 5> kOperationExcludedFields{{
     // RateRequest's comment says it does. The proto now says so on all three.
     {.operation = "ComputeXirr", .field = "guess"},
     {.operation = "ComputeIrr", .field = "guess"},
+
+    // ComputeRentVsBuy's owner-only costs: repairs, mortgage insurance, an
+    // overpayment and a HELOC. On the WIRE since 2026-09-15 and reachable from
+    // the UI, the JSON transcoder and the public API; NOT in the assistant's
+    // emittable label space, and the difference is deliberate.
+    //
+    // G2b REQUIRES EVERY DECLARED FIELD, so adding six the deployed model was
+    // never taught would make it omit them and have every rent-vs-buy parse
+    // refused. That is not hypothetical here: this exact operation was refusing
+    // 100% of assistant traffic on 2026-08-27 because four components disagreed
+    // about whether an unused shape is spelled "omitted" or "zero", and the
+    // dispatch had been built against a model that no longer existed.
+    //
+    // Excluded rather than convention-exempt because the service DROPS an
+    // excluded field before building `verifiable.fields`, so nothing reaches
+    // the verifier to be grounded or bounded -- the same reason `guess` above
+    // is excluded rather than whitelisted at one value.
+    //
+    // TO MAKE THEM SPEAKABLE: teach the corpus, retrain, prove the new model
+    // emits them on a disjoint holdout, THEN delete these five rows. In that
+    // order. Removing them first refuses every request the moment it deploys.
+    {.operation = "ComputeRentVsBuy", .field = "annual_repairs"},
+    {.operation = "ComputeRentVsBuy", .field = "pmi_annual_rate"},
+    {.operation = "ComputeRentVsBuy", .field = "monthly_overpayment"},
+    {.operation = "ComputeRentVsBuy", .field = "heloc_drawn_amount"},
+    {.operation = "ComputeRentVsBuy", .field = "heloc_annual_rate"},
+    {.operation = "ComputeRentVsBuy", .field = "heloc_term_years"},
 }};
 
 /**
