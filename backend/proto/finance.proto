@@ -83,6 +83,7 @@ service Finance {
 
   // -- Real estate -----------------------------------------------------------
   rpc ComputeRentalRoi (RentalRoiRequest) returns (RentalRoiResponse);
+  rpc ComputeRentalCashFlow (RentalCashFlowRequest) returns (RentalCashFlowResponse);
   rpc ComputeHomeFutureValue (HomeFutureValueRequest) returns (HomeFutureValueResponse);
   rpc ComputeRentVsBuy (RentVsBuyRequest) returns (RentVsBuyResponse);
   rpc ComputeRentVsBuyBatch (RentVsBuyBatchRequest) returns (RentVsBuyBatchResponse);
@@ -642,6 +643,93 @@ message RentalRoiResponse {
   string cash_on_cash_return = 3;
   string cap_rate = 4;
   string gross_rent_multiplier = 5;
+}
+
+// The multi-year investor view, as distinct from RentalRoiRequest's snapshot.
+//
+// Every expense is its OWN field. RentalRoiRequest collapses them into
+// `periodic_operating_expenses`, which is right for a ratio and useless for a
+// decision: an investor cannot tell whether the number they were handed
+// included a capex reserve, and the two most common ways to be wrong about a
+// rental are to omit one and to double-count the other.
+message RentalCashFlowRequest {
+  string property_price = 1;
+  string down_payment = 2;
+  string closing_costs = 3;
+  string loan_annual_rate = 4;
+  int32 loan_term_years = 5;
+
+  string monthly_gross_rent = 6;
+  string annual_rent_increase = 7;
+  // Share of the year the unit is LET, as a decimal: 0.92 for 8% vacancy.
+  // ZERO MEANS FULLY OCCUPIED, not never occupied -- an omitted field must not
+  // mean the worst case any more than it may mean the best. State-level
+  // expected occupancy belongs in state_assumptions, beside median rent.
+  string occupancy_rate = 8;
+
+  string annual_property_tax = 9;
+  string annual_insurance = 10;
+  // Routine repairs, separate from the reserve below. A boiler is not a
+  // leaking tap.
+  string annual_repairs = 11;
+  string annual_capex_reserve = 12;
+  string monthly_hoa = 13;
+  // Share of COLLECTED rent, not of scheduled rent.
+  string management_fee_rate = 14;
+  string annual_other_expenses = 15;
+  string annual_expense_increase = 16;
+
+  string annual_appreciation = 17;
+  string selling_cost_percent = 18;
+  int32 years = 19;
+
+  // A HELOC on ANOTHER property funding the cash to close. It is a source of
+  // funds and a second debt service; it is secured elsewhere, so it never
+  // touches this loan's balance or this property's equity.
+  string heloc_drawn_amount = 20;
+  string heloc_annual_rate = 21;
+  int32 heloc_term_years = 22;
+}
+
+message RentalCashFlowRow {
+  int32 year = 1;
+  string gross_scheduled_rent = 2;
+  string vacancy_loss = 3;
+  string effective_gross_income = 4;
+  string operating_expenses = 5;
+  // Excludes debt service, by definition. Cap rate is a property of the ASSET
+  // and financing is a property of the BUYER, so folding the mortgage in makes
+  // two identical houses have different cap rates.
+  string net_operating_income = 6;
+  string mortgage_debt_service = 7;
+  string heloc_debt_service = 8;
+  string cash_flow = 9;
+  string cumulative_cash_flow = 10;
+  string loan_balance = 11;
+  string property_value = 12;
+  string equity = 13;
+}
+
+message RentalCashFlowResponse {
+  repeated RentalCashFlowRow rows = 1;
+  string own_cash_invested = 2;
+  string total_cash_to_close = 3;
+  string year_one_noi = 4;
+  string cap_rate = 5;
+  // Year-one cash flow over OWN cash. `cash_on_cash_defined` is false when the
+  // purchase was fully financed: a return on zero is not a large number, it is
+  // not a number, and emitting one is how a leveraged deal looks infinite.
+  string cash_on_cash = 6;
+  bool cash_on_cash_defined = 7;
+  string debt_service_coverage = 8;
+  bool debt_service_coverage_defined = 9;
+  string total_cash_flow = 10;
+  string sale_price = 11;
+  string sale_proceeds = 12;
+  string total_profit = 13;
+  // True when ANY year is cash-flow negative, so a headline profit cannot hide
+  // a year the owner funds out of pocket.
+  bool any_year_negative = 14;
 }
 
 message HomeFutureValueRequest {

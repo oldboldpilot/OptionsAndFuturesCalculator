@@ -1742,6 +1742,71 @@ auto main() -> int {
                     "a STATED 78% grounds the threshold from the utterance");
     }
 
+    std::printf("\nM10 -- a stated VACANCY grounds the occupancy complement\n");
+    {
+        // Investors say "8% vacancy" at least as often as "92% occupancy", and
+        // the field is occupancy. 0.92 appears NOWHERE in the utterance, so
+        // without this map every investor row the corpus teaches would be
+        // refused at serving time -- the "squeezed from both sides" failure
+        // this project has paid for three times.
+        const std::string vacancy_text =
+            "I am looking at a $337,500 rental. I would put $84,400 down with $7,100 in "
+            "closing costs, borrowing the rest at 6.04% over 15 years. It should let for "
+            "$2,200 a month -- assume 8% vacancy. Property tax is $7,000 a year, insurance "
+            "$1,500, repairs $1,500, and $1,900 set aside for capital expenditure. What "
+            "does the cash flow look like over 5 years?";
+
+        // The whole declared shape, because G2b requires every field; the ones
+        // the utterance is silent about carry the convention zero.
+        const auto rental = [](std::string_view occupancy, std::string_view rate) {
+            return params("ComputeRentalCashFlow",
+                          {{"property_price", "337500.00"}, {"down_payment", "84400.00"},
+                           {"closing_costs", "7100.00"},    {"loan_annual_rate", std::string{rate}},
+                           {"loan_term_years", "15"},       {"monthly_gross_rent", "2200.00"},
+                           {"annual_rent_increase", "0.0000"},
+                           {"occupancy_rate", std::string{occupancy}},
+                           {"annual_property_tax", "7000.00"}, {"annual_insurance", "1500.00"},
+                           {"annual_repairs", "1500.00"},   {"annual_capex_reserve", "1900.00"},
+                           {"monthly_hoa", "0.00"},         {"management_fee_rate", "0.0000"},
+                           {"annual_other_expenses", "0.00"},
+                           {"annual_expense_increase", "0.0000"},
+                           {"annual_appreciation", "0.0000"},
+                           {"selling_cost_percent", "0.0000"}, {"years", "5"},
+                           {"heloc_drawn_amount", "0.00"},  {"heloc_annual_rate", "0.0000"},
+                           {"heloc_term_years", "0"}});
+        };
+
+        expect_pass(rental("0.9200", "0.0604"), vacancy_text,
+                    "8% vacancy grounds occupancy_rate = 0.92");
+
+        // THE DANGEROUS DIRECTION. 0.08 is a perfectly ordinary interest rate
+        // and sits well inside the 30% band, so nothing downstream would have
+        // caught it -- exactly how "20% down" once priced a 20% mortgage.
+        expect(rental("0.9200", "0.0800"), vacancy_text, mv::Outcome::Unsafe,
+               mv::ReasonCode::UngroundedValue,
+               "and the SAME 8% is refused as an interest rate");
+
+        // The identity phrasing needs no map at all; M2 already admits it.
+        const std::string occupancy_text =
+            "Work out the cash flow on a $337,500 buy-to-let over 5 years. $84,400 deposit, "
+            "$7,100 closing, 6.04% for 15 years, rent $2,200 a month, figure on 92% "
+            "occupancy. Property tax $7,000 a year, insurance $1,500, repairs $1,500, and "
+            "$1,900 for capital expenditure.";
+        expect_pass(rental("0.9200", "0.0604"), occupancy_text,
+                    "a directly stated 92% occupancy grounds without the complement");
+
+        // FENCED: a percent that names nothing is not evidence of what it
+        // names. Without this the map would turn any stray 8% into a 0.92.
+        const std::string untagged_text =
+            "Work out the cash flow on a $337,500 buy-to-let over 5 years. $84,400 deposit, "
+            "$7,100 closing, 6.04% for 15 years, rent $2,200 a month, and 8% of something "
+            "else entirely. Property tax $7,000 a year, insurance $1,500, repairs $1,500, "
+            "and $1,900 for capital expenditure.";
+        expect(rental("0.9200", "0.0604"), untagged_text, mv::Outcome::Unsafe,
+               mv::ReasonCode::UngroundedValue,
+               "a bare 8% does NOT become 0.92 -- the lexer tag is the evidence");
+    }
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

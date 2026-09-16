@@ -11,8 +11,8 @@
 // on. The module derives it rather than copying it, so agreement is
 // structural -- but "structural" is a claim, and this file checks it against
 // a FRESH parse of backend/proto/finance.proto with the same section banners
-// and the same two exclusions build_mortgage_dataset.py uses. 27 operations,
-// 184 fields, in declaration order, and it fails loudly on drift in either
+// and the same two exclusions build_mortgage_dataset.py uses. 28 operations,
+// 201 EMITTABLE fields (206 declared, less the 5 excluded seeds), in declaration order, and it fails loudly on drift in either
 // direction. The one table the module cannot derive (the enum constants,
 // which mortgage_verification keeps unexported) is checked BOTH against the
 // .proto and against `verify_mortgage_params` itself.
@@ -540,10 +540,10 @@ auto main() -> int {
         check(valid.has_value(),
               valid.has_value() ? "validate_label_space: schema matches mortgage_verification"
                                 : ("validate_label_space FAILED: " + valid.error()));
-        check(schema.operation_count() == 27,
-              "27 operations (schema has " + std::to_string(schema.operation_count()) + ")");
-        check(schema.field_count() == 184,
-              "184 fields (schema has " + std::to_string(schema.field_count()) + ")");
+        check(schema.operation_count() == 28,
+              "28 operations (schema has " + std::to_string(schema.operation_count()) + ")");
+        check(schema.field_count() == 201,
+              "201 fields (schema has " + std::to_string(schema.field_count()) + ")");
     }
 
     // ---------------------------------------------------------------------
@@ -564,9 +564,27 @@ auto main() -> int {
                   "operation count: proto has " + std::to_string(ops.size()) + ", schema has " +
                       std::to_string(schema.operation_count()));
 
+            // EXCLUDED FIELDS ARE NOT PART OF THE SHAPE THE MODEL EMITS, so the
+            // proto side of this comparison has to drop them or the check is
+            // between two different questions. `mortgage_assistant_service`
+            // drops them before the verifier, build_mortgage_dataset.py
+            // subtracts them from its gold, and the grammar skips them; this
+            // test is the fourth artifact that has to know, which is exactly
+            // why all four ask ONE predicate rather than keeping four lists.
+            //
+            // It surfaced only when the corpus was regenerated: the committed
+            // val.jsonl predated the `guess` exclusion and still carried
+            // "guess":0.1, so a grammar demanding that key was satisfied by a
+            // fixture its own generator would no longer produce.
+            const auto visible = [](const std::string& op, const std::string& f) {
+                return !mv::operation_excludes_field(op, f);
+            };
+
             std::size_t proto_fields = 0;
             for (const auto& [op, fields] : ops) {
-                proto_fields += fields.size();
+                for (const auto& f : fields) {
+                    if (visible(op, f)) { ++proto_fields; }
+                }
             }
             check(proto_fields == schema.field_count(),
                   "field count: proto has " + std::to_string(proto_fields) + ", schema has " +
@@ -582,17 +600,21 @@ auto main() -> int {
                     break;
                 }
                 const auto planned = schema.fields_at(*idx);
-                if (planned.size() != fields.size()) {
+                std::vector<std::string> expected;
+                for (const auto& f : fields) {
+                    if (visible(op, f)) { expected.push_back(f); }
+                }
+                if (planned.size() != expected.size()) {
                     all_match = false;
-                    mismatch = op + ": proto has " + std::to_string(fields.size()) +
-                               " fields, schema has " + std::to_string(planned.size());
+                    mismatch = op + ": proto has " + std::to_string(expected.size()) +
+                               " emittable fields, schema has " + std::to_string(planned.size());
                     break;
                 }
-                for (std::size_t i = 0; i < fields.size(); ++i) {
-                    if (std::string{planned[i].name} != fields[i]) {
+                for (std::size_t i = 0; i < expected.size(); ++i) {
+                    if (std::string{planned[i].name} != expected[i]) {
                         all_match = false;
                         mismatch = op + " field " + std::to_string(i) + ": proto says \"" +
-                                   fields[i] + "\", schema says \"" +
+                                   expected[i] + "\", schema says \"" +
                                    std::string{planned[i].name} + "\"";
                         break;
                     }

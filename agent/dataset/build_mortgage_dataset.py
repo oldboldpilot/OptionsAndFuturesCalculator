@@ -949,6 +949,106 @@ def make_rental_roi_extraction(rng: random.Random) -> dict:
                  ("assistant", params_block(op, obj)))
 
 
+# -- ComputeRentalCashFlow: the multi-year investor view -------------------
+#
+# RentalRoi answers a snapshot; this answers whether the thing pays its way
+# over a holding period, which is the question an investor actually has. 22
+# fields, so most rows state a SUBSET and leave the rest at the convention
+# zero -- the same shape make_rent_vs_buy_extraction uses, and for the same
+# reason: a model must be able to say "not this part of the shape" without
+# inventing a number, and `kConventionValues` exempts a zero from grounding
+# precisely so it can.
+#
+# OCCUPANCY IS TAUGHT IN BOTH DIRECTIONS AND THAT IS THE POINT OF THIS ROW
+# TYPE. Investors say "8% vacancy" at least as often as "92% occupancy", and
+# the field is occupancy. The direct phrasing is an identity the grounding gate
+# admits on its own; the vacancy phrasing is a COMPLEMENT, and 0.92 appears
+# nowhere in "8% vacancy" -- so it needs the M-map that admits `1 - p/100` for
+# this slot, exactly as the down-payment row needed `a x (1-p)`. Teaching only
+# the identity would produce a model that is fluent on half the language its
+# users speak and refused on the other half.
+def make_rental_cash_flow_extraction(rng: random.Random) -> dict:
+    op = "ComputeRentalCashFlow"
+
+    price = round_money(rng.triangular(120_000, 900_000, 300_000))
+    down_pct = rng.choice([0.20, 0.25, 0.25, 0.30])
+    down = round_money(price * down_pct)
+    closing = round_money(price * rng.uniform(0.015, 0.03))
+    rate = round(rng.triangular(0.055, 0.095, 0.07), 4)
+    term_years = rng.choice([15, 30, 30, 30])
+    rent = round_money(price * rng.uniform(0.005, 0.009))
+    years = rng.choice([5, 10, 10, 20])
+
+    tax = round_money(price * rng.uniform(0.008, 0.022))
+    insurance = round_money(rng.triangular(800, 4_000, 1_600))
+    repairs = round_money(rng.triangular(600, 6_000, 2_400))
+    capex = round_money(rng.triangular(0, 5_000, 1_800))
+
+    # Vacancy is stated as a whole-number percent, which is how it is spoken.
+    vacancy_pct = rng.choice([0, 3, 5, 5, 8, 10])
+    occupancy = round(1.0 - vacancy_pct / 100.0, 4)
+
+    obj = {
+        "property_price": money_str(price),
+        "down_payment": money_str(down),
+        "closing_costs": money_str(closing),
+        "loan_annual_rate": f"{rate:.4f}",
+        "loan_term_years": term_years,
+        "monthly_gross_rent": money_str(rent),
+        "annual_rent_increase": "0.0000",
+        "occupancy_rate": f"{occupancy:.4f}",
+        "annual_property_tax": money_str(tax),
+        "annual_insurance": money_str(insurance),
+        "annual_repairs": money_str(repairs),
+        "annual_capex_reserve": money_str(capex),
+        "monthly_hoa": "0.00",
+        "management_fee_rate": "0.0000",
+        "annual_other_expenses": "0.00",
+        "annual_expense_increase": "0.0000",
+        "annual_appreciation": "0.0000",
+        "selling_cost_percent": "0.0000",
+        "years": years,
+        "heloc_drawn_amount": "0.00",
+        "heloc_annual_rate": "0.0000",
+        "heloc_term_years": 0,
+    }
+
+    expenses = (f"property tax {phrase_money(tax)} a year, insurance "
+                f"{phrase_money(insurance)}, repairs {phrase_money(repairs)}, "
+                f"and {phrase_money(capex)} set aside for capital expenditure")
+
+    if vacancy_pct == 0:
+        occupancy_phrase = rng.choice([
+            "assume it is occupied year round",
+            "assume full occupancy",
+        ])
+    else:
+        occupancy_phrase = rng.choice([
+            f"assume {vacancy_pct}% vacancy",
+            f"budget {vacancy_pct}% vacancy",
+            f"figure on {100 - vacancy_pct}% occupancy",
+            f"assume {100 - vacancy_pct}% occupancy",
+        ])
+
+    user = rng.choice([
+        (f"I am looking at a {phrase_money(price)} rental. I would put "
+         f"{phrase_money(down)} down with {phrase_money(closing)} in closing costs, "
+         f"borrowing the rest at {rate * 100:.2f}% over {term_years} years. It should "
+         f"let for {phrase_money(rent)} a month -- {occupancy_phrase}. Running costs are "
+         f"{expenses}. What does the cash flow look like over {years} years?"),
+        (f"Work out the cash flow on a {phrase_money(price)} buy-to-let over {years} "
+         f"years. {phrase_money(down)} deposit, {phrase_money(closing)} closing, "
+         f"{rate * 100:.2f}% for {term_years} years, rent {phrase_money(rent)} a month, "
+         f"{occupancy_phrase}. Costs are {expenses}."),
+        (f"Is this rental worth buying? {phrase_money(price)} price, "
+         f"{phrase_money(down)} down, {phrase_money(closing)} closing costs, "
+         f"{rate * 100:.2f}% over {term_years} years. Rent {phrase_money(rent)}/month, "
+         f"{occupancy_phrase}. Yearly: {expenses}. Show me {years} years of cash flow."),
+    ])
+    return convo(("system", SYSTEM), ("user", user),
+                 ("assistant", params_block(op, obj)))
+
+
 # -- ComputeRefinance: "should/how does refinancing pencil out" -- the
 # richest of the mortgage RPCs (14 fields) and the one that answers the
 # "refinance break-even" question a mortgage assistant is asked constantly.
@@ -2360,7 +2460,8 @@ def stream_seed(master: int, name: str) -> int:
 # is the same defect as the hand-written operation allow-list that drifted to
 # refusing thirteen of twenty-seven live operations.
 CORPUS_MIX = [
-    (0.152, make_amortization_extraction),
+    (0.116, make_amortization_extraction),
+    (0.036, make_rental_cash_flow_extraction),
     (0.081, make_tvm_solver_extraction),
     (0.054, make_cashflow_extraction),
     (0.045, make_refinance_extraction),

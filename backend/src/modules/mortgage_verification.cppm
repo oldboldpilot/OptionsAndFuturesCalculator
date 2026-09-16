@@ -194,7 +194,7 @@ namespace detail {
 // its own OPERATIONS dict (parse_finance_proto + build_operations, the
 // same IN_SCOPE_SECTIONS and EXCLUDE_RPCS). The test re-parses the .proto
 // and fails if this table has drifted from it in either direction.
-constexpr std::array<FieldSpec, 184> kLabelSpace{{
+constexpr std::array<FieldSpec, 206> kLabelSpace{{
     {.operation = "ComputeAmortization", .field = "loan_amount", .proto_type = "string", .repeated = false},
     {.operation = "ComputeAmortization", .field = "annual_rate", .proto_type = "string", .repeated = false},
     {.operation = "ComputeAmortization", .field = "term_months", .proto_type = "int32", .repeated = false},
@@ -371,6 +371,28 @@ constexpr std::array<FieldSpec, 184> kLabelSpace{{
     {.operation = "ComputeRentalRoi", .field = "periodic_operating_expenses", .proto_type = "string", .repeated = false},
     {.operation = "ComputeRentalRoi", .field = "periodic_mortgage_payment", .proto_type = "string", .repeated = false},
     {.operation = "ComputeRentalRoi", .field = "periods_per_year", .proto_type = "int32", .repeated = false},
+    {.operation = "ComputeRentalCashFlow", .field = "property_price", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeRentalCashFlow", .field = "down_payment", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeRentalCashFlow", .field = "closing_costs", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeRentalCashFlow", .field = "loan_annual_rate", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeRentalCashFlow", .field = "loan_term_years", .proto_type = "int32", .repeated = false},
+    {.operation = "ComputeRentalCashFlow", .field = "monthly_gross_rent", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeRentalCashFlow", .field = "annual_rent_increase", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeRentalCashFlow", .field = "occupancy_rate", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeRentalCashFlow", .field = "annual_property_tax", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeRentalCashFlow", .field = "annual_insurance", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeRentalCashFlow", .field = "annual_repairs", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeRentalCashFlow", .field = "annual_capex_reserve", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeRentalCashFlow", .field = "monthly_hoa", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeRentalCashFlow", .field = "management_fee_rate", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeRentalCashFlow", .field = "annual_other_expenses", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeRentalCashFlow", .field = "annual_expense_increase", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeRentalCashFlow", .field = "annual_appreciation", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeRentalCashFlow", .field = "selling_cost_percent", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeRentalCashFlow", .field = "years", .proto_type = "int32", .repeated = false},
+    {.operation = "ComputeRentalCashFlow", .field = "heloc_drawn_amount", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeRentalCashFlow", .field = "heloc_annual_rate", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeRentalCashFlow", .field = "heloc_term_years", .proto_type = "int32", .repeated = false},
     {.operation = "ComputeXirr", .field = "rate", .proto_type = "double", .repeated = false},
     {.operation = "ComputeXirr", .field = "values", .proto_type = "double", .repeated = true},
     {.operation = "ComputeXirr", .field = "dates", .proto_type = "double", .repeated = true},
@@ -381,7 +403,7 @@ constexpr std::array<FieldSpec, 184> kLabelSpace{{
     {.operation = "ComputeXnpv", .field = "guess", .proto_type = "double", .repeated = false},
 }};
 
-constexpr std::array<std::string_view, 27> kOperationIds{
+constexpr std::array<std::string_view, 28> kOperationIds{
     "ComputeAmortization", "ComputeAmortizationBatch", "ComputeClosingCosts",
     "ComputeCumulative",
     "ComputeDepreciation", "ComputeDetailedAmortization", "ComputeFutureValue",
@@ -390,7 +412,8 @@ constexpr std::array<std::string_view, 27> kOperationIds{
     "ComputeMortgageRecast", "ComputeNpv", "ComputePaybackPeriod",
     "ComputePayment", "ComputePayoffTiming", "ComputePeriods",
     "ComputePresentValue", "ComputePrincipalPayment", "ComputeRate",
-    "ComputeRefinance", "ComputeRentVsBuy", "ComputeRentalRoi",
+    "ComputeRefinance", "ComputeRentVsBuy", "ComputeRentalCashFlow",
+    "ComputeRentalRoi",
     "ComputeXirr", "ComputeXnpv",
 };
 
@@ -1116,6 +1139,21 @@ export struct NumericLiteral {
      * an earlier one, and the graph may let it supersede.
      */
     bool names_increment = false;
+
+    /**
+     * The words around this literal name a VACANCY ("assume 8% vacancy",
+     * "budget 5% vacancy").
+     *
+     * Two jobs, and the second is the dangerous one. It admits the COMPLEMENT
+     * for an occupancy slot, because investors say vacancy at least as often
+     * as occupancy and the field is occupancy -- 0.92 appears nowhere in
+     * "8% vacancy". And it REMOVES the literal from rate slots, because 0.08
+     * is a perfectly plausible interest rate: without this, "assume 8%
+     * vacancy" grounds an 8% mortgage the same way "20% down" once grounded a
+     * 20% one. That defect passed every bound and every structural check, and
+     * this is the same shape wearing a different word.
+     */
+    bool names_vacancy = false;
 };
 
 /**
@@ -1507,7 +1545,7 @@ constexpr std::array<VariantInertField, 13> kVariantInertFields{{
     return false;
 }
 
-constexpr std::array<ConventionValue, 38> kConventionValues{{
+constexpr std::array<ConventionValue, 49> kConventionValues{{
     // ComputeRentVsBuy / ComputeHomeNpv: the optional inputs added with the
     // amortising model. An utterance that never mentions closing costs, selling
     // costs or inflation grounds none of them, and without an exemption the
@@ -1612,6 +1650,28 @@ constexpr std::array<ConventionValue, 38> kConventionValues{{
     // The statutory PMI drop-off threshold and the declining-balance factor.
     {.field = "pmi_drop_off_ltv", .value = "0.80"},
     {.field = "factor", .value = "2.0"},
+    // ComputeRentalCashFlow's optional MODELLING ASSUMPTIONS, exempt at zero for
+    // exactly the reason the seven granular rent-vs-buy fields are: the model
+    // must be able to say "not this part of the shape" without inventing a
+    // number, and G2b refuses a missing key. An investor who says nothing about
+    // rent growth, HOA dues or a HELOC is not describing a property with
+    // negative rent growth -- they are declining to model it.
+    //
+    // Exempt at ZERO ONLY, so a stated 3% rent increase still has to appear in
+    // the text. The `guess = 0.25` lesson applies in the other direction here:
+    // enumerating values lost because a seed states nothing, while these state
+    // something precise -- "assume none of this".
+    {.field = "annual_rent_increase", .value = "0"},
+    {.field = "annual_expense_increase", .value = "0"},
+    {.field = "annual_appreciation", .value = "0"},
+    {.field = "selling_cost_percent", .value = "0"},
+    {.field = "management_fee_rate", .value = "0"},
+    {.field = "monthly_hoa", .value = "0"},
+    {.field = "annual_other_expenses", .value = "0"},
+    {.field = "annual_capex_reserve", .value = "0"},
+    {.field = "heloc_drawn_amount", .value = "0"},
+    {.field = "heloc_annual_rate", .value = "0"},
+    {.field = "heloc_term_years", .value = "0"},
 }};
 
 // --- product-scope bounds (G5); see the file banner on non-duplication ----
@@ -1649,6 +1709,10 @@ constexpr __int128 kMaxRatioUnits = (static_cast<__int128>(150) * Decimal::kScal
  * engine half in test_finance_service_validation.cpp section 23 ("a fee share
  * above 100%"). Both must move together; neither test can notice on its own
  * that the other side changed. */
+/** Slots where a stated VACANCY grounds the complement. One entry today; it is
+ *  a list so the next share field is a row rather than a second rule. */
+constexpr std::array<std::string_view, 1> kShareComplementFields{"occupancy_rate"};
+
 constexpr std::array<std::string_view, 5> kUnitCappedRatioFields{
     "down_payment_percent", "origination_fee_percent", "discount_points_percent",
     "title_settlement_percent", "transfer_tax_percent",
@@ -1839,7 +1903,18 @@ auto classify_slot(std::string_view f) -> SlotKind {
     // Ratios BEFORE rates: `max_ltv_rate` ends in "rate" but is a
     // loan-to-value proportion, and `pmi_drop_off_ltv` (0.80) would fail the
     // 30% rate band if it were classified as a rate.
-    if (f.find("ltv") != std::string_view::npos || detail::ends_with(f, "_percent")) {
+    //
+    // `occupancy_rate` is the same trap with a different word and a worse
+    // outcome: it ends in "rate", a realistic value is 0.92, and the rate band
+    // tops out at 30% -- so classified as a Rate it would refuse every ordinary
+    // investor request rather than merely mis-bound an unusual one. It is a
+    // SHARE of the year, and `management_fee_rate` is a share of collected
+    // rent; neither is a rate of interest. Named explicitly rather than matched
+    // by suffix, because the suffix is exactly what is misleading here.
+    static constexpr std::array<std::string_view, 2> kShareRateFields{
+        "occupancy_rate", "management_fee_rate"};
+    if (f.find("ltv") != std::string_view::npos || detail::ends_with(f, "_percent") ||
+        detail::is_one_of(kShareRateFields, f)) {
         return SlotKind::Ratio;
     }
     if (detail::ends_with(f, "rate") || detail::ends_with(f, "rates") ||
@@ -1853,8 +1928,15 @@ auto classify_slot(std::string_view f) -> SlotKind {
     // is deliberately last; a name the rules above do not reach and that is
     // not a money field would be an unclassified slot, which the test's
     // totality assertion is what actually rules out.
-    static constexpr std::array<std::string_view, 48> kMoneyFields{
+    static constexpr std::array<std::string_view, 56> kMoneyFields{
         "monthly_taxes_ins_maintenance",
+        // ComputeRentalCashFlow itemises what RentalRoiRequest collapsed into
+        // one figure, so each line needs classifying or the slot is
+        // Unclassified -> Indeterminate and every investor parse is refused.
+        "annual_capex_reserve",         "annual_insurance",
+        "annual_other_expenses",        "annual_property_tax",
+        "annual_repairs",               "heloc_drawn_amount",
+        "monthly_gross_rent",           "monthly_hoa",
         // ComputeClosingCosts. Absent, these classify Unclassified ->
         // Indeterminate and every closing-cost parse is refused.
         "appraisal_fee", "home_price", "homeowners_insurance_annual", "inspection_fee", "other_lender_fees", "property_tax_annual", "recording_fees", "seller_lender_credits",
@@ -1952,6 +2034,10 @@ namespace detail {
     // in one slot and dangerous in another, which is why this could never be
     // a magnitude heuristic.
     if (kind == SlotKind::Rate && lit.names_down_payment) return out;
+    // The same refusal for a vacancy. "8% vacancy" is not an 8% mortgage, and
+    // 0.08 sits comfortably inside the rate band, so nothing downstream would
+    // have caught it.
+    if (kind == SlotKind::Rate && lit.names_vacancy) return out;
 
     const auto push = [&out](std::optional<Decimal> d) {
         if (d.has_value()) out.push_back(*d);
@@ -1985,6 +2071,25 @@ namespace detail {
             if (lit.tag != LiteralTag::Percent) push(lit.value);
             // M2
             if (percent_signature) push(lit.value.divided_by(100));
+
+            // M10 -- THE COMPLEMENT. "8% vacancy" states the share of the year
+            // the unit is EMPTY; `occupancy_rate` wants the share it is let.
+            // Exact: kScale is 1.0 in units, so 1 - p/100 needs no division
+            // beyond the one M2 already did.
+            //
+            // Fenced as tightly as M9, and for the same reason it had to be:
+            // only a Ratio slot, only the two share fields, and only when the
+            // LEXER tagged the literal as a vacancy. A bare "8%" never becomes
+            // 0.92, because a percent that names nothing is not evidence of
+            // what it names.
+            if (kind == SlotKind::Ratio && percent_signature && lit.names_vacancy &&
+                is_one_of(kShareComplementFields, field_name)) {
+                if (const auto as_fraction = lit.value.divided_by(100);
+                    as_fraction.has_value() &&
+                    as_fraction->units() >= 0 && as_fraction->units() <= Decimal::kScale) {
+                    push(Decimal{Decimal::kScale - as_fraction->units()});
+                }
+            }
 
             // M3 -- annual to per-period, only for the two field names
             // finance.proto documents as per-period.
@@ -2483,6 +2588,13 @@ auto lex_numeric_literals(std::string_view text) -> std::vector<NumericLiteral> 
         // the form the failing production utterance used.
         {
             const std::string w1 = detail::next_word(text, i);
+            if (w1 == "vacancy" || w1 == "vacant" || w1 == "vacancies") {
+                // The word FOLLOWS the figure in every phrasing people use:
+                // "8% vacancy", "budget 5% vacancy". One word, no window --
+                // this flag removes candidates, so a false positive refuses a
+                // correct parse.
+                lit.names_vacancy = true;
+            }
             if (w1 == "down" || w1 == "downpayment" || w1 == "deposit") {
                 lit.names_down_payment = true;
             } else if (w1 == "as" || w1 == "for" || w1 == "with") {
@@ -2610,8 +2722,21 @@ namespace detail {
             // engine already refuses a zero term on the amortising path, so this
             // does not make the verifier looser than the RPC it guards; it stops
             // it being STRICTER, which is the failure mode this file warns about.
-            if (v.units() < 0 || (v.units() == 0 && field != "loan_term_years")) {
-                return std::string{field} + " = " + v.to_string() + " is not positive";
+            //
+            // `heloc_term_years` joins it for the same structural reason and a
+            // different semantic one: the HELOC leg of a rental purchase is
+            // OPTIONAL, so zero means "no HELOC" rather than "a HELOC with no
+            // term". Most investor requests mention none, and without this every
+            // one of them is refused on a field the utterance never raised --
+            // which is the third time this exact carve-out has been needed, so
+            // it is now a list rather than a third name in the condition.
+            {
+                constexpr std::array<std::string_view, 2> kZeroIsRealYearFields{
+                    "loan_term_years", "heloc_term_years"};
+                if (v.units() < 0 ||
+                    (v.units() == 0 && !is_one_of(kZeroIsRealYearFields, field))) {
+                    return std::string{field} + " = " + v.to_string() + " is not positive";
+                }
             }
             return too_big(kMaxYearUnits, "horizon");
         case SlotKind::PeriodIndex:

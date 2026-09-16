@@ -674,6 +674,22 @@ auto Schema::build(GrammarOptions options) -> std::expected<Schema, std::string>
         plan.id = id;
         plan.fields.reserve(fields.size());
         for (const auto& f : fields) {
+            // An EXCLUDED field is not part of the shape the model should emit,
+            // so the grammar must not require one. `mortgage_assistant_service`
+            // drops these before the verifier ever sees them and
+            // build_mortgage_dataset.py subtracts the same set from its gold, so
+            // a grammar that demanded them would be the one artifact of four
+            // insisting on a key the other three agree is absent.
+            //
+            // This was invisible until the corpus was regenerated: the committed
+            // val.jsonl predated the `guess` exclusion and still carried
+            // "guess":0.1, so the grammar's requirement was satisfied by a gold
+            // file that no longer matched its own generator. A stale fixture
+            // hiding a real disagreement is the same shape as a dead allow-list
+            // entry reading like coverage.
+            if (mv::operation_excludes_field(id, f.field)) {
+                continue;
+            }
             auto shape = detail::shape_for(f);
             if (!shape.has_value()) {
                 return std::unexpected(shape.error());
@@ -714,11 +730,20 @@ auto validate_label_space(const Schema& schema) -> std::expected<void, std::stri
                                    std::string{schema.operation_at(i)} +
                                    "\", mortgage_verification says \"" + std::string{ids[i]} + "\"");
         }
-        const auto declared = mv::fields_of(ids[i]);
+        // The EMITTABLE shape, not the declared one: an excluded field is
+        // dropped by the service before the verifier sees it and subtracted by
+        // the corpus generator, so a schema that planned one would be requiring
+        // a key every other layer agrees is absent.
+        std::vector<mv::FieldSpec> declared;
+        for (const auto& f : mv::fields_of(ids[i])) {
+            if (!mv::operation_excludes_field(ids[i], f.field)) {
+                declared.push_back(f);
+            }
+        }
         const auto planned = schema.fields_at(i);
         if (declared.size() != planned.size()) {
             return std::unexpected(std::string{ids[i]} + ": schema plans " +
-                                   std::to_string(planned.size()) + " fields, " +
+                                   std::to_string(planned.size()) + " emittable fields, " +
                                    "mortgage_verification declares " +
                                    std::to_string(declared.size()));
         }
