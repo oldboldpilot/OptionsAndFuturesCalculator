@@ -1610,7 +1610,7 @@ constexpr std::array<Field, 8> kFields_ComputeDepreciation{{
     {"year", Kind::Int, {}},
 }};
 
-constexpr std::array<Field, 7> kFields_ComputeDetailedAmortization{{
+constexpr std::array<Field, 10> kFields_ComputeDetailedAmortization{{
     {"loan_amount", Kind::Decimal, {}},
     {"annual_rate", Kind::Decimal, {}},
     {"term_months", Kind::Int, {}},
@@ -1618,6 +1618,24 @@ constexpr std::array<Field, 7> kFields_ComputeDetailedAmortization{{
     {"pmi_annual_rate", Kind::Decimal, {}},
     {"original_home_value", Kind::Decimal, {}},
     {"annual_tax_rate", Kind::Decimal, {}},
+    // THE FOURTH TABLE, and it is the one that was missed. These three were
+    // added to finance.proto, to kOperationFields and to the corpus on
+    // 2026-09-15, and were invisible here because
+    // `kOperationExcludedFields` made the service DROP them before check (4)
+    // ever ran. The moment the exclusion came out with v19 they reached
+    // find_field(), which did not know them, and every detailed parse was
+    // refused in production with
+    //   "annual_repairs" is not a parameter of ComputeDetailedAmortization
+    // -- a field declared everywhere else in the system.
+    //
+    // An exclusion therefore HIDES a fourth-table omission for exactly as long
+    // as it is in force, which makes removing one the moment the gap appears.
+    // `test_label_space_field_parity` now compares this table against the
+    // verifier's declared set minus the exclusions, so the next one fails a
+    // test instead of a deploy.
+    {"annual_repairs", Kind::Decimal, {}},
+    {"annual_insurance", Kind::Decimal, {}},
+    {"annual_cost_growth", Kind::Decimal, {}},
 }};
 
 constexpr std::array<Field, 5> kFields_ComputeFutureValue{{

@@ -360,5 +360,85 @@ for _op, _fields in G.TEACHING_AHEAD_OF_SERVICE.items():
     check(_fields <= G.op_field_names(_op),
           f"{_op}: every taught-ahead field is emittable by the generator")
 
+
+# ---------------------------------------------------------------------------
+# THE FOURTH TABLE, which nothing compared until it broke production.
+#
+# An operation must reach kOperationFields and kOperationExcludedFields in
+# mortgage_verification.cppm, the corpus generator, AND a separate per-operation
+# field list in mortgage_assistant_service.cpp -- `kFields_<Operation>`, which
+# `find_field` consults in check (4) to reject unknown keys. The first three are
+# compared above; the fourth was compared by nothing.
+#
+# It failed on 2026-09-16, and HOW it failed is the part worth keeping. The
+# three carrying-cost fields were added to the proto, to kOperationFields and to
+# the corpus on 2026-09-15 and NOT to kFields_ComputeDetailedAmortization. That
+# was invisible for a day because kOperationExcludedFields made the service DROP
+# them before check (4) ever ran. The moment the exclusion came out with v19
+# they reached find_field(), which did not know them, and EVERY detailed parse
+# was refused in production with
+#
+#     "annual_repairs" is not a parameter of ComputeDetailedAmortization
+#
+# about a field declared everywhere else in the system. An exclusion therefore
+# HIDES a fourth-table omission for exactly as long as it is in force, and
+# lifting one is the moment the gap appears -- the worst moment to find it.
+#
+# The invariant is equality, not containment in either direction: a field
+# missing from the service list is the defect above, and an extra one is a field
+# the verifier will refuse as undeclared.
+_svc = (Path(__file__).resolve().parent.parent.parent
+        / "backend" / "src" / "modules" / "mortgage_assistant_service.cpp").read_text()
+
+
+def _svc_fields(op: str) -> set[str]:
+    """Field names of `constexpr std::array<Field, N> kFields_<op>{{ ... }}`."""
+    m = re.search(r"constexpr\s+std::array<Field,\s*\d+>\s+kFields_" + re.escape(op)
+                  + r"\{\{(.*?)\n\}\};", _svc, re.S)
+    return {x.group(1) for x in re.finditer(r'\{"([^"]+)"\s*,\s*Kind::', m.group(1))} if m else set()
+
+
+def _cpp_declared(op: str) -> set[str]:
+    """Field names of kOperationFields rows for `op` (they carry .proto_type)."""
+    return {m.group(1) for m in re.finditer(
+        r'\{\.operation\s*=\s*"' + re.escape(op) + r'"\s*,\s*\.field\s*=\s*"([^"]+)"\s*,\s*\.proto_type',
+        _cppm)}
+
+
+# Positive controls: a regex that matches nothing makes every check below pass
+# vacuously, which is the exact shape of the bug this file exists to catch.
+check(len(_svc_fields("ComputeDetailedAmortization")) > 0,
+      "kFields_ComputeDetailedAmortization parsed out of mortgage_assistant_service.cpp")
+check(len(_cpp_declared("ComputeDetailedAmortization")) > 0,
+      "kOperationFields rows parsed out of mortgage_verification.cppm")
+
+for _op in sorted({m.group(1) for m in re.finditer(
+        r"constexpr\s+std::array<Field,\s*\d+>\s+kFields_(\w+)\{\{", _svc)}):
+    _declared = _cpp_declared(_op)
+    if not _declared:
+        continue  # not in the verifier's label space (batch RPCs and the like)
+    _excluded = _cpp_excluded(_op)
+    _required = _declared - _excluded
+    _actual = _svc_fields(_op)
+
+    # THE ASYMMETRY IS THE WHOLE POINT, and equality was the wrong invariant.
+    #
+    # MISSING is the production defect: a field the verifier declares and the
+    # service does not drop reaches find_field(), which refuses it as "not a
+    # parameter of" its own operation.
+    #
+    # EXTRA is not. The service drops an excluded field BEFORE check (4), so
+    # find_field is never consulted for it and a leftover row is dead rather
+    # than dangerous -- `guess` on ComputeRate/ComputeXirr/ComputeXnpv and
+    # `rate` on ComputeXirr are exactly that, and failing them would have made
+    # this gate noisy on its first run and switched off on its second.
+    check(_required - _actual == set(),
+          f"{_op}: the service's kFields_ list carries every declared, non-dropped field; "
+          f"missing-from-service={sorted(_required - _actual)}")
+    check(_actual - _declared == set(),
+          f"{_op}: the service's kFields_ list invents nothing the verifier does not declare; "
+          f"undeclared-in-service={sorted(_actual - _declared)}")
+
+
 print(f"\n{CHECKS} checks, {FAILURES} failures")
 sys.exit(0 if FAILURES == 0 else 1)
