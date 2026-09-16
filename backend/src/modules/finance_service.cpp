@@ -3591,6 +3591,31 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         READ_DECIMAL_SAFE(growth, request->annual_cost_growth(), "annual_cost_growth");
         READ_DECIMAL_SAFE(ltv, request->pmi_drop_off_ltv(), "pmi_drop_off_ltv");
         READ_DECIMAL_SAFE(appr, request->annual_appreciation(), "annual_appreciation");
+        // THE HELOC WAS DECLARED HERE AND READ NOWHERE until 2026-09-16, which
+        // is the worst shape this failure takes: a caller who modelled a draw
+        // got an explanation of a scenario WITHOUT it, with nothing saying so.
+        // A refusal would have been honest; silence is what made it invisible.
+        // The reflection sweep in test_finance_service_validation section 28
+        // now covers this message, so the next declared-but-unread field fails
+        // a build rather than shipping.
+        READ_DECIMAL_SAFE(x_heloc, request->heloc_drawn_amount(), "heloc_drawn_amount");
+        READ_DECIMAL_SAFE(x_heloc_rate, request->heloc_annual_rate(), "heloc_annual_rate");
+        if (x_heloc.is_negative() || x_heloc_rate.is_negative()) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "HELOC amount and rate cannot be negative");
+        }
+        if (request->heloc_term_years() < 0 || request->heloc_term_years() > 100) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "heloc_term_years must be between 0 and 100");
+        }
+        // Same refusal as ComputeDetailedAmortization, in the same words: a
+        // draw with no term costs nothing, and an explanation built on that
+        // would recommend borrowing on the strength of an arithmetic artefact.
+        if (x_heloc.is_positive() && request->heloc_term_years() == 0) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "heloc_drawn_amount needs heloc_term_years: a draw with no "
+                          "repayment term costs nothing, which makes borrowing look free");
+        }
 
         if (request->term_months() <= 0 || request->term_months() > 1200) {
             return Status(grpc::StatusCode::INVALID_ARGUMENT,
@@ -3617,6 +3642,17 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
 
         auto [rows, sum] = sensen::calculate_detailed_mortgage_amortization(
             loan, rate, request->term_months(), extra, pmi, home, tax, policy, carrying);
+
+        // Amortised independently: it is secured elsewhere, so it never
+        // touches this loan's balance, its interest split or its PMI.
+        sensen::BigDecimal heloc_interest{0};
+        sensen::BigDecimal heloc_paid{0};
+        if (x_heloc.is_positive()) {
+            auto [hrows, hsum] = sensen::calculate_mortgage_amortization(
+                x_heloc, x_heloc_rate, request->heloc_term_years() * 12);
+            heloc_interest = hsum.total_interest_paid;
+            heloc_paid = hsum.total_payments_paid;
+        }
 
         const auto pmi_stop = [](const auto& sched) {
             int last = 0;
@@ -3672,8 +3708,14 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
                   sum.total_insurance_paid, ex::ZeroMeaning::Absent),
             money("total_tax_savings", "Tax saved on the interest deduction",
                   sum.total_tax_savings, ex::ZeroMeaning::Absent),
+            money("total_heloc_interest_paid", "Interest on the HELOC",
+                  heloc_interest, ex::ZeroMeaning::Absent),
+            // The total INCLUDES the HELOC, so the HELOC must have its own
+            // line. An itemisation whose parts do not reach the total it sits
+            // under is not an explanation -- the reader's arithmetic fails and
+            // the missing money has no name.
             money("total_cost_of_ownership", "What the house costs in total",
-                  sum.total_cost_of_ownership, ex::ZeroMeaning::Real),
+                  sum.total_cost_of_ownership.add(heloc_paid), ex::ZeroMeaning::Real),
         };
         for (auto& p : ex::explain_result(view)) { points.push_back(std::move(p)); }
 

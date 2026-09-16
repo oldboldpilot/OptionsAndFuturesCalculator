@@ -120,6 +120,9 @@
 
 
 #include <grpcpp/grpcpp.h>
+#include <google/protobuf/descriptor.h>
+#include <google/protobuf/message.h>
+#include <google/protobuf/text_format.h>
 #include "finance.pb.h"
 #include "finance.grpc.pb.h"
 
@@ -3173,6 +3176,319 @@ auto main() -> int {
             check(st.ok() && std::abs(v - 32000.0) < 1e-6,
                   "MACRS 5-year, year 2 is still 32% -- the refusal is scoped to classes with "
                   "no table");
+        }
+    }
+
+
+    // =======================================================================
+    section("28. EVERY declared request field REACHES the engine (reflection sweep)");
+    // =======================================================================
+    //
+    // A field can be in the proto, in the label space, in the slot classifier,
+    // in the descriptor the client encodes against, and STILL be dropped --
+    // because the only thing that makes it arrive is one line in
+    // finance_service.cpp reading it. Nothing above this line can see that
+    // line's absence.
+    //
+    // It is not hypothetical and it is not rare. Twice on 2026-09-16 a field
+    // was wired to the WRONG message by a `.replace(..., 1)` landing on the
+    // first match: HELOC fields went into ComputeRefinance rather than
+    // ComputeHeloc, and repairs went into plain ComputeAmortization rather
+    // than the Detailed sibling. Both compiled. Both passed every table check,
+    // because every table was right -- the tables are not where it broke.
+    //
+    // THE SWEEP IS OVER THE DESCRIPTOR, NOT OVER A LIST. A list written here
+    // would be the sixth hand-maintained copy of the contract, and it would
+    // omit exactly the field most likely to be forgotten: the newest one. The
+    // descriptor is generated from the .proto, so a field added tomorrow is
+    // swept tomorrow with no edit to this file. That is the same reason the
+    // client's ALLOWED_OPERATIONS is derived rather than typed.
+    //
+    // The method: take a baseline request that every field of that message can
+    // meaningfully influence, perturb ONE field, and require the response to
+    // CHANGE. A field that cannot change any answer is either unread or inert,
+    // and inertness must be declared with a reason rather than discovered.
+    //
+    // `annual_cost_growth` and `pmi_drop_off_ltv` are what prompted this: both
+    // are read by finance_service.cpp at four call sites and neither had a
+    // single service-level assertion anywhere in this file.
+    {
+        namespace pb = google::protobuf;
+
+        // Inert BY CONSTRUCTION, each with the reason. Not a suppression list
+        // for awkward failures -- every entry is a field whose effect is
+        // genuinely unobservable in the response, and saying why is the point.
+        const auto inert_reason =
+            [](const std::string& msg, const std::string& field) -> const char* {
+            if (field == "guess") {
+                return "a Newton SEED selects a root, it does not move one";
+            }
+            if (msg == "RefinanceRequest" && field == "current_monthly_payment") {
+                return "the stated payment is reported back, not re-derived; "
+                       "section 4 owns its validation";
+            }
+            return nullptr;
+        };
+
+        // A digest over the WHOLE response, so "changed" means any field of it
+        // rather than a headline this test happened to pick.
+        const auto digest = [](const pb::Message& m) -> std::string {
+            std::string s;
+            pb::TextFormat::PrintToString(m, &s);
+            return s;
+        };
+
+        // Perturb one field to a value that is valid for its slot and
+        // different from the baseline's. Returns false if the field's type is
+        // one this sweep does not drive (repeated/message/enum are exercised
+        // by their own sections).
+        const auto perturb = [](pb::Message& m, const pb::FieldDescriptor* f) -> bool {
+            const auto* refl = m.GetReflection();
+            if (f->is_repeated()) { return false; }
+            switch (f->cpp_type()) {
+                case pb::FieldDescriptor::CPPTYPE_STRING: {
+                    // Decimal strings on this surface. A rate-shaped field must
+                    // stay inside the verifier's band or the engine refuses and
+                    // "the response changed" would be true for the wrong reason.
+                    const std::string cur = refl->GetString(m, f);
+                    const bool rate_like =
+                        f->name().find("rate") != std::string::npos ||
+                        f->name().find("percent") != std::string::npos ||
+                        f->name().find("growth") != std::string::npos ||
+                        f->name().find("ltv") != std::string::npos ||
+                        f->name().find("appreciation") != std::string::npos;
+                    refl->SetString(&m, f, rate_like ? "0.0250" : "1234.00");
+                    return refl->GetString(m, f) != cur;
+                }
+                case pb::FieldDescriptor::CPPTYPE_INT32: {
+                    const int cur = refl->GetInt32(m, f);
+                    refl->SetInt32(&m, f, cur == 7 ? 9 : 7);
+                    return true;
+                }
+                case pb::FieldDescriptor::CPPTYPE_DOUBLE: {
+                    const double cur = refl->GetDouble(m, f);
+                    refl->SetDouble(&m, f, cur == 0.25 ? 0.5 : 0.25);
+                    return true;
+                }
+                case pb::FieldDescriptor::CPPTYPE_BOOL: {
+                    refl->SetBool(&m, f, !refl->GetBool(m, f));
+                    return true;
+                }
+                default: return false;
+            }
+        };
+
+        // ---- DetailedAmortizationRequest: the house's own costs ----
+        {
+            sensen::finance::DetailedAmortizationRequest base;
+            base.set_loan_amount("360000.00");
+            base.set_annual_rate("0.0650");
+            base.set_term_months(360);
+            base.set_monthly_overpayment("150.00");
+            base.set_pmi_annual_rate("0.0060");
+            base.set_original_home_value("400000.00");
+            base.set_annual_tax_rate("0.2400");
+            base.set_annual_repairs("3000.00");
+            base.set_annual_insurance("1600.00");
+            base.set_annual_cost_growth("0.0300");
+            base.set_heloc_drawn_amount("40000.00");
+            base.set_heloc_annual_rate("0.0850");
+            base.set_heloc_term_years(10);
+
+            sensen::finance::DetailedAmortizationResponse baseline;
+            {
+                auto ctx = make_context();
+                auto st = stub.ComputeDetailedAmortization(ctx.get(), base, &baseline);
+                check(st.ok(), "28a. the DetailedAmortization baseline is served (positive "
+                               "control -- an erroring baseline makes every sweep below vacuous)");
+            }
+            const std::string base_digest = digest(baseline);
+
+            std::vector<std::string> unread;
+            const auto* desc = base.GetDescriptor();
+            for (int i = 0; i < desc->field_count(); ++i) {
+                const auto* f = desc->field(i);
+                if (inert_reason(desc->name(), f->name()) != nullptr) { continue; }
+                auto probe = base;
+                if (!perturb(probe, f)) { continue; }
+                sensen::finance::DetailedAmortizationResponse out;
+                auto ctx = make_context();
+                auto st = stub.ComputeDetailedAmortization(ctx.get(), probe, &out);
+                // A refusal is an ANSWER -- the field was read and judged. Only
+                // an OK response identical to the baseline proves it was dropped.
+                if (st.ok() && digest(out) == base_digest) { unread.push_back(f->name()); }
+            }
+            std::string names;
+            for (const auto& n : unread) { names += " " + n; }
+            check(unread.empty(),
+                  "28b. every DetailedAmortizationRequest field changes the answer;"
+                  " dropped:" + (names.empty() ? std::string{" none"} : names));
+        }
+
+        // ---- RefinanceRequest: pmi_drop_off_ltv had no assertion at all ----
+        {
+            sensen::finance::RefinanceRequest base;
+            // 85% LTV, DELIBERATELY. At 300k against a 400k value the loan is
+            // already under the 80% drop-off, so sensen correctly charges no
+            // PMI and both *_pmi_monthly fields become genuinely inert -- which
+            // this sweep reported as "dropped". A baseline on which a field
+            // cannot matter makes a correct field indistinguishable from an
+            // unread one, and the fix is the baseline, not an exemption.
+            base.set_current_loan_balance("340000.00");
+            base.set_current_monthly_payment("2160.00");
+            base.set_current_annual_rate("0.0725");
+            base.set_current_remaining_months(300);
+            base.set_property_value("400000.00");
+            base.set_new_annual_rate("0.0575");
+            base.set_new_term_years(30);
+            base.set_closing_costs("6000.00");
+            base.set_current_pmi_monthly("180.00");
+            base.set_new_pmi_monthly("150.00");
+            base.set_pmi_drop_off_ltv("0.8000");
+            base.set_payments_per_year(12);
+
+            sensen::finance::RefinanceResponse baseline;
+            {
+                auto ctx = make_context();
+                auto st = stub.ComputeRefinance(ctx.get(), base, &baseline);
+                check(st.ok(), "28c. the Refinance baseline is served (positive control)");
+            }
+            const std::string base_digest = digest(baseline);
+
+            std::vector<std::string> unread;
+            const auto* desc = base.GetDescriptor();
+            for (int i = 0; i < desc->field_count(); ++i) {
+                const auto* f = desc->field(i);
+                if (inert_reason(desc->name(), f->name()) != nullptr) { continue; }
+                auto probe = base;
+                if (!perturb(probe, f)) { continue; }
+                sensen::finance::RefinanceResponse out;
+                auto ctx = make_context();
+                auto st = stub.ComputeRefinance(ctx.get(), probe, &out);
+                if (st.ok() && digest(out) == base_digest) { unread.push_back(f->name()); }
+            }
+            std::string names;
+            for (const auto& n : unread) { names += " " + n; }
+            check(unread.empty(),
+                  "28d. every RefinanceRequest field changes the answer; dropped:" +
+                      (names.empty() ? std::string{" none"} : names));
+        }
+
+        // ---- ExplainMortgageRequest: where a declared field hid unread ----
+        //
+        // This message is why the sweep exists in its general form. It declared
+        // heloc_drawn_amount / heloc_annual_rate / heloc_term_years and the
+        // handler read NONE of them: a caller who modelled a draw was handed an
+        // explanation of a scenario without it, with nothing in the response
+        // saying so. Every table was correct. Only the read was missing.
+        {
+            sensen::finance::ExplainMortgageRequest base;
+            base.set_loan_amount("360000.00");
+            base.set_annual_rate("0.0650");
+            base.set_term_months(360);
+            base.set_monthly_overpayment("200.00");
+            base.set_pmi_annual_rate("0.0060");
+            base.set_original_home_value("400000.00");
+            base.set_annual_tax_rate("0.2400");
+            base.set_annual_repairs("3000.00");
+            base.set_annual_insurance("1600.00");
+            base.set_annual_cost_growth("0.0300");
+            base.set_heloc_drawn_amount("40000.00");
+            base.set_heloc_annual_rate("0.0850");
+            base.set_heloc_term_years(10);
+            base.set_pmi_drop_off_ltv("0.8000");
+            base.set_annual_appreciation("0.0300");
+
+            sensen::finance::ExplainMortgageResponse baseline;
+            {
+                auto ctx = make_context();
+                auto st = stub.ExplainMortgage(ctx.get(), base, &baseline);
+                check(st.ok(), "28h. the ExplainMortgage baseline is served (positive control)");
+                check(baseline.points_size() > 0,
+                      "28i. ... and it produced sentences to compare, " +
+                          std::to_string(baseline.points_size()) + " of them");
+            }
+            const std::string base_digest = digest(baseline);
+
+            std::vector<std::string> unread;
+            const auto* desc = base.GetDescriptor();
+            for (int i = 0; i < desc->field_count(); ++i) {
+                const auto* f = desc->field(i);
+                if (inert_reason(desc->name(), f->name()) != nullptr) { continue; }
+                auto probe = base;
+                if (!perturb(probe, f)) { continue; }
+                sensen::finance::ExplainMortgageResponse out;
+                auto ctx = make_context();
+                auto st = stub.ExplainMortgage(ctx.get(), probe, &out);
+                if (st.ok() && digest(out) == base_digest) { unread.push_back(f->name()); }
+            }
+            std::string names;
+            for (const auto& n : unread) { names += " " + n; }
+            check(unread.empty(),
+                  "28j. every ExplainMortgageRequest field changes the explanation;"
+                  " dropped:" + (names.empty() ? std::string{" none"} : names));
+
+            // And the itemisation must ACCOUNT for it, not merely react to it.
+            // A HELOC that moves the total while having no sentence of its own
+            // leaves the reader's arithmetic short with nothing named.
+            bool names_heloc = false;
+            for (const auto& pt : baseline.points()) {
+                if (pt.field() == "total_heloc_interest_paid") { names_heloc = true; }
+            }
+            check(names_heloc,
+                  "28k. the explanation ITEMISES the HELOC's interest, so the parts "
+                  "reach the total they sit under");
+        }
+
+        // ---- The direction the sweep exists for, pinned by hand ----
+        //
+        // The sweep says "something changed". These two say WHICH WAY, because
+        // a field wired to the wrong sensen member would also change the
+        // answer -- and change it wrongly. The sweep catches a DROPPED field;
+        // only a signed assertion catches a MISROUTED one.
+        {
+            const auto totals = [&](const std::string& growth) {
+                sensen::finance::DetailedAmortizationRequest r;
+                r.set_loan_amount("360000.00");
+                r.set_annual_rate("0.0650");
+                r.set_term_months(360);
+                r.set_annual_tax_rate("0.2400");
+                r.set_annual_repairs("3000.00");
+                r.set_annual_insurance("1600.00");
+                r.set_annual_cost_growth(growth);
+                sensen::finance::DetailedAmortizationResponse out;
+                auto ctx = make_context();
+                auto st = stub.ComputeDetailedAmortization(ctx.get(), r, &out);
+                return std::pair{st.ok(), out};
+            };
+            auto [ok0, flat] = totals("0.0000");
+            auto [ok3, rising] = totals("0.0300");
+            check(ok0 && ok3, "28e. both cost-growth arms are served");
+            if (ok0 && ok3) {
+                const double f = std::stod(flat.summary().total_repairs_paid());
+                const double r = std::stod(rising.summary().total_repairs_paid());
+                // The FLAT total is pinned to its closed form, 3000/yr x 30
+                // years, before the ratio is asserted. A bare `r > f * 1.3` is
+                // satisfied by any positive r when f is zero -- and a misroute
+                // that leaves repairs unread makes f exactly zero, so the
+                // direction test passed on `flat 0.0 -> rising 1.43` until this
+                // line existed. Anchor the magnitude, then the growth.
+                check(std::fabs(f - 90000.0) < 1.0,
+                      "28f. flat repairs are 3000/yr x 30y = 90000, got " + std::to_string(f));
+                // 3%/yr compounding over 30 years is ~1.6x the flat total. A
+                // field read into the WRONG member -- the insurance slot, say --
+                // would leave this equal while still moving the digest.
+                check(r > f * 1.3,
+                      "28f2. annual_cost_growth compounds REPAIRS specifically: flat " +
+                          std::to_string(f) + " -> rising " + std::to_string(r));
+                check(std::fabs(std::stod(flat.summary().total_insurance_paid()) - 48000.0) < 1.0,
+                      "28g. flat insurance is 1600/yr x 30y = 48000, got " +
+                          flat.summary().total_insurance_paid());
+                check(std::stod(rising.summary().total_insurance_paid()) >
+                          std::stod(flat.summary().total_insurance_paid()),
+                      "28g2. ... and insurance too, so it is the growth rate and not a "
+                      "repairs-only multiplier");
+            }
         }
     }
 
