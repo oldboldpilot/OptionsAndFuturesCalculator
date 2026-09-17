@@ -184,7 +184,10 @@ auto control_amortization() -> Control {
                                            {"term_months", "360"},
                                            {"monthly_overpayment", "0.00"},
                                            {"pmi_annual_rate", "0.0000"},
-                                           {"original_home_value", "350000.00"}})};
+                                           {"original_home_value", "350000.00"},
+                                           {"annual_repairs", "0.00"},
+                                           {"annual_insurance", "0.00"},
+                                           {"annual_cost_growth", "0.0000"}})};
 }
 
 auto control_home_future_value() -> Control {
@@ -311,7 +314,10 @@ auto control_suffixes() -> Control {
                                            {"term_months", "360"},
                                            {"monthly_overpayment", "0.00"},
                                            {"pmi_annual_rate", "0.0000"},
-                                           {"original_home_value", "1356200.00"}})};
+                                           {"original_home_value", "1356200.00"},
+                                           {"annual_repairs", "0.00"},
+                                           {"annual_insurance", "0.00"},
+                                           {"annual_cost_growth", "0.0000"}})};
 }
 
 auto all_controls() -> std::vector<Control> {
@@ -954,7 +960,10 @@ auto main() -> int {
                                               {"term_months", "360"},
                                               {"monthly_overpayment", "0.00"},
                                               {"pmi_annual_rate", "0.0000"},
-                                              {"original_home_value", "350000.00"}}),
+                                              {"original_home_value", "350000.00"},
+                                              {"annual_repairs", "0.00"},
+                                              {"annual_insurance", "0.00"},
+                                              {"annual_cost_growth", "0.0000"}}),
                "Amortize a $350,000 loan at 45% over 30 years.", mv::Outcome::Unsafe,
                mv::ReasonCode::OutOfRange, "bounds: a grounded 45% rate is still out of scope");
 
@@ -1017,7 +1026,10 @@ auto main() -> int {
                                               {"term_months", "1800"},
                                               {"monthly_overpayment", "0.00"},
                                               {"pmi_annual_rate", "0.0000"},
-                                              {"original_home_value", "350000.00"}}),
+                                              {"original_home_value", "350000.00"},
+                                              {"annual_repairs", "0.00"},
+                                              {"annual_insurance", "0.00"},
+                                              {"annual_cost_growth", "0.0000"}}),
                "Amortize a $350,000 loan at 5.75% over 1800 months.", mv::Outcome::Unsafe,
                mv::ReasonCode::OutOfRange, "bounds: a grounded 1800-month term is still out of scope");
     }
@@ -1487,7 +1499,10 @@ auto main() -> int {
                                                       {"term_months", "360"},
                                                       {"monthly_overpayment", "0.00"},
                                                       {"pmi_annual_rate", "0.0000"},
-                                                      {"original_home_value", "500000.00"}});
+                                                      {"original_home_value", "500000.00"},
+                                                      {"annual_repairs", "0.00"},
+                                                      {"annual_insurance", "0.00"},
+                                                      {"annual_cost_growth", "0.0000"}});
         expect(as_rate, text, mv::Outcome::Unsafe, mv::ReasonCode::UngroundedValue,
                "the DOWN PAYMENT percent is refused as an interest rate -- this exact output "
                "was returned as Proven in production and priced a 20% mortgage");
@@ -1500,7 +1515,10 @@ auto main() -> int {
                                                            {"term_months", "360"},
                                                            {"monthly_overpayment", "0.00"},
                                                            {"pmi_annual_rate", "0.0000"},
-                                                           {"original_home_value", "500000.00"}});
+                                                           {"original_home_value", "500000.00"},
+                                                           {"annual_repairs", "0.00"},
+                                                           {"annual_insurance", "0.00"},
+                                                           {"annual_cost_growth", "0.0000"}});
         expect_pass(correct_rate, text,
                     "the STATED 6.5% still grounds as the rate in the same sentence");
 
@@ -1510,7 +1528,10 @@ auto main() -> int {
                                                      {"term_months", "360"},
                                                      {"monthly_overpayment", "0.00"},
                                                      {"pmi_annual_rate", "0.0000"},
-                                                     {"original_home_value", "500000.00"}});
+                                                     {"original_home_value", "500000.00"},
+                                                     {"annual_repairs", "0.00"},
+                                                     {"annual_insurance", "0.00"},
+                                                     {"annual_cost_growth", "0.0000"}});
         expect_pass(netted, text,
                     "loan_amount = 500000 - 20% = 400000 is GROUNDED, though 400000 appears "
                     "nowhere in the utterance");
@@ -2143,7 +2164,10 @@ auto main() -> int {
                                                        {"term_months", "360"},
                                                        {"monthly_overpayment", "0.00"},
                                                        {"pmi_annual_rate", "0.0000"},
-                                                       {"original_home_value", "350000.00"}});
+                                                       {"original_home_value", "350000.00"},
+                                                       {"annual_repairs", "0.00"},
+                                                       {"annual_insurance", "0.00"},
+                                                       {"annual_cost_growth", "0.0000"}});
         auto v2 = mv::verify_mortgage_output(bad_rate, no_rate);
         check(v2.reason == mv::ReasonCode::UnstatedField,
               "an out-of-range rate on an utterance with no percent is UnstatedField too");

@@ -1565,7 +1565,7 @@ struct ExcludedField {
     std::string_view operation;
     std::string_view field;
 };
-constexpr std::array<ExcludedField, 26> kOperationExcludedFields{{
+constexpr std::array<ExcludedField, 23> kOperationExcludedFields{{
     {.operation = "ComputeXirr", .field = "rate"},   // "ignored by XIRR"
     {.operation = "ComputeXnpv", .field = "guess"},  // "XIRR only"
     {.operation = "ComputeRate", .field = "guess"},  // "omit for the engine's own starting guess"
@@ -1641,21 +1641,25 @@ constexpr std::array<ExcludedField, 26> kOperationExcludedFields{{
     // fails G3 and the whole parse dies. Removing these rows against v18 would
     // therefore have converted working requests into refusals, which is why
     // the order is not negotiable.
-    // ComputeAmortization's six new fields, IN FLIGHT. They reached the proto,
-    // the engine and this label space on 2026-09-16 so that the STANDARD
-    // schedule can carry what the house costs to keep and a second lien --
-    // until then a plain amortization request had nowhere to put a repair
-    // budget and silently dropped it.
+    // ComputeAmortization's three heloc_* fields, excluded PERMANENTLY, exactly
+    // as ComputeDetailedAmortization's are: on the wire and read by the engine
+    // so the app and the API can model a second lien, never required of a
+    // model, because no sentence states a draw, a rate and a term alongside a
+    // mortgage schedule.
     //
-    // G2b requires every declared field, and v19 has never seen one of these
-    // on THIS operation, so without these rows every standard amortization
-    // parse refuses the moment this deploys. Same phase-1 state, same order as
-    // the detailed operation's carrying costs went through a day earlier:
-    // teach the corpus, retrain, prove the new model emits them on a disjoint
-    // holdout, THEN delete these six. Never the other way round.
-    {.operation = "ComputeAmortization", .field = "annual_repairs"},
-    {.operation = "ComputeAmortization", .field = "annual_insurance"},
-    {.operation = "ComputeAmortization", .field = "annual_cost_growth"},
+    // The three CARRYING COSTS were here from 2026-09-16 and came out the same
+    // day when v20 was trained and measured. The proof is the one this table
+    // demands -- the new model emitting them correctly on a holdout disjoint
+    // from both models' training sets -- and it is unambiguous. On 78
+    // ComputeAmortization rows:
+    //
+    //     v19   68/78 correct, and 10 of them named a DIFFERENT operation
+    //     v20   78/78 correct, 0 named anything else
+    //
+    // Right on all eight rows that STATE a repair budget and all seventy that
+    // say nothing, where the convention zero is the answer. Nothing was
+    // borderline, which is what made this safe to remove rather than a
+    // judgement call.
     {.operation = "ComputeAmortization", .field = "heloc_drawn_amount"},
     {.operation = "ComputeAmortization", .field = "heloc_annual_rate"},
     {.operation = "ComputeAmortization", .field = "heloc_term_years"},
@@ -2087,19 +2091,11 @@ struct TaughtAhead {
 // exists for recurs every time a field reaches the wire ahead of a model that
 // can fill it: the grammar must admit what the corpus teaches while the service
 // still drops it, or the corpus cannot be taught at all.
-constexpr std::array<TaughtAhead, 3> kTeachingAheadOfService{{
-    // ONLY the carrying costs. The three heloc_* fields on ComputeAmortization
-    // are excluded PERMANENTLY, exactly as they are on
-    // ComputeDetailedAmortization: they are on the wire and the engine reads
-    // them, so the web app and the API can model a second lien, but no
-    // sentence a person says states a HELOC draw, rate and term alongside a
-    // mortgage schedule. Requiring them of the model would make it invent
-    // three numbers the utterance cannot supply -- the label-not-derivable
-    // defect this corpus has paid for four times.
-    {.operation = "ComputeAmortization", .field = "annual_repairs"},
-    {.operation = "ComputeAmortization", .field = "annual_insurance"},
-    {.operation = "ComputeAmortization", .field = "annual_cost_growth"},
-}};
+// EMPTY is the steady state: no retrain is outstanding. The ComputeAmortization
+// carrying costs lived here for a few hours on 2026-09-16, between the fields
+// reaching the wire and v20 proving it could fill them 78/78. See
+// kOperationExcludedFields for that measurement.
+constexpr std::array<TaughtAhead, 0> kTeachingAheadOfService{};
 
 auto field_is_taught_ahead(std::string_view operation, std::string_view field) -> bool {
     for (const auto& e : kTeachingAheadOfService) {
