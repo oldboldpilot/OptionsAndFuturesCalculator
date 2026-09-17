@@ -2177,6 +2177,101 @@ auto main() -> int {
               "a bare untagged number could be anything, so nothing is declared unstated");
     }
 
+    // -----------------------------------------------------------------------
+    // A repair budget is not an overpayment on the loan.
+    //
+    // Measured against production 2026-09-16, on a phrasing the corpus itself
+    // teaches: "...Budget $3,600 a year for repairs and $1,700 for insurance."
+    // came back with monthly_overpayment = 3600.00 and annual_repairs =
+    // 1700.00 -- the repair budget paying down the mortgage and the insurance
+    // figure counted twice. Every number is in the utterance, so grounding
+    // admitted all of them: it is per FIELD, and nothing asked WHICH number
+    // belongs where. That is the documented 20%-down defect in money rather
+    // than percent, and it prices a loan nobody asked for.
+    // -----------------------------------------------------------------------
+    {
+        section("29. the words beside a money literal decide which cost it is");
+
+        const std::string upkeep =
+            "Amortization schedule for a $420,000 loan at 6.25% over 30 years. "
+            "Budget $3,600 a year for repairs and $1,700 for insurance.";
+
+        const auto lits = mv::lex_numeric_literals(upkeep);
+        int repairs_tagged = 0;
+        int insurance_tagged = 0;
+        bool loan_tagged = false;
+        for (const auto& l : lits) {
+            if (!l.names_upkeep) continue;
+            // The LOAN must not be swept up by the adjacency scan -- it is in a
+            // different sentence, which is what the boundary guard is for.
+            if (l.value.units() == mv::parse_strict_decimal("420000")->units()) {
+                loan_tagged = true;
+            }
+            if (l.names_insurance) ++insurance_tagged; else ++repairs_tagged;
+        }
+        check(repairs_tagged == 1, "the repairs figure is tagged upkeep, not insurance");
+        check(insurance_tagged == 1, "the insurance figure is tagged insurance");
+        check(!loan_tagged, "the LOAN is not tagged upkeep -- it is a sentence away");
+
+        // The subtractive rule itself: an upkeep figure offers NO candidate for
+        // the overpayment slot, so the parse that put it there is refused
+        // rather than served.
+        expect(params("ComputeAmortization",
+                      {{"loan_amount", "420000.00"}, {"annual_rate", "0.0625"},
+                       {"term_months", "360"}, {"monthly_overpayment", "3600.00"},
+                       {"pmi_annual_rate", "0.0000"},
+                       {"original_home_value", "420000.00"},
+                       {"annual_repairs", "1700.00"}, {"annual_insurance", "1700.00"},
+                       {"annual_cost_growth", "0.0000"}}),
+               upkeep, mv::Outcome::Unsafe, mv::ReasonCode::UngroundedValue,
+               "a repair budget cannot ground monthly_overpayment");
+
+        // THE OPPOSITE DIRECTION, and it is the one that makes the rule safe to
+        // ship. "an extra $250/month" stated in the SAME utterance as a repair
+        // budget is a real overpayment and must still ground -- the adjacency
+        // scan stops at the full stop, so the "Budget" two words after the 250
+        // does not reach it. Without this the fix would break the very
+        // phrasing that motivated it.
+        const std::string both =
+            "Amortization schedule for a $420,000 loan at 6.25% over 30 years, "
+            "paying an extra $250 a month. Budget $3,600 a year for repairs and "
+            "$1,700 for insurance.";
+        expect_pass(params("ComputeAmortization",
+                           {{"loan_amount", "420000.00"}, {"annual_rate", "0.0625"},
+                            {"term_months", "360"}, {"monthly_overpayment", "250.00"},
+                            {"pmi_annual_rate", "0.0000"},
+                            {"original_home_value", "420000.00"},
+                            {"annual_repairs", "3600.00"}, {"annual_insurance", "1700.00"},
+                            {"annual_cost_growth", "0.0000"}}),
+                    both, "a REAL overpayment beside a repair budget still grounds");
+
+        // And the repairs figure still cannot take the overpayment slot even
+        // when a genuine increment exists in the same sentence -- the rule is
+        // about the WORDS beside the literal, not about which numbers are
+        // present.
+        expect(params("ComputeAmortization",
+                      {{"loan_amount", "420000.00"}, {"annual_rate", "0.0625"},
+                       {"term_months", "360"}, {"monthly_overpayment", "3600.00"},
+                       {"pmi_annual_rate", "0.0000"},
+                       {"original_home_value", "420000.00"},
+                       {"annual_repairs", "0.00"}, {"annual_insurance", "1700.00"},
+                       {"annual_cost_growth", "0.0000"}}),
+               both, mv::Outcome::Unsafe, mv::ReasonCode::UngroundedValue,
+               "... while the repair budget still cannot become the overpayment");
+
+        // An utterance with NO upkeep words is untouched: the rule must not
+        // narrow the ordinary case.
+        expect_pass(params("ComputeAmortization",
+                           {{"loan_amount", "420000.00"}, {"annual_rate", "0.0625"},
+                            {"term_months", "360"}, {"monthly_overpayment", "250.00"},
+                            {"pmi_annual_rate", "0.0000"},
+                            {"original_home_value", "420000.00"},
+                            {"annual_repairs", "0.00"}, {"annual_insurance", "0.00"},
+                            {"annual_cost_growth", "0.0000"}}),
+                    "Amortize $420,000 at 6.25% over 30 years, paying an extra $250 a month.",
+                    "an utterance with no upkeep words is unaffected");
+    }
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

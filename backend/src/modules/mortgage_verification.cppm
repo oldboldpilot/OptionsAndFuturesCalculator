@@ -1252,6 +1252,20 @@ export struct NumericLiteral {
     bool names_upkeep = false;
 
     /**
+     * The upkeep word beside this literal was specifically INSURANCE rather
+     * than repairs, maintenance or upkeep.
+     *
+     * A strict subset of `names_upkeep`, carried separately because the two
+     * costs go to DIFFERENT FIELDS and the corpus states them in either order:
+     * "Budget $3,600 a year for repairs and $1,700 for insurance" puts repairs
+     * first, "I set aside $3,600 a year for maintenance, insurance is $1,700"
+     * puts the insurance word AFTER its number. Deciding by position would be
+     * right on one spelling and wrong on the other; deciding by the adjacent
+     * word is right on both.
+     */
+    bool names_insurance = false;
+
+    /**
      * The words around this literal name a VACANCY ("assume 8% vacancy",
      * "budget 5% vacancy").
      *
@@ -3083,6 +3097,7 @@ auto lex_numeric_literals(std::string_view text) -> std::vector<NumericLiteral> 
                 return w == "repairs" || w == "repair" || w == "maintenance" ||
                        w == "upkeep" || w == "insurance" || w == "budget";
             };
+            const auto is_insurance_word = [](std::string_view w) { return w == "insurance"; };
             std::size_t j = i;
             for (int step = 0; step < 4 && !lit.names_upkeep; ++step) {
                 while (j < text.size() && (text[j] == '/' || text[j] == ' ' ||
@@ -3092,7 +3107,10 @@ auto lex_numeric_literals(std::string_view text) -> std::vector<NumericLiteral> 
                 if (j < text.size() && (text[j] == '.' || text[j] == ';')) break;
                 const std::string w = detail::next_word(text, j);
                 if (w.empty()) break;
-                if (is_upkeep_word(w)) lit.names_upkeep = true;
+                if (is_upkeep_word(w)) {
+                    lit.names_upkeep = true;
+                    if (is_insurance_word(w)) lit.names_insurance = true;
+                }
                 while (j < text.size() && detail::is_alpha(text[j])) ++j;
             }
             if (!lit.names_upkeep) {
@@ -3100,7 +3118,11 @@ auto lex_numeric_literals(std::string_view text) -> std::vector<NumericLiteral> 
                 for (int step = 0; step < 3 && !lit.names_upkeep; ++step) {
                     const std::string wp = detail::prev_word(text, back);
                     if (wp.empty()) break;
-                    if (is_upkeep_word(wp)) { lit.names_upkeep = true; break; }
+                    if (is_upkeep_word(wp)) {
+                        lit.names_upkeep = true;
+                        if (is_insurance_word(wp)) lit.names_insurance = true;
+                        break;
+                    }
                     // Step back over this word and the run before it, stopping
                     // at a boundary for the reason above.
                     while (back > 0 && !detail::is_alpha(text[back - 1])) {

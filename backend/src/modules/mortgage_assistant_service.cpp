@@ -2629,6 +2629,182 @@ auto apply_tvm_sign_convention(std::string_view operation,
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// Graph A2: the AMORTIZATION-family operation choice.
+//
+// Measured on 2026-09-16, on 63 holdout rows disjoint from both models'
+// training sets: v19 named plain `ComputeAmortization` on 32 rows whose gold
+// was `ComputeDetailedAmortization`, and v18 on 17. The extraction is
+// otherwise fine -- loan, rate, term and the carrying costs are right -- and
+// the ONE thing lost is the tax deduction, which is the only thing the
+// detailed operation adds.
+//
+// THIS REMAP BECAME TRIVIAL WHEN THE STANDARD SCHEDULE GAINED THE CARRYING
+// COSTS, and that is worth stating because it is why it is safe. The two
+// request messages now differ by EXACTLY ONE FIELD, `annual_tax_rate`. There
+// is no field set to translate and nothing to re-derive: every value the model
+// emitted is carried across verbatim and one stated figure is added. Before
+// that change the two messages disagreed on four fields and a remap would have
+// had to invent or drop three of them.
+//
+// Scoped the same way `fv_detailed_cue` is, and for the same reason: a tax
+// cue is a fine discriminator WITHIN this family and a terrible general
+// operation chooser, so it is consulted only once the model has already named
+// the plain amortization. Any resolver that cannot decide returns nullopt and
+// the caller gets exactly the answer it gets today.
+[[nodiscard]] auto tax_bracket_rate(std::string_view text)
+    -> std::optional<mv::NumericLiteral> {
+    std::string lower;
+    lower.reserve(text.size());
+    for (const char c : text) {
+        lower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    }
+    std::optional<mv::NumericLiteral> found;
+    for (const auto& lit : mv::lex_numeric_literals(text)) {
+        if (lit.tag != mv::LiteralTag::Percent) continue;
+        // A 32-character window either side, the same shape `stated_rates`
+        // uses to keep an inflation percent away from a rate slot. Wider than
+        // that starts matching a tax clause in a different sentence, and this
+        // value goes into a field.
+        const std::size_t lo = lit.offset >= 32 ? lit.offset - 32 : 0;
+        const std::size_t hi = std::min(lower.size(), lit.offset + 32);
+        const std::string near = lower.substr(lo, hi - lo);
+        const bool taxish = near.find("tax") != std::string::npos ||
+                            near.find("bracket") != std::string::npos ||
+                            near.find("deduct") != std::string::npos ||
+                            near.find("marginal") != std::string::npos;
+        if (!taxish) continue;
+        // AMBIGUITY IS A DECLINE, but AGREEMENT IS NOT AMBIGUITY. Two
+        // tax-adjacent percents that DISAGREE mean we cannot tell which is the
+        // marginal rate, and picking one would put a number the user did not
+        // mean into a field that changes every after-tax figure -- so that
+        // declines. The same value stated twice is one fact stated twice:
+        // "With the interest deduction at 23.11%: ... tax rate 23.11%" is a
+        // spelling the corpus generates, and refusing it buys nothing.
+        //
+        // Measured over 2,289 amortization-family corpus rows: requiring a
+        // SOLE candidate recalls 475 of 1,023 detailed rows; accepting
+        // agreeing duplicates recalls 555. Both score ZERO wrong values and
+        // both are 1266/1266 on plain rows -- the cue never fires where the
+        // gold is the plain operation, which is the property that makes this
+        // remap unable to turn a right answer into a wrong one.
+        if (found.has_value() && found->value.units() != lit.value.units()) {
+            return std::nullopt;
+        }
+        found = lit;
+    }
+    return found;
+}
+
+/**
+ * Graph A3: put each stated carrying cost in the field its own WORDS name.
+ *
+ * Measured against production 2026-09-16, on a phrasing the corpus teaches:
+ *
+ *   "...Budget $3,600 a year for repairs and $1,700 for insurance."
+ *   -> monthly_overpayment = 3600.00   <- the repair budget, as an OVERPAYMENT
+ *      annual_repairs      = 1700.00   <- the insurance figure, twice
+ *      annual_insurance    = 1700.00
+ *
+ * Every number is in the utterance, so grounding admitted all of them: it is
+ * per FIELD, and nothing asked which number belongs where. `names_upkeep` now
+ * removes an upkeep figure from the overpayment slot, which turns that into an
+ * honest refusal -- better than a $3,600-a-month overpayment nobody asked for,
+ * and still not an answer.
+ *
+ * THIS IS A REPAIR AND NOT A GUESS, which is the bar this file sets for one.
+ * The words beside each literal say which cost it is: "for repairs" and "for
+ * insurance" admit exactly one reading each. Nothing is computed and nothing
+ * is defaulted -- two literals the user wrote are moved into the two fields
+ * their own adjectives name.
+ *
+ * Declines, leaving the existing refusal, whenever it cannot be certain: more
+ * than one repairs figure, more than one insurance figure, or an operation
+ * that does not declare the fields.
+ */
+[[nodiscard]] auto remap_upkeep_fields(const fastjson::json_value& obj,
+                                       std::string_view operation,
+                                       std::string_view user_text)
+    -> std::optional<std::string> {
+    const auto* op = find_operation(operation);
+    if (op == nullptr || find_field(*op, "annual_repairs") == nullptr) return std::nullopt;
+
+    std::optional<mv::NumericLiteral> repairs;
+    std::optional<mv::NumericLiteral> insurance;
+    for (const auto& lit : mv::lex_numeric_literals(user_text)) {
+        if (lit.tag != mv::LiteralTag::Money || !lit.names_upkeep) continue;
+        auto& slot = lit.names_insurance ? insurance : repairs;
+        if (slot.has_value()) return std::nullopt;  // two of a kind -- cannot decide
+        slot = lit;
+    }
+    if (!repairs.has_value() && !insurance.has_value()) return std::nullopt;
+
+    // Two decimal places, the corpus convention for money (`money_str`), which
+    // is also what lets G3 ground the value against the stated literal.
+    const auto money = [](const mv::NumericLiteral& lit) {
+        constexpr __int128 kPerCent = mv::Decimal::kScale / 100;
+        __int128 cents = lit.value.units() / kPerCent;
+        if ((lit.value.units() % kPerCent) * 2 >= kPerCent) ++cents;
+        const auto whole = static_cast<std::int64_t>(cents / 100);
+        auto frac = static_cast<std::int64_t>(cents % 100);
+        if (frac < 0) frac = -frac;
+        std::string out = std::to_string(whole) + ".";
+        if (frac < 10) out += '0';
+        return out + std::to_string(frac);
+    };
+    const std::string repairs_s = repairs.has_value() ? money(*repairs) : std::string{"0.00"};
+    const std::string insurance_s = insurance.has_value() ? money(*insurance) : std::string{"0.00"};
+
+    bool changed = false;
+    std::string out = "{\"operation\":\"" + std::string{operation} + "\"";
+    for (const auto& [key, value] : obj.as_object()) {
+        if (key == "operation") continue;
+        std::string v = value.is_string() ? std::string{value.as_string()}
+                                          : fastjson::stringify(value);
+        const bool quoted = value.is_string();
+        if (key == "annual_repairs" && v != repairs_s) { v = repairs_s; changed = true; }
+        else if (key == "annual_insurance" && v != insurance_s) { v = insurance_s; changed = true; }
+        else if (key == "monthly_overpayment") {
+            // An upkeep figure is not an overpayment. Cleared only when the
+            // model actually put one there -- a real "extra $250 a month"
+            // stated beside a repair budget is untouched, because its literal
+            // is tagged an INCREMENT and never reaches `repairs`/`insurance`.
+            const auto emitted = mv::parse_strict_decimal(v);
+            const bool is_upkeep =
+                emitted.has_value() &&
+                ((repairs.has_value() && repairs->value.units() == emitted->units()) ||
+                 (insurance.has_value() && insurance->value.units() == emitted->units()));
+            if (is_upkeep) { v = "0.00"; changed = true; }
+        }
+        out += ",\"" + std::string{key} + "\":";
+        out += quoted ? ('"' + v + '"') : v;
+    }
+    out += "}";
+    return changed ? std::optional<std::string>{out} : std::nullopt;
+}
+
+[[nodiscard]] auto remap_amortization_to_detailed(const fastjson::json_value& obj,
+                                                  std::string_view operation,
+                                                  std::string_view user_text)
+    -> std::optional<std::string> {
+    if (operation != "ComputeAmortization") return std::nullopt;
+    const auto rate = tax_bracket_rate(user_text);
+    if (!rate.has_value()) return std::nullopt;
+
+    // Every field carried across VERBATIM. Nothing is computed, nothing is
+    // defaulted, and the only addition is a figure the utterance states.
+    std::string out = R"({"operation":"ComputeDetailedAmortization")";
+    for (const auto& [key, value] : obj.as_object()) {
+        if (key == "operation") continue;
+        out += ",\"" + std::string{key} + "\":";
+        out += value.is_string() ? ('"' + std::string{value.as_string()} + '"')
+                                 : fastjson::stringify(value);
+    }
+    out += R"(,"annual_tax_rate":")" + percent_as_rate_string(*rate) + R"(")";
+    out += "}";
+    return out;
+}
+
 [[nodiscard]] auto remap_future_value_to_detailed(const fastjson::json_value& obj,
                                                   std::string_view operation,
                                                   std::string_view user_text)
@@ -2775,6 +2951,22 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
     // always ComputeFutureValueDetailed, which the remap declines, so it cannot
     // recurse twice.
     if (auto remapped = remap_future_value_to_detailed(obj, operation, user_text);
+        remapped.has_value()) {
+        return validate_and_populate_params(*remapped, user_text, latest_turn, response);
+    }
+
+    // Graph A2, same contract and the same single level of recursion: the
+    // result names ComputeDetailedAmortization, which the remap declines.
+    if (auto remapped = remap_amortization_to_detailed(obj, operation, user_text);
+        remapped.has_value()) {
+        return validate_and_populate_params(*remapped, user_text, latest_turn, response);
+    }
+
+    // Graph A3. Runs AFTER A2 so a tax-cued request has already become the
+    // detailed operation and both are corrected in one pass. Terminates
+    // because it returns nullopt once the fields already hold what the words
+    // say -- which is exactly the state its own rewrite produces.
+    if (auto remapped = remap_upkeep_fields(obj, operation, user_text);
         remapped.has_value()) {
         return validate_and_populate_params(*remapped, user_text, latest_turn, response);
     }

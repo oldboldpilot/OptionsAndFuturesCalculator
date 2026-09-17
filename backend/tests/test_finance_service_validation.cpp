@@ -3325,6 +3325,113 @@ auto main() -> int {
                   " dropped:" + (names.empty() ? std::string{" none"} : names));
         }
 
+        // ---- AmortizationRequest: the STANDARD schedule's six new fields ----
+        //
+        // Added 2026-09-16 so a plain amortization can carry what the house
+        // costs to keep and a second lien. Before that an utterance naming a
+        // repair budget parsed as ComputeAmortization and the budget appeared
+        // NOWHERE in the answer -- there was no field for it. Six new request
+        // fields are six new chances for exactly the defect this section
+        // exists to catch, so they are swept the same way.
+        {
+            sensen::finance::AmortizationRequest base;
+            base.set_loan_amount("340000.00");
+            base.set_annual_rate("0.0625");
+            base.set_term_months(360);
+            base.set_monthly_overpayment("150.00");
+            // 85% LTV so PMI is genuinely live -- at a lower LTV the PMI fields
+            // are inert and the sweep would report them unread, which is the
+            // baseline mistake this section already records once.
+            base.set_pmi_annual_rate("0.0070");
+            base.set_original_home_value("400000.00");
+            base.set_annual_repairs("3000.00");
+            base.set_annual_insurance("1600.00");
+            base.set_annual_cost_growth("0.0300");
+            base.set_heloc_drawn_amount("40000.00");
+            base.set_heloc_annual_rate("0.0850");
+            base.set_heloc_term_years(10);
+
+            sensen::finance::AmortizationResponse baseline;
+            {
+                auto ctx = make_context();
+                auto st = stub.ComputeAmortization(ctx.get(), base, &baseline);
+                check(st.ok(), "28r. the Amortization baseline is served (positive control)");
+            }
+            const std::string base_digest = digest(baseline);
+
+            std::vector<std::string> unread;
+            const auto* desc = base.GetDescriptor();
+            for (int i = 0; i < desc->field_count(); ++i) {
+                const auto* f = desc->field(i);
+                if (inert_reason(desc->name(), f->name()) != nullptr) { continue; }
+                auto probe = base;
+                if (!perturb(probe, f)) { continue; }
+                sensen::finance::AmortizationResponse out;
+                auto ctx = make_context();
+                auto st = stub.ComputeAmortization(ctx.get(), probe, &out);
+                if (st.ok() && digest(out) == base_digest) { unread.push_back(f->name()); }
+            }
+            std::string names;
+            for (const auto& n : unread) { names += " " + n; }
+            check(unread.empty(),
+                  "28s. every AmortizationRequest field changes the answer;"
+                  " dropped:" + (names.empty() ? std::string{" none"} : names));
+
+            // THE COMPATIBILITY PROPERTY, asserted rather than assumed.
+            //
+            // The handler routes to the DETAILED engine function when carrying
+            // costs are present and to the plain one when they are not,
+            // specifically so an existing caller cannot be affected. That is a
+            // claim about two functions agreeing on the loan, and a claim is
+            // worth a check: every figure a caller could already see must be
+            // untouched by the six new fields.
+            sensen::finance::AmortizationRequest bare;
+            bare.set_loan_amount("340000.00");
+            bare.set_annual_rate("0.0625");
+            bare.set_term_months(360);
+            bare.set_monthly_overpayment("150.00");
+            bare.set_pmi_annual_rate("0.0070");
+            bare.set_original_home_value("400000.00");
+
+            sensen::finance::AmortizationResponse bare_out;
+            {
+                auto ctx = make_context();
+                auto st = stub.ComputeAmortization(ctx.get(), bare, &bare_out);
+                check(st.ok(), "28t. a request sending none of the six new fields is served");
+            }
+            auto only_carrying = bare;
+            only_carrying.set_annual_repairs("3000.00");
+            only_carrying.set_annual_insurance("1600.00");
+            only_carrying.set_annual_cost_growth("0.0300");
+            sensen::finance::AmortizationResponse carried_out;
+            {
+                auto ctx = make_context();
+                auto st = stub.ComputeAmortization(ctx.get(), only_carrying, &carried_out);
+                check(st.ok(), "28u. the same request WITH carrying costs is served");
+            }
+            check(bare_out.summary().total_principal_paid() ==
+                          carried_out.summary().total_principal_paid() &&
+                      bare_out.summary().total_interest_paid() ==
+                          carried_out.summary().total_interest_paid() &&
+                      bare_out.summary().total_pmi_paid() ==
+                          carried_out.summary().total_pmi_paid() &&
+                      bare_out.summary().total_payments_paid() ==
+                          carried_out.summary().total_payments_paid() &&
+                      bare_out.summary().actual_term_months() ==
+                          carried_out.summary().actual_term_months(),
+                  "28v. carrying costs change NOTHING about the loan -- principal, interest, "
+                  "PMI, payments and term are identical (they are reported beside the debt "
+                  "service, never folded into it)");
+            check(bare_out.summary().total_repairs_paid()
+                      .find_first_not_of("0.-+") == std::string::npos,
+                  "28w. ... and an absent repair budget stays zero rather than a default");
+            check(carried_out.summary().total_cost_of_ownership() !=
+                      carried_out.summary().total_payments_paid(),
+                  "28x. total_cost_of_ownership exceeds debt service once the house costs "
+                  "something to keep -- an itemisation whose parts do not reach the total "
+                  "they sit under is not an explanation");
+        }
+
         // ---- RefinanceRequest: pmi_drop_off_ltv had no assertion at all ----
         {
             sensen::finance::RefinanceRequest base;
