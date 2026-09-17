@@ -172,6 +172,139 @@ for (const page of CONTENT_PAGES) {
   }
 }
 
+/* ---- 3. No two CALCULATOR pages say the same thing ----------------------- */
+
+/*
+ * The other duplication, found a month after the first one was fixed and NOT
+ * the same problem wearing different clothes.
+ *
+ * The AdSense fix moved every written word onto `/guides/<slug>` and left the
+ * calculator screens as the tool alone. That is correct about ADVERTISING —
+ * these pages emit no Google ad code, which section 1 proves on the emitted
+ * bytes — and it was never checked against SEARCH. Measured 2026-09-16 across
+ * the 26 exported pages:
+ *
+ *     median 6-gram Jaccard similarity   0.978   (the guides: 0.261)
+ *
+ * with every page declaring itself canonical and every page in the sitemap, so
+ * the site was asking Google to index twenty-six copies of one page. Search
+ * Console reported it as duplicate content.
+ *
+ * WHY THIS IS NOT AN EQUALITY CHECK, and why section 4's shape would be the
+ * wrong one to copy here. Twenty-six pages that render the same workspace are
+ * SUPPOSED to share most of their bytes — the ladder, the panels, the footer
+ * directory of links — so "no two are byte-identical" is a bar a template with
+ * a substituted name clears effortlessly. That is exactly the version of this
+ * assertion that existed before and passed while the pages were 97.8% alike.
+ *
+ * So what is asserted is the part that is supposed to differ: the title, the
+ * meta description, the h1 and the authored paragraph, each unique across all
+ * twenty-six and each checked individually. It follows `strategy-guides.test.ts`,
+ * which asserts uniqueness on the prose fields one at a time rather than on the
+ * whole record, for the same reason — the short enumerated fields SHOULD
+ * collide and the written material must not.
+ */
+
+/*
+ * Entity decoding, applied to BOTH sides of every text comparison below.
+ *
+ * Not tidiness. The lede is read out of one page and looked for in another,
+ * and React escapes an apostrophe as `&#x27;` — so a sentence copied verbatim
+ * between two pages does not match itself unless both sides are decoded, and
+ * the reuse check would silently pass on exactly the prose most likely to be
+ * copied. `&amp;` has to come last or it re-decodes the others' ampersands.
+ */
+const decodeEntities = (text) =>
+  text
+    .replace(/&#x27;|&apos;|&#39;/g, "'")
+    .replace(/&quot;|&#34;/g, '"')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&');
+
+/** The first capture of `pattern` in `file`, entity-decoded, or null. */
+const extract = (file, pattern) => {
+  const match = html(file).match(pattern);
+  if (!match) return null;
+  return decodeEntities(match[1].replace(/<[^>]+>/g, ' '))
+    .replace(/\s+/g, ' ')
+    .trim();
+};
+
+// 80 on the floor against ledes written at 99-117 words, and no ceiling: this
+// is a tool page, so the failure to catch is a stub, not an essay.
+const MIN_LEDE_WORDS = 80;
+
+const DISTINCT_FIELDS = [
+  ['title', /<title>([\s\S]*?)<\/title>/],
+  ['description', /<meta name="description" content="([^"]*)"/],
+  ['h1', /<h1[^>]*>([\s\S]*?)<\/h1>/],
+  // The first paragraph of the lede section, not the whole section: the link
+  // to the guide below it is navigation, and counting it toward the word floor
+  // would let a shorter paragraph pass.
+  ['lede', /data-strategy-lede="[^"]*"[^>]*>\s*<p[^>]*>([\s\S]*?)<\/p>/],
+];
+
+for (const [field, pattern] of DISTINCT_FIELDS) {
+  const seen = new Map();
+  for (const slug of slugs) {
+    const page = `calculator/${slug}.html`;
+    if (!existsSync(join(OUT, page))) {
+      fail('missing-page', page);
+      continue;
+    }
+    const value = extract(page, pattern);
+    if (!value) {
+      fail('calculator-copy', `${page} emits no ${field}`);
+      continue;
+    }
+    const previous = seen.get(value);
+    if (previous !== undefined) {
+      // Named, not counted. The failure has to say WHICH two pages a crawler
+      // cannot tell apart, because that pair is the one being deindexed.
+      fail(
+        'calculator-duplicate',
+        `${page} and calculator/${previous}.html share an identical ${field}`,
+      );
+    }
+    seen.set(value, slug);
+  }
+}
+
+for (const slug of slugs) {
+  const page = `calculator/${slug}.html`;
+  if (!existsSync(join(OUT, page))) continue;
+  const lede = extract(page, DISTINCT_FIELDS[3][1]);
+  if (!lede) continue;
+
+  const words = lede.split(' ').length;
+  if (words < MIN_LEDE_WORDS) {
+    fail('calculator-copy', `${page} has a ${words}-word lede (floor ${MIN_LEDE_WORDS})`);
+  }
+
+  /*
+   * The paragraph must not be the guide's paragraph.
+   *
+   * Copying the article's opening across would satisfy every check above and
+   * simply move the duplication: a calculator page identical to its own guide
+   * is two URLs competing for one piece of writing, which is the problem this
+   * section exists for with one more page in it. Sentence-level, because a
+   * shared term of art is fine and a shared sentence is not.
+   */
+  const guide = `guides/${slug}.html`;
+  if (!existsSync(join(OUT, guide))) continue;
+  const guideText = decodeEntities(visibleText(guide));
+  for (const sentence of lede.split(/(?<=\.)\s+/)) {
+    if (sentence.length >= 40 && guideText.includes(sentence)) {
+      fail(
+        'calculator-copy',
+        `${page} reuses a sentence verbatim from ${guide}: "${sentence.slice(0, 60)}…"`,
+      );
+    }
+  }
+}
+
 /* ---- 4. No two guides render the same content ---------------------------- */
 
 const byText = new Map();
@@ -232,6 +365,8 @@ if (failures.length > 0) {
 console.log(
   `check-export: OK — ${CONTENT_PAGES.length} article pages carry the AdSense loader, all clear ` +
     `${MIN_WORDS} words and are distinct; ${NO_AD_PAGES.length} other pages ` +
-    `(including 404) carry NO ad code of any kind; ` +
+    `(including 404 and every calculator page) carry NO ad code of any kind; ` +
+    `${slugs.length} calculator pages carry a distinct title, description, h1 and ` +
+    `${MIN_LEDE_WORDS}+ word lede that is not their guide's; ` +
     `${slugs.length} strategies cross-linked both ways.`,
 );

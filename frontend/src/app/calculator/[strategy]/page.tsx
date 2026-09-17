@@ -4,6 +4,7 @@ import StrategyWorkspace from '../../../components/StrategyWorkspace';
 import { branding } from '@/config/branding';
 import { StrategyStructuredData } from '@/components/StructuredData';
 import { getStrategyGuide } from '@/content/strategy-guides';
+import { getCalculatorPageCopy } from '@/content/calculator-pages';
 
 // Shared with the sitemap, so the pages exported and the pages advertised to
 // crawlers cannot drift apart.
@@ -45,10 +46,24 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
   // where the name does not already say it.
   const instrument = /futures/i.test(strategyName) ? '' : isFutures ? 'Futures ' : 'Options ';
 
-  const title = `${strategyName} ${instrument}Calculator & Profit Visualizer`;
-  const description = `Calculate maximum profit, loss, probability of profit and the full Greek profile for ${article} ${strategyName}, priced from live ${isFutures ? 'futures' : 'option chain'} quotes.`;
-  const ogTitle = `${strategyName} Calculator | ${branding.appName}`;
-  const ogDescription = `Model the P&L and probability distribution of ${article} ${strategyName} strategy.`;
+  // AUTHORED per strategy, with the derived strings kept only as the fallback
+  // for a slug that has no copy yet.
+  //
+  // The derivation is the defect. It produces one sentence with a name
+  // substituted into it, which reads perfectly well on a single page and is
+  // twenty-six near-identical pages to a crawler reading all of them -- median
+  // 6-gram similarity 0.978, every page self-canonical, every page in the
+  // sitemap. Search Console reported it as duplicate content.
+  const copy = getCalculatorPageCopy(slug);
+
+  const title = copy?.title ?? `${strategyName} ${instrument}Calculator & Profit Visualizer`;
+  const description =
+    copy?.description ??
+    `Calculate maximum profit, loss, probability of profit and the full Greek profile for ${article} ${strategyName}, priced from live ${isFutures ? 'futures' : 'option chain'} quotes.`;
+  const ogTitle = `${copy?.heading ?? `${strategyName} Calculator`} | ${branding.appName}`;
+  const ogDescription =
+    copy?.description ??
+    `Model the P&L and probability distribution of ${article} ${strategyName} strategy.`;
 
   return {
     title,
@@ -83,10 +98,17 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
 /**
  * Per-strategy calculator page.
  *
- * The TOOL, and only the tool. The written guide that used to sit below this
- * workspace now lives at `/guides/<slug>`, which is where the advertising went
- * with it — these screens are outside `/guides/<slug>`, so they ship no ad code, as
+ * The TOOL, plus one authored paragraph about the structure it prices. The
+ * written guide that used to sit below this workspace now lives at
+ * `/guides/<slug>`, which is where the advertising went with it — these screens
+ * are outside `/guides/<slug>`, so they ship no ad code, as
  * mortgagefvcalculator.com's own calculator page does.
+ *
+ * The paragraph is not a partial undo of that split. The article is still on
+ * the guide; what is here is 80-120 words saying which structure this screen
+ * prices and what goes wrong with it, because a page that differs from its
+ * twenty-five siblings only by a heading is one Google declines to index —
+ * measured 2026-09-16 at a median 6-gram similarity of 0.978.
  *
  * That split is what makes both pages honest. One page trying to be a tool and
  * an article was neither: all twenty-six rendered identically apart from a
@@ -111,21 +133,75 @@ export default async function StrategyCalculatorPage({ params }: Props) {
     slug === 'covered-futures-call';
 
   const hasGuide = Boolean(guide);
+  const copy = getCalculatorPageCopy(slug);
 
   return (
     <>
       <StrategyStructuredData
         slug={slug}
         name={`${strategyName}${/futures/i.test(strategyName) ? '' : isFutures ? ' Futures' : ' Options'} Calculator`}
-        description={`Model the profit, loss and Greeks of ${/^[aeiou]/i.test(strategyName) ? 'an' : 'a'} ${strategyName} strategy on live market data.`}
+        description={
+          copy?.description ??
+          `Model the profit, loss and Greeks of ${/^[aeiou]/i.test(strategyName) ? 'an' : 'a'} ${strategyName} strategy on live market data.`
+        }
       />
       <StrategyWorkspace
-        heading={`${strategyName} Calculator`}
+        heading={copy?.heading ?? `${strategyName} Calculator`}
         // A real URL now, not the `#guide` anchor: the article moved to its own
         // page, so this is the crawlable link between the two intents rather
         // than a jump down the same document.
         guideHref={hasGuide ? `/guides/${slug}` : undefined}
       />
+
+      {/*
+        The one authored paragraph on this screen, and it is here for SEARCH
+        rather than for advertising.
+
+        These pages carry no Google ad code -- they sit outside `/guides/<slug>`,
+        which is the only subtree that emits the loader -- so nothing here is
+        content written to satisfy an ad policy. What it fixes is a different
+        problem with the same root: all twenty-six of these pages rendered the
+        same workspace with one heading substituted, each declaring itself
+        canonical and each listed in the sitemap, so the site asked Google to
+        index twenty-six copies of one page and Google said no.
+
+        Below the workspace deliberately. The shell above is pinned to the
+        viewport and every panel inside it competes for those pixels; a
+        paragraph in the header would cost the strike ladder rows on every
+        strategy. This sits in the ordinary page flow with the broker links and
+        the footer, which already scroll.
+
+        It is NOT the guide's opening paragraph. Reusing that text would trade
+        duplication between calculator pages for duplication between a
+        calculator page and its own guide -- the same defect with one more URL
+        in it -- so each lede is written separately and `check-export.mjs`
+        asserts no sentence of one appears in the other.
+      */}
+      {copy && (
+        <section
+          data-strategy-lede={slug}
+          style={{
+            maxWidth: '60rem',
+            margin: '0 auto',
+            padding: '1.5rem 1.25rem 0',
+            fontSize: '0.8125rem',
+            lineHeight: 1.7,
+            color: 'var(--color-ink-300)',
+          }}
+        >
+          <p style={{ margin: 0 }}>{copy.lede}</p>
+          {hasGuide && (
+            <p style={{ margin: '0.75rem 0 0' }}>
+              <a
+                href={`/guides/${slug}`}
+                style={{ color: 'var(--color-accent)', textDecoration: 'none' }}
+              >
+                {`The full ${strategyName} guide, worked example and FAQs →`}
+              </a>
+            </p>
+          )}
+        </section>
+      )}
     </>
   );
 }
