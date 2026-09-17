@@ -547,6 +547,20 @@ def evaluate(rows: list[dict], stub, tail: RawOutputTail, timeout: float,
                 served, {"operation": (want or {}).get("operation", ""),
                          **gold_as_served(want)}) if served is not None else "",
             "outcome": which,
+            # THE REFUSAL'S OWN WORDS, ON EVERY ROW -- including the rows the
+            # model got RIGHT.
+            #
+            # `failures` below records `served_detail`, but only for rows where
+            # raw was WRONG, so the one class that matters most here was the one
+            # class with no message recorded: the model emits the gold exactly
+            # and the serving layer refuses it. `raw_exact` counts that row as a
+            # success and the user gets nothing, which is why CLAUDE.md calls it
+            # a failure class no accuracy metric can see -- and until now the
+            # harness could not enumerate it either.
+            "refusal_reason": REASON_NAME.get(reason, str(reason)) if which == "refusal" else "",
+            "refusal_shape": classify_refusal(reason, text) if which == "refusal" else "",
+            "refusal_message": text if which == "refusal" else "",
+            "utterance": utterance,
         })
         if comparable == want:
             raw_exact += 1
