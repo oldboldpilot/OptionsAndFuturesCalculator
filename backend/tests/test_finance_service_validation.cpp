@@ -3599,6 +3599,172 @@ auto main() -> int {
         }
     }
 
+    // =======================================================================
+    section("29. ComputeRentalCashFlow: the RPC that was declared and never wired");
+    // =======================================================================
+    //
+    // WHY THIS SECTION EXISTS. Until 2026-09-17 this RPC was in finance.proto,
+    // in the mortgage assistant's label space (22 fields), in the client's
+    // derived operation set, and computed by sensen::calculate_rental_cash_flow
+    // -- and production answered HTTP 501 / gRPC code 12 UNIMPLEMENTED, because
+    // no handler in finance_service.cpp joined the two. Every table agreed and
+    // the operation did not exist.
+    //
+    // The FIRST check below is therefore the regression test: it asserts the
+    // call is reachable at all. Nothing else in this suite could see a missing
+    // handler, because a missing handler is not a wrong answer -- it is no
+    // answer, and every test that asserts an answer's SHAPE passes vacuously
+    // when the method is never dispatched.
+    //
+    // The rest check IDENTITIES rather than figures the engine produced
+    // earlier: each one is a definition of the accounting, so it holds for any
+    // valid input and cannot be satisfied by a plausible-looking wrong number.
+    {
+        const auto base_request = []() {
+            sensen::finance::RentalCashFlowRequest req;
+            req.set_property_price("300000");
+            req.set_down_payment("60000");
+            req.set_closing_costs("9000");
+            req.set_loan_annual_rate("0.065");
+            req.set_loan_term_years(30);
+            req.set_monthly_gross_rent("2400");
+            req.set_annual_rent_increase("0.03");
+            req.set_occupancy_rate("0.92");
+            req.set_annual_property_tax("3600");
+            req.set_annual_insurance("1800");
+            req.set_annual_repairs("1200");
+            req.set_annual_capex_reserve("1200");
+            req.set_monthly_hoa("0");
+            req.set_management_fee_rate("0.08");
+            req.set_annual_other_expenses("0");
+            req.set_annual_expense_increase("0.02");
+            req.set_annual_appreciation("0.03");
+            req.set_selling_cost_percent("0.06");
+            req.set_years(10);
+            return req;
+        };
+
+        sensen::finance::RentalCashFlowRequest req = base_request();
+        sensen::finance::RentalCashFlowResponse resp;
+        auto ctx = make_context();
+        auto status = stub.ComputeRentalCashFlow(ctx.get(), req, &resp);
+
+        // 29a IS THE REGRESSION TEST. UNIMPLEMENTED is what production returned.
+        check(status.error_code() != grpc::StatusCode::UNIMPLEMENTED,
+              "29a. ComputeRentalCashFlow is WIRED -- it answered something other than "
+              "UNIMPLEMENTED. Production returned code 12 for this exact call until the "
+              "handler was added on 2026-09-17.");
+        check(status.ok(), "29b. a plausible rental request is served, got: " +
+                               status.error_message());
+
+        if (status.ok()) {
+            check(resp.rows_size() == 10,
+                  "29c. years=10 produces 10 rows, got " + std::to_string(resp.rows_size()));
+
+            double running = 0.0;
+            bool egi_ok = true, noi_ok = true, cf_ok = true, cum_ok = true;
+            for (const auto& r : resp.rows()) {
+                const double gross = std::stod(r.gross_scheduled_rent());
+                const double vac = std::stod(r.vacancy_loss());
+                const double egi = std::stod(r.effective_gross_income());
+                const double opex = std::stod(r.operating_expenses());
+                const double noi = std::stod(r.net_operating_income());
+                const double mds = std::stod(r.mortgage_debt_service());
+                const double hds = std::stod(r.heloc_debt_service());
+                const double cf = std::stod(r.cash_flow());
+                running += cf;
+                if (std::fabs(egi - (gross - vac)) > 0.01) egi_ok = false;
+                if (std::fabs(noi - (egi - opex)) > 0.01) noi_ok = false;
+                if (std::fabs(cf - (noi - mds - hds)) > 0.01) cf_ok = false;
+                if (std::fabs(std::stod(r.cumulative_cash_flow()) - running) > 0.05) cum_ok = false;
+            }
+            // Each of these is a DEFINITION, so a wrong-but-plausible figure in
+            // any one component breaks it. A test that only checked "cash flow
+            // is negative in year 1" would pass on almost any arithmetic.
+            check(egi_ok, "29d. effective_gross_income == gross_scheduled_rent - vacancy_loss, "
+                          "every row");
+            check(noi_ok, "29e. net_operating_income == effective_gross_income - "
+                          "operating_expenses, every row (NOI EXCLUDES debt service by "
+                          "definition -- folding the mortgage in makes two identical houses "
+                          "have different cap rates)");
+            check(cf_ok, "29f. cash_flow == NOI - mortgage_debt_service - heloc_debt_service, "
+                         "every row");
+            check(cum_ok, "29g. cumulative_cash_flow is the running sum of cash_flow");
+
+            // Cap rate is a property of the ASSET: NOI over price, financing
+            // excluded. Pinning it against the closed form is what catches the
+            // summary being wired to the wrong row.
+            const double cap = std::stod(resp.cap_rate());
+            const double noi1 = std::stod(resp.year_one_noi());
+            check(std::fabs(cap - noi1 / 300000.0) < 1e-6,
+                  "29h. cap_rate == year_one_noi / property_price, got " + resp.cap_rate());
+
+            // The first row's vacancy is the scheduled rent times (1 - occupancy).
+            const auto& r0 = resp.rows(0);
+            const double gross0 = std::stod(r0.gross_scheduled_rent());
+            check(std::fabs(std::stod(r0.vacancy_loss()) - gross0 * 0.08) < 0.05,
+                  "29i. vacancy_loss == gross_scheduled_rent * (1 - occupancy_rate)");
+            check(std::fabs(gross0 - 2400.0 * 12.0) < 0.01,
+                  "29j. year one gross scheduled rent is 12 months of the stated rent");
+        }
+
+        // A RETURN ON ZERO IS NOT A NUMBER. Fully financed -- no deposit, no
+        // closing costs of the buyer's own -- means own cash is zero, and
+        // cash_on_cash must report UNDEFINED rather than emit a figure that
+        // makes a leveraged deal look infinite.
+        {
+            sensen::finance::RentalCashFlowRequest z = base_request();
+            z.set_down_payment("0");
+            z.set_closing_costs("0");
+            sensen::finance::RentalCashFlowResponse zr;
+            auto zctx = make_context();
+            auto zs = stub.ComputeRentalCashFlow(zctx.get(), z, &zr);
+            check(zs.ok(), "29k. a fully financed purchase is a valid request");
+            if (zs.ok()) {
+                check(!zr.cash_on_cash_defined(),
+                      "29l. cash_on_cash is reported UNDEFINED when own cash is zero, rather "
+                      "than emitting a return on nothing");
+            }
+        }
+
+        // Bounds. Every one of these integers multiplies by 12 to reach a period
+        // count, which is the signed-overflow shape sections 1 and 23 already
+        // record against other RPCs.
+        for (const auto& [set, what] :
+             std::vector<std::pair<std::function<void(sensen::finance::RentalCashFlowRequest&)>,
+                                   std::string>>{
+                 {[](auto& r) { r.set_years(0); }, "years=0"},
+                 {[](auto& r) { r.set_years(101); }, "years=101"},
+                 {[](auto& r) { r.set_loan_term_years(101); }, "loan_term_years=101"},
+                 {[](auto& r) { r.set_heloc_term_years(101); }, "heloc_term_years=101"},
+             }) {
+            sensen::finance::RentalCashFlowRequest bad = base_request();
+            set(bad);
+            sensen::finance::RentalCashFlowResponse br;
+            auto bctx = make_context();
+            check(is_invalid_argument(stub.ComputeRentalCashFlow(bctx.get(), bad, &br)),
+                  "29m. ComputeRentalCashFlow{" + what + "} is REFUSED");
+        }
+
+        // A rental with no price or no rent is not under-specified, it is not a
+        // rental. An empty required field must refuse rather than parse as 0.
+        {
+            sensen::finance::RentalCashFlowRequest noprice = base_request();
+            noprice.clear_property_price();
+            sensen::finance::RentalCashFlowResponse nr;
+            auto nctx = make_context();
+            check(is_invalid_argument(stub.ComputeRentalCashFlow(nctx.get(), noprice, &nr)),
+                  "29n. a missing property_price is REFUSED, not parsed as zero");
+
+            sensen::finance::RentalCashFlowRequest norent = base_request();
+            norent.clear_monthly_gross_rent();
+            sensen::finance::RentalCashFlowResponse nr2;
+            auto nctx2 = make_context();
+            check(is_invalid_argument(stub.ComputeRentalCashFlow(nctx2.get(), norent, &nr2)),
+                  "29o. a missing monthly_gross_rent is REFUSED");
+        }
+    }
+
     // -----------------------------------------------------------------
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

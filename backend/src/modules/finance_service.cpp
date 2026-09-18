@@ -3312,6 +3312,169 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         return compute_rent_vs_buy_one(request, response);
     }
 
+    /**
+     * The RPC was DECLARED and never WIRED, and that is the whole defect.
+     *
+     * `ComputeRentalCashFlow` has been in finance.proto, in the mortgage
+     * assistant's label space (`kFields_ComputeRentalCashFlow`, 22 fields) and
+     * in the client's derived operation set the entire time, and
+     * `sensen::calculate_rental_cash_flow` has computed it in financial.cppm the
+     * entire time. Nothing joined the two, so production answered HTTP 501 /
+     * gRPC code 12 UNIMPLEMENTED -- measured against the live ingress on
+     * 2026-09-17. The mortgage model v18 gained +30 holdout rows PARSING this
+     * operation, so a user asking a rental cash-flow question was understood
+     * correctly and then handed a 501.
+     *
+     * This is the four-tables lesson with a wall nobody had counted: proto,
+     * label space, verifier and client all agreed, and the only thing that
+     * makes an operation ARRIVE is a handler in this file. Nothing above this
+     * line can see that this line was missing.
+     */
+    auto ComputeRentalCashFlow(ServerContext* context,
+                               const sensen::finance::RentalCashFlowRequest* request,
+                               sensen::finance::RentalCashFlowResponse* response)
+        -> Status override {
+        if (request == nullptr || response == nullptr) {
+            return Status(grpc::StatusCode::INTERNAL, "Null request or response from transport");
+        }
+        // The engine walks `years` rows and amortises `loan_term_years * 12`
+        // periods, both bounded below, so cost_default() prices it honestly.
+        CHARGE("ComputeRentalCashFlow", quota::cost_default());
+
+        // BOUND THE INTEGERS BEFORE ANY ARITHMETIC. Every caller-controlled
+        // integer here multiplies by 12 to reach a period count, which is the
+        // signed-overflow shape this file already documents against
+        // ComputeHeloc and ComputeRefinance. An unbounded `years` is also a
+        // wall-clock walk rather than an exponentiation-by-squaring, so it is a
+        // DoS as well as UB.
+        if (request->years() <= 0 || request->years() > 100) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "years must be positive and at most 100");
+        }
+        if (request->loan_term_years() < 0 || request->loan_term_years() > 100) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "loan_term_years must be between 0 and 100");
+        }
+        if (request->heloc_term_years() < 0 || request->heloc_term_years() > 100) {
+            return Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "heloc_term_years must be between 0 and 100");
+        }
+
+        // property_price and monthly_gross_rent are REQUIRED: a rental with no
+        // price or no rent is not an under-specified deal, it is not a deal.
+        // Everything else is optional and defaults inside RentalCashFlowInput,
+        // whose defaults are documented there (notably occupancy_rate == 0
+        // meaning fully occupied, so an omitted field cannot silently model a
+        // property that is never let).
+        REQUIRE_DECIMAL_SAFE(price, request->property_price(), "property_price");
+        REQUIRE_DECIMAL_SAFE(rent, request->monthly_gross_rent(), "monthly_gross_rent");
+        READ_DECIMAL_SAFE(down, request->down_payment(), "down_payment");
+        READ_DECIMAL_SAFE(closing, request->closing_costs(), "closing_costs");
+        READ_DECIMAL_SAFE(loan_rate, request->loan_annual_rate(), "loan_annual_rate");
+        READ_DECIMAL_SAFE(rent_growth, request->annual_rent_increase(), "annual_rent_increase");
+        READ_DECIMAL_SAFE(occupancy, request->occupancy_rate(), "occupancy_rate");
+        READ_DECIMAL_SAFE(prop_tax, request->annual_property_tax(), "annual_property_tax");
+        READ_DECIMAL_SAFE(insurance, request->annual_insurance(), "annual_insurance");
+        READ_DECIMAL_SAFE(repairs, request->annual_repairs(), "annual_repairs");
+        READ_DECIMAL_SAFE(capex, request->annual_capex_reserve(), "annual_capex_reserve");
+        READ_DECIMAL_SAFE(hoa, request->monthly_hoa(), "monthly_hoa");
+        READ_DECIMAL_SAFE(mgmt, request->management_fee_rate(), "management_fee_rate");
+        READ_DECIMAL_SAFE(other, request->annual_other_expenses(), "annual_other_expenses");
+        READ_DECIMAL_SAFE(exp_growth, request->annual_expense_increase(),
+                          "annual_expense_increase");
+        READ_DECIMAL_SAFE(appreciation, request->annual_appreciation(), "annual_appreciation");
+        READ_DECIMAL_SAFE(sell_pct, request->selling_cost_percent(), "selling_cost_percent");
+        READ_DECIMAL_SAFE(heloc_drawn, request->heloc_drawn_amount(), "heloc_drawn_amount");
+        READ_DECIMAL_SAFE(heloc_rate, request->heloc_annual_rate(), "heloc_annual_rate");
+
+        // A rate at or below -100% breaks BigDecimal pow() the same way it does
+        // on every other compounding RPC in this file.
+        if (auto st = check_compound_growth_safe(loan_rate.to_double(), 12,
+                                                 request->loan_term_years() * 12,
+                                                 "loan_annual_rate");
+            !st.ok()) {
+            return st;
+        }
+        if (auto st = check_compound_growth_safe(heloc_rate.to_double(), 12,
+                                                 request->heloc_term_years() * 12,
+                                                 "heloc_annual_rate");
+            !st.ok()) {
+            return st;
+        }
+
+        sensen::RentalCashFlowInput in;
+        in.property_price = price;
+        in.down_payment = down;
+        in.closing_costs = closing;
+        in.loan_annual_rate = loan_rate;
+        in.loan_term_years = request->loan_term_years();
+        in.monthly_gross_rent = rent;
+        // The proto spells these `_increase` and sensen spells them `_growth`.
+        // Named explicitly rather than pattern-matched, because a silent
+        // mismatch here is a compounding rate applied to the wrong series.
+        in.annual_rent_growth = rent_growth;
+        in.occupancy_rate = occupancy;
+        in.annual_property_tax = prop_tax;
+        in.annual_insurance = insurance;
+        in.annual_repairs = repairs;
+        in.annual_capex_reserve = capex;
+        in.monthly_hoa = hoa;
+        in.management_fee_rate = mgmt;
+        in.annual_other_expenses = other;
+        in.annual_expense_growth = exp_growth;
+        in.annual_appreciation = appreciation;
+        in.selling_cost_percent = sell_pct;
+        in.years = request->years();
+        in.heloc_drawn_amount = heloc_drawn;
+        in.heloc_annual_rate = heloc_rate;
+        in.heloc_term_years = request->heloc_term_years();
+
+        const auto computed = sensen::calculate_rental_cash_flow(in);
+        if (!computed) {
+            // sensen's refusals are caller-facing statements about the request
+            // ("property_price must be positive"), so they travel as
+            // INVALID_ARGUMENT verbatim rather than being reworded into
+            // something the caller cannot act on.
+            return Status(grpc::StatusCode::INVALID_ARGUMENT, computed.error());
+        }
+        const auto& [rows, summary] = *computed;
+
+        for (const auto& r : rows) {
+            auto* dst = response->add_rows();
+            dst->set_year(r.year);
+            dst->set_gross_scheduled_rent(r.gross_scheduled_rent.to_string());
+            dst->set_vacancy_loss(r.vacancy_loss.to_string());
+            dst->set_effective_gross_income(r.effective_gross_income.to_string());
+            dst->set_operating_expenses(r.operating_expenses.to_string());
+            dst->set_net_operating_income(r.net_operating_income.to_string());
+            dst->set_mortgage_debt_service(r.mortgage_debt_service.to_string());
+            dst->set_heloc_debt_service(r.heloc_debt_service.to_string());
+            dst->set_cash_flow(r.cash_flow.to_string());
+            dst->set_cumulative_cash_flow(r.cumulative_cash_flow.to_string());
+            dst->set_loan_balance(r.loan_balance.to_string());
+            dst->set_property_value(r.property_value.to_string());
+            dst->set_equity(r.equity.to_string());
+        }
+
+        response->set_own_cash_invested(summary.own_cash_invested.to_string());
+        response->set_total_cash_to_close(summary.total_cash_to_close.to_string());
+        response->set_year_one_noi(summary.year_one_noi.to_string());
+        response->set_cap_rate(summary.cap_rate.to_string());
+        response->set_cash_on_cash(summary.cash_on_cash.to_string());
+        // The `_defined` flags are carried, not inferred from the value. A
+        // return on zero own cash is NOT a large number, it is not a number,
+        // and emitting one is how a fully-financed deal looks infinite.
+        response->set_cash_on_cash_defined(summary.cash_on_cash_defined);
+        response->set_debt_service_coverage(summary.debt_service_coverage.to_string());
+        response->set_debt_service_coverage_defined(summary.debt_service_coverage_defined);
+        response->set_total_cash_flow(summary.total_cash_flow.to_string());
+        response->set_sale_price(summary.sale_price.to_string());
+        response->set_sale_proceeds(summary.sale_proceeds.to_string());
+        response->set_total_profit(summary.total_profit.to_string());
+        response->set_any_year_negative(summary.any_year_negative);
+        return Status::OK;
+    }
+
     auto ComputeRentVsBuyBatch(ServerContext* context,
                                const sensen::finance::RentVsBuyBatchRequest* request,
                                sensen::finance::RentVsBuyBatchResponse* response)
