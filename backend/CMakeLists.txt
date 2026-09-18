@@ -1475,6 +1475,12 @@ target_sources(bench_derivation PRIVATE FILE_SET CXX_MODULES FILES
     src/modules/mortgage_derivation.cppm)
 target_link_libraries(bench_derivation PRIVATE sensen_slim fastjson logger)
 
+# bench_finance_compute: raw kernel latency with no gRPC and no network. It
+# needs no module FILE_SET of its own -- every symbol it times is exported by
+# sensen_slim's financial/bigdecimal modules, which it imports directly.
+add_executable(bench_finance_compute tests/bench_finance_compute.cpp)
+target_link_libraries(bench_finance_compute PRIVATE sensen_slim fastjson logger)
+
 add_executable(dbg_grounding tests/dbg_grounding.cpp)
 target_sources(dbg_grounding PRIVATE FILE_SET CXX_MODULES FILES
     sensen/src/gp_ara_interfaces.cppm
