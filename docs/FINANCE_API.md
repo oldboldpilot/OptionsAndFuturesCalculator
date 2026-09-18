@@ -923,11 +923,29 @@ Measured against the live ingress on 2026-09-17, 20 samples per RPC, paced at
 | new connection per call | 58.0 ms | dns 2.5 + tcp 9.5 + **tls 24.0** + server 21.9 |
 | connection reused | **19.6 ms** (min 10.7) | no handshake |
 
-The handshake is **62% of a cold call**. The arithmetic behind these RPCs is
-single-digit milliseconds -- a `ComputePayment` is one closed-form annuity
-evaluation -- so essentially everything you wait for is connection setup, TLS,
-Envoy and gRPC framing. There is no server-side change available here that is
-worth as much as keep-alive on yours.
+The handshake is **62% of a cold call**, and essentially everything else you
+wait for is TLS, Envoy and gRPC framing. There is no server-side change
+available here that is worth as much as keep-alive on yours.
+
+**HOW MUCH OF IT IS ARITHMETIC: about 0.001%.** This paragraph said "the
+arithmetic behind these RPCs is single-digit milliseconds" until 2026-09-18,
+which was wrong by roughly five orders of magnitude and wrong in an
+instructive way -- it had been DERIVED by subtracting an estimate of the
+network from a warm round trip, never measured. Measured directly, by calling
+the kernels with no gRPC and no network (`backend/tests/bench_finance_compute.cpp`):
+
+| kernel | per call |
+| --- | --- |
+| `ComputePayment` | **121 ns** |
+| `ComputeRentalCashFlow`, 10 years | 3.0 us |
+| `ComputeRentVsBuy`, 7 years | 4.2 us |
+| `ComputeAmortization`, 360 months | 8.5 us |
+| `ComputeRentVsBuyBatch`, 1000 scenarios | 364 us |
+
+A `ComputePayment` computes in about **150 nanoseconds** against a ~20 ms warm
+round trip. So do not tune your request for compute: there is none to speak
+of. Tune it for connections, round trips and bytes, which is what the rest of
+this section is about.
 
 Concretely: use one long-lived HTTP client rather than a new one per request.
 `requests.Session()` in Python, a shared `http.Client` in Go, a reused
@@ -940,6 +958,31 @@ a quota bypass -- it charges `cost_default()` PER SCENARIO -- and what it buys
 is the round trips and the rate limit, which is exactly what the table above
 says dominates. A thousand scenarios one-at-a-time is a thousand handshakes and
 a hundred seconds of rate limiting; batched it is one request.
+
+**ASK FOR COMPRESSION ON BULK RESPONSES. It is one header and it is worth
+5x on the wire.** Responses are compressed only when you negotiate it, and
+`vary: accept-encoding` is set, so a client that does not send the header gets
+the full payload. Most HTTP libraries send it by default; `curl` does NOT
+unless you pass `--compressed`.
+
+Measured on a 1000-scenario `ComputeRentVsBuyBatch` with VARIED inputs (1000
+identical rows compress ~86x and would flatter this figure, so they are not
+what is quoted):
+
+| | bytes | total |
+| --- | --- | --- |
+| no `Accept-Encoding` | 986,842 | 238 ms |
+| `Accept-Encoding: gzip` | **185,062** | 205 ms |
+
+Time-to-first-byte is unchanged (163 ms vs 166 ms) -- compression shrinks the
+transfer, it does not delay the answer. The saving is small on a fast link
+beside the ingress and large on a real one: 987 KB over a 10 Mbps connection
+is about 790 ms of transfer against 148 ms.
+
+The payload is this large because every money field is an exact 18-place
+decimal STRING, which is a deliberate trade this document explains in section
+4 -- roughly a kilobyte per scenario. Compression is what makes that trade
+cheap, so take it.
 
 **The rate limit is per replica.** Envoy allows a burst of 100 and refills at
 10/s in each container, and the service runs more than one. Pace at or below
