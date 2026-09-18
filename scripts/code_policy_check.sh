@@ -94,6 +94,15 @@ strip_string_literals_then_match() {
 # Comment bodies are skipped so prose about "a new value" is not a violation.
 # Placement new and NOLINT-annotated lines are permitted.
 #
+# `%` IS A COMMENT TOO, because this tree embeds Prolog. The Horn-clause rule
+# base in mortgage_derivation.cppm is Prolog source carried inside a C++ raw
+# string literal, and Prolog comments start with `%`. Its prose explains, in
+# English, that "redo it for $817,400" means "the NEW price combines with the
+# ORIGINAL down payment" -- and that sentence was reported as a raw heap
+# allocation, failing the whole policy gate on a comment about mortgages. The
+# same cry-wolf failure this block already records for string literals, in a
+# second language nobody thought to list.
+#
 # STRING LITERALS are skipped for the same reason comment bodies are, and this
 # was a real defect rather than a refinement: user-facing copy in this codebase
 # genuinely contains the word -- api_key's "upgrade for a new one" and
@@ -103,7 +112,7 @@ strip_string_literals_then_match() {
 # still fires on a real `new Widget` sitting outside quotes on the same line.
 # --------------------------------------------------------------------------
 RAW_NEW=$(grep -nE "\bnew\s+[A-Za-z_][A-Za-z0-9_]*" "${CXX_FILES[@]}" 2>/dev/null \
-    | grep -vE "^[^:]+:[0-9]+:[[:space:]]*(//|\*|/\*)" \
+    | grep -vE "^[^:]+:[0-9]+:[[:space:]]*(//|\*|/\*|%)" \
     | grep -v "NOLINT" \
     | grep -vE "\bnew[[:space:]]*\(" \
     | strip_string_literals_then_match "\bnew\s+[A-Za-z_]" \
