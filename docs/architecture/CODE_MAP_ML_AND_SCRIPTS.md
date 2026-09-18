@@ -315,7 +315,6 @@ Enforces dataset hygiene across corpus iterations (`agent/train/eval_grpc_mortga
 
 | Script File | Language / Runtime | Operational Role | Key Flags & Dependencies |
 | :--- | :--- | :--- | :--- |
-| `apple_client_secret.py` | Python 3 | Mint, inspect, and rotate Apple OAuth client secret JWTs for Supabase GoTrue. | `mint`, `inspect`, `rotate`, `--service`, `--renew-before`; `cryptography` |
 | `backup_to_nas.sh` | Bash | Rsync repository backup to mounted CIFS NAS storage. | `rsync -avz --delete --no-links`, excludes `node_modules`, `build`, `.git` |
 | `code_policy_check.sh` | Bash | Audits C++ source files against `config/cpp_details.txt` (Rules 3, 31, 50, 55). | Scopes via `git ls-files`; checks raw `new`, `-ffast-math`, trailing return types |
 | `code_review_adversarial.sh` | Bash | Multi-phase review gate: static diff analysis and automated multi-agent consensus. | Targets `HEAD`, `--staged`, `--unstaged`; queries 3 independent review CLIs |
@@ -418,11 +417,6 @@ Multi-phase automated review gate (`scripts/code_review_adversarial.sh:1-60`):
 ---
 
 #### 4. Credential and Secret Management
-
-##### `scripts/apple_client_secret.py`
-- **Automated Client Secret Rotation** (`scripts/apple_client_secret.py:1-48`):
-  Generates, inspects, and rotates Apple OAuth client secrets (ES256 JWTs) for Supabase GoTrue authentication on Railway.
-  *Operational Constraint*: Apple caps client secret lifetime at 6 months (15,777,000 seconds). The script decodes active secrets (`inspect`) and mints replacements (`rotate`) when expiration is within `--renew-before` days (default: 30 days), pushing the new secret directly to the Railway GoTrue service.
 
 ##### `scripts/mint_pro_gate_creds.mjs`
 - **Pro-Gate Test Credential Matrix** (`scripts/mint_pro_gate_creds.mjs:1-45`):

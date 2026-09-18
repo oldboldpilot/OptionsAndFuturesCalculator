@@ -66,7 +66,7 @@ export const AuthUI: React.FC = () => {
     if (error) setMessage({ kind: 'error', text: error.message });
   };
 
-  const handleOAuthSignIn = async (provider: 'google' | 'apple') => {
+  const handleOAuthSignIn = async (provider: 'google') => {
     await supabase.auth.signInWithOAuth({
       provider: provider,
       options: {
@@ -132,10 +132,14 @@ export const AuthUI: React.FC = () => {
               </span>
             )}
           </form>
-          {/* Hidden unless a provider is actually configured in GoTrue. These
-              redirect to /auth/callback, which does not exist in a static
-              export, and no GOTRUE_EXTERNAL_* provider is set -- so shown, they
-              are two buttons that always fail. */}
+          {/* The Apple provider is GONE, not hidden. It was already unreachable
+              -- gated on NEXT_PUBLIC_OAUTH_ENABLED, which is set nowhere, so
+              the live site never served it -- but the dead code kept a daily
+              secret-rotation workflow alive that failed every night against an
+              Apple Developer account this project does not have and is not
+              buying. Social login was dropped during the Railway migration
+              (docs/technical/MORTGAGEFV_RAILWAY_MIGRATION.md); this removes
+              what that decision left behind. Sign-up is email, by decision. */}
           {process.env.NEXT_PUBLIC_OAUTH_ENABLED === '1' && (
           <div className="flex flex-col gap-2 border-l border-white/20 pl-4">
             <button
@@ -144,13 +148,6 @@ export const AuthUI: React.FC = () => {
               onClick={() => handleOAuthSignIn('google')}
             >
               Sign in with Google
-            </button>
-            <button
-              type="button"
-              className="text-xs bg-white/10 hover:bg-white/20 p-1.5 rounded flex items-center justify-center gap-2 transition-colors"
-              onClick={() => handleOAuthSignIn('apple')}
-            >
-              Sign in with Apple
             </button>
           </div>
           )}

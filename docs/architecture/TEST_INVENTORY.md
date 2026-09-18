@@ -17,7 +17,7 @@ This document provides a comprehensive inventory, architectural analysis, and op
 - **Backend Financial Mathematics & Census Demographics** (`backend/tests/test_finance_service_validation.cpp`, `backend/tests/test_state_refresh.cpp`).
 - **Backend SGEE, Local Admission & Distributed Queue** (`backend/tests/test_sgee_automated_reasoning.cpp`, `backend/tests/test_inference_admission.cpp`, `backend/tests/test_sgee_queue_client.cpp`, `backend/tests/test_inference_admission_pg.cpp`, `backend/tests/test_inference_queue_pg.cpp`, `backend/tests/integration/queue_node_entrypoint_test.sh`).
 - **Backend Assistant Verification, Grammar Decoding & LLM Defense** (`backend/tests/test_assistant_service.cpp`, `backend/tests/test_assistant_verification.cpp`, `backend/tests/test_mortgage_assistant_service.cpp`, `backend/tests/test_mortgage_verification.cpp`, `backend/tests/test_mortgage_grammar.cpp`).
-- **Backend Entitlements, Security Gates & Persistence** (`backend/tests/test_api_key_entitlement.cpp`, `backend/tests/test_quota_tier_label.cpp`, `backend/tests/test_state_assumptions_gate.cpp`, `backend/tests/test_strategy_store_pg.cpp`, `backend/tests/test_apple_client_secret.py`).
+- **Backend Entitlements, Security Gates & Persistence** (`backend/tests/test_api_key_entitlement.cpp`, `backend/tests/test_quota_tier_label.cpp`, `backend/tests/test_state_assumptions_gate.cpp`, `backend/tests/test_strategy_store_pg.cpp`).
 - **Build-Time Gate Scripts, Linters & Proto Drift** (`backend/tests/test_vendored_proto_drift.cpp`, `backend/tests/test_python_bindings.py`, `scripts/code_policy_check.sh`, `frontend/scripts/check-export.mjs`).
 - **Frontend Store & UI Gate Suites** (`frontend/src/config/ad-routes.test.ts`, `frontend/src/content/strategy-guides.test.ts`, `frontend/src/lib/chainFreshness.test.ts`, `frontend/src/store/asian-leg.test.ts`, `frontend/src/store/assistant-apply.test.ts`, `frontend/src/store/assistant-outcomes.test.ts`, `frontend/src/store/calculate-guards.test.ts`, `frontend/src/store/calculator-not-ready.test.ts`, `frontend/src/store/calculator-race.test.ts`, `frontend/src/store/chain.test.ts`, `frontend/src/store/entitlement.test.ts`, `frontend/src/store/harness.canary.test.ts`, `frontend/src/store/matrix-bounds.test.ts`, `frontend/src/store/model-limit.test.ts`, `frontend/src/store/saved-scenarios.test.ts`, `frontend/src/store/ticket.test.ts`, `frontend/src/store/tree-pricer-not-ready.test.ts`).
 
@@ -51,7 +51,6 @@ The table below records every test binary, script, and suite across the backend,
 | `test_vendored_proto_drift` (`VendoredProtoDriftTest`) | `backend/tests/test_vendored_proto_drift.cpp` | Yes (`backend/CMakeLists.txt:1411`) | In-process C++ | 8 checks | Wire protocol drift between backend `backend/proto/finance.proto` and `clients/mortgagefv/proto/finance.proto` |
 | `test_market_data_resilience` (`MarketDataResilienceTest`) | `backend/tests/test_market_data_resilience.cpp` | Yes (`backend/CMakeLists.txt:1331`) | In-process C++ | 9 sections (27 checks) | Circuit breaker failing to trip on 5xx, retrying 4xx client errors, half-open state deadlocks |
 | `QueueNodeEntrypointTest` | `backend/tests/integration/queue_node_entrypoint_test.sh` | Yes (`backend/CMakeLists.txt:1842-1843`) | Bash, Linux environment, OpenSSL | 4 scenarios (10 checks) | Container entrypoint booting in plaintext when mTLS required; partial TLS environment variables admitted |
-| `test_apple_client_secret.py` | `backend/tests/test_apple_client_secret.py` | **No** (Python CLI test) | Python 3, `cryptography`, `jwt` | 5 sections (12 checks) | Apple ES256 client secret JWT minting invalid header/claims; expiration exceeding 182-day hard Apple ceiling |
 | `test_python_bindings.py` (`PythonBindingsTest`) | `backend/tests/test_python_bindings.py` | Yes (`backend/CMakeLists.txt:1268-1271`) | Python 3, nanobind `.so`, `LD_PRELOAD` jemalloc | 5 tests | Python nanobind bindings crashing on Quote/RatePoint conversion; C++ ABI symbol export regressions |
 | `code_policy_check.sh` | `scripts/code_policy_check.sh` | **No** (Pre-commit / CI gate) | Bash, Git repository | 3 policy gates | Raw `new` introduced (Rule 3), `-ffast-math` enabled breaking IEEE 754 (Rules 50/55), non-trailing returns (Rule 31) |
 | `check-export.mjs` | `frontend/scripts/check-export.mjs` | **No** (Post-build SSG export gate) | Node.js, `npm run build` | 4 validation passes | Google AdSense code placed on non-publisher pages (`404.html`), guide pages under 600 words, invalid JSON-LD |
@@ -361,20 +360,6 @@ The table below records every test binary, script, and suite across the backend,
   - Sections 1-4: CRUD operations, cross-user isolation, and mutation arm proving RLS blocks cross-tenant reads even if application query omits `WHERE user_id = $1`.
 - **Registration**:
   - Built via CMake (`backend/CMakeLists.txt:1771-1781`) but excluded from `add_test()`.
-
-### `backend/tests/test_apple_client_secret.py`
-- **Purpose**: Exercises CLI script for minting Apple App Store Server API ES256 JWT client secrets (`scripts/apple_client_secret.py`).
-- **Sections & Checks (5 Sections, 12 Checks, Lines 1-115)**:
-  - Helper `throwaway_identity()` (`backend/tests/test_apple_client_secret.py:45-55`): generates throwaway NIST P-256 EC key.
-  - `Section 1: A minted secret carries the claims Apple checks` (`backend/tests/test_apple_client_secret.py:60-70`): `iss` is team ID, `sub` is service ID, `sub != iss`, `aud` is `"https://appleid.apple.com"`.
-  - `Section 2: The signature verifies, and it is ES256` (`backend/tests/test_apple_client_secret.py:72-80`): header `alg` is `"ES256"`, `kid` is key ID, signature verifies against EC public key.
-  - `Section 3: Apple's six-month ceiling is refused, not silently clamped` (`backend/tests/test_apple_client_secret.py:82-91`): `--days 200` raises `SystemExit` naming "caps the lifetime"; `--days 182` is accepted.
-  - `Section 4: days_remaining reads an expiry we did not sign` (`backend/tests/test_apple_client_secret.py:93-101`): reads `exp` claim off unverified token.
-  - `Section 5: The GoTrue variable name is pinned` (`backend/tests/test_apple_client_secret.py:103-108`): asserts `acs.GOTRUE_SECRET_VAR == "GOTRUE_EXTERNAL_APPLE_SECRET"`.
-
----
-
-## Build-Time Gate Scripts, Linters, and Policy Checks
 
 ### `scripts/code_policy_check.sh`
 - **Purpose**: Enforces repository C++23 coding rules using `git ls-files` against configuration in `config/cpp_details.txt`.

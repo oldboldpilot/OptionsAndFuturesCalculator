@@ -90,6 +90,14 @@ export function AdSlot({
   // injecting the ad tag during render would be a hydration mismatch.
   const [mounted, setMounted] = useState(false);
 
+  // This IS the hydration-safe mount latch, not a cascading render. The site
+  // is a STATIC
+  // EXPORT served from a CDN, so the build-time markup must equal the first
+  // client render; the <ins> can therefore only appear on the second render,
+  // and "have we rendered once" is not knowable without exactly this. The rule
+  // is aimed at effects that derive state from props, which this does not do:
+  // it takes no dependencies, runs once, and can never run again.
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => setMounted(true), []);
 
   useEffect(() => {

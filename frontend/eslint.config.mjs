@@ -12,6 +12,11 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // protoc output, committed because the CDN build has no protoc
+    // (scripts/gen_proto.sh). Linting generated code reports defects nobody can
+    // fix without editing a file the next `gen_proto.sh` overwrites -- and this
+    // project has already paid once for reformatting a generated file.
+    "src/grpc/**",
   ]),
 ]);
 

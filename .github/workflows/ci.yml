@@ -1,0 +1,92 @@
+# The test gate for optionsandfuturescalculator.com.
+#
+# @author Olumuyiwa Oluwasanmi
+#
+# WHY THIS DID NOT EXIST UNTIL 2026-09-18
+#
+# This repository had exactly two workflows: a Claude review that runs on pull
+# requests, and a nightly job that rotated an Apple client secret. NOTHING built
+# anything and NOTHING ran a test. `ctest` is 116/116 and the frontend carries 18
+# test files, and no push was ever obliged to run either.
+#
+# The nightly job had meanwhile failed every night for at least twelve
+# consecutive days on an invalid RAILWAY_TOKEN, for a Sign in with Apple feature
+# that was switched off in the UI and that this project has no Apple Developer
+# account for. It is deleted. That matters more than it sounds: a repository
+# whose CI is permanently red has no CI, because the one signal a red run should
+# carry -- something changed for the worse -- is already spent.
+#
+# WHAT IS DELIBERATELY NOT GATED HERE: the C++23 engine.
+#
+# Not an oversight, and not "too hard". `backend/` is clang-23 + libc++ + an
+# `import std;` module graph of ~300 interfaces, plus gRPC and protobuf built
+# from source via FetchContent. A COLD build of that on a GitHub-hosted runner is
+# hours, not minutes, and there is no ccache to inherit -- so a push gate built
+# on it would be abandoned or routinely cancelled, which is worse than an honest
+# absence. It is gated instead where the toolchain already exists:
+#
+#     ninja -C backend/build build_tests && ctest --test-dir backend/build
+#
+# run on the development host before a deploy, which is also the only place the
+# submodule pins, the local libc++ and the ccache state agree. If this ever moves
+# into CI it wants a self-hosted runner with a warm ccache, not a bigger timeout.
+# Recording the reason so the next reader does not mistake the gap for neglect.
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Frontend lint, tests, export checks
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      # No submodules: backend/sensen and backend/external/SGEE are the C++ tree
+      # and nothing in this job reads them.
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      # Includes the AdSense allow-list guards and the no-Apple-provider gate.
+      - name: Unit and regression tests
+        run: npm test
+
+      # `npm run build` ends in check-export.mjs, which asserts the EMITTED
+      # bytes: ad code appears on the 26 guide articles and nowhere else, every
+      # ad-serving page clears its word floor, no two guides render identical
+      # prose, and the two intents cross-link. That script exists because a unit
+      # test importing a module gets the real array while the browser got a
+      # client-reference proxy -- so the source can be right and the output wrong.
+      - name: Static export and emitted-bytes checks
+        run: npm run build
+
+  policy:
+    name: Code policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The policy check reads git HISTORY (authorship and trailers), not
+          # just file text, so a shallow clone would silently check nothing.
+          fetch-depth: 0
+      - name: Code policy check
+        run: ./scripts/code_policy_check.sh

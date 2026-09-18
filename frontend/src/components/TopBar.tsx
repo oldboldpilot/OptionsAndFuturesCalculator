@@ -76,10 +76,23 @@ export function TopBar() {
   // gap — a Friday print read on a Tuesday after a Monday holiday — and
   // anything beyond that means the feed stopped rather than that the calendar
   // was quiet.
+  // Reading the clock during
+  // render is impure, and here it is also CORRECT, which is why this is
+  // annotated rather than rewritten into ticking state.
+  //
+  // The threshold is FOUR DAYS. The defect the purity rule protects against is
+  // an age computed once at render and then frozen while the page stays open --
+  // real, and this repository documents it for the option-chain LIVE badge,
+  // which ticks every 15 s precisely because its threshold is 60 SECONDS. A
+  // four-day boundary cannot be crossed by a session sitting open long enough
+  // to matter, so a timer here would add a re-render schedule to the top bar of
+  // every page to change an answer that cannot change. Same rule, opposite
+  // conclusion, because the thresholds differ by four orders of magnitude.
   const rateIsStale = (() => {
     if (rateSource !== 'measured' || !rateMeta?.asOfDate) return false;
     const asOf = Date.parse(`${rateMeta.asOfDate}T00:00:00Z`);
     if (Number.isNaN(asOf)) return true;
+    // eslint-disable-next-line react-hooks/purity
     return (Date.now() - asOf) / 86_400_000 > 4;
   })();
 
