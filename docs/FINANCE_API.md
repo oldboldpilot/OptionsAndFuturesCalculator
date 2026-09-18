@@ -903,6 +903,59 @@ curl -X POST https://api.optionsandfuturescalculator.com/sensen.finance.Finance/
 
 ---
 
+## 6b. Latency, and the one change worth making on your side
+
+Measured against the live ingress on 2026-09-17, 20 samples per RPC, paced at
+5 req/s so the numbers describe the SERVICE rather than the rate limiter:
+
+| RPC | p50 | p95 |
+| --- | --- | --- |
+| `ComputePayment` | 65.2 ms | 105.9 ms |
+| `ComputeAmortization` | 105.6 ms | 166.3 ms |
+| `ComputeRentVsBuy` | 67.0 ms | 80.0 ms |
+| `ComputeRentalCashFlow` | 69.3 ms | 124.9 ms |
+| `GetStateAssumptions` | 110.8 ms | 149.7 ms |
+
+**REUSE THE CONNECTION. It is worth about 3x and it is entirely on your side.**
+
+| | total | breakdown |
+| --- | --- | --- |
+| new connection per call | 58.0 ms | dns 2.5 + tcp 9.5 + **tls 24.0** + server 21.9 |
+| connection reused | **19.6 ms** (min 10.7) | no handshake |
+
+The handshake is **62% of a cold call**. The arithmetic behind these RPCs is
+single-digit milliseconds -- a `ComputePayment` is one closed-form annuity
+evaluation -- so essentially everything you wait for is connection setup, TLS,
+Envoy and gRPC framing. There is no server-side change available here that is
+worth as much as keep-alive on yours.
+
+Concretely: use one long-lived HTTP client rather than a new one per request.
+`requests.Session()` in Python, a shared `http.Client` in Go, a reused
+`fetch`/undici agent in Node, `curl --next` rather than repeated `curl`
+invocations.
+
+**For bulk work, use the batch RPC rather than a loop.**
+`ComputeRentVsBuyBatch` takes up to 1000 scenarios in one round trip. It is not
+a quota bypass -- it charges `cost_default()` PER SCENARIO -- and what it buys
+is the round trips and the rate limit, which is exactly what the table above
+says dominates. A thousand scenarios one-at-a-time is a thousand handshakes and
+a hundred seconds of rate limiting; batched it is one request.
+
+**The rate limit is per replica.** Envoy allows a burst of 100 and refills at
+10/s in each container, and the service runs more than one. Pace at or below
+that per connection rather than relying on the multiplier, because which
+replica you land on is not yours to choose.
+
+Guarded by `src/lib/api-latency-contract.test.ts` in the mortgage-nest-egg
+repository, which asserts p95 stays well inside a second. Its thresholds are
+deliberately ~5x the measured figures: this runs over the public internet
+against a shared ingress, and a tight bound would fail for reasons that are not
+regressions and would be switched off. The cold-vs-warm figures above are
+DOCUMENTED rather than asserted, because Node's fetch pools connections and
+ignores `Connection: close`, so that property cannot be measured from inside
+that harness -- it was taken with curl, where each invocation is a fresh
+process. An unmeasurable claim is documented, not asserted.
+
 ## 7. Checking it yourself
 
 ```bash
