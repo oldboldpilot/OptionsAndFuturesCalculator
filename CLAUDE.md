@@ -3894,10 +3894,28 @@ was incremental and a mixed tree is not broken. That is also why SGEE's
 `replicated_queue_formal_verification_tests`, which sets `SENSEN_NO_IMPORT_STD`
 on itself deliberately, still builds and passes.
 
-Known residue: the vendored cpp23-logger still precompiles its own `std.pcm` and
-`std.compat.pcm` from a smaller flag set. **Nothing consumes them** — every
-compile binds `-fmodule-file=std=` to the shared BMI, which takes precedence over
-`-fprebuilt-module-path` — so it is wasted build time, not a second BMI in use.
+Known residue, re-measured 2026-09-18 and MILDER than this line used to claim:
+the vendored cpp23-logger still DECLARES a rule precompiling its own `std.pcm`
+and `std.compat.pcm` from a smaller flag set (`-std=c++23 -stdlib=libc++ -fPIC
+-O3`). **Nothing consumes them** — every compile binds `-fmodule-file=std=` to
+the shared BMI, which takes precedence over `-fprebuilt-module-path`. This line
+said "wasted build time"; it is not even that. The rule feeds only the phony
+`build_logger_std_modules`, nothing depends on that target, and the BMI is
+**never produced** — `find backend/build -name 'std*.pcm'` returns exactly one
+file, `backend/build/std_modules/std.pcm`. A rule in the graph that nothing
+pulls costs nothing.
+
+**The logger can now be told to reuse the superproject's BMI, and this tree does
+not tell it.** cpp23-logger `c60d3c9` added an `elseif(EXTERNAL_STD_PCM OR
+BIGBROTHER_STD_PCM)` branch that re-exports an externally supplied `std.pcm`
+under the `LOGGER_STD_*` names and declares no second `--precompile` rule —
+exactly what `SGEE_EXTERNAL_STD_PCM` already does for SGEE. `backend/CMakeLists.txt`
+sets no `EXTERNAL_STD_PCM`, so the logger still takes the old branch;
+`LOGGER_STD_PCM_FLAGS` in `CMakeCache.txt` is the small flag set, which is how
+to tell which branch ran. Wiring it is a one-line `set(... CACHE FILEPATH ...
+FORCE)` before `add_subdirectory(sensen)` and it buys nothing measurable today,
+because the rule already never runs — recorded so the next reader does not
+rediscover the branch and assume it is in use.
 
 The 2026-07-30 investigation abandoned this because sensen's working tree had no
 `std_module_precompile` target. It has one now, and libc++ is the standard
@@ -4138,7 +4156,23 @@ engine linked at `rc=0` before that fix.
   vitest 4 pulls in. The build itself does not require it; the test suite does.
 - **Backend Docker Build:** `docker build -t options-backend backend/`
 - **Backend Tests:** `ninja -C backend/build build_tests && ctest --test-dir backend/build`
-  (ctest is **116/116**, up from 115 with `GroundingCorpusSweepTest`).
+  (ctest is **117/117** — 116 after `GroundingCorpusSweepTest`, and 117 once
+  SGEE `6ec13bfc` brought `CapiLeaseFilterTests` with the submodule bump of
+  2026-09-18. 83 of the 117 are SGEE-owned.)
+
+  **A submodule bump must be built in the EMBEDDED configuration, because that
+  is the one nobody upstream compiles.** SGEE `6ec13bfc` is green standalone and
+  did not configure here at all: its new test named `${CMAKE_SOURCE_DIR}` for
+  its own include path, which is this repository only when SGEE is the top-level
+  project, so the dependency scan died with `'sgee_capi.h' file not found`
+  pointing at `backend/bindings/capi` — a path under THIS project. Fixed
+  upstream in SGEE `6351d4df` with `SGEE_SOURCE_DIR`, which names that
+  repository wherever it sits. The same file's
+  `include_directories(${CMAKE_SOURCE_DIR}/src)` was the identical defect
+  **already silently active**: it had been adding this project's `backend/src`
+  to every SGEE test's include path. That is the worse half — it does not stop
+  the build, it finds the wrong file, which is the stale-BMI trap the SGEE
+  logger-BMI path comment in `backend/CMakeLists.txt` already records.
 
   **`ninja && ctest` is WRONG here and fails silently in the dangerous
   direction.** SGEE is embedded with `add_subdirectory(... EXCLUDE_FROM_ALL)`,

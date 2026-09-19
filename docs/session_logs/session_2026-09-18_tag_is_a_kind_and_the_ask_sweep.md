@@ -148,3 +148,52 @@ property that outlives today's slot kinds. Do not read it as live coverage.
   was pre-existing; the enum is now exhaustive and fails closed on
   `INVALID_PARAMETERS`. Behaviourally inert — `UnstatedField` is intercepted
   upstream and turned into a Clarification.
+
+## Addendum: the SGEE and cpp23-logger pins moved, and one of them did not build
+
+Both submodules were behind their remotes and were moved to the tips:
+
+| submodule | from | to |
+| --- | --- | --- |
+| `backend/external/SGEE` | `1eee7f08` | `6351d4df` |
+| `backend/cpp23-logger` | `23343a8` | `c60d3c9` |
+
+**SGEE `6ec13bfc` did not configure in this tree.** It adds
+`capi_lease_filter_tests` and points it at its own shim header with
+`${CMAKE_SOURCE_DIR}/bindings/capi` — which names this repository only when SGEE
+is the top-level project. Embedded through `add_subdirectory`, that is the
+SUPERPROJECT, so the scan died before compiling anything:
+
+```
+capi_lease_filter_test.cpp:27:10: fatal error: 'sgee_capi.h' file not found
+-I/.../OptionsAndFuturesCalculator/backend/bindings/capi     <- ours, not SGEE's
+```
+
+Fixed upstream rather than patched here — SGEE `6351d4df`, using
+`SGEE_SOURCE_DIR`, which CMake sets from `project(SGEE …)` and which therefore
+names that repository wherever it sits. `PROJECT_SOURCE_DIR` would not do:
+`tests/CMakeLists.txt` declares its own `project(sgee_tests …)`.
+
+The same file's `include_directories(${CMAKE_SOURCE_DIR}/src)` was the identical
+defect and was **already active and silent**, adding this project's
+`backend/src` to every SGEE test's include path. Fixed in the same commit. A
+path that resolves to the wrong existing directory does not fail the build; it
+finds the wrong file.
+
+**`backend/cpp23-logger` is not compiled by this build at all** —
+`add_subdirectory(cpp23-logger EXCLUDE_FROM_ALL)` is commented out in
+`backend/CMakeLists.txt` and what actually builds is sensen's nested copy at
+`sensen/external/fastestjsoninthewest/external/cpp23-logger`, which was already
+at `c60d3c9`. So this bump changes no bytes in any artefact; it makes the pin
+agree with what is really used. Stated because the gate below does NOT cover it,
+and saying "ctest passed" about a submodule the build never reads would be a
+false claim.
+
+Re-measured while there: CLAUDE.md's "wasted build time" note about the logger's
+second `std.pcm` was pessimistic. The rule feeds only the phony
+`build_logger_std_modules`, nothing depends on it, and the BMI is never
+produced — one `std.pcm` exists in the whole build tree.
+
+**Gate: ctest 117/117** (the new `CapiLeaseFilterTests` is the 117th), engine
+relinked with plain `ninja -C backend/build` as well as `build_tests`, because
+`build_tests` does not build `calculator_engine`.
