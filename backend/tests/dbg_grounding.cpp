@@ -129,6 +129,49 @@ auto split_tabs(const std::string& line) -> std::vector<std::string> {
     return fastjson::stringify(v);
 }
 
+/**
+ * Fields whose GOLD is known not to ground, by name rather than by message.
+ *
+ * The same three families `known_ungroundable` excuses, needed a second time
+ * because the ask sweep below has to skip them BEFORE it mutates anything: a
+ * field the utterance never states is one this gate has no opinion about, and
+ * feeding it in would assert the opposite of what the corpus says.
+ */
+[[nodiscard]] auto gold_does_not_ground(std::string_view field) -> bool {
+    return field == "pmi_annual_rate" || field == "prepaid_interest_days" ||
+           field == "monthly_piti_and_maintenance";
+}
+
+/**
+ * The gold value moved somewhere the utterance does not mention.
+ *
+ * x1.37 rather than a constant: a fixed sentinel would ground by accident on
+ * whichever row happened to contain it, and the multiplier keeps the value in
+ * the same order of magnitude, so what comes back is an ORDINARY ungrounded
+ * refusal rather than an out-of-range one. Counted slots are rounded, because a
+ * fractional `term_months` is refused on SHAPE and would test the grammar
+ * instead of the question.
+ */
+[[nodiscard]] auto invent_off_corpus(std::string_view field, const std::string& gold)
+    -> std::string {
+    double v = 0.0;
+    const auto [ptr, ec] = std::from_chars(gold.data(), gold.data() + gold.size(), v);
+    if (ec != std::errc{} || v == 0.0) { return {}; }
+    v *= 1.37;
+    switch (mv::classify_slot(field)) {
+        case mv::SlotKind::MonthCount:
+        case mv::SlotKind::YearCount:
+        case mv::SlotKind::PeriodIndex:
+        case mv::SlotKind::Frequency:
+            return std::format("{}", static_cast<std::int64_t>(std::llround(v)));
+        default:
+            break;
+    }
+    auto s = std::format("{:.6f}", v);
+    while (s.size() > 3 && s.back() == '0' && s[s.size() - 2] != '.') { s.pop_back(); }
+    return s;
+}
+
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
@@ -148,6 +191,13 @@ auto main(int argc, char** argv) -> int {
     int excused = 0;
     std::map<std::string, int> by_op;
     std::map<std::string, std::string> example;
+
+    // The ask sweep's own counters -- see the block at the bottom of the row
+    // loop for what it proves and why it is in this binary rather than a third.
+    int ask_probes = 0;
+    int ask_unusable = 0;
+    int ask_wrong = 0;
+    std::map<std::string, std::string> ask_example;
 
     std::string line;
     while (std::getline(in, line)) {
@@ -183,6 +233,60 @@ auto main(int argc, char** argv) -> int {
         if (!f[2].empty()) {
             if (!text.empty()) { text += "\n"; }
             text += f[2];
+        }
+
+        // ===================================================================
+        // THE ASK SWEEP: a question must never be asked about something the
+        // user SAID.
+        // ===================================================================
+        // The complement of the gate below, on the same corpus and in the same
+        // pass. That gate proves the verifier does not REFUSE its own gold;
+        // this one proves the layer on top of it does not turn a refusal into a
+        // CLARIFYING QUESTION when the utterance plainly carries the answer.
+        //
+        // The two fail in opposite directions and only one of them is visible
+        // from an accuracy number. Under-asking shows up as `asked_ok` and
+        // needs a model, an engine and a holdout -- measured 46/86 on v20,
+        // which is what sent anyone looking. OVER-asking shows up as nothing at
+        // all: the row is a refusal either way, `raw_exact` cannot move, and
+        // the only symptom is a user being asked for a figure they just gave.
+        // That is the direction with no natural alarm, so it is the direction
+        // that gets a gate.
+        //
+        // The probe is a MUTATION, which is what makes it a test of the
+        // question rather than of the corpus: each field that has a wording is
+        // moved off-corpus one at a time, and the verdict must stay a refusal.
+        // A mutation that still verifies is counted and skipped -- it means the
+        // invented value grounded anyway, so there is nothing to assert.
+        //
+        // It is deliberately scoped to fields `clarifying_question` can word.
+        // Anything else keeps its refusal by construction and asserting on it
+        // would pass for the wrong reason.
+        for (std::size_t fi = 0; fi < input.fields.size(); ++fi) {
+            const auto& ef = input.fields[fi];
+            if (ef.repeated || ef.values.size() != 1) { continue; }
+            if (gold_does_not_ground(ef.name)) { continue; }
+            if (mv::clarifying_question(f[0], ef.name).empty()) { continue; }
+
+            const auto invented = invent_off_corpus(ef.name, ef.values.front());
+            if (invented.empty()) { continue; }  // a convention zero states nothing
+
+            auto probe = input;
+            probe.fields[fi].values[0] = invented;
+            const auto pv = mv::verify_mortgage_output(probe, text);
+            if (pv.outcome == mv::Outcome::Proven) {
+                ++ask_unusable;  // the invented value grounded; nothing to assert
+                continue;
+            }
+            ++ask_probes;
+            if (pv.reason != mv::ReasonCode::UnstatedField) { continue; }
+
+            ++ask_wrong;
+            if (!ask_example.contains(ef.name)) {
+                ask_example[ef.name] =
+                    f[0] + " :: " + mv::clarifying_question(f[0], ef.name) + "  <- but the user said " +
+                    ef.values.front() + "\n      " + text;
+            }
         }
 
         const auto verdict = mv::ground_emitted_values(input, text);
@@ -233,5 +337,26 @@ auto main(int argc, char** argv) -> int {
         return 1;
     }
     std::printf("PASS: every generated label grounds against its own utterance.\n");
+
+    std::printf("ask sweep: %d probes, %d asked wrongly, %d unusable (mutation still grounded)\n",
+                ask_probes, ask_wrong, ask_unusable);
+    for (const auto& [field, ex] : ask_example) {
+        std::printf("  WOULD ASK about %-28s %s\n", field.c_str(), ex.c_str());
+    }
+    if (ask_wrong != 0) {
+        std::printf(
+            "\nFAIL: the layer would ask a clarifying question about a field the utterance\n"
+            "STATES. That is not a cosmetic slip -- it hides a corrupted value behind a\n"
+            "question, which is the one thing `refine_unstated` promises never to do.\n"
+            "Narrow what counts as evidence; do not widen the question table.\n");
+        return 1;
+    }
+    if (ask_probes == 0) {
+        std::printf(
+            "\nFAIL: the ask sweep probed nothing, so it proved nothing. Either no field\n"
+            "has a clarifying wording any more or the mutation stopped biting.\n");
+        return 1;
+    }
+    std::printf("PASS: no clarifying question is asked about a field the utterance states.\n");
     return 0;
 }

@@ -146,6 +146,13 @@ describes why it is that way and what it cost to find out.
 
 ## Session logs
 
+- [2026-09-18 — a tag is a kind, not a field: the asking gap was a stated interest rate speaking for every percent-typed slot, and the over-asking direction had no alarm until it got a sweep](session_logs/session_2026-09-18_tag_is_a_kind_and_the_ask_sweep.md)
+- [2026-09-14 (second) — the sensen pin moved onto master, and the v13 evaluation that scored the harness rather than the model](session_logs/session_2026-09-14_sensen_bump_and_v13_eval.md)
+- [2026-09-14 — recency in the dependency graph, and two logical defects in `reconcile`: the solver must never emit what the verifier will refuse](session_logs/session_2026-09-14_derivation_recency_and_reconcile.md)
+- [2026-08-29 (second) — the weekly state-assumptions refresh: a run that wrote nothing and reported success, and a write that was open to anyone](session_logs/session_2026-08-29_state_assumptions_refresh.md)
+- [2026-08-29 — clang 23 as the toolchain, and the two latent bugs a second compiler exposed: a guessed libc++ path and an archive member nobody referenced](session_logs/session_2026-08-29_clang23_toolchain.md)
+- [2026-08-10 — the ticket committed `expiration_days: 0` and every panel refused: the frontend had no test tooling at all until this session](session_logs/session_2026-08-10_frontend-ticket-expiry-and-test-suite.md)
+- [2026-08-05 — the repetition penalty was applied before the greedy argmax, the model hosting was replaced, and the harness was the thing being measured](session_logs/session_2026-08-05_penalty_hosting_and_harness.md)
 - [2026-09-09 — the whole codebase documented, then the documentation verified: fabrication clusters in THIN files, an edge function wired to nothing, and an auto-correction that made the citations worse](session_logs/session_2026-09-09_code_documentation_sweep.md)
 - [2026-09-05 — the finance surface swept end to end: two wrong answers served with 200 OK, three dead operations, and a probe that lied](session_logs/session_2026-09-05_finance_surface_sweep.md)
 - [2026-08-20 — the mortgage assistant was never broken: three dataset defects, a vocabulary extension that starved the adapters, and three retrains to prove it](session_logs/session_2026-08-20_mortgage_corpus_and_three_retrains.md)

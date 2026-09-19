@@ -62,10 +62,18 @@ ROW SHAPES, from agent/dataset/build_mortgage_dataset.py:
     THE 5-TURN ROWS ARE TWO DIFFERENT SHAPES AND MUST NOT BE POOLED. Both
     `make_clarification` and `make_modification` in build_mortgage_dataset.py
     produce five turns, and the only thing that tells them apart is whether the
-    FIRST assistant turn carries a `<params>` block. In val.jsonl: 81
-    clarification rows (first assistant turn is a question) and 61 modification
-    rows (first assistant turn is already an answer, and the user's reply is
-    "redo it over 20-year").
+    FIRST assistant turn carries a `<params>` block. In the val.jsonl of
+    2026-09-18 -- sha256 `1aa3ce94c344217e12f7...`, 600 rows -- that is **86
+    clarification** rows (first assistant turn is a question) and **68
+    modification** rows (first assistant turn is already an answer, and the
+    user's reply is "redo it over 20-year").
+
+    THESE COUNTS ARE A PROPERTY OF ONE FILE AND THEY HAVE ALREADY GONE STALE
+    ONCE. They read 81 and 61 -- a corpus revision ago -- while the file in the
+    tree held 86 and 68, so a reported `asked_ok` of 46/86 could not be
+    reconciled against this docstring and had to be re-derived from the data.
+    Count them from the holdout you are actually scoring; the sha is what makes
+    a figure quotable, not this paragraph.
 
     Pooling them makes the first-call metric meaningless, and worse, it reads as
     a model failure: scoring "did it ask?" against a modification row punishes

@@ -1383,6 +1383,47 @@ export [[nodiscard]] auto dated_utterance_rejects_operation(std::string_view ope
 export [[nodiscard]] auto utterance_states_nothing_for(std::string_view field,
                                                        std::string_view user_text) -> bool;
 
+/**
+ * The same question, asked against what the model ACTUALLY EMITTED -- which is
+ * what the service has and what the two-argument form cannot see.
+ *
+ * A TAG IS A KIND, NOT A FIELD, and that is the defect this overload exists to
+ * close. `LiteralTag::Percent` says "this number is a percentage"; it does not
+ * say WHICH percentage. So on
+ *
+ *   "My home is worth $1,047,400, I owe $576,500. I want to draw $46,900 from
+ *    a HELOC at 9.6% over 20 years."
+ *
+ * the stated INTEREST RATE makes the utterance contain a Percent literal, and
+ * the two-argument form therefore reports that the user said something about
+ * `max_ltv_rate` -- a different Percent slot the utterance never mentions. The
+ * refusal that follows ("max_ltv_rate = 0.80 does not correspond to anything in
+ * the request") names a number the model invented, against a question the user
+ * was never asked. Measured on the 600-row holdout: 22 of the 40 rows that
+ * should have asked and did not are exactly this, across two field families.
+ *
+ * THE DISCRIMINATOR IS WHETHER THE LITERAL IS SPOKEN FOR. A compatible literal
+ * blocks the question only while no OTHER emitted field grounds against it: the
+ * 9.6 above is consumed by `annual_rate`, so it is not available to be what the
+ * user said about the LTV cap, and the question is restored.
+ *
+ * It keeps the documented dangerous failure a refusal BY CONSTRUCTION rather
+ * than by exception. `present_value = 304000.00` against a 495,000 utterance is
+ * refused because 495000 grounds NOTHING else -- `present_value` is the only
+ * Money slot on that operation -- so it is unclaimed and still available. The
+ * same holds for a model that ZEROES a field the user did state: on "mortgage
+ * payment $1,400/month" -> `periodic_mortgage_payment = 0.00`, the 1400 is
+ * claimed by nobody and the refusal stands, which is the honest answer.
+ *
+ * Passing a default-constructed input reproduces the two-argument behaviour
+ * exactly -- no fields means no claims means every literal blocks -- so this
+ * only ever WIDENS asking, and only where another field already accounted for
+ * the evidence.
+ */
+export [[nodiscard]] auto utterance_states_nothing_for(std::string_view field,
+                                                       std::string_view user_text,
+                                                       const MortgageParamsInput& input) -> bool;
+
 /** The question to ask when `field` was never stated, or empty when this
  *  contract has no natural wording for it. */
 export [[nodiscard]] auto clarifying_question(std::string_view operation,
@@ -3608,7 +3649,159 @@ auto ground_emitted_values(const MortgageParamsInput& input, std::string_view us
 // The composed gate.
 // ---------------------------------------------------------------------------
 
+namespace detail {
+
+/**
+ * Which of the utterance's literals are already SPOKEN FOR by some field other
+ * than `failing_field`.
+ *
+ * This is the grounding loop of `ground_emitted_values` run for a different
+ * purpose: there it asks "can this field's value be derived from the text",
+ * here it asks "which literal did that derivation consume". It is deliberately
+ * the SAME `expand_candidates` rather than a second, simpler notion of
+ * matching -- a claim computed by looser rules than grounding would mark a
+ * literal spoken for that grounding never actually used, and the question that
+ * followed would be asked about evidence still sitting in the utterance.
+ *
+ * Three conservative choices, all in the direction of claiming LESS, because
+ * under-claiming keeps a refusal and over-claiming invents a question:
+ *
+ *  - A value claims at most ONE literal: the first it grounds against, mirroring
+ *    grounding's own `break`. A field is one statement by the user.
+ *  - Two fields MAY claim the same literal. "$1,236,300" legitimately grounds
+ *    both `loan_amount` and `original_home_value`, and one literal serving two
+ *    fields does not free up a second literal for a third.
+ *  - A convention value and a solver seed claim NOTHING. They ground against no
+ *    literal by construction (`is_convention_value`, `is_ungrounded_field`), so
+ *    letting `pmi_annual_rate: 0.0000` consume a percentage it never
+ *    corresponded to would silence a question about a rate the user really did
+ *    omit. This is the same reasoning that keeps those two exemptions narrow at
+ *    the grounding gate itself.
+ *
+ * M9, the binary netted-loan map, is not consulted: it derives one value from
+ * TWO literals and does not report which pair, so a claim taken from it could
+ * not be attributed. A field grounded only through M9 therefore claims nothing,
+ * which again fails toward the refusal.
+ *
+ * KNOWN LIMIT, inherited rather than introduced: a claim is only as good as the
+ * grounding it reads, and grounding is PER FIELD -- nothing asks whether the
+ * literal belongs to the field that grounded against it. So a model that SWAPS
+ * two values claims both literals and looks, from here, like a user who stated
+ * one of them. Measured on the holdout: "rent $1,900/month, mortgage payment
+ * $1,400/month" came back with `periodic_operating_expenses = 1400.00` and
+ * `periodic_mortgage_payment = 0.00`, and the 1400 is duly claimed by the wrong
+ * field. Those rows keep their refusal, but they keep it because
+ * `clarifying_question` has no wording for `periodic_mortgage_payment` -- not
+ * because this function saw the swap. Do not add that wording to "fix" them: it
+ * would ask the user for a payment they had just given. The swap is the same
+ * per-field blindness the 20%-down defect and the repair-budget defect record,
+ * and it is fixed there, not here.
+ */
+/**
+ * Fields for which the lexer's down-payment adjacency is direct evidence.
+ *
+ * AN ADJACENCY FLAG QUALIFIES WHAT A LITERAL MAY GROUND, so the question "did
+ * the user state anything for this field" has to read the same qualifications
+ * the grounding MAPS read -- M0 and M9 both consult `names_down_payment`, and a
+ * tag/kind matrix that ignores it answers a different question from the gate it
+ * is narrowing. Concretely: "20% down" is a PERCENT literal and `down_payment`
+ * is a MONEY slot, so on tags alone the user appears to have said nothing about
+ * it. They said exactly one thing about it. Treating that as silence turns the
+ * documented unit-confusion misuse class -- `down_payment = 20.00` out of "20%
+ * down" -- into "how much are you putting down?", asked of someone who just
+ * answered it.
+ *
+ * UNREACHABLE TODAY, and recorded as such rather than quietly kept. The
+ * same-kind rule below already covers every live case: `down_payment` is Money
+ * and so is everything that could claim its literal, so the claim never counts
+ * and the Money literals block anyway. Mutation-checked in exactly that
+ * direction -- deleting this guard fails nothing, on 235 unit checks and 1,355
+ * sweep probes.
+ *
+ * It is kept for the reason the `guess` grounding exemption is kept: it states
+ * a PROPERTY -- an adjacency flag qualifies what a literal may ground, so it
+ * qualifies what counts as evidence -- which is true of this function whether
+ * or not today's slot kinds happen to line up. A `down_payment_percent`
+ * reclassified, or a new down-payment field of another kind, lands back here.
+ * Do not read it as live coverage; the same-kind rule is what covers that.
+ *
+ * The next adjacency flag added to `NumericLiteral` wants the same treatment;
+ * this is the seam for it.
+ */
+[[nodiscard]] constexpr auto down_payment_adjacency_applies(std::string_view field) -> bool {
+    return field == "down_payment" || field == "down_payment_percent";
+}
+
+[[nodiscard]] inline auto claimed_literals(const MortgageParamsInput& input,
+                                           std::string_view failing_field,
+                                           const std::vector<NumericLiteral>& literals,
+                                           std::int64_t periods_per_year) -> std::vector<bool> {
+    std::vector<bool> claimed(literals.size(), false);
+
+    const SlotKind failing_kind = classify_slot(failing_field);
+
+    for (const auto& emitted : input.fields) {
+        if (emitted.name == failing_field) { continue; }
+        const SlotKind kind = classify_slot(emitted.name);
+        if (!is_numeric_kind(kind)) { continue; }
+        // A FIELD OF THE SAME KIND DOES NOT SPEAK FOR THE LITERAL, and this is
+        // the line that keeps the rule honest.
+        //
+        // Two slots of one kind are interchangeable enough that the user's
+        // single number could belong to either, so it stays evidence for both.
+        // `loan_amount` and `original_home_value` are the case that proves it:
+        // on "Amortize $467,500 at 5.96% over 15-year" they are the SAME
+        // amount, and letting one consume the 467500 made a mangled
+        // `loan_amount` look unstated -- "How much is the loan or the property
+        // worth?", asked of someone who had just said. `recovery_period`
+        // against `life` is the same shape in YearCount. The corpus sweep found
+        // 114 rows of it.
+        //
+        // Across kinds the opposite holds, and `classify_slot` is already the
+        // place this project decides it: `max_ltv_rate` is a Ratio and
+        // `annual_rate` is a Rate precisely because "ends in rate" is
+        // misleading for one of them, and `annual_tax_rate` is a Ratio for the
+        // same reason with 205 corpus rows behind it. A number that is an
+        // interest rate is not an LTV cap, so once the rate has taken it the
+        // cap has nothing left -- which is the question this restores.
+        if (kind == failing_kind) { continue; }
+        const __int128 tolerance = slot_tolerance_units(kind);
+
+        for (const auto& raw : emitted.values) {
+            const auto parsed = parse_strict_decimal(raw);
+            if (!parsed.has_value()) { continue; }
+            if (is_ungrounded_field(emitted.name)) { continue; }
+            if (is_convention_value(emitted.name, *parsed)) { continue; }
+
+            for (std::size_t i = 0; i < literals.size(); ++i) {
+                bool hit = false;
+                for (const auto& candidate :
+                     expand_candidates(literals[i], kind, emitted.name, periods_per_year)) {
+                    if (parsed->within(candidate, tolerance)) {
+                        hit = true;
+                        break;
+                    }
+                }
+                if (hit) {
+                    claimed[i] = true;
+                    break;
+                }
+            }
+        }
+    }
+    return claimed;
+}
+
+}  // namespace detail
+
 auto utterance_states_nothing_for(std::string_view field, std::string_view user_text) -> bool {
+    // No emitted fields means no claims, so every compatible literal blocks --
+    // which is exactly what this function did before the overload existed.
+    return utterance_states_nothing_for(field, user_text, MortgageParamsInput{});
+}
+
+auto utterance_states_nothing_for(std::string_view field, std::string_view user_text,
+                                  const MortgageParamsInput& input) -> bool {
     const auto kind = classify_slot(field);
     // An unclassified slot is already Indeterminate upstream; claiming the user
     // said nothing about it would put a question in front of a verifier gap.
@@ -3616,7 +3809,26 @@ auto utterance_states_nothing_for(std::string_view field, std::string_view user_
     // Enumerations and booleans are not numbers and no literal bears on them.
     if (kind == SlotKind::Enumeration || kind == SlotKind::Boolean) { return false; }
 
-    for (const auto& lit : lex_numeric_literals(user_text)) {
+    const auto literals = lex_numeric_literals(user_text);
+    // The same cadence grounding itself inferred, for the same reason: a
+    // candidate set built at the wrong cadence claims the wrong literal.
+    const std::int64_t periods_per_year =
+        detail::infer_periods_per_year(input.fields, literals).value_or(12);
+    const auto claimed = detail::claimed_literals(input, field, literals, periods_per_year);
+
+    for (std::size_t i = 0; i < literals.size(); ++i) {
+        const auto& lit = literals[i];
+        // Checked BEFORE the claim skip, deliberately: a literal the lexer saw
+        // naming a down payment is evidence about the down payment whether or
+        // not some other field also grounded against it. Being spoken for twice
+        // does not make the user's statement disappear, and this is the
+        // direction that keeps a refusal.
+        if (lit.names_down_payment && detail::down_payment_adjacency_applies(field)) {
+            return false;
+        }
+        // Already accounted for by another field, so it is not evidence about
+        // this one.
+        if (claimed[i]) { continue; }
         // Untagged is compatible with everything, deliberately: a bare number
         // is ambiguous, and the ambiguous case must fall through to the refusal
         // this function exists to NARROW rather than to widen.
@@ -3695,14 +3907,18 @@ auto clarifying_question(std::string_view operation, std::string_view field) -> 
  * there before, and a field with no natural question keeps its refusal too --
  * a question assembled from a proto field name reads like a stack trace.
  */
-[[nodiscard]] auto refine_unstated(VerificationVerdict v, std::string_view user_text)
-    -> VerificationVerdict {
+[[nodiscard]] auto refine_unstated(VerificationVerdict v, std::string_view user_text,
+                                   const MortgageParamsInput& input) -> VerificationVerdict {
     if (v.outcome == Outcome::Proven) { return v; }
     if (v.reason != ReasonCode::UngroundedValue && v.reason != ReasonCode::OutOfRange) {
         return v;
     }
     if (v.field.empty()) { return v; }
-    if (!utterance_states_nothing_for(v.field, user_text)) { return v; }
+    // The EMITTED fields are passed, not just the text: a literal another field
+    // already grounded is not evidence about this one. See the overload's
+    // comment -- without it a stated interest rate silences the question about
+    // every other percentage in the operation.
+    if (!utterance_states_nothing_for(v.field, user_text, input)) { return v; }
     if (clarifying_question("", v.field).empty()) { return v; }
     v.reason = ReasonCode::UnstatedField;
     return v;
@@ -3725,11 +3941,11 @@ auto verify_mortgage_output(const MortgageParamsInput& input, std::string_view u
     // ---- G1 + G2 + G5 ----
     auto structural = verify_mortgage_params(input);
     if (structural.outcome != Outcome::Proven) {
-        return refine_unstated(std::move(structural), user_text);
+        return refine_unstated(std::move(structural), user_text, input);
     }
 
     // ---- G3 ----
-    return refine_unstated(ground_emitted_values(input, user_text), user_text);
+    return refine_unstated(ground_emitted_values(input, user_text), user_text, input);
 }
 
 // ---------------------------------------------------------------------------

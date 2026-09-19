@@ -2201,6 +2201,209 @@ auto main() -> int {
               "a bare untagged number could be anything, so nothing is declared unstated");
     }
 
+    // =======================================================================
+    section("A TAG IS A KIND, NOT A FIELD: a claimed literal states nothing");
+    // =======================================================================
+    // `LiteralTag::Percent` says "this number is a percentage". It does not say
+    // WHICH percentage -- and the section above consulted nothing else, so a
+    // stated INTEREST RATE reported that the user had also spoken about every
+    // other Percent slot in the operation. Measured on the 600-row holdout with
+    // v20: of the 40 clarification rows that did not ask, 22 were exactly this,
+    // in two families -- `max_ltv_rate` on ComputeHeloc (18) and `annual_rate`
+    // on ComputeDetailedAmortization (5, one of them arriving as a BOUNDS
+    // failure rather than a grounding one).
+    //
+    // The discriminator is whether the literal is SPOKEN FOR: it blocks the
+    // question only while no OTHER emitted field grounds against it. Both
+    // directions are asserted, and as in the section above the refusing one is
+    // the one that matters.
+    {
+        // --- ASK: the only percentage is the rate, and the rate took it. ----
+        // Production utterance and production emission, verbatim: the model
+        // invented the conventional 80% cap, and the refusal that followed
+        // ("max_ltv_rate = 0.80 does not correspond to anything in the request
+        // (the nearest figure you gave is 9.6)") named a number against a
+        // question the user was never asked.
+        const std::string heloc =
+            "My home is worth $1,047,400, I owe $576,500. I want to draw $46,900 "
+            "from a HELOC at 9.6% over 20 years.";
+        auto heloc_in = params("ComputeHeloc", {{"home_value", "1047400.00"},
+                                                {"current_mortgage_balance", "576500.00"},
+                                                {"max_ltv_rate", "0.80"},
+                                                {"drawn_amount", "46900.00"},
+                                                {"annual_rate", "0.0960"},
+                                                {"repayment_term_years", "20"},
+                                                {"payments_per_year", "12"}});
+
+        check(!mv::utterance_states_nothing_for("max_ltv_rate", heloc),
+              "text alone: the stated 9.6% looks like the user speaking about the LTV cap");
+        check(mv::utterance_states_nothing_for("max_ltv_rate", heloc, heloc_in),
+              "... but `annual_rate` already claimed it, so the cap was never stated");
+
+        auto hv = mv::verify_mortgage_output(heloc_in, heloc);
+        check(hv.reason == mv::ReasonCode::UnstatedField,
+              "... and the whole gate now answers UnstatedField rather than refusing");
+        check(hv.field == "max_ltv_rate", "... naming the cap");
+        check(!mv::clarifying_question("ComputeHeloc", "max_ltv_rate").empty(),
+              "... which has a natural wording, so a question is actually asked");
+
+        // --- REFUSE: a SECOND percentage is left over, so one of them may well
+        // be the cap the model got wrong. One unclaimed literal is enough.
+        const std::string heloc_ltv =
+            "My home is worth $1,047,400, I owe $576,500. I want to draw $46,900 "
+            "from a HELOC at 9.6% over 20 years, capped at 85% LTV.";
+        check(!mv::utterance_states_nothing_for("max_ltv_rate", heloc_ltv, heloc_in),
+              "the stated 85% cap is claimed by nobody, so 0.80 contradicts the user");
+        check(mv::verify_mortgage_output(heloc_in, heloc_ltv).reason ==
+                  mv::ReasonCode::UngroundedValue,
+              "... and that stays a REFUSAL");
+
+        // --- REFUSE: the documented dangerous failure, now through the
+        // claim-aware path. It is preserved BY CONSTRUCTION, not by exception:
+        // `present_value` is the only Money slot on ComputePayment, so the
+        // 495,000 grounds nothing else and is still available to be what the
+        // user said.
+        const std::string stated495 =
+            "What's the payment on a $495,000 loan at 6% over 30 years?";
+        auto corrupted495 = params("ComputePayment", {{"rate", "0.005"},
+                                                      {"periods", "360"},
+                                                      {"present_value", "304000.00"},
+                                                      {"future_value", "0.00"},
+                                                      {"timing", "END_OF_PERIOD"}});
+        check(!mv::utterance_states_nothing_for("present_value", stated495, corrupted495),
+              "495,000 is claimed by no other field, so it is still evidence");
+        check(mv::verify_mortgage_output(corrupted495, stated495).reason ==
+                  mv::ReasonCode::UngroundedValue,
+              "... so pricing a different loan is still refused");
+
+        // --- REFUSE: a CONVENTION value claims nothing. --------------------
+        // `pmi_annual_rate: 0.0000` grounds against no literal by construction
+        // (kConventionValues exempts it), so letting it consume the stated 6.5%
+        // would silence a question about a rate the model really did mangle.
+        // This is the sharpest mutation target in the section: drop the
+        // is_convention_value guard in claimed_literals and this flips to
+        // UnstatedField, asking "What's the interest rate?" about a rate the
+        // user gave.
+        const std::string rate_stated =
+            "Amortize a $350,000 loan at 6.5% over 30 years.";
+        auto mangled_rate = params("ComputeAmortization",
+                                   {{"loan_amount", "350000.00"},
+                                    {"annual_rate", "0.0000"},
+                                    {"term_months", "360"},
+                                    {"monthly_overpayment", "0.00"},
+                                    {"pmi_annual_rate", "0.0000"},
+                                    {"original_home_value", "350000.00"},
+                                    {"annual_repairs", "0.00"},
+                                    {"annual_insurance", "0.00"},
+                                    {"annual_cost_growth", "0.0000"}});
+        check(!mv::utterance_states_nothing_for("annual_rate", rate_stated, mangled_rate),
+              "a convention zero does not consume the 6.5% the user actually stated");
+        check(mv::verify_mortgage_output(mangled_rate, rate_stated).reason ==
+                  mv::ReasonCode::UngroundedValue,
+              "... so a zeroed rate against a stated one is still a refusal");
+
+        // --- ASK: the same shape with the percentage genuinely spent. -------
+        // "26.77% tax bracket" is claimed by `annual_tax_rate`, and there is no
+        // other percentage, so the interest rate really was never given.
+        const std::string bracket_only =
+            "Amortize $1,236,300 over 20-year. I'm in the 26.77% tax bracket.";
+        auto no_rate_given = params("ComputeDetailedAmortization",
+                                    {{"loan_amount", "1236300.00"},
+                                     {"annual_rate", "0.0000"},
+                                     {"term_months", "240"},
+                                     {"monthly_overpayment", "0.00"},
+                                     {"pmi_annual_rate", "0.0000"},
+                                     {"original_home_value", "1236300.00"},
+                                     {"annual_tax_rate", "0.2677"},
+                                     {"annual_repairs", "0.00"},
+                                     {"annual_insurance", "0.00"},
+                                     {"annual_cost_growth", "0.0000"}});
+        check(mv::utterance_states_nothing_for("annual_rate", bracket_only, no_rate_given),
+              "the tax bracket is spoken for, so the interest rate was never stated");
+        check(mv::verify_mortgage_output(no_rate_given, bracket_only).reason ==
+                  mv::ReasonCode::UnstatedField,
+              "... and the row asks instead of refusing");
+
+        // --- The two-argument form is the three-argument one with no claims. -
+        // Every assertion in the section above is therefore still describing
+        // live behaviour: an empty input claims nothing, so every compatible
+        // literal blocks exactly as it always did.
+        check(mv::utterance_states_nothing_for("max_ltv_rate", heloc, mv::MortgageParamsInput{}) ==
+                  mv::utterance_states_nothing_for("max_ltv_rate", heloc),
+              "no emitted fields means no claims means the original behaviour");
+
+        // --- A MIS-ASSIGNED literal is claimed, and only the missing wording
+        // stops a wrong question. Stated rather than hidden, because it is the
+        // known limit of reading claims out of a per-field gate.
+        //
+        // Production row: the model put the $1,400 MORTGAGE PAYMENT into
+        // operating expenses and zeroed the payment. The 1400 is duly claimed
+        // -- by the wrong field -- so the claim rule would call the payment
+        // unstated. What keeps the refusal is that `periodic_mortgage_payment`
+        // has no natural wording, and that is the reason not to give it one:
+        // the question would ask for a figure the user had just supplied.
+        const std::string swapped_utt =
+            "Rental worth $524,800, $125,600 cash invested, rent $1,900/month, "
+            "mortgage payment $1,400/month. What's my return?";
+        auto swapped = params("ComputeRentalRoi", {{"property_value", "524800.00"},
+                                                   {"total_cash_invested", "125600.00"},
+                                                   {"periodic_gross_rent", "1900.00"},
+                                                   {"periodic_operating_expenses", "1400.00"},
+                                                   {"periodic_mortgage_payment", "0.00"},
+                                                   {"periods_per_year", "12"}});
+        check(mv::clarifying_question("ComputeRentalRoi", "periodic_mortgage_payment").empty(),
+              "there is deliberately no wording for a payment the user already gave");
+        check(mv::verify_mortgage_output(swapped, swapped_utt).reason ==
+                  mv::ReasonCode::UngroundedValue,
+              "... so a swapped pair keeps its refusal rather than asking");
+
+        // --- REFUSE: a field of the SAME KIND does not speak for the literal.
+        // `loan_amount` and `original_home_value` are both Money and on a
+        // full-price loan they are the SAME amount, so letting one consume the
+        // 467,500 made a mangled `loan_amount` look unstated -- "How much is
+        // the loan or the property worth?", asked of someone who had just said
+        // it. GroundingCorpusSweepTest's ask sweep found 114 rows of this, and
+        // it is the reason a claim is only counted ACROSS kinds.
+        const std::string amort =
+            "Amortize $467,500 at 5.96% over 15-year. I'm in the 22.46% tax bracket.";
+        auto same_kind = params("ComputeDetailedAmortization",
+                                {{"loan_amount", "640475.00"},
+                                 {"annual_rate", "0.0596"},
+                                 {"term_months", "180"},
+                                 {"monthly_overpayment", "0.00"},
+                                 {"pmi_annual_rate", "0.0000"},
+                                 {"original_home_value", "467500.00"},
+                                 {"annual_tax_rate", "0.2246"},
+                                 {"annual_repairs", "0.00"},
+                                 {"annual_insurance", "0.00"},
+                                 {"annual_cost_growth", "0.0000"}});
+        check(!mv::utterance_states_nothing_for("loan_amount", amort, same_kind),
+              "another MONEY field holding the same figure does not consume it");
+        check(mv::verify_mortgage_output(same_kind, amort).reason ==
+                  mv::ReasonCode::UngroundedValue,
+              "... so a mangled loan amount is refused, not asked about");
+
+        // And the cross-kind case on the SAME utterance still asks, which is
+        // what makes the rule a discriminator rather than a switch: the tax
+        // RATIO took the 22.46% and the interest RATE is genuinely absent.
+        auto cross_kind = params("ComputeDetailedAmortization",
+                                 {{"loan_amount", "467500.00"},
+                                  {"annual_rate", "0.0000"},
+                                  {"term_months", "180"},
+                                  {"monthly_overpayment", "0.00"},
+                                  {"pmi_annual_rate", "0.0000"},
+                                  {"original_home_value", "467500.00"},
+                                  {"annual_tax_rate", "0.2246"},
+                                  {"annual_repairs", "0.00"},
+                                  {"annual_insurance", "0.00"},
+                                  {"annual_cost_growth", "0.0000"}});
+        const std::string no_rate_amort =
+            "Amortize $467,500 over 15-year. I'm in the 22.46% tax bracket.";
+        check(mv::verify_mortgage_output(cross_kind, no_rate_amort).reason ==
+                  mv::ReasonCode::UnstatedField,
+              "a Ratio claiming the only percentage still leaves the Rate unstated");
+    }
+
     // -----------------------------------------------------------------------
     // A repair budget is not an overpayment on the loan.
     //

@@ -1366,6 +1366,125 @@ two-turn exchange completes -- `prior_clarification` "30 years" yields
 reproduces both production messages; making every field look unstated fails the
 assertion that a corrupted value STAYS a refusal.
 
+### A TAG IS A KIND, NOT A FIELD -- the other half of the asking fix
+
+The section above restored asking from 0/90 to 49/90 and then stopped moving.
+Re-measured on 2026-09-18 against the CURRENT holdout and the CURRENT model,
+`asked_ok` was **46 of 86**, and the 40 that did not ask were not scattered --
+they were three fields.
+
+**EVERY FIGURE ABOVE IS ON A DIFFERENT HOLDOUT FROM THIS ONE.** The 0/90 and
+49/90 were measured on `849e8a349a2470b6`; this is
+`agent/dataset/data_mortgage/val.jsonl` sha256 `1aa3ce94c344217e12f7`, 600 rows,
+**86 clarification and 68 modification** five-turn rows. `eval_grpc_mortgage.py`'s
+own docstring said 81 and 61 and was stale. Quote the sha or the number means
+nothing -- this file's oldest rule, and it cost a wrong denominator again.
+
+**The defect:** `utterance_states_nothing_for` asked "does the utterance contain
+any literal of a compatible TAG?" -- and a tag is a KIND (Money/Percent/Years),
+not a field. `LiteralTag::Percent` says *this number is a percentage*; it does
+not say WHICH percentage. So on
+
+```
+"My home is worth $1,047,400, I owe $576,500. I want to draw $46,900 from a
+ HELOC at 9.6% over 20 years."
+-> "max_ltv_rate" = 0.80 does not correspond to anything in the request
+   (the nearest figure you gave is 9.6)
+```
+
+the stated INTEREST RATE made the utterance look like the user speaking about
+the LTV cap, and the model's invented 80% conventional default was refused
+instead of asked about. 18 rows. `annual_rate` against a stated tax bracket was
+the same shape for 5 more.
+
+**The discriminator is whether the literal is SPOKEN FOR.** A compatible literal
+blocks the question only while no OTHER emitted field grounds against it -- the
+9.6 is consumed by `annual_rate`, so it is not available to be what the user
+said about the cap. `refine_unstated` now receives the emitted
+`MortgageParamsInput`, which is the thing the two-argument form could not see.
+
+**It preserves the documented dangerous failure BY CONSTRUCTION, not by
+exception.** `present_value = 304000.00` against a 495,000 utterance is refused
+because 495000 grounds NOTHING else -- `present_value` is the only Money slot on
+that operation -- so it is unclaimed and still evidence.
+
+**A CLAIM ONLY COUNTS ACROSS SLOT KINDS, and the first version got this wrong.**
+Two slots of one kind are interchangeable enough that the user's single number
+could belong to either. `loan_amount` and `original_home_value` are the case
+that proves it: on "Amortize $467,500 at 5.96% over 15-year" they are the SAME
+amount, so one consuming the 467500 made a mangled `loan_amount` look unstated
+-- *"How much is the loan or the property worth?"*, asked of someone who had
+just said. `recovery_period` against `life` is the same shape in YearCount.
+**114 corpus rows**, found by the new gate below within a minute of it existing,
+and invisible to every accuracy number there is.
+
+Across kinds the opposite holds, and `classify_slot` is already where this
+project decides it: `max_ltv_rate` is a **Ratio** and `annual_rate` a **Rate**
+precisely because "ends in rate" misleads for one of them, and `annual_tax_rate`
+is a Ratio for the same reason with 205 corpus rows behind it. The fix leans on
+a distinction that was already argued and already tested.
+
+**Measured, paired, one engine asserted on `:50051`, v20 Q8_0 through the real
+`ParseOperation`:**
+
+| | raw | served | asks when it should | answers when stated |
+| --- | --- | --- | --- | --- |
+| v20 + the fix above | 412/560 | 433 | **46/86** | 68/68 |
+| **v20 + claimed-literal narrowing** | 414/560 | 435 | **69/86** | 68/68 |
+
+`asked_ok` **+23 and ZERO lost**, row-paired. `answered_ok` stays 68/68, so
+nothing began asking on a complete request. raw/served move +2 with McNemar
+**p = 0.7539 -- not significant**, gained 6 and lost 4, every one of them
+`ComputeHeloc`: asking the LTV question changes turn two's `prior_question`, so
+the model sees a different prompt and answers differently in both directions.
+That is the same effect this file records at 449 -> 443 and at +17; **it is not
+a capability change and must not be quoted as one.**
+
+**The 17 rows still not asking are NOT this defect, and two of them are worth
+naming.** 12 are the model answering with a full params block that verifies --
+capability, not serving. The other 5 are `ComputeRentalRoi`, where the model
+SWAPPED two fields: it put the stated "$1,400/month mortgage payment" into
+`periodic_operating_expenses` and zeroed the payment. Those keep their refusal,
+correctly -- but they keep it because `clarifying_question` has no wording for
+`periodic_mortgage_payment`. **Do not add one to close the gap:** it would ask
+the user for a figure they had just supplied. The swap is the per-field
+blindness the 20%-down and repair-budget defects already record, and it is fixed
+in the lexer, not here.
+
+### The gate that finds the OTHER direction, which nothing could see
+
+`GroundingCorpusSweepTest` gained an **ask sweep** in the same binary and the
+same pass (`backend/tests/dbg_grounding.cpp`). The existing half proves the
+verifier does not REFUSE its own gold; this half proves the layer above it does
+not turn a refusal into a QUESTION about something the utterance states.
+
+**The two fail in opposite directions and only one has an alarm.** Under-asking
+surfaces as `asked_ok` and needs a model, an engine and a holdout -- 46/86 is
+what sent anyone looking. **Over-asking surfaces as nothing at all:** the row is
+a refusal either way, `raw_exact` cannot move, `served_exact` cannot move, and
+the only symptom is a user being asked for a number they just gave. That is the
+direction that gets a gate.
+
+It is a MUTATION sweep, which is what makes it a test of the question rather
+than of the corpus: every field with a clarifying wording is moved off-corpus
+one at a time (x1.37, so the result is an ordinary ungrounded value rather than
+an out-of-range one) and the verdict must stay a refusal. A mutation that still
+verifies is counted and skipped. **1,355 probes, 0 asked wrongly**, and it found
+the 114 above immediately.
+
+Mutation-checked three ways, all with `CCACHE_DISABLE=1` because the edits are
+to a module interface:
+- deleting the same-kind guard reproduces **exactly 114** wrong asks;
+- disabling claims entirely fails **5** unit checks -- the restored HELOC and
+  tax-bracket questions -- while the ask sweep still passes, which is the
+  signature that proves the claim rule is what restores asking;
+- deleting the down-payment adjacency guard fails **nothing**. It is
+  UNREACHABLE today and is kept, marked as such, for the reason the `guess`
+  grounding exemption is kept: it states a property that outlives today's slot
+  kinds. Do not read it as live coverage.
+
+`ctest` **116/116**, `test_mortgage_verification` **235 checks / 0 failures**.
+
 ## Security posture: what is enforced, and what is only claimed
 
 Measured on 2026-08-28, not recalled. The distinction between "we observed it"

@@ -2087,6 +2087,11 @@ namespace md = ::mortgage_calculator::assistant::derive;
         case mv::ReasonCode::UngroundedValue:
         case mv::ReasonCode::OutOfRange:
         case mv::ReasonCode::Unclassified:
+        // Intercepted upstream and turned into a Clarification, so reaching the
+        // mapper at all would be this file's own bug -- listed for the same
+        // fail-closed reason as `None`, and so that -Wswitch keeps covering
+        // this enum.
+        case mv::ReasonCode::UnstatedField:
         case mv::ReasonCode::None:
             return ::mortgage::assistant::Refusal::INVALID_PARAMETERS;
     }
