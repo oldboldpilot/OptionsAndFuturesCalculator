@@ -76,3 +76,8 @@ config/keys/
 # input to any build, and untracked build output at the ROOT is exactly what
 # rides along in `railway up`, which uploads the working tree rather than git.
 Testing/
+
+# Google OAuth client (Search Console API) and the token it mints. Secrets:
+# never committed. The NAS backup is the only copy outside this machine.
+config/client_secret_*.json
+config/google_search_console_token.json
