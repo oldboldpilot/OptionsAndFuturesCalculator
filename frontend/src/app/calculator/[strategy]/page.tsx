@@ -5,6 +5,7 @@ import { branding } from '@/config/branding';
 import { StrategyStructuredData } from '@/components/StructuredData';
 import { getStrategyGuide } from '@/content/strategy-guides';
 import { getCalculatorPageCopy } from '@/content/calculator-pages';
+import { CalculatorPageExtras } from '@/components/CalculatorPageExtras';
 
 // Shared with the sitemap, so the pages exported and the pages advertised to
 // crawlers cannot drift apart.
@@ -202,6 +203,15 @@ export default async function StrategyCalculatorPage({ params }: Props) {
           )}
         </section>
       )}
+
+      {/*
+        Third-wave content: mechanics, at-a-glance table, the order ticket,
+        a computed payoff grid and a comparison with related strategies. See
+        `calculator-extras.ts` for why the lede alone was not enough — the
+        26 pages still measured a pairwise median 6-gram similarity of 0.768
+        against each other with only the lede shipped.
+      */}
+      <CalculatorPageExtras slug={slug} />
     </>
   );
 }

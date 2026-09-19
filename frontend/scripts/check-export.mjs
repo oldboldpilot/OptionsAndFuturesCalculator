@@ -305,6 +305,85 @@ for (const slug of slugs) {
   }
 }
 
+/* ---- 3b. Full-page similarity ceiling across the 26 calculator pages ----- */
+
+/*
+ * Section 3 checks the PIECES that are supposed to differ (title, description,
+ * h1, lede) one field at a time. It does not — and by its own comment, should
+ * not — check the whole rendered page, because the workspace shell the pages
+ * share is supposed to be identical. But "the pieces are distinct" and "the
+ * page a crawler renders is still 97% the same bytes" are different claims,
+ * and only the second is what Search Console measures.
+ *
+ * Measured against the LIVE site on 2026-09-19, with only the lede from
+ * section 3 shipped: pairwise median 6-gram Jaccard similarity across the 26
+ * `/calculator/<slug>` pages was 0.768 — full body text, script/style/head
+ * stripped, same measure Search Console's duplicate-content signal responds
+ * to. `calculator-extras.ts` (mechanics/sizing/mistake paragraphs, at-a-glance
+ * table, order ticket, payoff grid, comparison table) exists to bring that
+ * down. This section is the gate: it fails the build if the MEASURED
+ * similarity — not a proxy for it — regresses.
+ *
+ * A ceiling rather than an exact figure, because future content edits will
+ * move the number slightly; it is set with a small margin above what was
+ * measured on `out/` right after this content shipped (median 0.4799, max
+ * 0.5183), and well below the 0.768 baseline it replaces.
+ */
+const SIMILARITY_MEDIAN_CEILING = 0.5;
+const SIMILARITY_MAX_CEILING = 0.54;
+
+const shingles = (text, n = 6) => {
+  const words = text.split(' ');
+  const set = new Set();
+  for (let i = 0; i + n <= words.length; i++) {
+    set.add(words.slice(i, i + n).join(' '));
+  }
+  return set;
+};
+
+const jaccard = (a, b) => {
+  if (a.size === 0 && b.size === 0) return 1;
+  let inter = 0;
+  for (const s of a) if (b.has(s)) inter++;
+  const union = a.size + b.size - inter;
+  return union === 0 ? 0 : inter / union;
+};
+
+{
+  const shingleSets = new Map();
+  for (const slug of slugs) {
+    const page = `calculator/${slug}.html`;
+    if (!existsSync(join(OUT, page))) continue;
+    shingleSets.set(slug, shingles(decodeEntities(visibleText(page))));
+  }
+  const sims = [];
+  const present = [...shingleSets.keys()];
+  for (let i = 0; i < present.length; i++) {
+    for (let j = i + 1; j < present.length; j++) {
+      sims.push([jaccard(shingleSets.get(present[i]), shingleSets.get(present[j])), present[i], present[j]]);
+    }
+  }
+  if (sims.length > 0) {
+    const values = sims.map((s) => s[0]).sort((a, b) => a - b);
+    const median = values[Math.floor(values.length / 2)];
+    const maxEntry = sims.reduce((a, b) => (b[0] > a[0] ? b : a));
+    if (median > SIMILARITY_MEDIAN_CEILING) {
+      fail(
+        'calculator-similarity',
+        `pairwise median 6-gram Jaccard across calculator pages is ${median.toFixed(4)}, ` +
+          `ceiling ${SIMILARITY_MEDIAN_CEILING}`,
+      );
+    }
+    if (maxEntry[0] > SIMILARITY_MAX_CEILING) {
+      fail(
+        'calculator-similarity',
+        `${maxEntry[1]} and ${maxEntry[2]} are ${maxEntry[0].toFixed(4)} similar, ` +
+          `ceiling ${SIMILARITY_MAX_CEILING}`,
+      );
+    }
+  }
+}
+
 /* ---- 4. No two guides render the same content ---------------------------- */
 
 const byText = new Map();
@@ -368,5 +447,7 @@ console.log(
     `(including 404 and every calculator page) carry NO ad code of any kind; ` +
     `${slugs.length} calculator pages carry a distinct title, description, h1 and ` +
     `${MIN_LEDE_WORDS}+ word lede that is not their guide's; ` +
+    `full-page similarity across calculator pages is under ${SIMILARITY_MEDIAN_CEILING} median / ` +
+    `${SIMILARITY_MAX_CEILING} max; ` +
     `${slugs.length} strategies cross-linked both ways.`,
 );
