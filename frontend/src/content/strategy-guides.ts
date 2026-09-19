@@ -1167,7 +1167,7 @@ export const STRATEGY_GUIDES: Record<string, StrategyGuide> = {
   'futures-intercommodity-spread': {
     slug: 'futures-intercommodity-spread',
     name: 'Futures Inter-Commodity Spread',
-    outlook: 'Relative value — processing or substitution margin',
+    outlook: 'Relative value — processing margin',
     netCost: 'Margin',
     lede:
       'Long one product and short a different but economically linked one — crude against its refined products, soybeans against oil and meal, corn against ethanol. The spread usually represents a real processing margin that somebody in the physical market earns or pays. ' +
@@ -1263,7 +1263,7 @@ export const STRATEGY_GUIDES: Record<string, StrategyGuide> = {
   'covered-futures-call': {
     slug: 'covered-futures-call',
     name: 'Covered Futures Call',
-    outlook: 'Neutral to mildly bullish — income on a futures position',
+    outlook: 'Neutral to mildly bullish — futures income',
     netCost: 'Margin',
     lede:
       'Hold a long futures contract and sell a call option on that same future against it. The economics mirror an equity covered call — premium in exchange for capped upside — with one difference that changes the risk entirely: the underlying is a leveraged, margined contract rather than fully paid shares. ' +

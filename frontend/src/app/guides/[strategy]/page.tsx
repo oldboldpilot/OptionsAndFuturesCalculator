@@ -7,6 +7,7 @@ import { branding } from '@/config/branding';
 import { STRATEGY_SLUGS } from '@/config/strategies';
 import { getStrategyGuide } from '@/content/strategy-guides';
 import { StrategyStructuredData, FaqStructuredData } from '@/components/StructuredData';
+import { pageTitle } from '@/lib/seo-title';
 
 /**
  * The written guide for one strategy.
@@ -38,10 +39,11 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
     guide?.name ??
     slug.split('-').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
 
-  const title = `${name}: Payoff, Breakeven and Greeks Explained`;
+  const authoredTitle = `${name}: Payoff, Breakeven and Greeks Explained`;
+  const title = pageTitle(authoredTitle);
   const description =
     guide
-      ? `${name} explained: how it is built, maximum profit and loss, breakeven, the Greeks before expiry, and what goes wrong. ${guide.outlook}.`
+      ? `${name} explained: how it is built, maximum profit and loss, breakeven, Greeks, and what goes wrong. ${guide.outlook}.`
       : `How the ${name} strategy works.`;
   const ogTitle = `${name} explained | ${branding.appName}`;
   const ogDescription = guide?.lede.slice(0, 200) ?? `How the ${name} strategy works.`;

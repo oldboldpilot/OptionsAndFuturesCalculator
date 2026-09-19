@@ -6,6 +6,7 @@ import { StrategyStructuredData } from '@/components/StructuredData';
 import { getStrategyGuide } from '@/content/strategy-guides';
 import { getCalculatorPageCopy } from '@/content/calculator-pages';
 import { CalculatorPageExtras } from '@/components/CalculatorPageExtras';
+import { pageTitle } from '@/lib/seo-title';
 
 // Shared with the sitemap, so the pages exported and the pages advertised to
 // crawlers cannot drift apart.
@@ -57,7 +58,8 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
   // sitemap. Search Console reported it as duplicate content.
   const copy = getCalculatorPageCopy(slug);
 
-  const title = copy?.title ?? `${strategyName} ${instrument}Calculator & Profit Visualizer`;
+  const authoredTitle = copy?.title ?? `${strategyName} ${instrument}Calculator & Profit Visualizer`;
+  const title = pageTitle(authoredTitle);
   const description =
     copy?.description ??
     `Calculate maximum profit, loss, probability of profit and the full Greek profile for ${article} ${strategyName}, priced from live ${isFutures ? 'futures' : 'option chain'} quotes.`;

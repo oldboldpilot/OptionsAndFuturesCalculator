@@ -245,7 +245,7 @@ export const CALCULATOR_PAGES: Record<string, CalculatorPageCopy> = {
     slug: 'diagonal-spread',
     title: 'Diagonal Spread Calculator — Strike Lean and Time Decay',
     description:
-      'Model a diagonal spread across two expiries and two strikes: net debit, the directional lean the strike gap adds, and what early assignment on the front leg costs.',
+      'Model a diagonal spread across two expiries and strikes: net debit, directional lean from the strike gap, and what early assignment on the front leg costs.',
     heading: 'Diagonal Spread Calculator',
     lede:
       'Sell a near-dated option at one strike and buy a longer-dated one at another. Both dimensions are mismatched on purpose: the expiry gap harvests decay, the strike gap adds a directional lean, and how far apart the strikes sit decides which of the two dominates the result. Widened out with a deep in-the-money back month it becomes a stock substitute funded by selling the front month again and again, behaving much like covered stock on a fraction of the capital. Price both legs here and check what the back month is worth if the front is assigned early, which is the case that breaks the financing.',
@@ -277,7 +277,7 @@ export const CALCULATOR_PAGES: Record<string, CalculatorPageCopy> = {
     slug: 'futures-calendar-spread',
     title: 'Futures Calendar Spread Calculator — Contango and Carry',
     description:
-      'Price a futures calendar spread between two delivery months: the differential, the implied carry it embeds, and whether the curve is in contango or backwardation.',
+      'Price a futures calendar spread across delivery months: the differential, the implied carry it embeds, and whether the curve is in contango or backwardation.',
     heading: 'Futures Calendar Spread Calculator',
     lede:
       'Long one delivery month and short another in the same product. The level of the curve drops out and its shape is what is left: the position pays when the differential between the two months widens or narrows, largely irrespective of the outright price. Every roll of a long-dated futures position is this trade, whether the person doing it thinks of it that way or not. Storage, financing and seasonality drive the differential, so contango and backwardation are the working vocabulary here rather than bullish and bearish. Set the two months here and read the spread and the carry implied between them.',

@@ -20,6 +20,7 @@ import { describe, it, expect } from 'vitest';
 import { STRATEGY_SLUGS } from '@/config/strategies';
 import { CALCULATOR_PAGES, getCalculatorPageCopy } from '@/content/calculator-pages';
 import { STRATEGY_GUIDES } from '@/content/strategy-guides';
+import { pageTitle, TITLE_MAX, DESCRIPTION_MAX } from '@/lib/seo-title';
 
 describe('calculator page copy coverage', () => {
   it('has copy for every slug that is exported as a page', () => {
@@ -81,11 +82,14 @@ describe('calculator page copy is distinct and usable', () => {
 
   it('keeps titles and descriptions inside what a result actually shows', () => {
     for (const copy of pages) {
-      // The root layout appends ` | Options & Futures Calculator`, so a title
-      // written to the full ~60 character budget is truncated in the result.
-      expect(copy.title.length, `${copy.slug} title`).toBeLessThanOrEqual(62);
+      // Sized via pageTitle(): the brand suffix gives way when the combined title
+      // exceeds TITLE_MAX (70). We measure the rendered string that actually ships,
+      // not an authored stub or an unchecked budget.
+      const renderedTitle = pageTitle(copy.title);
+      expect(renderedTitle.length, `${copy.slug} title`).toBeLessThanOrEqual(TITLE_MAX);
+      expect(renderedTitle.length, `${copy.slug} title`).toBeGreaterThanOrEqual(10);
       expect(copy.description.length, `${copy.slug} description`).toBeGreaterThan(110);
-      expect(copy.description.length, `${copy.slug} description`).toBeLessThanOrEqual(170);
+      expect(copy.description.length, `${copy.slug} description`).toBeLessThanOrEqual(DESCRIPTION_MAX);
     }
   });
 

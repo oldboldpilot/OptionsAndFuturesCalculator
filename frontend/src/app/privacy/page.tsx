@@ -2,9 +2,10 @@ import React from 'react';
 import { Metadata } from 'next';
 import { branding } from '@/config/branding';
 import { LegalPage, H2, P, UL } from '@/components/LegalPage';
+import { pageTitle } from '@/lib/seo-title';
 
 export const metadata: Metadata = {
-  title: 'Privacy Policy',
+  title: pageTitle('Privacy Policy'),
   description: `How ${branding.appName} handles your data, cookies and advertising.`,
   alternates: { canonical: `${branding.canonicalUrl}/privacy` },
 };

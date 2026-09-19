@@ -2,9 +2,10 @@ import React from 'react';
 import { Metadata } from 'next';
 import { branding } from '@/config/branding';
 import { LegalPage, H2, P, UL } from '@/components/LegalPage';
+import { pageTitle } from '@/lib/seo-title';
 
 export const metadata: Metadata = {
-  title: 'Terms of Use',
+  title: pageTitle('Terms of Use'),
   description: `Terms of use for ${branding.appName}, including the financial disclaimer.`,
   alternates: { canonical: `${branding.canonicalUrl}/terms` },
 };

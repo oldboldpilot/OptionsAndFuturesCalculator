@@ -15,7 +15,7 @@ export default function robots(): MetadataRoute.Robots {
       // review as bare unstyled HTML with no working application — indexing
       // and the AdSense review both judge the page as users see it, and they
       // cannot when the assets are forbidden.
-      disallow: ['/api/', '/admin/'],
+      disallow: ['/api/', '/admin/', '/cdn-cgi/'],
     },
     sitemap: `${branding.canonicalUrl}/sitemap.xml`,
   };

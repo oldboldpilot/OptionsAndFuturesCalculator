@@ -21,6 +21,7 @@ refreshes an access token from it without a browser.
     python3 scripts/search_console.py sites
     python3 scripts/search_console.py sitemaps SITE
     python3 scripts/search_console.py submit-sitemap SITE SITEMAP_URL
+    python3 scripts/search_console.py delete-sitemap SITE SITEMAP_URL
     python3 scripts/search_console.py inspect SITE [--sitemap URL] [--limit N] [--out FILE]
 
 SITE is the Search Console property exactly as `sites` lists it, e.g.
@@ -255,8 +256,15 @@ def cmd_submit(a: argparse.Namespace) -> None:
     print(f"submitted {a.sitemap}")
 
 
+def cmd_delete(a: argparse.Namespace) -> None:
+    call("DELETE", f"{API}/sites/{enc(a.site)}/sitemaps/{enc(a.sitemap)}")
+    print(f"deleted {a.sitemap}")
+
+
 def sitemap_urls(url: str) -> list[str]:
-    with urllib.request.urlopen(url, timeout=60) as r:
+    # Cloudflare answers 403 to Python's default User-Agent on both sites.
+    req = urllib.request.Request(url, headers={"User-Agent": "search-console-tool/1.0 (+site owner)"})
+    with urllib.request.urlopen(req, timeout=60) as r:
         xml = r.read().decode()
     locs = re.findall(r"<loc>([^<]+)</loc>", xml)
     if "<sitemapindex" in xml:
@@ -323,6 +331,9 @@ def main() -> None:
     ss = sub.add_parser("submit-sitemap")
     ss.add_argument("site")
     ss.add_argument("sitemap")
+    sd = sub.add_parser("delete-sitemap")
+    sd.add_argument("site")
+    sd.add_argument("sitemap")
     ins = sub.add_parser("inspect")
     ins.add_argument("site")
     ins.add_argument("--sitemap")
@@ -339,6 +350,8 @@ def main() -> None:
         cmd_sitemaps(a)
     elif a.cmd == "submit-sitemap":
         cmd_submit(a)
+    elif a.cmd == "delete-sitemap":
+        cmd_delete(a)
     elif a.cmd == "inspect":
         cmd_inspect(a)
 

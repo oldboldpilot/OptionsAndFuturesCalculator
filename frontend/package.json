@@ -4,12 +4,13 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build && node scripts/check-export.mjs",
+    "build": "next build && node scripts/check-export.mjs && node scripts/check-indexability.mjs",
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
     "test:watch": "vitest",
-    "check:export": "node scripts/check-export.mjs"
+    "check:export": "node scripts/check-export.mjs",
+    "check:indexability": "node scripts/check-indexability.mjs"
   },
   "dependencies": {
     "@react-three/drei": "^10.7.7",

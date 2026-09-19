@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { STRATEGY_SLUGS } from '@/config/strategies';
 import { getStrategyGuide } from '@/content/strategy-guides';
+import { pageTitle } from '@/lib/seo-title';
 
 /**
  * The 404 screen.
@@ -33,7 +34,7 @@ import { getStrategyGuide } from '@/content/strategy-guides';
  */
 
 export const metadata: Metadata = {
-  title: 'Page not found',
+  title: pageTitle('Page not found'),
   // A 404 that gets indexed is a 404 that competes with the real pages. The
   // status code already says this to a well-behaved crawler; this says it to
   // the rest.

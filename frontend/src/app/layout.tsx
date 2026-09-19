@@ -90,10 +90,7 @@ export async function generateMetadata(): Promise<Metadata> {
     // production -- an unreachable, non-HTTPS image on every share and every
     // crawl.
     metadataBase: new URL(branding.canonicalUrl),
-    title: {
-      template: `%s | ${branding.appName}`,
-      default: branding.appName,
-    },
+    title: branding.appName,
     description: branding.description,
     keywords: ["Options", "Futures", "Calculator", "Quantitative Finance", "Stochastic Modeling", "SGEE", "Derivatives"],
     authors: [{ name: branding.companyName }],

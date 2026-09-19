@@ -2,6 +2,7 @@ import React from 'react';
 import type { Metadata } from 'next';
 import SiteGuide from '@/components/SiteGuide';
 import { branding } from '@/config/branding';
+import { pageTitle } from '@/lib/seo-title';
 
 /**
  * The Guides tab.
@@ -22,7 +23,7 @@ import { branding } from '@/config/branding';
  * One page of 27 given up, on an account that has already been flagged once.
  */
 export const metadata: Metadata = {
-  title: 'Options & Futures Strategy Guides',
+  title: pageTitle('Options & Futures Strategy Guides'),
   description:
     'How twenty-six options and futures strategies work: construction, maximum profit and loss, breakeven, the Greeks, and the specific ways each one goes wrong.',
   alternates: { canonical: `${branding.canonicalUrl}/guides` },
