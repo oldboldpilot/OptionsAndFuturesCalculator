@@ -65,12 +65,22 @@ def die(msg: str) -> None:
 
 
 def client() -> dict:
-    found = sorted(glob.glob(os.path.join(CONFIG, "client_secret_*.json")))
+    """The OAuth client to use. SEARCH_CONSOLE_CLIENT (a path, or a substring of
+    the filename) picks one explicitly; otherwise the most recently added
+    config/client_secret_*.json wins -- when a new client is dropped in to
+    replace an old one, the new one is the one meant."""
+    found = glob.glob(os.path.join(CONFIG, "client_secret_*.json"))
     if not found:
         die(f"no OAuth client in {CONFIG}/client_secret_*.json")
-    with open(found[0]) as f:
+    want = os.environ.get("SEARCH_CONSOLE_CLIENT", "")
+    if want:
+        found = [f for f in found if want in f] or die(f"no client matches SEARCH_CONSOLE_CLIENT={want!r}")
+    path = max(found, key=os.path.getmtime)
+    with open(path) as f:
         c = json.load(f)
-    return c.get("installed") or c.get("web") or die("unrecognised client JSON")  # type: ignore[return-value]
+    inner = c.get("installed") or c.get("web") or die("unrecognised client JSON")
+    print(f"(OAuth client: project {inner.get('project_id')})", file=sys.stderr)
+    return inner  # type: ignore[return-value]
 
 
 def write_private(path: str, data: dict) -> None:
