@@ -844,10 +844,25 @@ Read a node's status over the private network instead. `railway ssh --service
 bash, so:
 
 ```
-railway ssh --service sgee-queue-3 -- sh -lc \
-  "bash -c \"exec 3<>/dev/tcp/localhost/8080 && \
-   printf 'GET /statusz HTTP/1.0\r\n\r\n' >&3 && cat <&3\""
+# probe.sh -- the node binds :: ONLY (localhost resolves to 127.0.0.1 and is
+# refused), railway ssh swallows the first output line, and the server may not
+# send EOF, so the read is bounded. The last line ("}") has no trailing newline
+# and `read` drops it; re-append it before parsing.
+echo _
+exec 3<>/dev/tcp/::1/8080 || { echo CONNECT_FAIL; exit 1; }
+printf 'GET /statusz HTTP/1.0\r\n\r\n' >&3
+while IFS= read -t 8 -r l <&3; do echo "$l"; done
 ```
+
+Run it from the repo root (the CLI resolves its project from the cwd), shipped
+as base64 so no quoting layer can mangle it:
+
+```
+railway ssh --service sgee-queue-3 "echo $(base64 -w0 probe.sh) | base64 -d | bash"
+```
+
+Updated 2026-09-19. The command that stood here used `/dev/tcp/localhost/8080`
+and an unbounded `cat`, and it hung against every node.
 
 Two notes on that command. `bash` must be invoked INSIDE `sh -lc` — the remote
 runs `sh`, so a top-level `bash -c` is parsed by dash and fails with

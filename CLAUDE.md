@@ -153,13 +153,18 @@ a fallback chain that tries those first silently yields "". Confirm auth with
 `query{ me { email } }` before concluding anything about scope. The TCP proxy
 was then created in one call with `tcpProxyCreate`.
 
-**A DEAD TCP PROXY EXISTS ON THIS SERVICE and should probably be removed.**
-`sakura.proxy.rlwy.net:56253 -> container :50052`. Nothing binds 50052 in the
-engine container -- the connection is accepted by Railway and immediately reset
-by the upstream (`errno=104`), no TLS, no ALPN. Harmless today, but 50052 is
-SGEE's CONSENSUS port, and this file already warns against attaching a public
-endpoint to an SGEE port. If anything ever binds it in this container it becomes
-publicly reachable with no authentication.
+**The dead TCP proxy was DELETED on 2026-09-19.** It was
+`sakura.proxy.rlwy.net:56253 -> container :50052`. Nothing bound 50052 in the
+engine container, but 50052 is SGEE's CONSENSUS port, so anything that later
+bound it there would have been publicly reachable with no authentication.
+Removed with `tcpProxyDelete`. The engine's only TCP proxy is now `tokaido`
+(native gRPC, :50443), and the finance smoke suite passes over it.
+
+**You cannot confirm a deletion by probing the old address.** The `*.proxy.rlwy.net`
+edge hosts are shared: they accept a TCP connect on ANY port and then close it.
+Measured after the delete, 56253 behaves exactly like 56254, 41777 and 12345,
+none of which were ever ours. It behaved the same way BEFORE the delete, too.
+The `tcpProxies` query is the evidence. A successful connect is not.
 
 Three ways to reach production through the HTTP edge, and one that cannot work
 there by construction:
