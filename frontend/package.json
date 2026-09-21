@@ -10,7 +10,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "check:export": "node scripts/check-export.mjs",
-    "check:indexability": "node scripts/check-indexability.mjs"
+    "check:indexability": "node scripts/check-indexability.mjs",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@react-three/drei": "^10.7.7",
@@ -31,6 +32,7 @@
     "zustand": "^5.0.14"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
