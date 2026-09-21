@@ -263,10 +263,11 @@ export function PnLMatrix() {
             )}
           </div>
 
-          <div className="segment">
+          <div className="segment" role="group" aria-label="Matrix units">
             <button
               className="segment-item"
               data-active={mode === 'dollars'}
+              aria-pressed={mode === 'dollars'}
               onClick={() => setMode('dollars')}
             >
               $
@@ -274,6 +275,7 @@ export function PnLMatrix() {
             <button
               className="segment-item"
               data-active={mode === 'percent'}
+              aria-pressed={mode === 'percent'}
               onClick={() => setMode('percent')}
             >
               % risk

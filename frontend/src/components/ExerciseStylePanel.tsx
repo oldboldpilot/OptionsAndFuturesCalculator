@@ -100,13 +100,14 @@ export function ExerciseStylePanel() {
         {/* Exercise style -- a 3-way segment, the Buy/Sell idiom from
             OptionTicket.tsx widened to three states. */}
         <span className="stat-label">Exercise</span>
-        <div className="segment" style={{ width: '100%' }}>
+        <div className="segment" style={{ width: '100%' }} role="group" aria-label="Exercise style">
           {(['EUROPEAN', 'AMERICAN', 'BERMUDAN'] as ExerciseStyle[]).map((s) => (
             <button
               key={s}
               className="segment-item"
               style={{ flex: 1 }}
               data-active={exerciseType === s}
+              aria-pressed={exerciseType === s}
               onClick={() => setExerciseType(s)}
             >
               {STYLE_LABEL[s]}
@@ -151,7 +152,7 @@ export function ExerciseStylePanel() {
             click. */}
         <div style={{ display: 'grid', gap: '0.1875rem' }}>
           <span className="stat-label">Averaging</span>
-          <div className="segment" style={{ width: '100%' }}>
+          <div className="segment" style={{ width: '100%' }} role="group" aria-label="Averaging">
             {(
               [
                 ['NOT_ASIAN', 'Vanilla'],
@@ -164,6 +165,7 @@ export function ExerciseStylePanel() {
                 className="segment-item"
                 style={{ flex: 1 }}
                 data-active={asianType === type}
+                aria-pressed={asianType === type}
                 onClick={() => setAsianType(type)}
               >
                 {label}

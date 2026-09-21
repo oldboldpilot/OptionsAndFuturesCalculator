@@ -193,10 +193,10 @@ export function OptionChain() {
             squeezed: a truncated date leaves the trader unable to tell which
             contract they are pricing. */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.375rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-          <div className="segment">
-            <button className="segment-item" data-active={side === 'both'} onClick={() => setSide('both')}>Both</button>
-            <button className="segment-item" data-active={side === 'calls'} onClick={() => setSide('calls')}>Calls</button>
-            <button className="segment-item" data-active={side === 'puts'} onClick={() => setSide('puts')}>Puts</button>
+          <div className="segment" role="group" aria-label="Chain side">
+            <button className="segment-item" data-active={side === 'both'} aria-pressed={side === 'both'} onClick={() => setSide('both')}>Both</button>
+            <button className="segment-item" data-active={side === 'calls'} aria-pressed={side === 'calls'} onClick={() => setSide('calls')}>Calls</button>
+            <button className="segment-item" data-active={side === 'puts'} aria-pressed={side === 'puts'} onClick={() => setSide('puts')}>Puts</button>
           </div>
           <select
             className="select"

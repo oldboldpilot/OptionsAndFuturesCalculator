@@ -54,6 +54,7 @@ export function ThemeToggle() {
       <button
         className="segment-item"
         data-active={theme === 'slate'}
+        aria-pressed={theme === 'slate'}
         onClick={() => pick('slate')}
         title="Slate theme"
       >
@@ -62,6 +63,7 @@ export function ThemeToggle() {
       <button
         className="segment-item"
         data-active={theme === 'light'}
+        aria-pressed={theme === 'light'}
         onClick={() => pick('light')}
         title="Light theme"
       >

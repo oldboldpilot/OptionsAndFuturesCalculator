@@ -102,9 +102,9 @@ export function PnLSurface() {
             price × date × profit
           </span>
         </div>
-        <div className="segment">
-          <button className="segment-item" data-active={!enabled} onClick={() => setEnabled(false)}>Off</button>
-          <button className="segment-item" data-active={enabled} onClick={() => setEnabled(true)}>3D</button>
+        <div className="segment" role="group" aria-label="3D surface">
+          <button className="segment-item" data-active={!enabled} aria-pressed={!enabled} onClick={() => setEnabled(false)}>Off</button>
+          <button className="segment-item" data-active={enabled} aria-pressed={enabled} onClick={() => setEnabled(true)}>3D</button>
         </div>
       </div>
 

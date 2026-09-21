@@ -460,12 +460,17 @@ export const StrategySelector: React.FC = () => {
           aria-label="Search strategies"
         />
         {!query && (
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.25rem' }}>
+          <div
+            style={{ display: 'flex', flexWrap: 'wrap', gap: '0.25rem' }}
+            role="group"
+            aria-label="Strategy category"
+          >
             {CATEGORIES.map((c) => (
               <button
                 key={c}
                 className="btn"
                 data-active={category === c}
+                aria-pressed={category === c}
                 onClick={() => { setCategory(c); setSelected(null); }}
                 style={{
                   padding: '0.125rem 0.4375rem',

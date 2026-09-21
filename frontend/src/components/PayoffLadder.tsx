@@ -90,9 +90,9 @@ export function PayoffLadder() {
           <span className="panel-title">Payoff</span>
           <span className="chip" title={curveLabel.title}>{curveLabel.text}</span>
         </div>
-        <div className="segment">
-          <button className="segment-item" data-active={mode === 'dollars'} onClick={() => setMode('dollars')}>$</button>
-          <button className="segment-item" data-active={mode === 'percent'} onClick={() => setMode('percent')}>% risk</button>
+        <div className="segment" role="group" aria-label="Payoff units">
+          <button className="segment-item" data-active={mode === 'dollars'} aria-pressed={mode === 'dollars'} onClick={() => setMode('dollars')}>$</button>
+          <button className="segment-item" data-active={mode === 'percent'} aria-pressed={mode === 'percent'} onClick={() => setMode('percent')}>% risk</button>
         </div>
       </div>
 
