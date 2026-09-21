@@ -132,12 +132,31 @@ export function OptionChain() {
   const showCalls = side !== 'puts';
   const showPuts = side !== 'calls';
 
-  const actions = (row: ChainStrike, type: 'CALL' | 'PUT') => (
-    <td style={{ whiteSpace: 'nowrap', textAlign: 'center' }}>
-      <button className="btn btn-buy" style={{ padding: '0 0.3125rem' }} onClick={() => load(row, type, 'BUY')} title={`Buy ${type}`}>B</button>{' '}
-      <button className="btn btn-sell" style={{ padding: '0 0.3125rem' }} onClick={() => load(row, type, 'SELL')} title={`Sell ${type}`}>S</button>
-    </td>
-  );
+  const actions = (row: ChainStrike, type: 'CALL' | 'PUT') => {
+    const expiry = selectedExpiration ? ` ${selectedExpiration}` : '';
+    return (
+      <td style={{ whiteSpace: 'nowrap', textAlign: 'center' }}>
+        <button
+          className="btn btn-buy"
+          style={{ padding: '0 0.3125rem' }}
+          onClick={() => load(row, type, 'BUY')}
+          title={`Buy ${type}`}
+          aria-label={`Buy ${row.strike.toFixed(2)} ${type.toLowerCase()}${expiry}`}
+        >
+          B
+        </button>{' '}
+        <button
+          className="btn btn-sell"
+          style={{ padding: '0 0.3125rem' }}
+          onClick={() => load(row, type, 'SELL')}
+          title={`Sell ${type}`}
+          aria-label={`Sell ${row.strike.toFixed(2)} ${type.toLowerCase()}${expiry}`}
+        >
+          S
+        </button>
+      </td>
+    );
+  };
 
   return (
     <div className="panel" style={{ flex: 1, minWidth: 0 }}>

@@ -126,27 +126,31 @@ export function OptionTicket() {
         {/* Direction and right. Two-state segments rather than dropdowns: these
             are the choices most often changed, and they should take one click. */}
         <div style={{ display: 'flex', gap: '0.375rem' }}>
-          <div className="segment" style={{ flex: 1 }}>
+          <div className="segment" style={{ flex: 1 }} role="group" aria-label="Action">
             <button
               className="segment-item" style={{ flex: 1 }}
               data-active={ticket.action === 'BUY'}
+              aria-pressed={ticket.action === 'BUY'}
               onClick={() => repriceFor({ action: 'BUY' })}
             >Buy</button>
             <button
               className="segment-item" style={{ flex: 1 }}
               data-active={ticket.action === 'SELL'}
+              aria-pressed={ticket.action === 'SELL'}
               onClick={() => repriceFor({ action: 'SELL' })}
             >Sell</button>
           </div>
-          <div className="segment" style={{ flex: 1 }}>
+          <div className="segment" style={{ flex: 1 }} role="group" aria-label="Option type">
             <button
               className="segment-item" style={{ flex: 1 }}
               data-active={ticket.optionType === 'CALL'}
+              aria-pressed={ticket.optionType === 'CALL'}
               onClick={() => repriceFor({ optionType: 'CALL' })}
             >Call</button>
             <button
               className="segment-item" style={{ flex: 1 }}
               data-active={ticket.optionType === 'PUT'}
+              aria-pressed={ticket.optionType === 'PUT'}
               onClick={() => repriceFor({ optionType: 'PUT' })}
             >Put</button>
           </div>
@@ -161,13 +165,14 @@ export function OptionTicket() {
             and answers that question without a click. */}
         <div style={{ display: 'grid', gap: '0.1875rem' }}>
           <span className="stat-label">Averaging</span>
-          <div className="segment" style={{ width: '100%' }}>
+          <div className="segment" style={{ width: '100%' }} role="group" aria-label="Averaging">
             {AVERAGING_CHOICES.map(([type, label]) => (
               <button
                 key={type}
                 className="segment-item"
                 style={{ flex: 1 }}
                 data-active={ticket.asianType === type}
+                aria-pressed={ticket.asianType === type}
                 onClick={() => setTicket({ asianType: type })}
               >
                 {label}
