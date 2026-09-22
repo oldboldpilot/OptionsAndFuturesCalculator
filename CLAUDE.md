@@ -2469,6 +2469,89 @@ Task #44 — a live $0 Stripe round trip — remains unproven and needs owner
 authorization, because it puts a real card on an account shared with other apps.
 Enforce is live independently of it.
 
+### Exercising the key and quota gates LOCALLY, and the loader that made it possible
+
+**BOTH GATES WERE SILENTLY OFF IN EVERY LOCAL RUN, and the cause was the
+shell, not the code.** `FINANCE_API_KEYS` and `QUOTA_POLICY` are BARE JSON in
+`config/.env`:
+
+```
+FINANCE_API_KEYS={"<sha512>":{"id":...,"scopes":["finance","assistant"]}}
+```
+
+The value is unquoted, so `set -a; . config/.env` treats every `"` as a quoting
+metacharacter and DELETES it. Measured 2026-09-22: `QUOTA_POLICY` is 316 bytes
+in the file and **286** in the environment — exactly its 30 double quotes gone —
+and `{anonymous_tier:anonymous,...}` is not JSON, so the engine logs
+`QUOTA_POLICY is not valid JSON; quotas stay DISABLED` and serves everything.
+Confirmed against the engine that had been running since the previous session
+by reading `/proc/<pid>/environ`: `FINANCE_API_KEYS len=293` against the file's
+319. **Nothing was broken and nothing warned** — a local run simply measured an
+engine with both controls off while looking entirely healthy.
+
+`scripts/run_with_env.py` parses the file itself and `execve`s, so no shell ever
+sees the values. `scripts/probe_key_and_quota.py` is the gate that proves the
+loader worked and that the controls do what they claim; it speaks NATIVE gRPC
+with a generic channel and hand-encoded protobuf, so `x-api-key` and `origin`
+are fully under its control.
+
+**Railway is NOT affected** — it sets the container environment directly, with
+no shell in the path. Both variables arrive there at their full 319/316 bytes,
+verified through the API. This was only ever a local-loader defect, which is
+precisely why it survived: production was correct the whole time.
+
+**`FINANCE_REQUIRE_KEY` is UNSET, so the key gate runs in OBSERVE — in
+production too.** Measured both directions on a local engine, and the honest
+reading is that on the finance surface **the API key is identification and
+metering, not access control**:
+
+| case | Observe (production) | `FINANCE_REQUIRE_KEY=enforce` |
+| --- | --- | --- |
+| valid key, no origin | OK | OK |
+| valid key + allowed origin | OK | OK |
+| valid key + FOREIGN origin | **OK** | `PERMISSION_DENIED` not registered for this site |
+| bogus key | **OK** | `UNAUTHENTICATED` unrecognised API key |
+| no key at all | **OK** | `UNAUTHENTICATED` no API key supplied |
+
+That is consistent with the design stated above — the Finance RPCs are
+deliberately ungated and the Pro gate is what protects the assistants — but
+write it as what it is: in Observe an **origin-locked publishable key is not
+origin-locked**, because the binding is only consulted on the enforcing path.
+
+**THE TWO GATES ARE ORDERED, and the order changes the error a user sees.**
+Under Observe an anonymous `ParseOperation` is refused by the PRO gate, with the
+`kMortgageSurface` message pointing the caller at the free Finance RPCs. Under
+Enforce the KEY gate refuses first and that redirection is never reached. Both
+are correct; a test asserting only the `PERMISSION_DENIED` shape reports the
+enforcing engine as broken, which is exactly what the first run of the probe
+did.
+
+**The ADMIT direction is now covered too, which is the half a refuse-only test
+cannot see.** The issued partner key carries `scopes [finance, assistant]`, and
+with it `ParseOperation` passes BOTH gates and stops at inference instead
+(locally `DEADLINE_EXCEEDED`, because no weights are present). Assert
+"not `PERMISSION_DENIED`/`UNAUTHENTICATED`", not a success payload — what comes
+back after the gates is a statement about the model, not about entitlement.
+
+**QUOTA: the key SELECTS THE TIER, and the buckets reconcile to the request.**
+With a deliberately tiny policy (anonymous 4/min, partner 10/min) and 14
+requests each way:
+
+| caller | served before refusal | refusal |
+| --- | --- | --- |
+| unkeyed | 1 | `quota exceeded for tier 'anonymous' on ComputePayment (request rate); retry in 15s` |
+| the partner key | 7 | `quota exceeded for tier 'partner' on ComputePayment (request rate); retry in 6s` |
+
+**Those counts are exact, and that is the real finding.** 4 minus the 3 earlier
+unkeyed probe calls is 1; 10 minus the 3 earlier keyed calls is 7. Two separate
+per-caller buckets, metered precisely, with the tier taken from the key registry
+even though `QUOTA_API_KEYS` is unset (`Quotas ENABLED: 4 tiers, 0 keys`) — so
+`QUOTA_API_KEYS` is a SECOND, independent way to assign a tier, not the only
+one. A burst that only hammered anonymously would have passed against an engine
+that metered everyone identically.
+
+Note the policy's top-level key is **`anonymous_tier`**, not `default_tier`.
+
 `quota.cpp` collapses **every unkeyed caller into one shared `~anonymous`
 bucket**. A per-user-looking anonymous limit is therefore a site-wide limit; it
 is sized as what it is:
@@ -4192,6 +4275,58 @@ the problem.
 since this tree's pin, and dragging those in alongside a toolchain change makes
 any failure unattributable. It is also not load-bearing here — the clang 23
 engine linked at `rc=0` before that fix.
+
+## The Railway host has AVX-512; the BASELINE deliberately does not
+
+Asked and measured 2026-09-22, because "does the deploy support AVX-512" has
+two different answers and only quoting both is honest.
+
+**The host CPU supports it comprehensively.** Read from inside the running
+container with `railway ssh -- grep ^flags /proc/cpuinfo`:
+
+```
+model name : AMD EPYC 9655 96-Core Processor     (Zen 5 / Turin), 48 vCPU visible
+avx512f avx512bw avx512cd avx512dq avx512vl avx512ifma avx512vbmi avx512vbmi2
+avx512vnni avx512_bitalg avx512_vpopcntdq avx512_vp2intersect avx512_bf16
+avx avx2 avx_vnni bmi1 bmi2 f16c sse4_1 sse4_2 sse4a
+```
+
+Zen 5 also has a full 512-bit datapath rather than Zen 4's double-pumped one,
+so these are not merely present.
+
+**The binary's minimum-CPU requirement is `x86-64-v3`, which is the AVX2 level,
+and that is a decision rather than an oversight.** `CANONICAL_FLAGS` sets
+`-march=x86-64-v3 -mtune=generic` and deliberately does NOT pass `-mavx512f`
+(`config/cpp_details.txt`), for **cross-host FP parity and durable-replay
+determinism** — the same input must give the same bits on this dev box and on
+whichever Railway host the container lands on. This is the same reasoning that
+strips sensen's own `-march=native`, which would otherwise tune the whole
+library to whatever CPU ran the *builder*.
+
+**AVX-512 is nevertheless COMPILED IN AND REACHED AT RUNTIME**, which is the
+half that a reading of `-march` alone gets wrong. sensen carries a per-function
+`[[gnu::target("avx512f,...")]]` tier selected by CPUID at run time;
+`SENSEN_HAS_AVX512F` (set from sensen's cached `HAVE_AVX512F`
+`check_cxx_source_compiles`) decides whether those bodies are compiled at all,
+and `gguf_parser.cppm`, `autograd.cppm`, `mxfp4.cppm` and `k_quant_dequant.cppm`
+all gate real code on it. Verified on the built binary rather than argued:
+
+```
+objdump -d calculator_engine | grep -c '%zmm'     -> 11,198
+nm -C  calculator_engine | grep -ci avx512        ->    143
+vpdpbusd (AVX512-VNNI int8 dot product)           ->     52
+vmovdqu64 (AVX-512 only)                          ->     66
+```
+
+`vpdpbusd` is the quantized-inference kernel, and the EPYC 9655 has
+`avx512vnni`, so that tier is live in production — the `-march` baseline sets
+the FLOOR, not the ceiling.
+
+**Known limit, stated rather than papered over:** the engine logs no SIMD tier
+at boot, so which waterfall rung it selected in the container has NOT been
+observed directly. The chain above (host flags ✓, instructions present in the
+binary ✓, CPUID dispatch ✓) is strong but is three facts joined, not one
+measurement. A one-line boot log naming the selected tier would close it.
 
 ## Build Commands
 - **Frontend Production Build:** `cd frontend && npm run build`

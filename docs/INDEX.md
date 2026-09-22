@@ -146,6 +146,7 @@ describes why it is that way and what it cost to find out.
 
 ## Session logs
 
+- [2026-09-22 — the key and quota gates were silently OFF in every local run because the shell deleted the quotes out of their JSON; a loader, a both-directions probe, and what AVX-512 the Railway host really has](session_logs/session_2026-09-22_key_quota_local_gates.md)
 - [2026-09-22 — sensen to `9c760d4f` for both websites: 37 commits that touch nothing the engine links, a branch merged in content but not ancestry, and a local engine serving a deleted binary](session_logs/session_2026-09-22_sensen_bump_both_sites.md)
 - [2026-09-18 — a tag is a kind, not a field: the asking gap was a stated interest rate speaking for every percent-typed slot, and the over-asking direction had no alarm until it got a sweep](session_logs/session_2026-09-18_tag_is_a_kind_and_the_ask_sweep.md)
 - [2026-09-14 (second) — the sensen pin moved onto master, and the v13 evaluation that scored the harness rather than the model](session_logs/session_2026-09-14_sensen_bump_and_v13_eval.md)
