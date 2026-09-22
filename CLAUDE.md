@@ -3968,6 +3968,46 @@ as the gate, and do not "fix" either of those two.
 `ninja build_tests` 263/263, **ctest 103/103**, and the full
 `smoke_client … finance` identity suite against a local engine.
 
+**The 2026-09-22 bump `12fe563d` -> `9c760d4f` (37 commits) touched NOTHING the
+engine links, and measuring that is what made the bump cheap.** Every changed
+source is speech/TTS/OCR/vision/CUDA or `agent/` — `speech_dispatch.cppm` alone
+is +8,049 lines — and the intersection of the 57 changed `src/` files with the
+`sensen_slim` module list is EMPTY. `financial.cppm`, `bigdecimal.cppm`,
+`options.cppm` and `portfolio.cppm` are byte-identical across the range, so the
+finance surface both websites call could not have moved. The closure check
+reported only its two documented false positives, which is the signal the list
+did not go stale.
+
+**Both repositories vendor sensen and only ONE of them deploys it.**
+`mortgage-nest-egg` pins `backend/sensen` as a SOURCE REFERENCE — its own
+`backend/README.md` says "Nothing in this repository's build compiles them", and
+`mfv-web` builds with `vite` and never enters `backend/`. So bumping its pointer
+changes no deployment; it was moved from `762c4301` to the same `9c760d4f` only
+so the two trees do not describe different libraries. The engine that serves
+BOTH products is built from THIS repository.
+
+**Gated after this bump:** `scripts/sensen_module_closure.py --check` clean of
+new entries, `ninja` 178 steps with `calculator_engine` relinked, `ninja
+build_tests` 164 steps, **ctest 117/117**, and `smoke_client` on both suites --
+`finance` at rc=0 and the full options suite at rc=0 with `PRO_GATE_MODE=off` so
+the multi-leg path was actually exercised rather than refused.
+
+**A Pro-gated smoke run exits 1 on a HEALTHY engine, and that is not a
+regression.** `config/.env` carries no `SMOKE_PRO_LICENCE` / `SMOKE_PRO_BEARER`,
+so `smoke_client` is anonymous and the calendar spread comes back
+`7 Multi-leg strategies are a Pro feature` — the gate doing its job. Read the
+status code before reading the exit code. The consequence is that the default
+suite leaves the MULTI-LEG COMPUTE PATH untested, which is precisely the path a
+sensen change could move; re-run with `PRO_GATE_MODE=off` to separate "the gate
+refused" from "the arithmetic is wrong".
+
+**A long-lived local engine keeps serving a binary that no longer exists.** The
+engine on `:50051` had been up since 2026-09-18 and `/proc/<pid>/exe` read
+`... /calculator_engine (deleted)` after the rebuild — `ps` looks perfectly
+healthy, same path and same argv. Smoke-testing it would have measured the
+pre-bump engine. This is the `ninja && ctest` stale-binary trap at RUNTIME:
+check `/proc/<pid>/exe` for `(deleted)`, and restart before trusting a number.
+
 **A CUDA-only test must SKIP, not vanish and not crash.** Guarding the source
 with `#ifdef SENSEN_HAS_CUDA` and giving it `int main() { return 77; }` keeps the
 target present and reports Skipped, which is the convention
