@@ -108,6 +108,14 @@ export function getCurrency(): CurrencyDef {
 export function setCurrency(code: string, persist = true) {
   const next = def(code);
   if (next.code === current.code) return;
+  // An explicit choice ends detection, INCLUDING a lookup already in flight.
+  //
+  // `detectCurrency`'s last step is an async fetch of the Cloudflare edge's
+  // geo, and it used to land AFTER the user had picked something and quietly
+  // overwrite it -- selecting EUR snapped back to USD about a second later.
+  // The race is invisible in dev, where the trace fetch is skipped, and was
+  // caught only by a browser test against the deployed site.
+  if (persist) detected = true;
   current = next;
   if (persist && typeof window !== 'undefined') {
     try {
@@ -160,7 +168,16 @@ export async function detectCurrency() {
     if (res.ok) {
       const text = await res.text();
       const loc = /(?:^|\n)loc=([A-Z]{2})/.exec(text)?.[1];
-      if (loc) setCurrency(currencyForCountry(loc), false);
+      // Re-read the saved choice rather than trusting the flag alone: the user
+      // may have picked something while this request was in flight, and a geo
+      // guess must never outrank a decision somebody actually made.
+      let chosen: string | null = null;
+      try {
+        chosen = window.localStorage.getItem(STORAGE_KEY);
+      } catch {
+        /* blocked storage -- fall through to the geo result */
+      }
+      if (loc && !chosen) setCurrency(currencyForCountry(loc), false);
     }
   } catch {
     /* ignore — the locale fallback above already applied */

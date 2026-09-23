@@ -19,9 +19,10 @@
  * the DEFECT shape fails the same check, because a formatter that returns the
  * same string for everything passes any one-directional test.
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   caretPositionForDigits,
+  detectCurrency,
   currencySymbol,
   DEFAULT_CURRENCY,
   formatAmount,
@@ -31,7 +32,9 @@ import {
   formatMoneyInput,
   parseMoneyInput,
   separatorsFor,
+  getCurrency,
   setCurrency,
+  __resetCurrencyForTests,
 } from './currency';
 
 const digitsOf = (s: string) => s.replace(/[^0-9]/g, '');
@@ -231,5 +234,98 @@ describe('caret position survives regrouping', () => {
 
   it('clamps rather than returning a bogus index', () => {
     expect(caretPositionForDigits('475,000', 99)).toBe(7);
+  });
+});
+
+describe("an explicit choice outranks detection", () => {
+  /**
+   * The defect this pins: `detectCurrency`'s last step is an async fetch of the
+   * Cloudflare edge's geo, and it used to land AFTER the user had picked a
+   * currency and overwrite it -- selecting EUR snapped back to USD about a
+   * second later. Invisible in dev, where the trace fetch is skipped entirely,
+   * and invisible to every test that did not drive a real browser against the
+   * DEPLOYED build.
+   *
+   * THE FIRST VERSION OF THIS TEST WAS VACUOUS and a mutation caught it:
+   * `detectCurrency` returns immediately when `window` is undefined, which it
+   * is under the node environment, so the assertion held with the guard
+   * deleted. Exercising the path needs `window`, a localStorage, a `fetch` that
+   * answers the trace, and NODE_ENV=production -- otherwise the function under
+   * test never reaches the line being tested.
+   */
+  function stubBrowser(saved: string | null, loc: string) {
+    const store = new Map<string, string>();
+    if (saved) store.set("ofc.currency", saved);
+    vi.stubGlobal("window", {
+      localStorage: {
+        getItem: (k: string) => store.get(k) ?? null,
+        setItem: (k: string, v: string) => void store.set(k, v),
+        removeItem: (k: string) => void store.delete(k),
+      },
+    });
+    vi.stubGlobal("navigator", { language: "en-US", languages: ["en-US"] });
+    vi.stubGlobal("fetch", async () => ({ ok: true, text: async () => `loc=${loc}\n` }));
+    vi.stubEnv("NODE_ENV", "production");
+    return store;
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+    __resetCurrencyForTests();
+  });
+
+  it("a late geo lookup does NOT overwrite what the user picked", async () => {
+    // THE ACTUAL RACE, interleaved rather than sequenced. Detection has to be
+    // IN FLIGHT when the choice is made -- if localStorage already holds a
+    // value, detectCurrency returns at its first check and never reaches the
+    // geo fetch, which is why the previous TWO versions of this test passed
+    // with the guards deleted.
+    //
+    // Mutation-checked per guard, and they are not interchangeable: deleting
+    // the localStorage re-check FAILS this, deleting the `detected` flag alone
+    // does NOT (the re-check still catches this path), and deleting both fails.
+    // The flag covers a different route -- a second call to detectCurrency --
+    // so both are kept and only one is load-bearing here.
+    __resetCurrencyForTests();
+    let release!: () => void;
+    const inFlight = new Promise<void>((r) => (release = r));
+    const store = new Map<string, string>();
+    vi.stubGlobal('window', {
+      localStorage: {
+        getItem: (k: string) => store.get(k) ?? null,
+        setItem: (k: string, v: string) => void store.set(k, v),
+        removeItem: (k: string) => void store.delete(k),
+      },
+    });
+    vi.stubGlobal('navigator', { language: 'en-US', languages: ['en-US'] });
+    vi.stubGlobal('fetch', async () => {
+      await inFlight; // the request has not answered yet
+      return { ok: true, text: async () => 'loc=GB\n' };
+    });
+    vi.stubEnv('NODE_ENV', 'production');
+
+    const detecting = detectCurrency(); // starts, blocks on the trace fetch
+    setCurrency('EUR', true); // the user picks WHILE it is in flight
+    release(); // the edge answers "GB" -- too late to matter
+    await detecting;
+
+    expect(getCurrency().code).toBe('EUR');
+  });
+
+  it("and the geo lookup DOES apply when nothing was chosen", async () => {
+    // The opposite direction, so the guard cannot pass by disabling detection
+    // altogether -- which is the failure mode that would look identical.
+    __resetCurrencyForTests();
+    stubBrowser(null, "GB");
+    await detectCurrency();
+    expect(getCurrency().code).toBe("GBP");
+  });
+
+  it("a saved choice wins over geo on the next visit", async () => {
+    __resetCurrencyForTests();
+    stubBrowser("EUR", "GB");
+    await detectCurrency();
+    expect(getCurrency().code).toBe("EUR");
   });
 });
