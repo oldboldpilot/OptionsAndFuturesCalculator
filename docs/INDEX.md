@@ -146,6 +146,7 @@ describes why it is that way and what it cost to find out.
 
 ## Session logs
 
+- [2026-09-23 — one money formatter and a currency picker: why `type="number"` cannot group, the locale traps that change the NUMBER rather than its presentation, and a sweep regex that was a digit too loose to catch its own defect](session_logs/session_2026-09-23_money_formatting.md)
 - [2026-09-23 — `FINANCE_REQUIRE_KEY`: the security doc said `1` enforces and `1` serves everything; the mapping nothing gated, and why enforce would take down the calculator rather than the Finance API](session_logs/session_2026-09-23_finance_require_key.md)
 - [2026-09-22 — the key and quota gates were silently OFF in every local run because the shell deleted the quotes out of their JSON; a loader, a both-directions probe, and what AVX-512 the Railway host really has](session_logs/session_2026-09-22_key_quota_local_gates.md)
 - [2026-09-22 — sensen to `9c760d4f` for both websites: 37 commits that touch nothing the engine links, a branch merged in content but not ancestry, and a local engine serving a deleted binary](session_logs/session_2026-09-22_sensen_bump_both_sites.md)
