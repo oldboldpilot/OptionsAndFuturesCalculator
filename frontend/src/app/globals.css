@@ -664,6 +664,50 @@ body {
 }
 .select { font-family: var(--font-sans); cursor: pointer; }
 
+/*
+  Money input: a currency symbol sitting inside the field's own border rather
+  than a separate control, so the pair reads as one input. The symbol comes
+  from the active currency (see lib/currency.ts) and is never a literal `$`.
+
+  The wrapper carries the border and the focus ring; the inner input drops both
+  so there is not a box inside a box. `.input` on the inner element keeps its
+  font and colour without re-adding the frame.
+*/
+.money-input {
+  display: flex;
+  align-items: center;
+  background: var(--color-base-900);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-sm);
+  transition: border-color 0.15s var(--ease-out), box-shadow 0.15s var(--ease-out);
+}
+.money-input:focus-within {
+  border-color: var(--color-accent-dim);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent) 20%, transparent);
+}
+.money-input-symbol {
+  padding-left: 0.4375rem;
+  color: var(--color-ink-400);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  user-select: none;
+}
+.money-input .input {
+  border: none;
+  background: transparent;
+  box-shadow: none;
+}
+.money-input .input:focus {
+  border: none;
+  box-shadow: none;
+}
+
+/* The display-currency picker in the site nav. */
+.currency-select select {
+  font-family: var(--font-sans);
+  cursor: pointer;
+}
+
 /* Dense data grid */
 .grid-table {
   width: 100%;

@@ -93,6 +93,24 @@ describe('money inputs cannot be type=number', () => {
   });
 });
 
+describe('MoneyInput is USED, not merely defined', () => {
+  it('is rendered by at least one component', () => {
+    // Found by review: the component existed, the sweep asserted its shape, and
+    // NOTHING imported it. A gate that checks a component's internals while
+    // nobody mounts it is testing dead code.
+    const users = UI.filter(
+      (f) => !f.endsWith('MoneyInput.tsx') && /<MoneyInput\b/.test(read(f)),
+    );
+    expect(users.length).toBeGreaterThan(0);
+  });
+
+  it('and its styles exist, so it is not an unstyled box', () => {
+    const css = readFileSync('src/app/globals.css', 'utf8');
+    expect(css).toContain('.money-input');
+    expect(css).toContain('.money-input-symbol');
+  });
+});
+
 describe('the picker is reachable', () => {
   it('CurrencySelect is mounted in the site nav', () => {
     expect(read('src/components/SiteNav.tsx')).toContain('<CurrencySelect');

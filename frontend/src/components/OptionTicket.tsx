@@ -1,7 +1,8 @@
 'use client';
 
 import { useMemo } from 'react';
-import { formatMoney, useCurrency } from '../lib/currency';
+import { formatAmount, formatMoney, useCurrency } from '../lib/currency';
+import { MoneyInput } from './MoneyInput';
 import { useCalculatorStore } from '../store/useCalculatorStore';
 import type { AsianStyle } from '../store/useTreePricerStore';
 
@@ -240,15 +241,23 @@ export function OptionTicket() {
         <div style={{ display: 'flex', gap: '0.375rem' }}>
           <label style={{ display: 'grid', gap: '0.1875rem', flex: 1 }}>
             <span className="stat-label">{ticket.action === 'BUY' ? 'Price paid' : 'Price received'}</span>
-            <input
+            {/*
+              The one grouped money INPUT on this screen. A premium is usually
+              a two-figure per-share number, but on a high-priced underlying it
+              is not, and this is the field whose value is multiplied by
+              contracts x 100 to produce the debit above -- a slipped digit
+              here is a position priced an order of magnitude wrong.
+
+              NaN is how MoneyInput reports an empty field, and it maps to
+              `null` rather than 0: no premium is not a free option.
+            */}
+            <MoneyInput
+              value={ticket.premium ?? NaN}
+              onChange={(v) => setTicket({ premium: Number.isNaN(v) ? null : v })}
+              decimals={2}
+              ariaLabel={ticket.action === 'BUY' ? 'Price paid' : 'Price received'}
+              placeholder={quote && executable > 0 ? formatAmount(executable, 2) : 'no quote'}
               className="input num"
-              type="number" step="0.01" min="0"
-              value={ticket.premium ?? ''}
-              placeholder={quote && executable > 0 ? executable.toFixed(2) : 'no quote'}
-              onChange={(e) => {
-                const v = parseFloat(e.target.value);
-                setTicket({ premium: Number.isNaN(v) ? null : v });
-              }}
             />
           </label>
           <label style={{ display: 'grid', gap: '0.1875rem', width: '5rem' }}>
