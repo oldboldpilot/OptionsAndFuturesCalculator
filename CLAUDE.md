@@ -3823,6 +3823,112 @@ before concluding an upload was missed.
 `SponsoredBrokers` is unaffected throughout: it is this site's own affiliate
 markup, not Google-served, so the policy does not reach it.
 
+## Money is formatted in ONE place, and `type="number"` cannot group
+
+Asked on 2026-09-23 to make every amount comma-separated on both sites, then to
+do it across locales, then to fix the mortgagefv INPUT fields, which "will
+likely lead to data entry errors".
+
+**There was no money module on this site.** `money()` existed TWICE — copied
+between `StrategyMetrics` and `ProbabilityCurve`, each hardcoding a `$` and the
+browser's default locale with DIFFERENT decimal rules. Both grouped, which is
+why nothing looked broken. What did not group:
+
+| place | rendered | should be |
+| --- | --- | --- |
+| ticket debit/credit | `$7250.00` | `$7,250.00` |
+| P&L matrix cell | `12775` | `12,775` |
+| option chain strike | `5900.00` | `5,900.00` |
+| term structure forward/basis | ungrouped | grouped |
+
+The ticket figure is premium × contracts × 100, so it is the one most likely to
+reach five figures and it was the one with no separator at all.
+
+**`type="number"` CANNOT GROUP, and that is the whole reason the input work was
+not a formatting tweak.** The HTML spec restricts a number input's value to a
+"valid floating-point number", which has no separator in it, so every browser
+refuses or strips one. `475,000` is not representable there. The element has to
+change: `type="text"` with `inputMode="decimal"`, which keeps the numeric
+keypad on a phone — the thing `type="number"` was really buying. On
+mortgagefvcalculator that meant FOUR implementations of one input (`NumberField`
+plus three copies of `Field`) collapsing onto a single `MoneyInput`, and 80
+hardcoded `prefix="$"` disappearing, because a literal dollar sign ignored the
+currency picker in its own header.
+
+**Grouping matters more on input than on output.** `475000` and `4750000` are
+one keystroke apart and look alike; `475,000` and `4,750,000` do not. The
+separator is the error check.
+
+**PARSING IS THE DANGEROUS HALF.** In de-DE `475.000` is four hundred
+seventy-five thousand; parsed with en-US rules it is 475 — a silent factor of a
+thousand, accepted without complaint. Separators are therefore DISCOVERED from
+`Intl.formatToParts` rather than assumed. Three more traps, each measured:
+
+- **fr-FR groups with U+202F** (narrow no-break space) and older ICU used
+  U+00A0. Neither is on a keyboard, so both are treated as grouping.
+- **ar-EG, hi-IN and fa-IR format with their own DIGITS** — `١٬٢٣٤٬٥٦٧`. A
+  parser keeping only `[0-9]` deletes every digit and reports NaN for a valid
+  amount. The locale's digit set is discovered by formatting a known number, so
+  it stays right for numbering systems nobody here has considered.
+- **An empty field is not zero.** NaN travels instead; fabricating a 0 prices a
+  position nobody described.
+
+**en-IN is the case that proves grouping is not "insert a comma every three
+digits":** 1234567 is `12,34,567`, not `1,234,567`. No hand-rolled thousands
+regex gets that right, and a test asserts it.
+
+**The currency picker is FORMATTING ONLY and says so.** These amounts come from
+a live US chain and are denominated in dollars; nothing converts them. The
+tooltip states it, because a symbol swap with no FX is a display choice and
+labelling a USD price with a euro sign is the same class of defect as the LIVE
+badge derived from request status — fabrication by labelling.
+
+**ITS OPTION LIST IS CLIENT-ONLY, for a CONTENT-POLICY reason rather than a
+performance one.** Rendering all 38 currencies server-side put the same 38
+lines into the static HTML of all 59 exported pages, and `check-export.mjs`
+failed the build: pairwise 6-gram Jaccard across calculator pages rose to
+**0.5172** against its 0.5 ceiling, and bear-call-spread/bull-put-spread to
+**0.5535** against 0.54. Those pages sit near the ceiling by design — they are
+the same tool with a different strategy name — so identical chrome is exactly
+what they cannot afford. **The fix was to emit less duplicated text, not to
+raise the ceiling**: a moved threshold with no reason behind it is
+indistinguishable from a moved goalpost, and this file already records that
+lesson once.
+
+### Three layers of gate, because each is blind to the others
+
+| gate | what it can see | what it CANNOT |
+| --- | --- | --- |
+| `money-format.test.ts` (44 / MFV 50) | the formatter and parser, across locales | a component that never calls them |
+| `money-source-sweep.test.ts` (8 / MFV 8) | a component formatting money itself | whether the result reaches the screen |
+| `money.spec.ts` (6) / `money-input.e2e.test.ts` (5) | the rendered DOM in a browser | — |
+
+**The formatter was never the defect.** On mortgagefv `formatMoney` was correct
+the whole time and ~350 call sites never called it, so a unit test passed
+cleanly while the screen was full of `475000`. That is why the sweep exists,
+and why it strips comments first: this file and `MoneyInput.tsx` both document
+the shapes they replace by QUOTING them, and a sweep that reads comments
+reports the documentation as the defect.
+
+**TWO DEFECTS WERE FOUND ONLY BY THE BROWSER LAYER**, and both are the kind a
+unit test cannot reach:
+
+1. **The currency choice did not survive a reload.** `detectCurrency()` was
+   ported with the module and never called — a toggle, not a preference. Every
+   function involved was correct in isolation and nothing invoked them.
+2. **The sweep regex was a digit too loose.** It was `\d{5,}`, and the string
+   the ticket rendered was `$7250.00` — **four** digits. The gate would have
+   passed the defect it was written to catch. It is `\d{4,}` now, with an
+   explicit case asserting it fires on `$7250.00` and stays quiet on
+   `$7,250.00`.
+
+Mutation-checked in both repositories: reverting `MoneyInput` to
+`type="number"` fails the sweep; deleting the `<MoneyInput>` element while
+keeping its import fails it too (the first version of that check looked for the
+identifier anywhere and passed); rendering the raw ungrouped value fails
+exactly three of the five browser checks, which are exactly the three that
+depend on grouping.
+
 ## Theme tokens and the workspace layout
 
 Both were changed on 2026-08-16 and neither is derivable from reading the code
