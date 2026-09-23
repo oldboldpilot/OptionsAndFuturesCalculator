@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { CURRENCIES, setCurrency, useCurrency } from '../lib/currency';
+import { CURRENCIES, detectCurrency, setCurrency, useCurrency } from '../lib/currency';
 
 /**
  * Display currency picker.
@@ -36,7 +36,16 @@ export function CurrencySelect({ className = '' }: { className?: string }) {
 
   // Deliberately after paint: the first client render must match the server's
   // single option or React reports a hydration mismatch.
-  useEffect(() => setMounted(true), []);
+  //
+  // `detectCurrency` runs here too, and it is what makes the choice a
+  // PREFERENCE rather than a toggle -- it restores the saved code from
+  // localStorage, falling back to the browser's region and then to the
+  // Cloudflare edge's. Without it the picker worked and then forgot on the
+  // next page load, which a browser test caught and no unit test could.
+  useEffect(() => {
+    setMounted(true);
+    void detectCurrency();
+  }, []);
 
   const options = mounted ? CURRENCIES : CURRENCIES.filter((c) => c.code === currency.code);
 
