@@ -1,6 +1,7 @@
 'use client';
 
 import { useMemo } from 'react';
+import { formatMoney, useCurrency } from '../lib/currency';
 import { useCalculatorStore } from '../store/useCalculatorStore';
 import type { AsianStyle } from '../store/useTreePricerStore';
 
@@ -42,6 +43,8 @@ const AVERAGING_CHOICES: [AsianStyle, string][] = [
  * makes every payoff number downstream wrong.
  */
 export function OptionTicket() {
+  // Re-render this ticket when the display currency changes.
+  useCurrency();
   const {
     ticket, setTicket, commitTicket,
     chainStrikes, chainExpirations, selectedExpiration, setSelectedExpiration,
@@ -280,7 +283,7 @@ export function OptionTicket() {
             {ticket.action === 'BUY' ? 'Debit' : 'Credit'} · {contracts} × 100
           </span>
           <span className="stat-value" style={{ fontVariantNumeric: 'tabular-nums' }}>
-            {cost === null ? '—' : `$${cost.toFixed(2)}`}
+            {cost === null ? '—' : formatMoney(cost, 2)}
           </span>
         </div>
 

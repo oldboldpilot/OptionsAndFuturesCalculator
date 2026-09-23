@@ -1,13 +1,21 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import { formatAmount, useCurrency } from '../lib/currency';
 import { useCalculatorStore, type ChainStrike } from '../store/useCalculatorStore';
 import { chainFreshness } from '../lib/chainFreshness';
 
 type SideFilter = 'both' | 'calls' | 'puts';
 
-const n = (v: number, dp = 2) => (Number.isFinite(v) && v !== 0 ? v.toFixed(dp) : '—');
-const int = (v: number) => (Number.isFinite(v) && v !== 0 ? v.toLocaleString() : '—');
+/**
+ * A price column. GROUPED: `toFixed` left an SPX strike reading `5900.00` and
+ * a high-priced underlying's premium with no separator at all. `formatAmount`
+ * carries no symbol because the column header already says what these are.
+ */
+const n = (v: number, dp = 2) =>
+  Number.isFinite(v) && v !== 0 ? formatAmount(v, dp) : '—';
+/** Volume and open interest -- counts, not money, but still grouped. */
+const int = (v: number) => (Number.isFinite(v) && v !== 0 ? formatAmount(v, 0) : '—');
 const pct = (v: number) => (Number.isFinite(v) && v > 0 ? `${(v * 100).toFixed(1)}%` : '—');
 
 /**
@@ -21,6 +29,8 @@ const pct = (v: number) => (Number.isFinite(v) && v > 0 ? `${(v * 100).toFixed(1
  * plainly when there is none.
  */
 export function OptionChain() {
+  // Regroup the chain when the display locale changes.
+  useCurrency();
   const {
     chainStrikes, chainExpirations, selectedExpiration, chainStatus, chainError, chainFetchedAt,
     setSelectedExpiration, loadChain, setTicket, ticket,
@@ -126,7 +136,7 @@ export function OptionChain() {
   const pick = (row: ChainStrike, type: 'CALL' | 'PUT') => ({
     onClick: () => load(row, type, ticket.action),
     style: { cursor: 'pointer' as const },
-    title: `Select the ${row.strike.toFixed(2)} ${type.toLowerCase()}`,
+    title: `Select the ${n(row.strike)} ${type.toLowerCase()}`,
   });
 
   const showCalls = side !== 'puts';
@@ -141,7 +151,7 @@ export function OptionChain() {
           style={{ padding: '0 0.3125rem' }}
           onClick={() => load(row, type, 'BUY')}
           title={`Buy ${type}`}
-          aria-label={`Buy ${row.strike.toFixed(2)} ${type.toLowerCase()}${expiry}`}
+          aria-label={`Buy ${n(row.strike)} ${type.toLowerCase()}${expiry}`}
         >
           B
         </button>{' '}
@@ -150,7 +160,7 @@ export function OptionChain() {
           style={{ padding: '0 0.3125rem' }}
           onClick={() => load(row, type, 'SELL')}
           title={`Sell ${type}`}
-          aria-label={`Sell ${row.strike.toFixed(2)} ${type.toLowerCase()}${expiry}`}
+          aria-label={`Sell ${n(row.strike)} ${type.toLowerCase()}${expiry}`}
         >
           S
         </button>
@@ -307,7 +317,7 @@ export function OptionChain() {
                       borderRight: '1px solid var(--color-line)',
                     }}
                   >
-                    {row.strike.toFixed(2)}
+                    {n(row.strike)}
                   </td>
                   {showPuts && (
                     <>

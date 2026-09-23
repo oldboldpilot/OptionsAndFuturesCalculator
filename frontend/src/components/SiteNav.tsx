@@ -1,6 +1,7 @@
 'use client';
 
 import React from 'react';
+import { CurrencySelect } from './CurrencySelect';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 
@@ -117,6 +118,12 @@ export function SiteNav() {
         */}
         {isActive('/') ? 'Ad-free tool' : null}
       </span>
+
+      {/*
+        The display-currency picker. Formatting only -- see CurrencySelect for
+        why that limit is stated in the tooltip rather than left implied.
+      */}
+      <CurrencySelect />
     </nav>
   );
 }

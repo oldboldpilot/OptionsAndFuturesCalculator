@@ -1,6 +1,7 @@
 'use client';
 
 import { useMemo, useState } from 'react';
+import { formatMoney, useCurrency } from '../lib/currency';
 import { useCalculatorStore, type CurvePoint } from '../store/useCalculatorStore';
 
 /* ---------------------------------------------------------------------------
@@ -59,10 +60,8 @@ const W = 760;
 const H = 268;
 const PAD = { l: 6, r: 6, t: 14, b: 30 };
 
-const money = (v: number) =>
-  `${v < 0 ? '−' : ''}$${Math.abs(v).toLocaleString(undefined, {
-    maximumFractionDigits: Math.abs(v) >= 100 ? 0 : 2,
-  })}`;
+/** The second copy of StrategyMetrics' helper; both now share one formatter. */
+const money = (v: number) => formatMoney(v, Math.abs(v) >= 100 ? 0 : 2);
 
 /**
  * Terminal price distribution with the strategy payoff overlaid.
@@ -78,6 +77,9 @@ const money = (v: number) =>
  * drawn at all until those real inputs exist.
  */
 export function ProbabilityCurve() {
+  // Subscribes this component to the currency picker. Without it the amounts
+  // keep the previous locale's separators until something else re-renders.
+  useCurrency();
   const { result, error, isLoading, symbol, modelLimit, gateDenied, notReady } = useCalculatorStore();
   const [hoverX, setHoverX] = useState<number | null>(null);
 

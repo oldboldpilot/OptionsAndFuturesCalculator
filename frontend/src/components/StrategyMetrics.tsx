@@ -2,12 +2,14 @@
 
 import { useCalculatorStore } from '../store/useCalculatorStore';
 import { UpgradePrompt } from './UpgradePrompt';
+import { formatMoney, useCurrency } from '../lib/currency';
 
-const money = (v: number) =>
-  `${v < 0 ? '−' : ''}$${Math.abs(v).toLocaleString(undefined, {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  })}`;
+/**
+ * Was a local helper hardcoding `$` and the browser's default locale. It
+ * grouped, which is why it never looked broken, but it ignored the currency
+ * picker entirely -- and it was one of TWO copies of the same expression.
+ */
+const money = (v: number) => formatMoney(v, 2);
 
 /**
  * Strategy-level outcome, probability and risk.
@@ -30,6 +32,9 @@ const money = (v: number) =>
 const tone = (v: number) => (v > 0 ? 'profit' : v < 0 ? 'loss' : 'flat');
 
 export function StrategyMetrics() {
+  // Subscribes this component to the currency picker. Without it the amounts
+  // keep the previous locale's separators until something else re-renders.
+  useCurrency();
   const { result, error, gateDenied, modelLimit, notReady } = useCalculatorStore();
 
   const shell = (body: React.ReactNode) => (
@@ -119,7 +124,7 @@ export function StrategyMetrics() {
         <div className="stat">
           <span className="stat-label">Break-even</span>
           <span className="stat-value">
-            {result.break_even > 0 ? result.break_even.toFixed(2) : '—'}
+            {result.break_even > 0 ? money(result.break_even) : '—'}
           </span>
         </div>
         <div className="stat">

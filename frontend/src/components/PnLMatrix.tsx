@@ -1,6 +1,7 @@
 'use client';
 
 import { useMemo, useState } from 'react';
+import { formatAmount, formatAmountCompact, useCurrency } from '../lib/currency';
 import { useCalculatorStore } from '../store/useCalculatorStore';
 
 type ValueMode = 'dollars' | 'percent';
@@ -27,6 +28,8 @@ type ValueMode = 'dollars' | 'percent';
  * calendar spread's peak is mid-life, not at expiry).
  */
 export function PnLMatrix() {
+  // Re-render the grid when the display currency changes.
+  useCurrency();
   const {
     result, spotPrice, isLoading, error, modelLimit, gateDenied, notReady,
     matrixPriceMin, matrixPriceMax, setMatrixBounds,
@@ -158,8 +161,13 @@ export function PnLMatrix() {
 
   function label(value: number): string {
     if (mode === 'percent') return `${value > 0 ? '+' : ''}${value.toFixed(0)}`;
+    // Grid cells are money. They were rendered with `toFixed(0)`, so a
+    // five-figure P&L read `12775` -- the one place on this screen where an
+    // amount carried no separator at all. Above a thousand the cell is too
+    // narrow for a full amount, so it compacts; `notation: 'compact'` is
+    // locale-aware, where the previous hardcoded "k" was not.
     const abs = Math.abs(value);
-    const compact = abs >= 1000 ? `${(value / 1000).toFixed(1)}k` : value.toFixed(0);
+    const compact = abs >= 1000 ? formatAmountCompact(value) : formatAmount(value, 0);
     return value > 0 ? `+${compact}` : compact;
   }
 

@@ -1,8 +1,10 @@
 'use client';
 
 import { useCalculatorStore } from '../store/useCalculatorStore';
+import { formatAmount, useCurrency } from '../lib/currency';
 
-const n2 = (v: number) => v.toFixed(2);
+/** Forward price and basis -- money, so grouped. */
+const n2 = (v: number) => formatAmount(v, 2);
 
 /**
  * Futures forward curve — contango or backwardation, by tenor.
@@ -24,6 +26,8 @@ const n2 = (v: number) => v.toFixed(2);
  * about the front month that the level alone does not.
  */
 export function TermStructure() {
+  // Regroup when the display locale changes.
+  useCurrency();
   const { futuresCurve, chainStatus, chainError, symbol, spotPrice, assetClass } =
     useCalculatorStore();
 
