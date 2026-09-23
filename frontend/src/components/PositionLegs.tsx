@@ -1,11 +1,17 @@
 'use client';
 
 import { useCalculatorStore } from '../store/useCalculatorStore';
+import { formatAmount, useCurrency } from '../lib/currency';
 
 /** Editable leg list. Strike, quantity and premium are all live-editable,
  *  matching optionsprofitcalculator.com's behaviour of letting the trader
  *  override any fill price. */
 export function PositionLegs() {
+  // Regroup the strike column when the display locale changes. The per-leg
+  // quantity and premium inputs stay plain number fields on purpose: they sit
+  // in 52-68px cells, a premium is a per-share figure well under a thousand,
+  // and a currency symbol would not fit. Grouping buys nothing there.
+  useCurrency();
   const { legs, updateLeg, removeLeg, clearLegs, calculateStrategy, result } =
     useCalculatorStore();
 
@@ -96,7 +102,7 @@ export function PositionLegs() {
                       </span>
                     )}
                   </td>
-                  <td>{leg.strike_price.toFixed(2)}</td>
+                  <td>{formatAmount(leg.strike_price, 2)}</td>
                   <td style={{ width: '52px' }}>
                     <input
                       className="input"
