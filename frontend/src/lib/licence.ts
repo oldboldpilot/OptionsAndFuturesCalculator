@@ -132,6 +132,33 @@ export function isPro(info: LicenceInfo | null): boolean {
 }
 
 /**
+ * The site's OWN publishable key, baked in at build time.
+ *
+ * Publishable by construction: it ships in a static export that any visitor can
+ * read, which is exactly what `pk_live_` means. The control is the ORIGIN
+ * BINDING held against it in the engine's registry, not secrecy -- see
+ * docs/API_SECURITY.md. Nothing here is weakened by it being readable.
+ *
+ * What it buys, today, with `FINANCE_REQUIRE_KEY` unset:
+ *
+ *  - **Its own quota bucket.** `quota.cpp` buckets by caller id, and every
+ *    unkeyed caller collapses into one shared `~anonymous` bucket -- shared
+ *    with any third party pointing at the same host. Keyed, this site meters
+ *    against its own id. It is issued at tier `anonymous` deliberately, so the
+ *    LIMITS are unchanged and only the isolation is new; a per-caller tier such
+ *    as `free` would cap the entire site at that tier's rate, because one key
+ *    shared by every visitor is one bucket.
+ *  - **Attribution in the logs**, as `key=optionsandfuturescalculator` rather
+ *    than `key=<none>`.
+ *
+ * Absent, everything behaves exactly as it did before this existed: no header
+ * is sent and the caller is anonymous. That is the required degrade path -- a
+ * build without the variable must not fail, because this is attribution and
+ * metering, never access.
+ */
+const SITE_KEY = process.env.NEXT_PUBLIC_FINANCE_API_KEY ?? '';
+
+/**
  * gRPC-Web metadata carrying the licence and/or the signed-in session, or
  * empty when there is neither.
  *
@@ -149,7 +176,13 @@ export function authMetadata(): Record<string, string> {
   ensureAuthSubscription();
   const headers: Record<string, string> = {};
   const info = loadLicence();
+  // A Pro LICENCE and the site's own publishable KEY both travel in
+  // `x-api-key`, and only one header exists, so the licence wins when both are
+  // available: it is the entitlement, and the site key grants nothing the
+  // anonymous caller does not already have. A signed-in subscriber is
+  // unaffected either way -- the engine checks `authorization` first.
   if (info) headers['x-api-key'] = info.token;
+  else if (SITE_KEY) headers['x-api-key'] = SITE_KEY;
   if (cachedAccessToken) headers['authorization'] = `Bearer ${cachedAccessToken}`;
   return headers;
 }

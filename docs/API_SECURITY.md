@@ -312,14 +312,75 @@ mortgagefvcalculator.com — which sends the key server-side, with no `Origin` �
 keeps working. That asymmetry is exactly what makes it dangerous: the site that
 breaks is not the one the variable is named after.
 
-**The calculator is meant to stay public throughout** — it serves the website,
-and a static export cannot hold a secret, so it is meant to get attribution via
-its own PUBLISHABLE key rather than via a gate. **That is the design, and it is
-not yet implemented.** `authMetadata()`'s own comment already describes "a page
-that also carries the site's own publishable licence key"; no such key is
-issued, configured or sent. So the precondition for ever setting `enforce` is
-issuing that key and shipping it in the frontend bundle — until then the
-variable has exactly two safe values, `observe` and `warn`.
+**The calculator stays public throughout** — it serves the website, and a static
+export cannot hold a secret, so it gets attribution via its own PUBLISHABLE key
+rather than via a gate.
+
+**ISSUED 2026-09-23**, closing the precondition recorded above. `id
+optionsandfuturescalculator`, publishable, **tier `anonymous`**, scopes
+`[calculator, finance]`, origin-locked to the apex, `www` and the `workers.dev`
+verification host, no expiry. It is minted by `calculator_engine issue-key`,
+which links the server's own `generate_key`/`sha512_hex` so a minting tool
+cannot compute the digest differently from the door that checks it. It reaches
+the browser as `NEXT_PUBLIC_FINANCE_API_KEY`, baked into the static export
+alongside `NEXT_PUBLIC_SUPABASE_ANON_KEY`, and `licence.ts::authMetadata()`
+sends it whenever there is no Pro licence to send instead.
+
+**THE TIER IS THE DANGEROUS FIELD, and it is `anonymous` for a reason that is
+not obvious.** `quota.cpp` buckets by caller id, so ONE key shared by every
+visitor is ONE bucket. A per-caller tier would therefore cap the WHOLE SITE at
+that tier's rate — `free` is 120 req/min against anonymous's 6000, a 50x
+throttle on all traffic, arriving silently and **in Observe mode**, because
+`api_key.cpp` assigns the identity's id, tier and limits BEFORE it consults
+`FINANCE_REQUIRE_KEY` at all. Issued at `anonymous` the limits are exactly what
+unkeyed callers already had, so capacity is unchanged and only the isolation is
+new.
+
+Measured on a local engine with a deliberately tiny policy (anonymous 5/min,
+free 2/min) to make the tiers distinguishable by behaviour rather than by
+reading config:
+
+| caller | served before refusal | engine's own refusal |
+| --- | --- | --- |
+| the site key | 4 | `quota exceeded for tier 'anonymous'` |
+| unkeyed | 5 | `quota exceeded for tier 'anonymous'` |
+
+The refusal text naming `anonymous` is the tier assertion; the unkeyed caller
+still having its full allowance after the keyed bucket was spent is the
+isolation assertion. Before the key, this site's traffic shared `~anonymous`
+with every third party pointing at the host.
+
+Verified against an engine running `FINANCE_REQUIRE_KEY=enforce`, which is the
+only mode where the origin binding and scopes are consulted at all:
+
+| case | result |
+| --- | --- |
+| key, no origin (server-side) | admitted |
+| key + allowed origin | admitted |
+| key + FOREIGN origin | `PERMISSION_DENIED` not registered for this site |
+| bogus key | `UNAUTHENTICATED` unrecognised API key |
+| no key | `UNAUTHENTICATED` no API key supplied |
+| `calculator` scope | admitted |
+| `assistant` scope | `PERMISSION_DENIED` not entitled — **deliberate** |
+
+**`assistant` is deliberately NOT in scope.** That surface is Pro-only, and a Pro
+subscriber sends their LICENCE in `x-api-key` instead of the site key — a
+licence is verified by signature and never consulted against the registry, so
+the scope list cannot affect them. An anonymous caller is refused either way.
+
+**Nothing a user sees changes.** `Outcome::Ok` and `Outcome::NoKey` both fall to
+the `default:` arm of `strategy_outcome_clause`, so a two-leg strategy still
+refuses with the identical "Multi-leg strategies are a Pro feature" copy and the
+identical `PERMISSION_DENIED`, which is what the frontend routes on.
+
+**Rollout is order-independent, which is worth knowing before deploying.** In
+Observe an unrecognised key returns before the identity's id is assigned, so a
+frontend shipped ahead of the registry lands in `~anonymous` — exactly today's
+behaviour — and a registry updated ahead of the frontend simply knows a key
+nobody sends. Neither order has a window.
+
+`enforce` still requires a deliberate decision and still has the blast radius
+described above; issuing this key removes the blocker, not the decision.
 
 ---
 

@@ -2568,6 +2568,65 @@ and `" enforce"` — all fall back to **Observe**, asserted, so a typo in a depl
 variable cannot start refusing production traffic. `pro_gate_mode()` carries the
 identical mapping and was swept: its documentation is correct everywhere.
 
+**FACT 2 AND FACT 3 ABOVE WERE CLOSED THE SAME DAY: the calculator now HAS its
+own publishable key.** Issued 2026-09-23 with `calculator_engine issue-key` —
+`id optionsandfuturescalculator`, publishable, **tier `anonymous`**, scopes
+`[calculator, finance]`, origin-locked to the apex, `www` and the `workers.dev`
+host, no expiry. `FINANCE_API_KEYS` now holds two keys; the
+`mortgagefvcalculator` entry was asserted byte-identical before and after, and
+nothing was rotated. It reaches the browser as `NEXT_PUBLIC_FINANCE_API_KEY`,
+baked into the static export beside `NEXT_PUBLIC_SUPABASE_ANON_KEY`, and
+`authMetadata()` sends it whenever there is no Pro licence to send instead.
+
+**THE TIER IS THE FIELD THAT COULD HAVE THROTTLED THE SITE 50x, SILENTLY, IN
+OBSERVE MODE.** `quota.cpp` buckets by caller id, so one key shared by every
+visitor is ONE bucket — a per-caller tier would cap the entire site at that
+tier's rate. `free` is 120 req/min against anonymous's 6000. And this lands
+regardless of `FINANCE_REQUIRE_KEY`, because `api_key.cpp` assigns the
+identity's id, tier and limits at lines 818-823, **before** the origin check,
+the scope check, or the mode check. **The auth switch is not the immediate
+surface of a new key; the quota bucket is.**
+
+Measured rather than reasoned, on a local engine with a deliberately tiny policy
+(anonymous 5/min, free 2/min) chosen so the tiers are distinguishable by
+BEHAVIOUR rather than by re-reading the config that set them:
+
+| caller | served before refusal | engine's own refusal |
+| --- | --- | --- |
+| the site key | 4 | `quota exceeded for tier 'anonymous'` |
+| unkeyed | 5 | `quota exceeded for tier 'anonymous'` |
+
+The refusal naming `anonymous` is the tier assertion. The unkeyed caller still
+holding its full allowance after the keyed bucket was spent is the ISOLATION
+assertion — and that isolation is the actual win today: before this key, the
+site's traffic shared `~anonymous` with any third party pointing at the host.
+
+Verified under `FINANCE_REQUIRE_KEY=enforce`, the only mode where origins and
+scopes are consulted: allowed origin admitted, **foreign origin
+`PERMISSION_DENIED`**, bogus key and no key both `UNAUTHENTICATED`, `calculator`
+scope admitted, `assistant` scope refused. The assistant exclusion is
+deliberate — that surface is Pro-only and a subscriber sends their LICENCE,
+which is verified by signature and never consulted against the registry, so the
+scope list cannot reach them.
+
+**No user-visible behaviour changes.** `Outcome::Ok` and `Outcome::NoKey` both
+fall to the `default:` arm of `strategy_outcome_clause`, so a two-leg strategy
+still refuses with the identical "Multi-leg strategies are a Pro feature" copy
+and the identical `PERMISSION_DENIED` the frontend routes on.
+
+**Deploy order does not matter, which is unusual enough to state.** In Observe an
+unrecognised key returns before the id is assigned, so a frontend shipped ahead
+of the registry lands in `~anonymous` — exactly today's behaviour — and a
+registry updated ahead of the frontend knows a key nobody sends. There is no
+window in either direction.
+
+Gated by `frontend/src/lib/site-key.test.ts` (5 checks), mutation-checked twice:
+removing the site-key branch fails exactly the 2 behaviour checks, and making
+the assignment unguarded fails exactly the degrade check. That degrade check is
+the one that matters — a build without the variable must send NO header rather
+than an empty one, because an empty `x-api-key` is `Outcome::Malformed` and not
+`Outcome::NoKey`, which are different refusals the day the gate is enforced.
+
 **THE TWO GATES ARE ORDERED, and the order changes the error a user sees.**
 Under Observe an anonymous `ParseOperation` is refused by the PRO gate, with the
 `kMortgageSurface` message pointing the caller at the free Finance RPCs. Under
