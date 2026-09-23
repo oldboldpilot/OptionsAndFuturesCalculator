@@ -1,7 +1,12 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import { formatAmount, formatAmountCompact, useCurrency } from '../lib/currency';
+import {
+  formatAmount,
+  formatAmountCompact,
+  parseMoneyInput,
+  useCurrency,
+} from '../lib/currency';
 import { useCalculatorStore } from '../store/useCalculatorStore';
 
 type ValueMode = 'dollars' | 'percent';
@@ -125,10 +130,14 @@ export function PnLMatrix() {
   }
 
   function commitBounds() {
+    // `parseMoneyInput` rather than `Number`, because everything else on this
+    // screen now groups: a user reading 5,900 off the chain and typing it here
+    // produced `Number("5,900")` = NaN, which this function read as "no bound"
+    // and discarded in silence. It is locale-aware for the same reason the
+    // rest of the money path is -- in de-DE `5.900` is 5900, not 5.9.
     const parse = (t: string): number | null => {
-      const trimmed = t.trim();
-      if (trimmed === '') return null;
-      const n = Number(trimmed);
+      if (t.trim() === '') return null;
+      const n = parseMoneyInput(t);
       return Number.isFinite(n) && n > 0 ? n : null;
     };
     const lo = parse(loDraft);
@@ -143,6 +152,12 @@ export function PnLMatrix() {
       return;
     }
     setBoundsHint(null);
+    // Echo the accepted value back GROUPED. The draft stays exactly what the
+    // user typed while the field has focus -- that is the documented design and
+    // the reason these are drafts at all -- so this runs only once the value
+    // has been accepted, never mid-keystroke.
+    setLoDraft(lo === null ? '' : formatAmount(lo, 0));
+    setHiDraft(hi === null ? '' : formatAmount(hi, 0));
     if (lo === matrixPriceMin && hi === matrixPriceMax) return;
     setMatrixBounds({ min: lo, max: hi });
   }
@@ -217,12 +232,11 @@ export function PnLMatrix() {
             <input
               className="input"
               style={{ width: '62px', textAlign: 'right' }}
-              type="number"
-              min={0}
-              step="any"
+              type="text"
               inputMode="decimal"
+              autoComplete="off"
               aria-label="Matrix lower price bound"
-              placeholder={grid ? grid.windowLo.toFixed(0) : 'low'}
+              placeholder={grid ? formatAmount(grid.windowLo, 0) : 'low'}
               value={loDraft}
               onChange={(e) => setLoDraft(e.target.value)}
               onBlur={commitBounds}
@@ -236,12 +250,11 @@ export function PnLMatrix() {
             <input
               className="input"
               style={{ width: '62px', textAlign: 'right' }}
-              type="number"
-              min={0}
-              step="any"
+              type="text"
               inputMode="decimal"
+              autoComplete="off"
               aria-label="Matrix upper price bound"
-              placeholder={grid ? grid.windowHi.toFixed(0) : 'high'}
+              placeholder={grid ? formatAmount(grid.windowHi, 0) : 'high'}
               value={hiDraft}
               onChange={(e) => setHiDraft(e.target.value)}
               onBlur={commitBounds}

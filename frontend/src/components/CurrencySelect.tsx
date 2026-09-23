@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useSyncExternalStore } from 'react';
 import { CURRENCIES, detectCurrency, setCurrency, useCurrency } from '../lib/currency';
 
 /**
@@ -30,20 +30,28 @@ import { CURRENCIES, detectCurrency, setCurrency, useCurrency } from '../lib/cur
  * which is also when the picker first becomes usable — there is nothing to
  * pick with before hydration.
  */
+/** Stable no-op subscription: hydration state never changes again. */
+const subscribeNever = () => () => {};
+
 export function CurrencySelect({ className = '' }: { className?: string }) {
   const currency = useCurrency();
-  const [mounted, setMounted] = useState(false);
 
-  // Deliberately after paint: the first client render must match the server's
-  // single option or React reports a hydration mismatch.
-  //
-  // `detectCurrency` runs here too, and it is what makes the choice a
-  // PREFERENCE rather than a toggle -- it restores the saved code from
-  // localStorage, falling back to the browser's region and then to the
-  // Cloudflare edge's. Without it the picker worked and then forgot on the
-  // next page load, which a browser test caught and no unit test could.
+  // Hydration detection WITHOUT setState-in-an-effect, which this repo's lint
+  // rejects (react-hooks/set-state-in-effect) for the reason PnLMatrix's draft
+  // seeding already documents: it renders twice, once with the stale value.
+  // `useSyncExternalStore` answers "am I on the client" directly -- the server
+  // snapshot is false, the client snapshot is true, and the subscription is a
+  // no-op because the answer never changes after hydration.
+  const mounted = useSyncExternalStore(subscribeNever, () => true, () => false);
+
+  // `detectCurrency` is a genuine side effect with no React state of its own:
+  // it writes to the currency module's store, and subscribers re-render through
+  // `useCurrency`. It is what makes the choice a PREFERENCE rather than a
+  // toggle -- restoring the saved code from localStorage, falling back to the
+  // browser's region and then to the Cloudflare edge's. Without it the picker
+  // worked and then forgot on the next page load, which a browser test caught
+  // and no unit test could.
   useEffect(() => {
-    setMounted(true);
     void detectCurrency();
   }, []);
 

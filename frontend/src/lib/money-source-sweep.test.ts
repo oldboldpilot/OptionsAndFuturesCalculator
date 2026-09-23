@@ -93,6 +93,53 @@ describe('money inputs cannot be type=number', () => {
   });
 });
 
+/**
+ * Every `type="number"` left in the UI, with what it holds.
+ *
+ * A number input cannot carry a grouping separator -- the HTML spec restricts
+ * its value to a "valid floating-point number" -- so this list is the set of
+ * fields asserted NOT to be money. It is pinned by count so a new money field
+ * cannot join it quietly; adding a non-money one means adding it here with a
+ * reason, which is a deliberate act rather than an omission.
+ */
+const NON_MONEY_NUMBER_INPUTS: Record<string, { count: number; holds: string }> = {
+  'src/components/BermudanDateBuilder.tsx': { count: 1, holds: 'an exercise date offset in days' },
+  'src/components/ExerciseStylePanel.tsx': { count: 2, holds: 'tree steps and averaging states' },
+  'src/components/OptionTicket.tsx': { count: 2, holds: 'contract count and IV percent' },
+  'src/components/PositionLegs.tsx': { count: 1, holds: 'per-leg contract quantity' },
+  'src/components/TopBar.tsx': { count: 2, holds: 'risk-free rate and dividend yield, both percents' },
+};
+
+describe('no money field is a type=number input', () => {
+  it('the set of number inputs is exactly the declared non-money one', () => {
+    const found: Record<string, number> = {};
+    for (const f of UI) {
+      if (f.endsWith('MoneyInput.tsx')) continue;
+      const n = (read(f).match(/type="number"/g) ?? []).length;
+      if (n > 0) found[f] = n;
+    }
+    const expected = Object.fromEntries(
+      Object.entries(NON_MONEY_NUMBER_INPUTS).map(([k, v]) => [k, v.count]),
+    );
+    expect(found).toEqual(expected);
+  });
+
+  it('every declared entry states what it holds', () => {
+    for (const [file, { holds }] of Object.entries(NON_MONEY_NUMBER_INPUTS)) {
+      expect(holds.length, `${file} needs a reason`).toBeGreaterThan(10);
+    }
+  });
+
+  it('the price-bound drafts accept a GROUPED value', () => {
+    // They parsed with `Number`, so "5,900" was NaN and silently discarded --
+    // the one field on the screen that rejected the format every other field
+    // renders in.
+    const s = read('src/components/PnLMatrix.tsx');
+    expect(s).toContain('parseMoneyInput');
+    expect(s).not.toContain('type="number"');
+  });
+});
+
 describe('MoneyInput is USED, not merely defined', () => {
   it('is rendered by at least one component', () => {
     // Found by review: the component existed, the sweep asserted its shape, and

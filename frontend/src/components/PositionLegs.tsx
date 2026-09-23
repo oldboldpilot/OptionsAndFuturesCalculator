@@ -2,6 +2,7 @@
 
 import { useCalculatorStore } from '../store/useCalculatorStore';
 import { formatAmount, useCurrency } from '../lib/currency';
+import { MoneyInput } from './MoneyInput';
 
 /** Editable leg list. Strike, quantity and premium are all live-editable,
  *  matching optionsprofitcalculator.com's behaviour of letting the trader
@@ -119,17 +120,23 @@ export function PositionLegs() {
                     />
                   </td>
                   <td style={{ width: '68px' }}>
-                    <input
-                      className="input"
-                      style={{ textAlign: 'right' }}
-                      type="number"
-                      step="0.01"
-                      min={0}
+                    {/*
+                      Grouped, and WITHOUT a symbol: this cell is 68px and the
+                      column is already headed as a price. A premium is usually
+                      a two-figure per-share number, but it is multiplied by
+                      quantity x 100 downstream, so a slipped digit is a
+                      position priced an order of magnitude wrong.
+                    */}
+                    <MoneyInput
                       value={leg.premium}
-                      onChange={(e) => {
-                        updateLeg(leg.id, { premium: Number(e.target.value) || 0 });
+                      onChange={(v) => {
+                        updateLeg(leg.id, { premium: Number.isNaN(v) ? 0 : v });
                         calculateStrategy();
                       }}
+                      decimals={2}
+                      showSymbol={false}
+                      ariaLabel="Leg premium"
+                      className="input"
                     />
                   </td>
                   {/* Em dash until the engine has answered, never zero: a leg

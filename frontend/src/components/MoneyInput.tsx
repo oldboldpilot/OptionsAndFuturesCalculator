@@ -33,6 +33,7 @@ export function MoneyInput({
   className = '',
   id,
   placeholder,
+  showSymbol = true,
 }: {
   value: number;
   onChange: (v: number) => void;
@@ -41,6 +42,15 @@ export function MoneyInput({
   className?: string;
   id?: string;
   placeholder?: string;
+  /**
+   * Render the currency symbol inside the field.
+   *
+   * Off for a dense grid cell, where the column header already says the values
+   * are money and ~62-68px leaves no room for a symbol. Grouping is the point
+   * of this component; the symbol is decoration and is the part that can be
+   * dropped when space is short.
+   */
+  showSymbol?: boolean;
 }) {
   useCurrency();
   const ref = useRef<HTMLInputElement>(null);
@@ -75,7 +85,7 @@ export function MoneyInput({
 
   return (
     <span className="money-input">
-      <span className="money-input-symbol">{currencySymbol()}</span>
+      {showSymbol && <span className="money-input-symbol">{currencySymbol()}</span>}
       <input
         ref={ref}
         id={id}
