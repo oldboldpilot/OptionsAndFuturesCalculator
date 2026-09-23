@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import { formatAmount, useCurrency } from '../lib/currency';
 import { useCalculatorStore } from '../store/useCalculatorStore';
 import ThemeToggle from './ThemeToggle';
 
@@ -12,6 +13,8 @@ import ThemeToggle from './ThemeToggle';
  * freshness is chrome-level information, not something buried in a tooltip.
  */
 export function TopBar() {
+  // Regroup when the display locale changes.
+  useCurrency();
   const {
     symbol, spotPrice, assetClass, setSymbol, calculateStrategy,
     isLoading, error, notReady, legs, riskFreeRate, setRiskFreeRate, dividendYield, setDividendYield,
@@ -180,7 +183,7 @@ export function TopBar() {
               borderRadius: 'var(--radius-sm)',
             }}
           >
-            {spotPrice.toFixed(2)}
+            {formatAmount(spotPrice, 2)}
           </span>
         ) : (
           <span className="num" style={{ fontSize: 'var(--text-lg)', color: 'var(--color-ink-400)' }}>

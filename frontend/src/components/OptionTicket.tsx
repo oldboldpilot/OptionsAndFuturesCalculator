@@ -118,7 +118,7 @@ export function OptionTicket() {
           {moneyness && (
             <span
               className={moneyness.label === 'OTM' ? 'chip' : 'chip chip-accent'}
-              title={`${moneyness.pct >= 0 ? '+' : ''}${moneyness.pct.toFixed(1)}% from spot ${spotPrice.toFixed(2)}`}
+              title={`${moneyness.pct >= 0 ? '+' : ''}${moneyness.pct.toFixed(1)}% from spot ${formatAmount(spotPrice, 2)}`}
             >
               {moneyness.label}{moneyness.atm ? '' : ` ${moneyness.pct >= 0 ? '+' : ''}${moneyness.pct.toFixed(1)}%`}
             </span>
@@ -231,7 +231,7 @@ export function OptionTicket() {
               const px = ticket.action === 'BUY' ? q.ask : q.bid;
               return (
                 <option key={s.strike} value={s.strike}>
-                  {s.strike.toFixed(2)}{s.isAtm ? '  · ATM' : ''}{px > 0 ? `  ${px.toFixed(2)}` : '  no quote'}
+                  {formatAmount(s.strike, 2)}{s.isAtm ? '  · ATM' : ''}{px > 0 ? `  ${formatAmount(px, 2)}` : '  no quote'}
                 </option>
               );
             })}

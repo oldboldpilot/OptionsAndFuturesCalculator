@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useEffect, useMemo, useState } from 'react';
+import { formatAmount, useCurrency } from '../lib/currency';
 import { useCalculatorStore, type ChainStrike } from '../store/useCalculatorStore';
 import { useAssistantStore } from '../store/useAssistantStore';
 import { useProStatus } from '../lib/useProStatus';
@@ -272,6 +273,8 @@ function nearestStrike(strikes: ChainStrike[], target: number): ChainStrike | nu
 }
 
 export const StrategySelector: React.FC = () => {
+  // Regroup the strike hints when the display locale changes.
+  useCurrency();
   const [category, setCategory] = useState<Category>('Bullish');
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState<string | null>(null);
@@ -437,7 +440,7 @@ export const StrategySelector: React.FC = () => {
       const row = nearestStrike(chainStrikes, spotPrice * t.moneyness);
       if (row) return ` ${row.strike}`;
     }
-    if (spotPrice > 0) return ` ~${(spotPrice * t.moneyness).toFixed(0)}`;
+    if (spotPrice > 0) return ` ~${formatAmount(spotPrice * t.moneyness, 0)}`;
     return '';
   }
 

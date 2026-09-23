@@ -147,7 +147,7 @@ export function PositionLegs() {
                     {risk ? risk.theta.toFixed(2) : '—'}
                   </td>
                   <td className={risk ? (risk.openPnl >= 0 ? 'profit' : 'loss') : undefined}>
-                    {risk ? `${risk.openPnl >= 0 ? '+' : ''}${risk.openPnl.toFixed(0)}` : '—'}
+                    {risk ? `${risk.openPnl >= 0 ? '+' : ''}${formatAmount(risk.openPnl, 0)}` : '—'}
                   </td>
                   <td style={{ width: '24px' }}>
                     <button

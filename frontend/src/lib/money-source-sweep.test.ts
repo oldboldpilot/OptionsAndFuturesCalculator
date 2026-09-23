@@ -110,6 +110,55 @@ const NON_MONEY_NUMBER_INPUTS: Record<string, { count: number; holds: string }> 
   'src/components/TopBar.tsx': { count: 2, holds: 'risk-free rate and dividend yield, both percents' },
 };
 
+/**
+ * Every remaining `toFixed` in a component, with what it renders.
+ *
+ * This census exists because the first version of this sweep looked only for
+ * `$${...}` templates and locally-defined `money()` helpers, and BARE `toFixed`
+ * on a money value matched neither. It walked straight past the spot price, the
+ * breakeven marker, the probability curve's price axis and sigma bands, the
+ * open P&L column, and the strike list in the ticket -- eight ungrouped amounts
+ * on the main screen, found by re-reading the source rather than by any test.
+ *
+ * `toFixed` is legitimate for a percent, a Greek, a year fraction and an SVG
+ * path coordinate, none of which group. Pinning the COUNT per file is what
+ * makes a new one a deliberate act: adding a non-money `toFixed` means
+ * updating this table, and adding a money one fails.
+ */
+const TOFIXED_CENSUS: Record<string, { count: number; renders: string }> = {
+  'BermudanDateBuilder.tsx': { count: 2, renders: 'year fractions and day counts' },
+  'ExerciseStylePanel.tsx': { count: 3, renders: 'Greeks and a step count' },
+  'OptionChain.tsx': { count: 1, renders: 'implied volatility percent' },
+  'OptionTicket.tsx': { count: 3, renders: 'moneyness percent and IV percent' },
+  'PayoffLadder.tsx': { count: 1, renders: 'return percent' },
+  'PnLMatrix.tsx': { count: 2, renders: 'percent mode and return-on-risk percent' },
+  'PositionLegs.tsx': { count: 2, renders: 'per-leg delta and theta' },
+  'ProbabilityCurve.tsx': { count: 13, renders: 'SVG path coordinates and probability percents' },
+  'StrategyMetrics.tsx': { count: 11, renders: 'risk/reward ratio, probability, Greeks, rate percents' },
+  'TermStructure.tsx': { count: 1, renders: 'annualised yield percent' },
+  'TopBar.tsx': { count: 5, renders: 'risk-free rate and dividend yield percents' },
+};
+
+describe('every remaining toFixed renders something that does not group', () => {
+  it('the census matches the source exactly', () => {
+    const found: Record<string, number> = {};
+    for (const f of UI) {
+      const n = (read(f).match(/toFixed/g) ?? []).length;
+      if (n > 0) found[f.replace('src/components/', '')] = n;
+    }
+    const expected = Object.fromEntries(
+      Object.entries(TOFIXED_CENSUS).map(([k, v]) => [k, v.count]),
+    );
+    expect(found).toEqual(expected);
+  });
+
+  it('every entry states what it renders', () => {
+    for (const [f, { renders }] of Object.entries(TOFIXED_CENSUS)) {
+      expect(renders.length, `${f} needs a reason`).toBeGreaterThan(10);
+    }
+  });
+});
+
 describe('no money field is a type=number input', () => {
   it('the set of number inputs is exactly the declared non-money one', () => {
     const found: Record<string, number> = {};

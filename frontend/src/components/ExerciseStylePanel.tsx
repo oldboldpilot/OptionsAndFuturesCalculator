@@ -11,6 +11,7 @@
  * open the rest of this panel.
  */
 import { useEffect } from 'react';
+import { formatAmount, useCurrency } from '../lib/currency';
 import { useCalculatorStore } from '../store/useCalculatorStore';
 import {
   useTreePricerStore,
@@ -46,6 +47,8 @@ function greeksLine(result: TreePriceResult): React.ReactNode {
 }
 
 export function ExerciseStylePanel() {
+  // Regroup when the display locale changes.
+  useCurrency();
   const { ticket, spotPrice, riskFreeRate, chainExpirations, selectedExpiration } =
     useCalculatorStore();
   const {
@@ -274,7 +277,7 @@ export function ExerciseStylePanel() {
                 <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
                   <span className="stat-label">{STYLE_LABEL[r.style]}</span>
                   <span className="stat-value" style={{ fontVariantNumeric: 'tabular-nums' }}>
-                    {r.value.toFixed(4)}
+                    {formatAmount(r.value, 4)}
                     {r.earlyExercisePremium !== null && (
                       <span
                         style={{
@@ -288,7 +291,7 @@ export function ExerciseStylePanel() {
                         title="Value vs. the European price from this same batch"
                       >
                         {r.earlyExercisePremium > 0 ? '+' : ''}
-                        {r.earlyExercisePremium.toFixed(4)}
+                        {formatAmount(r.earlyExercisePremium, 4)}
                       </span>
                     )}
                   </span>

@@ -1,7 +1,7 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import { formatMoney, useCurrency } from '../lib/currency';
+import { formatAmount, formatMoney, useCurrency } from '../lib/currency';
 import { useCalculatorStore, type CurvePoint } from '../store/useCalculatorStore';
 
 /* ---------------------------------------------------------------------------
@@ -406,7 +406,7 @@ export function ProbabilityCurve() {
               fill="var(--color-warn)" fontSize="10" textAnchor="middle"
               fontFamily="var(--font-mono)"
             >
-              BE {b.toFixed(2)}
+              BE {formatAmount(b, 2)}
             </text>
           </g>
         ))}
@@ -438,7 +438,7 @@ export function ProbabilityCurve() {
             fontFamily="var(--font-mono)"
             textAnchor={i === 0 ? 'start' : i === axisTicks.length - 1 ? 'end' : 'middle'}
           >
-            {t.toFixed(t >= 1000 ? 0 : 2)}
+            {formatAmount(t, t >= 1000 ? 0 : 2)}
           </text>
         ))}
       </svg>
@@ -457,7 +457,7 @@ export function ProbabilityCurve() {
       >
         {hoverPrice !== null ? (
           <>
-            <span>{symbol} {hoverPrice.toFixed(2)}</span>
+            <span>{symbol} {formatAmount(hoverPrice, 2)}</span>
             <span>
               P&amp;L{' '}
               <span className={(hoverPnl ?? 0) >= 0 ? 'profit' : 'loss'}>
@@ -512,14 +512,14 @@ export function ProbabilityCurve() {
         <div>
           <div className="stat-label">1σ range (68%)</div>
           <div className="stat-value">
-            {model.oneSigma.lo.toFixed(2)} – {model.oneSigma.hi.toFixed(2)}
+            {formatAmount(model.oneSigma.lo, 2)} – {formatAmount(model.oneSigma.hi, 2)}
           </div>
         </div>
 
         <div>
           <div className="stat-label">2σ range (95%)</div>
           <div className="stat-value">
-            {model.twoSigma.lo.toFixed(2)} – {model.twoSigma.hi.toFixed(2)}
+            {formatAmount(model.twoSigma.lo, 2)} – {formatAmount(model.twoSigma.hi, 2)}
           </div>
         </div>
 

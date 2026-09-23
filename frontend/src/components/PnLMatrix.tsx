@@ -1,12 +1,7 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import {
-  formatAmount,
-  formatAmountCompact,
-  parseMoneyInput,
-  useCurrency,
-} from '../lib/currency';
+import { formatAmount, formatAmountCompact, parseMoneyInput, useCurrency } from '../lib/currency';
 import { useCalculatorStore } from '../store/useCalculatorStore';
 
 type ValueMode = 'dollars' | 'percent';
@@ -361,7 +356,7 @@ export function PnLMatrix() {
                         fontWeight: isSpot ? 600 : 400,
                       }}
                     >
-                      {price.toFixed(2)}
+                      {formatAmount(price, 2)}
                     </td>
                     {grid.dates.map((d) => {
                       const cell = grid.byKey.get(`${price}|${d}`);
@@ -372,7 +367,7 @@ export function PnLMatrix() {
                           key={d}
                           className={value > 0 ? 'profit' : value < 0 ? 'loss' : 'flat'}
                           style={{ background: tint(value, grid.magnitude) }}
-                          title={`${d} · ${price.toFixed(2)} · ${cell.pnl >= 0 ? '+' : ''}${cell.pnl.toFixed(2)} (${cell.returnOnRiskPercent >= 0 ? '+' : ''}${cell.returnOnRiskPercent.toFixed(1)}% of risk)`}
+                          title={`${d} · ${formatAmount(price, 2)} · ${cell.pnl >= 0 ? '+' : ''}${formatAmount(cell.pnl, 2)} (${cell.returnOnRiskPercent >= 0 ? '+' : ''}${cell.returnOnRiskPercent.toFixed(1)}% of risk)`}
                         >
                           {label(value)}
                         </td>

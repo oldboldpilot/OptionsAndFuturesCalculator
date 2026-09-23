@@ -1,6 +1,7 @@
 'use client';
 
 import { useMemo, useState } from 'react';
+import { formatAmount, formatAmountCompact, useCurrency } from '../lib/currency';
 import { useCalculatorStore } from '../store/useCalculatorStore';
 
 type ValueMode = 'dollars' | 'percent';
@@ -18,6 +19,8 @@ type ValueMode = 'dollars' | 'percent';
  * which the engine now fills correctly; wiring it up here is separate work.
  */
 export function PayoffLadder() {
+  // Regroup when the display locale changes.
+  useCurrency();
   const { result, spotPrice, isLoading, error, modelLimit, gateDenied, notReady } = useCalculatorStore();
   const [mode, setMode] = useState<ValueMode>('dollars');
 
@@ -79,7 +82,7 @@ export function PayoffLadder() {
       return `${p > 0 ? '+' : ''}${p.toFixed(0)}%`;
     }
     const abs = Math.abs(pnl);
-    const compact = abs >= 1000 ? `${(pnl / 1000).toFixed(1)}k` : pnl.toFixed(0);
+    const compact = abs >= 1000 ? formatAmountCompact(pnl) : formatAmount(pnl, 0);
     return pnl > 0 ? `+${compact}` : compact;
   }
 
@@ -153,7 +156,7 @@ export function PayoffLadder() {
                         fontWeight: isSpot ? 600 : 400,
                       }}
                     >
-                      {r.price.toFixed(2)}
+                      {formatAmount(r.price, 2)}
                     </td>
                     <td className={positive ? 'profit' : r.pnl < 0 ? 'loss' : 'flat'}>
                       {label(r.pnl)}
