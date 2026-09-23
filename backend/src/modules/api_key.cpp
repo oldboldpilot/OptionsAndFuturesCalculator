@@ -564,6 +564,15 @@ auto check_assistant_entitlement(const Identity& identity, const AssistantSurfac
                         std::string{assistant_outcome_message(surface, identity.outcome)});
 }
 
+auto parse_require_mode(std::string_view raw) noexcept -> Mode {
+    // Only these six spellings mean anything. Everything else -- including the
+    // empty string, which is the production default -- is Observe, so a typo in
+    // a deploy variable cannot start refusing traffic.
+    if (raw == "2" || raw == "enforce") return Mode::Enforce;
+    if (raw == "1" || raw == "warn") return Mode::Warn;
+    return Mode::Observe;
+}
+
 class KeyRegistry::Impl {
   public:
     Impl() { load(); }
@@ -583,14 +592,7 @@ class KeyRegistry::Impl {
     auto load() -> void {
         auto& log = logger::Logger::getInstance();
 
-        const auto mode_raw = env_or("FINANCE_REQUIRE_KEY", "");
-        if (mode_raw == "2" || mode_raw == "enforce") {
-            mode_ = Mode::Enforce;
-        } else if (mode_raw == "1" || mode_raw == "warn") {
-            mode_ = Mode::Warn;
-        } else {
-            mode_ = Mode::Observe;
-        }
+        mode_ = parse_require_mode(env_or("FINANCE_REQUIRE_KEY", ""));
 
         const auto keys_json = env_or("FINANCE_API_KEYS", "");
         if (keys_json.empty()) {

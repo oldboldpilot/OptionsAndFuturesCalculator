@@ -56,6 +56,28 @@ enum class Outcome : std::uint8_t {
  */
 enum class Mode : std::uint8_t { Observe, Warn, Enforce };
 
+/**
+ * `FINANCE_REQUIRE_KEY` -> `Mode`, as a PURE function of the string.
+ *
+ * Extracted from `KeyRegistry::load()` so the mapping can be asserted without
+ * a process. `KeyRegistry` is a Meyers singleton that reads the environment
+ * once at first use, so one process holds one mode for its life -- which is
+ * why `test_state_assumptions_gate` is its own binary, and why testing three
+ * modes through the registry would cost three binaries to pin three lines.
+ *
+ * It is gated because it was NOT, and the cost of that was a stale document.
+ * `docs/API_SECURITY.md` told operators that `FINANCE_REQUIRE_KEY=1` was
+ * Enforce; `1` is **Warn**, which serves every request. Nothing in the test
+ * suite referenced this variable at all, so the document and the code drifted
+ * with no mechanism that could notice. The dangerous direction is the one that
+ * looks like success: a gate that refuses nobody passes every probe.
+ *
+ * Anything unrecognised -- including the empty string -- is `Observe`,
+ * deliberately. A typo in a deploy variable must not be able to start refusing
+ * production traffic.
+ */
+[[nodiscard]] auto parse_require_mode(std::string_view raw) noexcept -> Mode;
+
 /** The caller, once resolved. Every field here is safe to write to a log. */
 struct Identity {
     std::string id;                        // human label, e.g. "acme-risk"

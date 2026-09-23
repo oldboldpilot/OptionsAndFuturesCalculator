@@ -273,16 +273,53 @@ does not become a credential leak.
 ## 5. Rollout
 
 A change that starts refusing traffic must not be switched on blind.
+`FINANCE_REQUIRE_KEY` selects the stage, and the accepted values are what
+`api_key.cpp`'s `load()` actually parses:
 
-1. **Observe.** Keys optional, everything logged. Answers "is anyone already
-   using this, and from where?" with data instead of a guess.
-2. **Warn.** Unkeyed calls still served, at the anonymous tier, logged as
-   `would-deny`. Confirms nothing legitimate is about to break.
-3. **Enforce.** `FINANCE_REQUIRE_KEY=1`. Unkeyed calls refused.
+| `FINANCE_REQUIRE_KEY` | Mode | Unkeyed call |
+| --- | --- | --- |
+| unset / `0` / `observe` | Observe | **served**, `would-deny` logged at info |
+| `1` / `warn` | Warn | **served**, `would-deny` logged at error |
+| `2` / `enforce` | Enforce | refused — `UNAUTHENTICATED` |
 
-The calculator stays public throughout — it serves the website, and a static
-export cannot hold a secret. It gets attribution via its own publishable key,
-not a gate.
+**This table said `FINANCE_REQUIRE_KEY=1` was Enforce until 2026-09-22, and it
+was WRONG in the direction that hides itself.** `1` selects **Warn**, which
+serves every request; an operator following this document to switch the gate on
+would have got a gate that refuses nobody, while the boot banner read
+`WARN (serving, logging what enforce would do)` and every probe came back green.
+A control that is off produces passing results, not failing ones. The other
+three documents describing this variable — `FINANCE_API.md`, `BUSINESS_API.md`
+and `MORTGAGEFV_INTEGRATION.md` — all carried the correct mapping throughout,
+so this was one stale copy beside three right ones rather than a design change.
+
+**ENFORCE IS NOT REACHABLE TODAY, and the blocker is not this variable.**
+Measured 2026-09-22:
+
+- `FINANCE_API_KEYS` holds **exactly one key**, `mortgagefvcalculator`
+  (`tier partner`, `scopes [finance, assistant]`, origin-locked). There is **no
+  key for optionsandfuturescalculator.com at all.**
+- `frontend/src/lib/licence.ts::authMetadata()` returns `{}` when there is no Pro
+  licence and no signed-in session — which is every anonymous visitor. It sets
+  `x-api-key` from a subscription **licence**, never from a site key.
+- `KeyRegistry::authenticate()` is called by **all four services**
+  (`finance_service`, `calculator_service`, and both assistants), so despite its
+  name this variable is an ENGINE-WIDE switch, not a Finance-service one. Under
+  Enforce, `Outcome::NoKey` returns `UNAUTHENTICATED`.
+
+Those three together mean flipping to `enforce` today is a **full outage of
+optionsandfuturescalculator.com for every anonymous visitor**, while
+mortgagefvcalculator.com — which sends the key server-side, with no `Origin` —
+keeps working. That asymmetry is exactly what makes it dangerous: the site that
+breaks is not the one the variable is named after.
+
+**The calculator is meant to stay public throughout** — it serves the website,
+and a static export cannot hold a secret, so it is meant to get attribution via
+its own PUBLISHABLE key rather than via a gate. **That is the design, and it is
+not yet implemented.** `authMetadata()`'s own comment already describes "a page
+that also carries the site's own publishable licence key"; no such key is
+issued, configured or sent. So the precondition for ever setting `enforce` is
+issuing that key and shipping it in the frontend bundle — until then the
+variable has exactly two safe values, `observe` and `warn`.
 
 ---
 

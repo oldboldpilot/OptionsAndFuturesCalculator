@@ -112,6 +112,8 @@ using options_calculator::auth::Identity;
 using options_calculator::auth::kMortgageSurface;
 using options_calculator::auth::kStrategySurface;
 using options_calculator::auth::KeyType;
+using options_calculator::auth::Mode;
+using options_calculator::auth::parse_require_mode;
 using options_calculator::auth::Outcome;
 
 /** A free-tier, unauthenticated identity carrying the given auth outcome. */
@@ -485,6 +487,53 @@ auto main() -> int {
         }
         setenv("PRO_GATE_MODE", "enforce", 1);
         unsetenv("LICENCE_SIGNING_KEY");
+    }
+
+    // -----------------------------------------------------------------
+    section("10. FINANCE_REQUIRE_KEY -> Mode: the mapping nothing gated");
+
+    // This whole section exists because NOTHING in the test suite referenced
+    // FINANCE_REQUIRE_KEY. docs/API_SECURITY.md told operators that
+    // `FINANCE_REQUIRE_KEY=1` was Enforce, and `1` is WARN -- which SERVES
+    // every request. An operator following that document to switch the gate on
+    // would have got a gate that refuses nobody, while the boot banner said
+    // WARN and every probe came back green. A control that is off produces
+    // passing results, not failing ones, so the drift had no alarm.
+    //
+    // parse_require_mode is a PURE function precisely so this can be asserted
+    // without a process: KeyRegistry is a Meyers singleton that reads the
+    // environment once at first use, so pinning three modes through the
+    // registry would cost three separate binaries (which is exactly why
+    // test_state_assumptions_gate is its own).
+    {
+        check(parse_require_mode("2") == Mode::Enforce, "\"2\" is Enforce");
+        check(parse_require_mode("enforce") == Mode::Enforce, "\"enforce\" is Enforce");
+
+        // The two that carried the documented lie. Both SERVE.
+        check(parse_require_mode("1") == Mode::Warn,
+              "\"1\" is WARN, not Enforce -- the exact claim docs/API_SECURITY.md "
+              "made until 2026-09-22");
+        check(parse_require_mode("warn") == Mode::Warn, "\"warn\" is Warn");
+
+        // Warn and Observe must stay DISTINCT from Enforce, because the whole
+        // point of the staged rollout is that the first two serve.
+        check(parse_require_mode("1") != Mode::Enforce,
+              "\"1\" must never become Enforce -- it would turn a documented "
+              "observe-only step into a live refusal");
+
+        // Production's actual value, and the safe default.
+        check(parse_require_mode("") == Mode::Observe,
+              "the EMPTY string is Observe -- this is production's setting");
+        check(parse_require_mode("0") == Mode::Observe, "\"0\" is Observe");
+        check(parse_require_mode("observe") == Mode::Observe, "\"observe\" is Observe");
+
+        // Unrecognised spellings fail toward serving, never toward refusing.
+        // A typo in a deploy variable must not be able to take a site down.
+        for (const auto* typo : {"Enforce", "ENFORCE", "true", "yes", "on", "3", " enforce"}) {
+            check(parse_require_mode(typo) == Mode::Observe,
+                  std::string{"unrecognised \""} + typo +
+                      "\" falls back to Observe, never to Enforce");
+        }
     }
 
     // -----------------------------------------------------------------

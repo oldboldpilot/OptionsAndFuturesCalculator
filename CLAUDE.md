@@ -2518,6 +2518,56 @@ deliberately ungated and the Pro gate is what protects the assistants — but
 write it as what it is: in Observe an **origin-locked publishable key is not
 origin-locked**, because the binding is only consulted on the enforcing path.
 
+### `FINANCE_REQUIRE_KEY=enforce` WOULD TAKE THE CALCULATOR DOWN, and the name hides it
+
+Measured 2026-09-23, after "fix the FINANCE_REQUIRE_KEY issue". Three
+independent facts, each verifiable on its own:
+
+1. **`KeyRegistry::authenticate()` is called by ALL FOUR services** —
+   `finance_service.cpp`, `calculator_service.cpp`, `assistant_service.cpp` and
+   `mortgage_assistant_service.cpp`. Despite its name this is an **engine-wide**
+   switch, not a Finance-service one.
+2. **`FINANCE_API_KEYS` holds exactly ONE key**, `mortgagefvcalculator`
+   (`tier partner`, `scopes [finance, assistant]`, origin-locked). **There is no
+   key for optionsandfuturescalculator.com at all.**
+3. **The calculator frontend sends no key.**
+   `frontend/src/lib/licence.ts::authMetadata()` sets `x-api-key` only from a Pro
+   **licence** (`if (info)`), so it returns `{}` for every anonymous visitor. The
+   site's "own publishable key" exists only in that function's comment and in
+   `docs/API_SECURITY.md` §5 — it was never issued, configured or sent.
+
+Under Enforce, `Outcome::NoKey` returns `UNAUTHENTICATED`. So the flip refuses
+**every anonymous visitor to optionsandfuturescalculator.com, on all four
+services**, while mortgagefvcalculator.com — server-side, key attached, no
+`Origin` — keeps working perfectly. **The site that breaks is not the one the
+variable is named after**, which is what makes this worth a section rather than
+a line. `enforce` has exactly one precondition: issue the calculator its own
+publishable key and ship it in the bundle.
+
+**A SECOND defect, and it is the one with no alarm.** `docs/API_SECURITY.md`
+said Enforce was `FINANCE_REQUIRE_KEY=1` until 2026-09-23. `1` is **Warn**,
+which SERVES every request. An operator following the security document — the
+one you would read when deciding to switch the gate on — would have got a gate
+that refuses nobody, with the boot banner reading `WARN (serving, logging what
+enforce would do)` and every probe green. `FINANCE_API.md`, `BUSINESS_API.md`
+and `MORTGAGEFV_INTEGRATION.md` all carried the correct table throughout, so it
+was one stale copy beside three right ones.
+
+**Nothing in the test suite referenced `FINANCE_REQUIRE_KEY`**, which is how the
+document and the code drifted with no mechanism that could notice. The mapping
+is now a pure exported function, `auth::parse_require_mode`, gated by section 10
+of `test_api_key_entitlement` (15 checks, 90 total). Pure deliberately:
+`KeyRegistry` is a Meyers singleton reading the environment once at first use,
+so pinning three modes through the registry would cost three binaries — which is
+exactly why `test_state_assumptions_gate` is its own. Mutation-checked with
+`CCACHE_DISABLE=1`: making `1` mean Enforce reproduces the documented lie and
+fails exactly those 2 checks and nothing else.
+
+Unrecognised values — including `Enforce`, `ENFORCE`, `true`, `yes`, `on`, `3`
+and `" enforce"` — all fall back to **Observe**, asserted, so a typo in a deploy
+variable cannot start refusing production traffic. `pro_gate_mode()` carries the
+identical mapping and was swept: its documentation is correct everywhere.
+
 **THE TWO GATES ARE ORDERED, and the order changes the error a user sees.**
 Under Observe an anonymous `ParseOperation` is refused by the PRO gate, with the
 `kMortgageSurface` message pointing the caller at the free Finance RPCs. Under
