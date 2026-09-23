@@ -10,6 +10,7 @@ import mortgage_assistant_service;
 import api_key;
 import fips_mode;
 import state_refresh;
+import sensen.cpu_features;
 
 namespace {
 
@@ -153,6 +154,33 @@ auto RunServer() -> void {
                   << std::endl;
     }
     std::cout << "Max request size: " << kMaxRequestBytes << " bytes" << std::endl;
+
+    // The SIMD tier this process will actually dispatch to, named at boot.
+    //
+    // CLAUDE.md recorded the AVX-512 answer as three joined facts -- the host
+    // flags say yes, the binary contains 11,198 %zmm references, and sensen
+    // dispatches on CPUID -- and stated plainly that the rung SELECTED inside
+    // the container had never been observed. Three facts pointing the same way
+    // is not a measurement, and this is the one line that turns it into one.
+    //
+    // It reports the CPU's capability and this binary's floor SEPARATELY,
+    // because they are different questions and conflating them is what made the
+    // original claim ambiguous: `-march=x86-64-v3` sets the MINIMUM, while the
+    // per-function `[[gnu::target]]` tiers reach higher at run time.
+    {
+        const auto cpu = sensen::detectCpuFeatures();
+        const char* tier = cpu.has_avx512f    ? "avx512"
+                           : cpu.has_avx2     ? "avx2"
+                           : cpu.has_sse4_2   ? "sse4.2"
+                                              : "sse2";
+        std::cout << "SIMD: runtime tier " << tier
+                  << " (avx512f=" << (cpu.has_avx512f ? 1 : 0)
+                  << " avx512vnni=" << (cpu.has_avx512_vnni ? 1 : 0)
+                  << " avx512bf16=" << (cpu.has_avx512_bf16 ? 1 : 0)
+                  << " avx2=" << (cpu.has_avx2 ? 1 : 0)
+                  << " fma3=" << (cpu.has_fma3 ? 1 : 0)
+                  << "), compiled floor x86-64-v3" << std::endl;
+    }
     // Started AFTER the listener binds, so a slow first tick can never delay the
     // health check Railway gates the deploy cutover on. The scheduler no-ops
     // when CENSUS_API_KEY or DATABASE_URL is absent, which is what keeps a

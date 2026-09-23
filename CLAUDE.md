@@ -4537,11 +4537,29 @@ vmovdqu64 (AVX-512 only)                          ->     66
 `avx512vnni`, so that tier is live in production — the `-march` baseline sets
 the FLOOR, not the ceiling.
 
-**Known limit, stated rather than papered over:** the engine logs no SIMD tier
-at boot, so which waterfall rung it selected in the container has NOT been
-observed directly. The chain above (host flags ✓, instructions present in the
-binary ✓, CPUID dispatch ✓) is strong but is three facts joined, not one
-measurement. A one-line boot log naming the selected tier would close it.
+**THAT LIMIT IS CLOSED as of 2026-09-23.** The paragraph here used to read:
+*"the engine logs no SIMD tier at boot, so which waterfall rung it selected in
+the container has NOT been observed directly ... three facts joined, not one
+measurement."* `main.cpp` now names the rung it will dispatch to, from
+`sensen::detectCpuFeatures()`:
+
+```
+SIMD: runtime tier avx512 (avx512f=1 avx512vnni=1 avx512bf16=1 avx2=1 fma3=1), compiled floor x86-64-v3
+```
+
+It reports the CPU's CAPABILITY and this binary's FLOOR separately, because
+they are different questions and conflating them is what made the original
+claim ambiguous: `-march=x86-64-v3` sets the MINIMUM while the per-function
+`[[gnu::target]]` tiers reach higher at run time. Cross-checked against
+`/proc/cpuinfo` on the dev host — all five flags agree — so the line reports
+real CPUID rather than a hardcoded string.
+
+**The dev host has AVX-512 too**, which is worth writing down because this file
+elsewhere distinguishes it from the GPU server only by CUDA: `avx512f`,
+`avx512_vnni` and `avx512_bf16` are all present on `oluwasanmi-fedora-server`.
+So a local boot exercises the same rung production does, and the remaining
+question is only whether the Railway container agrees — which the line now
+answers by being read, not by being argued.
 
 ## Build Commands
 - **Frontend Production Build:** `cd frontend && npm run build`
