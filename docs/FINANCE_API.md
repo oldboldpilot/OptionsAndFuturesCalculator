@@ -180,8 +180,20 @@ proxy, and fails with `Stream removed` against the custom domain.
 **Money and rates are `string`, not `double`.** This is not a quirk to work
 around — it is the reason the numbers are right.
 
-sensen computes in `BigDecimal`: an `__int128` scaled by 1e18, exact to
-eighteen decimal places. Two consequences:
+sensen computes in `BigDecimal`: an `Int256` scaled by 1e38, exact to
+**thirty-eight decimal places**.
+
+**THIS CHANGED ON 2026-09-23 AND IT CHANGES THE WIRE.** It was an `__int128`
+scaled by 1e18 at eighteen places, and `to_string()` emits exactly the scale, so
+every money string in this API grew from 18 decimal places to 38. Parse these
+as decimal strings of UNSPECIFIED length -- which is what a caller should have
+been doing anyway -- and do not pin the count. It was a correction rather than
+decoration: on the canonical 495,000 @ 0.5625%/mo x 360 payment, the old
+18-place value agreed with the closed form to only **13** places, while the new
+one agrees to **36**. The trailing digits of the old figure were rounding noise
+from the 128-bit intermediate.
+
+Two consequences:
 
 - Rounding to `double` compounds. Over a 360-period amortization the schedule
   stops closing. On the live service, `start - principal - end` is exactly
@@ -979,7 +991,7 @@ transfer, it does not delay the answer. The saving is small on a fast link
 beside the ingress and large on a real one: 987 KB over a 10 Mbps connection
 is about 790 ms of transfer against 148 ms.
 
-The payload is this large because every money field is an exact 18-place
+The payload is this large because every money field is an exact 38-place
 decimal STRING, which is a deliberate trade this document explains in section
 4 -- roughly a kilobyte per scenario. Compression is what makes that trade
 cheap, so take it.

@@ -128,7 +128,8 @@ Field names come straight from the `.proto`, so the JSON body and the gRPC
 message are the same shape.
 
 **Money is a string, not a number.** `sensen` computes in `BigDecimal` (exact
-`__int128` fixed-point, eighteen places). JavaScript's `number` is a float64, so
+`Int256` fixed-point, thirty-eight places as of 2026-09-23 -- it was `__int128`
+at eighteen). JavaScript's `number` is a float64, so
 a JSON number field would be lossy in the browser before anyone wrote a line of
 code, and rounding compounds over a 360-period amortization. Fields that are
 genuinely `double` in the engine are emitted as numbers; money is not.

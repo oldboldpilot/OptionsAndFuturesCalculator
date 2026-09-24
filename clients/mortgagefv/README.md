@@ -198,7 +198,8 @@ The proto's own header (`finance.proto` top-of-file comment) states the rule
 and the reason:
 
 > `string` -- sensen computed this in `BigDecimal`: an `__int128` scaled by
-> 1e18, exact to eighteen decimal places. `double` -- sensen computed this
+> 1e38, exact to thirty-eight decimal places (1e18/eighteen before
+> 2026-09-23). `double` -- sensen computed this
 > value in `double` natively. Widening a double to a string would imply a
 > precision the engine never had; narrowing a BigDecimal string to a double
 > loses precision the engine actually has.

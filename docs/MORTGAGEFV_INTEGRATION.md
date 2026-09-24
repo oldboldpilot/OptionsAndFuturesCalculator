@@ -372,7 +372,7 @@ populated **only on the amortising path**:
 | `totalPrincipalPaid` / `totalInterestPaid` / `totalRentPaid` | `string` | **empty** | ✓ |
 | `realBuyingAdvantage` / `realOwnerTerminalWealth` / `realRenterTerminalWealth` | `string` | **empty** | ✓ (zero inflation ⇒ equals the nominal) |
 
-The legacy model computes in `double`, so rendering it to eighteen places would
+The legacy model computes in `double`, so rendering it to the full scale would
 invent digits it never had. **An empty `_exact` string is the honest statement
 that this path has no exact companion — not a missing value.** Branch on
 `buyingAdvantageExact !== ""` if you need to know which model answered; do not
@@ -473,7 +473,10 @@ printed on the page must come from the `Decimal` path.
 ### Why the split is per-field, and not "money = string" as a slogan
 
 A field is a `string` where the engine computes in `BigDecimal` — an exact
-`__int128` scaled by 1e18, eighteen decimal places — and a `double` where the
+`Int256` scaled by 1e38, **thirty-eight decimal places** as of 2026-09-23; it
+was an `__int128` at eighteen, and `to_string()` emits exactly the scale, so
+every money string on this surface grew accordingly. Parse them as decimal
+strings of unspecified length and do not pin the count — and a `double` where the
 engine **genuinely computes in `double`**. Widening a double to a string would
 claim a precision the engine never had; narrowing a BigDecimal to a double
 discards precision it actually has. Every field carries a comment in the proto
@@ -500,7 +503,7 @@ computations.
 Consequence for your code: **do not write one generic response mapper that treats
 every field the same way.** Wrap the strings in `Decimal`; use the doubles as
 plain numbers. Wrapping a double in `Decimal` is not harmless — it dresses up
-float64 noise as eighteen significant places.
+float64 noise as thirty-eight significant places.
 
 The doubles you will meet on this surface: `RefinanceResponse.total_savings_over_life`,
 `HomeFutureValueResponse.future_property_value`, all of `RentVsBuyResponse`, all of
