@@ -221,6 +221,72 @@ presence alongside a transport-level error means the failure is in the RESPONSE
 path, not the request path — which is the opposite of where the original
 diagnosis looked.
 
+## Why the OPTIONS side computes in `double` and the MORTGAGE side does not
+
+Asked directly on 2026-09-23: *"why is OFC not using BigDecimal, it is more
+accurate?"* The short answer is that `BigDecimal` cannot price an option, and
+the longer answer is that the two problems are different SHAPES, not different
+products.
+
+**sensen's numeric ladder, measured rather than recalled:**
+
+| kind | types | exact? |
+| --- | --- | --- |
+| integer | `std::int64_t` → `Int256` → `bigint` (arbitrary) | yes |
+| fixed-point money | `BigDecimal` = `Int256` scaled by 1e38 | yes, for `+ − × ÷` and INTEGER powers |
+| floating point | `fp32_t`, `fp64_t`, **`fp128_t`** (`__float128`, ~34 significant digits) | no |
+
+**The 256 bits are an INTEGER width, not a float one.** There is no `fp256_t`;
+`grep` for it returns nothing. The float ladder tops out at `fp128_t`, which
+`float_types.cppm` defines and `autograd.cppm` and `linear_algebra.cppm` use.
+It is NOT used by `options.cppm`.
+
+**`BigDecimal` has no `exp`, no `ln`, no `sqrt` and no normal CDF**, and the one
+function that looks like an exception proves the rule:
+
+```cpp
+[[nodiscard]] auto pow(double n) const noexcept -> BigDecimal {
+    double base_d = to_double();          // 38 places -> ~15 significant digits
+    double res_d  = std::pow(base_d, n);  // computed in double
+    return BigDecimal(res_d);             // and dressed back up as 38 places
+}
+```
+
+Option pricing needs exactly those functions on every node —
+`u = exp(λσ√dt)`, `df = exp(-r·dt)` in `options.cppm`, evaluated ~10⁶ times in a
+1000-step trinomial tree. Routing that through `BigDecimal` would produce
+thirty-eight digits of which roughly fifteen are real: **false precision, which
+is the same defect as the LIVE badge derived from request status** — a number
+claiming an accuracy it does not have.
+
+**Two properties decide it, and the mortgage side has both:**
+
+1. **Accumulation.** A 360-row amortization schedule carries the balance
+   forward, so every rounding error compounds and the schedule must still
+   CLOSE: `start − principal − end` is exactly `0E-38` on all 360 rows, and
+   `smoke_client`'s finance suite asserts that closure. A payoff diagram has no
+   such chain — each grid point is priced independently from spot, so there is
+   nothing for an error to accumulate through.
+2. **Input precision.** A loan is stated exactly: 495,000 at 0.5625% for 360
+   months are the real numbers. An option's inputs are not — implied volatility
+   is quoted to two to four significant figures and bid/ask to the cent.
+   Computing to 34 or 38 places from a σ known to three figures is arithmetic
+   theatre.
+
+**`fp128_t` IS available and unused for options, and that is a real choice
+rather than an oversight** — it would roughly double the significant digits
+(~34 against ~15-17) and it does have transcendentals. It is not taken because
+of property 2: nothing downstream could tell the difference, since the inputs
+do not carry the precision and the output is rendered to the cent. If that ever
+changes — a calibration surface, a long-dated exotic where tree error genuinely
+bites — `fp128_t` is the lever, and the reason to pull it would be a measured
+error, not a preference for bigger numbers.
+
+**So the rule this file already states is right, and now has its reasoning:** a
+field is a `string` where sensen computes in `BigDecimal` and a `double` where
+sensen genuinely computes in `double`. Widening a double to a string would
+claim a precision the engine never had.
+
 ## Strategy assistant
 
 A fine-tuned Qwen3-0.6B (QLoRA, rank 16, 95.0% params exact-match) converts a

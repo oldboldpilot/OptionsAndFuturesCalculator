@@ -75,7 +75,7 @@ The calculator frontend is structured around a centralized reactive store (`fron
 
 The general-purpose sensen financial engine is exposed via `sensen.finance.Finance` (`backend/proto/finance.proto`). It comprises **46 RPCs** categorized across 12 distinct functional domains. 
 
-All money values in `finance.proto` are represented as decimal `string`s mapping directly to `sensen::BigDecimal` (`__int128` fixed-point scaled by $10^{18}$), preventing binary float compounding errors over multi-decade amortizations.
+All money values in `finance.proto` are represented as decimal `string`s mapping directly to `sensen::BigDecimal` (`Int256` fixed-point scaled by $10^{38}$ since 2026-09-23; `__int128` at $10^{18}$ before), preventing binary float compounding errors over multi-decade amortizations.
 
 ```
 Domain Breakdown (46 RPCs):

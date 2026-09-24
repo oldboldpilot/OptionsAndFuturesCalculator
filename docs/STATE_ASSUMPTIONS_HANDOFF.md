@@ -70,7 +70,7 @@ that is not there is a legitimate question with the answer "none".
 ### Every money and rate field is a STRING
 
 This is the file-wide convention on `finance.proto` and it is not stylistic.
-The engine computes in `BigDecimal` (exact `__int128` fixed-point, eighteen
+The engine computes in `BigDecimal` (exact `Int256` fixed-point, thirty-eight
 places) and JavaScript's `number` is a float64, so a JSON number would be
 rounded before your code ran. `"283800.00"` is exact; `283800.00` as a number is
 a value your runtime chose.

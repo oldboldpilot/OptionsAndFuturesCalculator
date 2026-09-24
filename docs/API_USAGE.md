@@ -197,7 +197,8 @@ aggressively, and back off on 429 rather than retrying immediately.
 `double`. The distinction is deliberate and per-field.**
 
 A field is a `string` where the engine computes in `BigDecimal` — an exact
-`__int128` fixed-point decimal with eighteen places — and a `double` where the
+`Int256` fixed-point decimal with thirty-eight places (it was `__int128` at
+eighteen until 2026-09-23) — and a `double` where the
 engine genuinely computes in `double`. Every field carries a comment in the proto
 saying which it is and why.
 
