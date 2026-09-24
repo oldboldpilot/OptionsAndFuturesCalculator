@@ -118,18 +118,39 @@ auto scenarios() -> std::vector<Scenario> {
 }  // namespace
 
 auto main() -> int {
-    std::printf("1. BYTE-IDENTITY: the refactor changes no existing answer\n");
+    std::printf("1. DIGEST: the schedule is unchanged apart from the money scale\n");
     {
         // Recorded by running this same fold against the code as it stood at
         // 40de144a, BEFORE pmi_for_month existed. A default-constructed policy
         // must reproduce it exactly: 80% of the value at origination, tested on
         // the actual balance.
+        //
+        // RE-RECORDED 2026-09-23 for the sensen bump to 20c20a44, which widened
+        // BigDecimal from 128 to 256 bits and took the money scale from 18
+        // decimal places to 38. `digest()` folds `to_string()`, which emits
+        // exactly SCALE digits, so EVERY digest here had to move whether or not
+        // a single value changed. A digest that must change on a formatting
+        // change cannot, on its own, tell you whether the arithmetic changed.
+        //
+        // So the new constants were NOT accepted because the test went green.
+        // They were accepted because the answers were re-verified against
+        // INDEPENDENT identities first -- `smoke_client ... finance` at rc=0:
+        // schedule closure, the closed-form annuity, bond price/yield
+        // inversion, NPV(IRR) = 0, and recast/refinance linearity. Section 2
+        // below, which is directional rather than recorded, passed UNCHANGED
+        // through the bump.
+        //
+        // The scale change is a correction, not merely more digits. On the
+        // canonical 495000 @ 0.5625%/mo x 360 payment the OLD 18-place value
+        // agreed with the closed form to 13 decimal places; the new 38-place
+        // value agrees to 36. The last five digits of the figure this project
+        // quoted everywhere were rounding noise from the 128-bit intermediate.
         const std::vector<std::pair<std::string_view, std::string_view>> golden{
-            {"716400 @5.97% 30y, 0.6% PMI, 796000 value", "9301b67a3a09c003"},
-            {"no home value -> basis falls back to the loan", "d346da1bac93c46d"},
-            {"with 250/mo overpayment", "3100fe5e5ffd02ac"},
-            {"no PMI", "062bbdacd5ee01de"},
-            {"3.5% down, PMI runs long", "830dfe95bd2c3799"},
+            {"716400 @5.97% 30y, 0.6% PMI, 796000 value", "800edc89df6de9af"},
+            {"no home value -> basis falls back to the loan", "c7155eb17c4bcd05"},
+            {"with 250/mo overpayment", "7f3c5b86fdebb58e"},
+            {"no PMI", "e59b661779c3075d"},
+            {"3.5% down, PMI runs long", "ec2cc368d69ef3e5"},
         };
 
         std::size_t i = 0;

@@ -50,9 +50,45 @@ commodity spreads, option pricing (trees, Black-Scholes with full Greeks, Monte
 Carlo) and portfolio statistics/optimization.
 
 **Numeric types are not uniform, and the difference is deliberate.** A field is
-`string` where sensen computes in `BigDecimal` (an exact `__int128` fixed-point
-decimal, eighteen places) and `double` where sensen genuinely computes in
-`double`. Money is a decimal string because rounding it to `double` compounds
+`string` where sensen computes in `BigDecimal` (an exact fixed-point decimal)
+and `double` where sensen genuinely computes in `double`.
+
+**THE MONEY SCALE IS 38 DECIMAL PLACES AND THE STORAGE WORD IS 256 BITS, as of
+the sensen bump to `20c20a44` on 2026-09-23.** It was `__int128` at eighteen
+places, and this file said so in four places. `BigDecimal::to_string()` emits
+exactly `SCALE` digits, so **every money string on the wire grew from 18 decimal
+places to 38** — a format change on the public Finance API, not merely an
+internal one.
+
+**It is a CORRECTION, not decoration, and that is the part worth keeping.**
+Measured against the closed form at 80 digits on the canonical payment
+(495,000 @ 0.5625%/mo × 360):
+
+| | agrees with the closed form to |
+| --- | --- |
+| old, 18 places — `-3210.560578012665289866` | **13** decimal places |
+| new, 38 places — `-3210.56057801266526493048779502036505463691` | **36** decimal places |
+
+The figure this file quoted everywhere was **wrong past the 13th decimal
+place**: its last five digits were rounding noise from the 128-bit
+intermediate. Every recorded `-3210.560578012665289866` in this repository is
+therefore stale, and is kept only inside dated session logs, which are history.
+
+**Neither website changes what a user sees.** `mortgage-nest-egg` parses money
+with `Number.parseFloat`, which truncates to float64 and then renders two
+decimal places; optionsandfuturescalculator's own calculator is `double`-based
+and never touches a `BigDecimal` string at all. The extra digits are consumed
+by the parser, not displayed.
+
+**What DID move is every recorded digest.** `PmiPolicyTest`'s five byte-identity
+constants all changed, because it folds `to_string()` — and a digest that must
+change on a formatting change cannot, by itself, say whether the arithmetic
+changed. They were re-recorded only after `smoke_client … finance` re-verified
+the answers against INDEPENDENT identities at rc=0 (schedule closure, the
+closed-form annuity, bond price/yield inversion, NPV(IRR)=0, recast and
+refinance linearity), and after that test's own directional section passed
+unchanged. **Do not re-record a digest because the test went red; re-record it
+because something that does not depend on the digest says the answer is right.** Money is a decimal string because rounding it to `double` compounds
 over a 360-period amortization, and because this service is reachable from
 browsers where JavaScript's `number` *is* a float64 — a `double` money field is
 lossy on the client before anyone writes a line of code.
