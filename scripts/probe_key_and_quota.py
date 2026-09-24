@@ -72,7 +72,7 @@ def payment_request(pv: str = "495000", rate: str = "0.005625", periods: int = 3
     """`PaymentRequest{ rate=1 string, periods=2 int32, present_value=3 string }`.
 
     `rate` and `present_value` are STRINGS on the wire, not doubles: sensen
-    computes them in BigDecimal (exact __int128 fixed point, 18 places) and a
+    computes them in BigDecimal (exact Int256 fixed point, 38 places) and a
     double would truncate compounding over a 360-period schedule. Encoding
     either as a double here yields `rate is required and was not supplied` --
     which reads like a missing field and is actually a wrong wire type.

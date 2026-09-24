@@ -90,3 +90,12 @@ jobs:
           fetch-depth: 0
       - name: Code policy check
         run: ./scripts/code_policy_check.sh
+
+      # Byte-identity of the vendored client contracts against backend/proto.
+      # It lives in this job rather than a new one because it needs only a
+      # checkout -- no toolchain, no submodules, no build -- and the backend
+      # suite is deliberately NOT run in CI (a C++23-modules + sensen + gRPC
+      # build does not fit a hosted runner). That makes this the only place a
+      # contract drift can be caught automatically, so it must not be skipped.
+      - name: Vendored proto identity
+        run: ./scripts/check_vendored_protos.sh

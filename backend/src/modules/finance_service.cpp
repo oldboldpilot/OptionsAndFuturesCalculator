@@ -2100,7 +2100,7 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         // Double, not a decimal string: the engine accumulates this over the
         // whole month-by-month comparison loop in double
         // (financial.cppm:1932-1980, total_old_paid/total_new_paid are
-        // double). An 18-place string here would claim digits the
+        // double). A 38-place string here would claim digits the
         // computation never had.
         response->set_total_savings_over_life(s.total_savings_over_life.to_double());
         return Status::OK;

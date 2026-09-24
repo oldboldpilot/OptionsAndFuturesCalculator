@@ -193,6 +193,22 @@ decoration: on the canonical 495,000 @ 0.5625%/mo x 360 payment, the old
 one agrees to **36**. The trailing digits of the old figure were rounding noise
 from the 128-bit intermediate.
 
+**LIVE IN PRODUCTION since deployment `9e842180` on 2026-09-23.** Verified
+against the ingress rather than asserted:
+
+```
+POST /sensen.finance.Finance/ComputePayment
+  {"rate":"0.005625","periods":360,"present_value":"495000"}
+-> {"value":"-3210.56057801266526493048779502036505463691"}
+```
+
+That is 38 fractional digits, uniform across every money field in a response --
+measured across all 17 money fields of `ComputeClosingCosts`. **A consumer
+contract test that pinned `/^-?\d+\.\d{18}$/` went red on this deploy**,
+which is exactly what the paragraph above warns against: parse the fractional
+part as having unspecified length. Assert that the value is a decimal STRING
+and that its scale is consistent, never that the scale is a particular number.
+
 Two consequences:
 
 - Rounding to `double` compounds. Over a 360-period amortization the schedule

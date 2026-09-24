@@ -205,7 +205,7 @@ and the reason:
 > loses precision the engine actually has.
 
 Money is a decimal `string` for two concrete reasons, not convention:
-rounding an 18-decimal-place amortization to `double` compounds over a
+rounding a fixed-scale amortization to `double` compounds over a
 360-period schedule until it stops closing (`start − principal − end` would
 stop being exactly zero). And this API is called from browsers, where
 JavaScript's `number` **is** an IEEE‑754 float64 -- a `double` money field

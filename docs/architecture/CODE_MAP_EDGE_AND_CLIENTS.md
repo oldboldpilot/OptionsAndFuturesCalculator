@@ -166,7 +166,7 @@ The billing worker is a Cloudflare Worker handling Stripe Checkout session creat
 
 ### Gotchas
 1. **Periodic vs. Annual Rates**: `PaymentRequest.rate` is the rate PER PERIOD (e.g. `0.005` for 6% annual over 12 months), not the annual nominal rate (`clients/mortgagefv/example/compute-payment.js:42-44`; `clients/mortgagefv/README.md:90`).
-2. **Float Parsing Precision Loss**: Calling `parseFloat()` or `Number()` on returned decimal strings truncates 18-decimal-place numbers to IEEE-754 float64, corrupting amortization closure (`clients/mortgagefv/README.md:242-264`).
+2. **Float Parsing Precision Loss**: Calling `parseFloat()` or `Number()` on returned decimal strings truncates the engine's fixed-scale decimals (38 places) to IEEE-754 float64, corrupting amortization closure (`clients/mortgagefv/README.md:242-264`).
 3. **Transport Rate Limit vs. Quota Errors**: Exceeding Envoy's 10 req/s rate limit yields an HTTP 429 response containing header `x-local-rate-limit: true` without a gRPC status code or trailers (`clients/mortgagefv/README.md:300, 339-346`).
 4. **Native gRPC Header Stripping**: Connecting to `https://api.optionsandfuturescalculator.com` with native gRPC causes Railway's HTTP edge to terminate HTTP/2 and strip trailers, resulting in `grpc-status: 2` "Missing :te header" or "Stream removed" (`clients/mortgagefv/README.md:414-417`). gRPC-Web must be used.
 

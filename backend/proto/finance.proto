@@ -34,7 +34,7 @@ package sensen.finance;
 //              string would imply a precision the engine never had.
 //
 // Money is a string here for two concrete reasons, not as ceremony. Rounding
-// an 18-decimal-place amortization to double compounds over 360 periods. And
+// a fixed-scale amortization to double compounds over 360 periods. And
 // this service is reachable from browsers, where JavaScript's `number` IS a
 // float64 -- a double money field is lossy on the client before the developer
 // has written a line of code. A decimal string is exact in both places.
@@ -112,7 +112,8 @@ service Finance {
 // Shared
 // ============================================================================
 
-// A single exact decimal. `value` is BigDecimal's own 18-decimal-place string.
+// A single exact decimal. `value` is BigDecimal's own fixed-scale string --
+// 38 places as of 2026-09-23, 18 before it. Do not pin the count.
 message DecimalResponse {
   string value = 1;
 }

@@ -13,7 +13,7 @@ does it: adding a Python codegen step to a C++/TypeScript repo for one
 diagnostic costs more than the forty lines below.
 
 Decimal fields cross the wire as exact strings, because sensen's BigDecimal is
-a genuine 18-decimal-place fixed-point type and double would quietly truncate
+a genuine fixed-point decimal type (38 places since 2026-09-23) and double would quietly truncate
 it -- so the checks below parse them with Decimal, not float.
 """
 import base64
