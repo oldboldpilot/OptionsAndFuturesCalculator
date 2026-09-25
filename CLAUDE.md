@@ -4453,6 +4453,32 @@ build_tests` 164 steps, **ctest 117/117**, and `smoke_client` on both suites --
 `finance` at rc=0 and the full options suite at rc=0 with `PRO_GATE_MODE=off` so
 the multi-leg path was actually exercised rather than refused.
 
+**The 2026-09-25 bump `20c20a44` -> `fb01a47a` (107 commits) is the same shape, and
+the same measurement is what made it cheap.** Only **6 files under `src/`** changed
+(`CMakeLists.txt`, `autograd_cuda.cppm`, `llm_interfaces.cppm`, `llm_pipeline.cppm`,
+`qwen38.cppm`, `tokenizer.cppm`); the other 120 are `tests/`, `agent/`, `docs/` and
+`server/`. **`financial.cppm`, `bigdecimal.cppm`, `options.cppm` and `portfolio.cppm`
+are byte-identical across the range**, so the finance surface both websites call
+could not have moved -- assert that rather than re-deriving it from the diff size.
+
+Gated: closure check clean of NEW entries (its two documented false positives,
+`logger.cppm` MISSING by basename and `numa_bind.cpp` EXTRA, are unchanged -- do
+not "fix" them), `ninja` rc=0 with `calculator_engine` relinked, `ninja build_tests`
+rc=0, **ctest 117/117**, `smoke_client ... finance` rc=0 and the full options suite
+rc=0.
+
+**`PRO_GATE_MODE=off` must be passed through the LOADER, not the shell.** Setting it
+as an ordinary environment variable and starting the engine under
+`scripts/run_with_env.py` does nothing: the loader applies `config/.env` AFTER the
+inherited environment, and that file sets `PRO_GATE_MODE=enforce`, so the calendar
+spread came back `7 Multi-leg strategies are a Pro feature` -- a healthy engine
+refusing correctly, and the multi-leg compute path left untested. Starting the
+engine WITHOUT the loader is the opposite trap: the gate is off but `ALPACA_API_KEY`
+is gone, so `GetMarketQuote` fails and the suite stops before it reaches the
+arithmetic. The form that exercises the path is
+`scripts/run_with_env.py --set PRO_GATE_MODE=off -- ./backend/build/calculator_engine`,
+which the loader's own docstring gives as its example.
+
 **A Pro-gated smoke run exits 1 on a HEALTHY engine, and that is not a
 regression.** `config/.env` carries no `SMOKE_PRO_LICENCE` / `SMOKE_PRO_BEARER`,
 so `smoke_client` is anonymous and the calendar spread comes back
