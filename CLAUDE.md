@@ -296,14 +296,33 @@ products.
 | integer | `std::int64_t` → `Int256` → `bigint` (arbitrary) | yes |
 | fixed-point money | `BigDecimal` = `Int256` scaled by 1e38 | yes, for `+ − × ÷` and INTEGER powers |
 | floating point | `fp32_t`, `fp64_t`, **`fp128_t`** (`__float128`, ~34 significant digits) | no |
+| arbitrary-precision float | **`BigFloat`** — significand is a `BigInt`, precision set by a `PrecisionContext` | no, but correctly ROUNDED, and the precision is yours to pick |
+| IEEE binary256 | **`sensen::f256::IeeeFloat<binary256>`** (237-bit significand, ~71 decimal digits) | no |
 
-**The 256 bits are an INTEGER width, not a float one.** There is no `fp256_t`;
-`grep` for it returns nothing. The float ladder tops out at `fp128_t`, which
-`float_types.cppm` defines and `autograd.cppm` and `linear_algebra.cppm` use.
-It is NOT used by `options.cppm`.
+**THE PARAGRAPH THAT WAS HERE SAID THE FLOAT LADDER TOPS OUT AT `fp128_t` AND
+THAT THERE IS NO 256-BIT FLOAT. That was true when it was written and is now
+wrong in both halves**, as of the sensen bump to `26f94ff2` on 2026-09-25:
+`bigfloat.cppm`, `float256.cppm`, `pade.cppm`, `scalar_math.cppm` and
+`special/foundation.cppm` landed the multiprecision epic. `grep` for `fp256_t`
+still returns nothing, which is why the old claim survived — the type is spelled
+`IeeeFloat<binary256>`, not `fp256_t`.
 
-**`BigDecimal` has no `exp`, no `ln`, no `sqrt` and no normal CDF**, and the one
-function that looks like an exception proves the rule:
+It matters because the old paragraph was the stated REASON for a design
+decision, and a stale note recording why something is impossible is worse than
+no note: it is the one a reader trusts instead of measuring. What is still true
+is the narrower statement — **the 256 bits of `BigDecimal` are an INTEGER
+width** — and `fp128_t` is still what `autograd.cppm` and `linear_algebra.cppm`
+use, and is still not used by `options.cppm`.
+
+**`BigDecimal` has no `exp`, no `ln`, no `sqrt` and no normal CDF** — still true
+of `BigDecimal`, and **no longer true of the library**. `BigFloat` carries
+`exp`, `log`, `sin`, `cos`, `atan`, `sqrt`, `cbrt`, `hypot`, `fma` and `pow`,
+and `sensen::special` adds `erf`, `erfc`, `erfinv`, `lgamma` and `beta` on top
+of it — so the normal CDF an option price needs now exists at any precision you
+ask for. Read the rest of this section as an argument about INPUT PRECISION,
+which is what it always rested on, and not about a missing function. The one
+function that looks like an exception still proves the rule for `BigDecimal`
+itself:
 
 ```cpp
 [[nodiscard]] auto pow(double n) const noexcept -> BigDecimal {
@@ -319,6 +338,17 @@ Option pricing needs exactly those functions on every node —
 thirty-eight digits of which roughly fifteen are real: **false precision, which
 is the same defect as the LIVE badge derived from request status** — a number
 claiming an accuracy it does not have.
+
+**`BigFloat` would NOT produce false precision, and options still stay
+`double`.** That is the honest position after the epic: the objection above is
+specific to `BigDecimal`'s `pow(double)` round-trip and does not reach `BigFloat`,
+whose 256-bit `exp` is correctly rounded. What decides it is property 2 below —
+an implied volatility is quoted to two to four significant figures, so nothing
+downstream could tell the difference, and the output is rendered to the cent.
+The lever is available and the reason not to pull it is a measurement about the
+inputs, not a gap in the library. If that ever changes — a calibration surface, a
+long-dated exotic where tree error genuinely bites — `BigFloat` is now a better
+lever than `fp128_t`, because its precision is a parameter rather than a type.
 
 **Two properties decide it, and the mortgage side has both:**
 
@@ -347,6 +377,140 @@ error, not a preference for bigger numbers.
 field is a `string` where sensen computes in `BigDecimal` and a `double` where
 sensen genuinely computes in `double`. Widening a double to a string would
 claim a precision the engine never had.
+
+## A double published as a 38-place decimal, and a 30-year loan served as 361 months
+
+Found on 2026-09-25 while integrating sensen's finished multiprecision
+arithmetic (`26f94ff2`) into both websites. **The integration is the smaller
+half of this section; the measurement is the point.**
+
+**A BUMP ON ITS OWN WOULD HAVE CHANGED NOTHING, and knowing that is what turned
+this into real work.** `financial.cppm`, `bigdecimal.cppm`, `options.cppm` and
+`portfolio.cppm` are **byte-identical** across all 417 commits from `fb01a47a`
+to `26f94ff2` — the epic added modules rather than touching the finance surface.
+So the question was never what the bump changes; it was what the new arithmetic
+makes possible. Probing production answered it.
+
+### Two RPCs emitted 38 decimal places and meant fourteen
+
+Measured against the live ingress with an 80-digit `mpmath` reference:
+
+| RPC | live engine | true value | real to |
+| --- | --- | --- | --- |
+| `ComputePeriods` | `360.00000000000057000000000000000000000000` | exactly `360` | **12 places** |
+| `ComputeRate` | `0.00562500000000001000000000000000000000` | exactly `0.005625` | **14 places** |
+| `ComputePayment` | `-3210.56057801266526493048779502036505463691` | — | **36 places** |
+
+All three return `DecimalResponse` — the same shape, the same 38 places. Two of
+them were zero-padded from the 13th digit on, and **the trailing zeros are not
+exactness, they are the absence of information.** A caller cannot tell them
+apart from `ComputePayment`'s, which are real; the uniform scale is precisely
+what `mortgage-nest-egg`'s contract test asserts.
+
+The cause is the rule this file already states, broken: `ComputeRate` and
+`ComputePeriods` were computed by `sensen::rate_fn`/`nper_fn`, which **solve in
+`double`**, and the handlers then widened that double into a decimal string.
+Both functions are honestly typed for a caller that wants a double; the handler
+was the lie. `ComputePayment` never touches a float, which is exactly why its
+places are real.
+
+**THE 18→38 SCALE WIDENING MADE IT THREE TIMES WORSE AND NOBODY SAW, because
+that cutover was verified on `ComputePayment` alone.** At 18 places the padding
+was 1–3 digits; at 38 it is 24–26. Sweep the class, not the instance — and the
+class here is "every `DecimalResponse` RPC", of which there are seven.
+
+Fixed by `sensen::rate_checked` / `nper_checked`, with **no double in the path
+at all**: not the answer, not the seed, not the validation, not the stopping
+rule. 256 bits of `BigFloat` significand (wider than binary256's 237) in a
+`PrecisionContext` whose shortfall is *checked* rather than assumed, and
+`BigInt` as the bridge back to `BigDecimal`.
+
+**An earlier draft seeded Newton from `rate_fn` and was wrong for a reason worth
+keeping:** a double seed cannot survive an exact refinement, which is true of
+the *digits* and false of everything else — the double would still have decided
+which inputs are admissible, which root is approached, and when to give up.
+
+**EVERY EPSILON LEFT WITH THE DOUBLE.** `rate_fn` switches to a series below
+`|r| < 1e-6` because the annuity quotient loses its leading digits in binary64,
+and calls a derivative flat below `1e-12`. Both are statements about binary64,
+neither about the problem. At 256 bits the only value needing its own arm is `r`
+**exactly** zero, where the quotient is 0/0 rather than inaccurate. The one
+remaining tolerance is DERIVED: a Newton correction below `10^-45` cannot move a
+digit at `10^-38`.
+
+**`BigDecimal`'s string constructor uses the LENIENT `parse`, not the strict
+`try_parse` documented directly above it** — so it takes a mantissa and drops an
+exponent silently. `BigFloat::to_string` emits scientific notation, so handing
+it over turned `0.005625` into `5.625`: right digits, wrong by three orders of
+magnitude, no error. Route `BigFloat → BigInt → positional digits` instead;
+there is no exponent to lose. **This is a live trap for any caller**, not just
+this one.
+
+### The same float in an int32 field, where it cost a whole month
+
+```
+ComputePayoffTiming{balance 495000, rate 0.0675, payment <exact 360-month P&I>}
+-> {"originalMonthsRemaining":361,"newMonthsRemaining":361,...}
+```
+
+A 30-year mortgage served as 30 years and one month, live. `total_paid` is the
+payment times the month count, so the reported interest carried a 361st payment
+too.
+
+**TWO INDEPENDENT DEFECTS WERE STACKED, AND THE FUNCTION WAS THE BUG — NOT THE
+PRECISION.** The true term is exactly 360; the double gives `360.0000000000008`,
+an error of eight parts in 10¹⁶ that is invisible in anything quoted to the
+cent. `std::ceil` is what converted it into a whole month. **Rounding to the
+nearest period answers 360 from the double term as readily as from the exact
+one**, so rounding is the fix and exactness is not what closes it.
+
+`ceil` is wrong for a term on its own merits, before any float is involved: it
+biases every non-integral term up by a period — a payment two cents short takes
+360.000209 periods and reporting 361 months for a 67-cent final payment is the
+worse answer — and it makes the result hostage to the input's last digit.
+
+What the exact solver contributes here is narrower and worth stating separately:
+it removes `ceil`'s systematic bias at source, and it takes the disagreement
+between the two terms behind `months_saved` from `1e-13` to `1e-38`, so they can
+no longer round apart. **`ceil` is kept, and named, for the PMI drop-off
+month**, where the question genuinely is the first whole period at which a
+balance has fallen below a threshold.
+
+### The gate is an identity, and one mutation arm changed the diagnosis
+
+Section 30 of `test_finance_service_validation` (20 checks) pins **no digits**:
+it asks `ComputePayment` — an exact `BigDecimal` closed form — for the payment on
+a known rate and term, hands that payment to the solver, and requires the solver
+to recover what it was built from. The true answer is an INPUT, so there is no
+reference to record and nothing to re-record when a formatting detail moves. It
+recovers `0.005625` and `0.004` exactly at all 38 places.
+
+Mutation-checked with `CCACHE_DISABLE=1`. Reverting both solvers to the double
+path **reproduces all three production strings byte for byte, 361 included**,
+and fails exactly the five dependent checks.
+
+**ONE ARM PASSED AND CORRECTED THE ACCOUNT OF THE DEFECT.** Routing the exact
+answer through `to_double()` changes nothing, because `0.005625` round-trips
+through a 17-digit decimal. **The conversion was never the defect; the solver
+was.** Believing that arm had proved the gate would have been wrong in the
+direction that matters — this is why the arm gets run, not reasoned about.
+
+**A SECOND ARM FAILED NOTHING AND THE CODE WENT.** An `|f|`-reduction
+backtracking line search was written to make a hostile 90%-a-month seed
+converge. It did not, and disabling it changed no gated outcome. Production
+refuses `guess` 0.5 and 0.9 identically, so requiring convergence there would
+have invented a contract — and the exact solver in fact converges from 0.5,
+which production refuses, so asserting plain *parity* would have failed on the
+improvement. The check asserts the property both arms share: **a hostile seed
+may cost the answer and may never buy a wrong one.** Only the domain guard
+survives, and what makes that safe is the residual verification in
+`rate_checked`, which refuses an iterate that has not reached the root rather
+than printing it.
+
+Gated: `ctest` **117/117** with `CCACHE_DISABLE=1`, `smoke_client … finance`
+rc=0, module closure clean (only its two documented false positives), and a
+consumer **pre-deploy baseline of 20/20** against the old engine so anything
+moving afterwards is attributable.
 
 ## Strategy assistant
 
