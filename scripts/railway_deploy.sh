@@ -170,7 +170,18 @@ print(t)
 # check did not run, and a skip that reads like a pass is the failure mode this
 # whole script is written against.
 # --------------------------------------------------------------------------
-PARKED_TREES=(backend/sensen/tests backend/sensen/benchmarks backend/sensen/examples backend/sensen/python)
+# DERIVED FROM .railwayignore, not written out here. A hand-kept list beside a
+# hand-kept exclude list is two things to forget, and forgetting one of them is
+# what this preflight exists to catch. Every excluded path that is a directory
+# INSIDE the build's source root is parked; a path that no longer exists, or
+# that names a file, is skipped.
+mapfile -t PARKED_TREES < <(
+    grep -vE '^\s*(#|$)' .railwayignore \
+    | sed -E 's#/+$##' \
+    | grep -E '^backend/' \
+    | grep -vE '[*?\[]' \
+    | while read -r cand; do [[ -d "$cand" ]] && printf '%s\n' "$cand"; done
+)
 if [[ ! -f backend/build/CMakeCache.txt ]]; then
     echo "PREFLIGHT SKIPPED: backend/build is not configured, so the"
     echo "  'does it configure without the excluded trees' check did NOT run."
