@@ -148,6 +148,77 @@ print(t)
 ")"
 
 # --------------------------------------------------------------------------
+# PREFLIGHT: does this repository still CONFIGURE without the trees the upload
+# excludes?
+#
+# WHY THIS EXISTS. Deployment 797424f2 (2026-09-25) FAILED at CMake generate,
+# before one file compiled, on
+#     Cannot find source file: .../backend/sensen/tests/test_ring_completion_contract.cpp
+# Nothing local was wrong and no local build could see it. `.railwayignore` and
+# `.dockerignore` both drop `backend/sensen/tests`, on the stated grounds that
+# backend/CMakeLists.txt FORCEs BUILD_TESTS off -- an invariant whose own comment
+# records it as "verified by parking all four and re-configuring". That is a
+# hand-check, it was true when it was made, and a submodule bump invalidated it
+# by adding two test targets declared OUTSIDE `if(BUILD_TESTS)`.
+#
+# So the check is now performed rather than remembered: park the excluded trees
+# and re-run configure, which is what the upload's builder will do. It is nearly
+# free when backend/build is already configured -- the try_compile probes are
+# cached, so it is a generate step of under a second.
+#
+# It SKIPS LOUDLY, never silently: an unconfigured build directory means the
+# check did not run, and a skip that reads like a pass is the failure mode this
+# whole script is written against.
+# --------------------------------------------------------------------------
+PARKED_TREES=(backend/sensen/tests backend/sensen/benchmarks backend/sensen/examples backend/sensen/python)
+if [[ ! -f backend/build/CMakeCache.txt ]]; then
+    echo "PREFLIGHT SKIPPED: backend/build is not configured, so the"
+    echo "  'does it configure without the excluded trees' check did NOT run."
+    echo "  Configure it once (cmake -B backend/build -S backend) to enable this."
+else
+    PARK_DIR="$(mktemp -d -t railway-parked-XXXXXX)"
+    restore_parked() {
+        local t
+        for t in "${PARKED_TREES[@]}"; do
+            if [[ -d "${PARK_DIR}/$(basename "$t")" && ! -d "$t" ]]; then
+                mv "${PARK_DIR}/$(basename "$t")" "$t"
+            fi
+        done
+        rm -rf "$PARK_DIR"
+    }
+    trap restore_parked EXIT
+    for t in "${PARKED_TREES[@]}"; do
+        [[ -d "$t" ]] && mv "$t" "${PARK_DIR}/$(basename "$t")"
+    done
+    PREFLIGHT_LOG="$(mktemp -t railway-preflight-XXXXXX.log)"
+    set +e
+    cmake -B backend/build -S backend -DCMAKE_BUILD_TYPE=Release > "$PREFLIGHT_LOG" 2>&1
+    PREFLIGHT_RC=$?
+    set -e
+    restore_parked
+    trap - EXIT
+    if [[ $PREFLIGHT_RC -ne 0 ]]; then
+        echo "PREFLIGHT FAILED: this tree does not CONFIGURE without the trees the" >&2
+        echo "  upload excludes, so the image build would die at CMake generate" >&2
+        echo "  exactly as deployment 797424f2 did. Nothing has been uploaded." >&2
+        echo >&2
+        grep -E 'CMake Error|Cannot find source file|^ +/' "$PREFLIGHT_LOG" | head -20 >&2
+        echo >&2
+        echo "  Full log: ${PREFLIGHT_LOG}" >&2
+        echo "  Usual cause: a vendored CMakeLists declares a target whose source" >&2
+        echo "  lives in an excluded tree. Guard it on EXISTS rather than on" >&2
+        echo "  BUILD_TESTS -- a derived condition cannot go stale." >&2
+        # leave backend/build correct for the next local build before leaving
+        cmake -B backend/build -S backend -DCMAKE_BUILD_TYPE=Release >/dev/null 2>&1 || true
+        exit 1
+    fi
+    rm -f "$PREFLIGHT_LOG"
+    # Put the build directory back the way a local build expects it.
+    cmake -B backend/build -S backend -DCMAKE_BUILD_TYPE=Release >/dev/null 2>&1
+    echo "preflight: configures cleanly without the excluded trees (${#PARKED_TREES[@]} parked)."
+fi
+
+# --------------------------------------------------------------------------
 # Build the archive, honouring .railwayignore.
 # --------------------------------------------------------------------------
 ARCHIVE="$(mktemp -t railway-upload-XXXXXX.tar.gz)"
