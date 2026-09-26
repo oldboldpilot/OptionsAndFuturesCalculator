@@ -726,6 +726,27 @@ target_sources(sensen_slim
             "${SENSEN_SRC}/int256.cppm"
             "${SENSEN_SRC}/int256_bigint.cppm"
             "${SENSEN_SRC}/bigdecimal.cppm"
+            # The multiprecision closure, added 2026-09-25 with the bump to
+            # 26f94ff2. Every entry is genuinely transitive: financial.cppm now
+            # imports sensen.bigfloat and sensen.float256 for the exact rate and
+            # term solvers, which pulls bignum_mul, bignum_simd, scalar_math,
+            # float256_convert and special/foundation in behind them.
+            #
+            # `scripts/sensen_module_closure.py --check` is the authority here
+            # rather than hand-tracing imports, and after this block it reports
+            # only its two documented false positives (logger.cppm MISSING by
+            # basename, numa_bind.cpp EXTRA by intent). Do not "fix" those two.
+            "${SENSEN_SRC}/bignum_mul.cppm"
+            "${SENSEN_SRC}/bignum_simd.cppm"
+            "${SENSEN_SRC}/scalar_math.cppm"
+            "${SENSEN_SRC}/float256.cppm"
+            "${SENSEN_SRC}/bigfloat.cppm"
+            "${SENSEN_SRC}/special/foundation.cppm"
+            # The 5.2 MoE-offload closure, same bump: kv/attention modules
+            # already listed now import these three.
+            "${SENSEN_SRC}/moe_expert_cache.cppm"
+            "${SENSEN_SRC}/offload_streaming.cppm"
+            "${SENSEN_SRC}/weight_tier.cppm"
             "${SENSEN_SRC}/context_parallel.cppm"
             "${SENSEN_SRC}/cpu_features.cppm"
             "${SENSEN_SRC}/cuda_backend.cppm"

@@ -1346,19 +1346,28 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         READ_DECIMAL(fv_v, request->future_value(), "future_value");
         READ_DECIMAL(guess, request->guess(), "guess");
         if (auto s = check_tvm_solvable(pv_v, pmt_v, fv_v, "rate"); !s.ok()) return s;
-        // rate_fn solves iteratively in double, unlike the closed-form annuity
-        // functions above -- so the inputs narrow here rather than pretending
-        // to a precision the solver does not carry.
+        // THIS RESPONSE IS A DECIMAL, SO IT IS SOLVED AS ONE. `rate_fn` solves
+        // in double and is honestly typed for a caller that wants a double;
+        // widening its answer into a 38-place string is what this handler used
+        // to do, and measured against an 80-digit reference on 2026-09-25 it
+        // emitted 0.00562500000000001000000000000000000000 for a rate that is
+        // exactly 0.005625 -- real to fourteen places, then zero-padded to
+        // thirty-eight, in the same response shape as ComputePayment, whose 38
+        // places agree with the closed form to 36.
+        //
+        // `sensen::rate_checked` calls `rate_fn` itself for validation and for
+        // the Newton seed, so every refusal below is byte-identical to what
+        // this handler returned before; only the digits changed.
         //
         // An unset guess is 0, which is a legitimate rate but a poor seed; the
         // engine's own default is better, so an unstated guess uses it.
         const auto r = guess.is_zero()
-            ? sensen::rate_fn(request->periods(), pmt_v.to_double(), pv_v.to_double(),
-                              fv_v.to_double(), timing_of(request->timing()))
-            : sensen::rate_fn(request->periods(), pmt_v.to_double(), pv_v.to_double(),
-                              fv_v.to_double(), timing_of(request->timing()), guess.to_double());
+            ? sensen::rate_checked(request->periods(), pmt_v, pv_v, fv_v,
+                                   timing_of(request->timing()))
+            : sensen::rate_checked(request->periods(), pmt_v, pv_v, fv_v,
+                                   timing_of(request->timing()), guess);
         if (!r) return fail(r);
-        response->set_value(BigDecimal(*r).to_string());
+        response->set_value(r->to_string());
         return Status::OK;
     }
 
@@ -1373,23 +1382,28 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         REQUIRE_DECIMAL(pv_v, request->present_value(), "present_value");
         READ_DECIMAL(fv_v, request->future_value(), "future_value");
         if (auto s = check_tvm_solvable(pv_v, pmt_v, fv_v, "term"); !s.ok()) return s;
-        // nper_fn is a double-domain closed form, same as rate_fn above.
-        const auto r = sensen::nper_fn(rate.to_double(), pmt_v.to_double(), pv_v.to_double(),
-                                       fv_v.to_double(), timing_of(request->timing()));
+        // Solved as a decimal, for the reason ComputeRate above states: this
+        // handler used to widen nper_fn's double and returned
+        // 360.00000000000057000000000000000000000000 for a term that is
+        // exactly 360 periods. `nper_checked` calls `nper_fn` for its
+        // validation and refusal text, so nothing about which inputs are
+        // admissible moved.
+        const auto r = sensen::nper_checked(rate, pmt_v, pv_v, fv_v,
+                                            timing_of(request->timing()));
         if (!r) return fail(r);
         // Defence in depth, and NOT redundant with the check above: nper_fn is
         // a plain formula with no solver to fail, so every way of reaching a
         // meaningless answer arrives here as a number rather than an error. A
         // term is a count of periods; zero or fewer of them is not a shorter
         // loan, it is not a loan.
-        if (*r <= 0.0) {
+        if (!r->is_positive()) {
             return Status(grpc::StatusCode::INVALID_ARGUMENT,
-                          "the inputs imply a term of " + BigDecimal(*r).to_string() +
+                          "the inputs imply a term of " + r->to_string() +
                               " periods, which is not a term; check the signs of payment and "
                               "present_value and the magnitude of the payment against the "
                               "interest alone");
         }
-        response->set_value(BigDecimal(*r).to_string());
+        response->set_value(r->to_string());
         return Status::OK;
     }
 

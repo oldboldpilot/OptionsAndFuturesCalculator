@@ -116,6 +116,7 @@
 // AnalyzeBond/AnalyzeTreasuryBill, ComputeCommoditySpread) that were NOT
 // fixed in this pass (lower priority: not called by mortgagefvcalculator.com,
 // and this pass's time budget went to the prioritised RPCs above).
+#include <array>
 #include <cstdio>
 
 
@@ -128,6 +129,7 @@
 
 import std;
 import finance_service;
+import sensen.bigdecimal;
 
 namespace {
 
@@ -3762,6 +3764,252 @@ auto main() -> int {
             auto nctx2 = make_context();
             check(is_invalid_argument(stub.ComputeRentalCashFlow(nctx2.get(), norent, &nr2)),
                   "29o. a missing monthly_gross_rent is REFUSED");
+        }
+    }
+
+
+    // =======================================================================
+    section("30. ComputeRate / ComputePeriods: a DECIMAL response must carry real digits");
+    // =======================================================================
+    //
+    // WHY THIS SECTION EXISTS, measured against production on 2026-09-25 with
+    // an 80-digit mpmath reference:
+    //
+    //   ComputePeriods -> 360.00000000000057000000000000000000000000   (true: 360)
+    //   ComputeRate    -> 0.00562500000000001000000000000000000000     (true: 0.005625)
+    //   ComputePayment -> -3210.56057801266526493048779502036505463691 (real to 36)
+    //
+    // All three are 38-place decimal strings in the same response shape. Two of
+    // them were real to twelve and fourteen places and then ZERO-PADDED to
+    // thirty-eight, because `sensen::rate_fn` and `sensen::nper_fn` solve in
+    // double and the handlers widened their answers. The trailing zeros are not
+    // exactness; they are the absence of information, and no caller could tell
+    // them apart from ComputePayment's, whose 38 places are real. The scale
+    // widening from 18 to 38 places on 2026-09-23 tripled the fabricated digits
+    // and was verified on ComputePayment alone -- sweep the class, not the
+    // instance.
+    //
+    // THE GATE IS AN IDENTITY, NOT A PINNED DIGIT STRING, and that is what
+    // makes it strong. In each case below the true answer is an INPUT to the
+    // step that produced the request, so there is no reference to record and
+    // nothing to re-record when a formatting detail moves: ask ComputePayment
+    // (an exact BigDecimal closed form) for the payment on a known rate and
+    // term, hand that payment back to the solver, and require it to recover the
+    // rate or the term it was built from. A figure the engine produced earlier
+    // is never the standard here.
+    //
+    // 1e-30 is the threshold throughout. It sits ~13 orders of magnitude below
+    // what a double solver can deliver (the live errors above are 5.7e-13 and
+    // 1e-17) and ~8 above what the exact solvers do deliver, so it separates
+    // the two without pinning either. Mutation-checked with CCACHE_DISABLE=1:
+    // restoring the rate_fn/nper_fn widening reproduces both production strings
+    // and fails exactly the recovery checks.
+    {
+        // 1e-30, written at BigDecimal's own scale.
+        const sensen::BigDecimal tol{std::string_view("0.000000000000000000000000000001")};
+
+        const auto decimals_after_point = [](const std::string& s) -> std::size_t {
+            const auto dot = s.find('.');
+            return dot == std::string::npos ? 0U : s.size() - dot - 1U;
+        };
+
+        const auto payment_for = [&stub](const std::string& rate, int periods,
+                                         const std::string& pv) -> std::string {
+            sensen::finance::PaymentRequest req;
+            req.set_rate(rate);
+            req.set_periods(periods);
+            req.set_present_value(pv);
+            sensen::finance::DecimalResponse resp;
+            auto ctx = make_context();
+            const auto s = stub.ComputePayment(ctx.get(), req, &resp);
+            return s.ok() ? resp.value() : std::string{};
+        };
+
+        struct Case {
+            const char* rate;
+            int periods;
+            const char* pv;
+            const char* label;
+        };
+        // Two cases, deliberately: a round rate and one that is not, so a pass
+        // cannot come from the answer happening to be a value the double path
+        // also lands on.
+        const std::array<Case, 2> cases{{
+            {"0.005625", 360, "495000", "the canonical 495,000 @ 0.5625%/mo x 360"},
+            {"0.004", 240, "1275100", "1,275,100 @ 0.4%/mo x 240"},
+        }};
+
+        for (const auto& c : cases) {
+            const std::string pmt = payment_for(c.rate, c.periods, c.pv);
+            check(!pmt.empty(), std::string("30a. ComputePayment answers for ") + c.label);
+            if (pmt.empty()) { continue; }
+
+            // ---- ComputeRate recovers the rate it was built from ----
+            sensen::finance::RateRequest rreq;
+            rreq.set_periods(c.periods);
+            rreq.set_payment(pmt);
+            rreq.set_present_value(c.pv);
+            sensen::finance::DecimalResponse rresp;
+            auto rctx = make_context();
+            const auto rstatus = stub.ComputeRate(rctx.get(), rreq, &rresp);
+            check(rstatus.ok(), std::string("30b. ComputeRate answers for ") + c.label);
+            if (rstatus.ok()) {
+                check(decimals_after_point(rresp.value()) == 38,
+                      std::string("30c. ComputeRate emits 38 decimal places (") + c.label + ")");
+                const sensen::BigDecimal got{std::string_view(rresp.value())};
+                const sensen::BigDecimal want{std::string_view(c.rate)};
+                const sensen::BigDecimal err = got.subtract(want).abs();
+                check(err < tol, std::string("30d. ComputeRate recovers ") + c.rate +
+                                     " to better than 1e-30 -- got " + rresp.value());
+            }
+
+            // ---- ComputePeriods recovers the term it was built from ----
+            sensen::finance::PeriodsRequest preq;
+            preq.set_rate(c.rate);
+            preq.set_payment(pmt);
+            preq.set_present_value(c.pv);
+            sensen::finance::DecimalResponse presp;
+            auto pctx = make_context();
+            const auto pstatus = stub.ComputePeriods(pctx.get(), preq, &presp);
+            check(pstatus.ok(), std::string("30e. ComputePeriods answers for ") + c.label);
+            if (pstatus.ok()) {
+                check(decimals_after_point(presp.value()) == 38,
+                      std::string("30f. ComputePeriods emits 38 decimal places (") + c.label + ")");
+                const sensen::BigDecimal got{std::string_view(presp.value())};
+                const sensen::BigDecimal want{static_cast<std::int64_t>(c.periods)};
+                const sensen::BigDecimal err = got.subtract(want).abs();
+                check(err < tol, std::string("30g. ComputePeriods recovers ") +
+                                     std::to_string(c.periods) +
+                                     " to better than 1e-30 -- got " + presp.value());
+            }
+        }
+
+        // THE REFUSALS MUST NOT HAVE MOVED. `rate_checked`/`nper_checked` call
+        // the double solver first precisely so that admissibility is decided by
+        // the code whose behaviour is already gated -- these two assert that
+        // the documented same-sign refusal still fires, on both RPCs, with the
+        // INVALID_ARGUMENT the frontend routes on.
+        {
+            sensen::finance::RateRequest same;
+            same.set_periods(360);
+            same.set_payment("7751.77");      // same sign as present_value
+            same.set_present_value("1275100");
+            sensen::finance::DecimalResponse resp;
+            auto ctx = make_context();
+            check(is_invalid_argument(stub.ComputeRate(ctx.get(), same, &resp)),
+                  "30h. ComputeRate still REFUSES a same-signed payment/present_value");
+
+            sensen::finance::PeriodsRequest samep;
+            samep.set_rate("0.005625");
+            samep.set_payment("7751.77");
+            samep.set_present_value("1275100");
+            sensen::finance::DecimalResponse resp2;
+            auto ctx2 = make_context();
+            check(is_invalid_argument(stub.ComputePeriods(ctx2.get(), samep, &resp2)),
+                  "30i. ComputePeriods still REFUSES a same-signed payment/present_value");
+        }
+
+        // REFUSAL PARITY ON A HOSTILE SEED, which is an assertion that nothing
+        // MOVED rather than that anything improved. `guess` is a caller-supplied
+        // field and f carries (1+r)^n, so a seed far above the root crawls: from
+        // 90% a month on a 360-period loan Newton advances about (1+r)/n per
+        // step and cannot arrive inside any sane iteration cap. The double
+        // solver in production refuses these identically -- verified against the
+        // live engine on 2026-09-25, `guess` 0.5 and 0.9 both answering
+        // `Newton-Raphson solver failed to converge for rate.` while 0.1
+        // answers -- so requiring the exact solver to converge here would be
+        // inventing a contract this change never promised.
+        //
+        // An |f|-reduction line search WAS written to make 0.9 converge and was
+        // removed: it did not, and it changed no gated outcome. What keeps the
+        // refusal honest is the residual verification in `rate_checked`, which
+        // refuses an iterate that has not reached the root rather than printing
+        // it.
+        for (const char* seed : {"0.5", "0.9"}) {
+            const std::string pmt = payment_for("0.005625", 360, "495000");
+            sensen::finance::RateRequest req;
+            req.set_periods(360);
+            req.set_payment(pmt);
+            req.set_present_value("495000");
+            req.set_guess(seed);
+            sensen::finance::DecimalResponse resp;
+            auto ctx = make_context();
+            const auto st = stub.ComputeRate(ctx.get(), req, &resp);
+            // EITHER-OR, because that is the whole contract: a hostile seed may
+            // cost the answer, and it may never buy a wrong one. Measured, the
+            // exact solver is strictly better than the double it replaces -- it
+            // converges from 0.5, which production refuses, and refuses at 0.9,
+            // which production also refuses. Asserting plain parity would have
+            // failed on the improvement; asserting convergence would invent a
+            // contract. This asserts the property both arms share.
+            const bool refused_honestly =
+                !st.ok() &&
+                st.error_message() == "Newton-Raphson solver failed to converge for rate.";
+            bool answered_correctly = false;
+            if (st.ok()) {
+                const sensen::BigDecimal got{std::string_view(resp.value())};
+                const sensen::BigDecimal want{std::string_view("0.005625")};
+                answered_correctly = got.subtract(want).abs() < tol;
+            }
+            check(refused_honestly || answered_correctly,
+                  std::string("30o. a ") + seed +
+                      " seed either refuses or is right, never wrong -- got " +
+                      (st.ok() ? resp.value() : st.error_message()));
+        }
+
+        // THE SAME FLOAT, IN AN int32 FIELD, and this is the half that had no
+        // digits to give it away. `calculate_payoff_timing` takes ceil() of the
+        // term, so a double term of 360.0000000000008 for a loan that is
+        // exactly 360 months became 361 -- measured against production on
+        // 2026-09-25:
+        //
+        //   {"originalMonthsRemaining":361,"newMonthsRemaining":361,...}
+        //
+        // A 30-year mortgage reported as 30 years and one month, with the extra
+        // month also inflating total_paid. The payment below is ComputePayment's
+        // own answer for 495,000 at 6.75%/yr over 360 months, so 360 is the
+        // arithmetic's own statement about itself rather than a figure recorded
+        // by hand.
+        {
+            const std::string exact_pmt = payment_for("0.005625", 360, "495000");
+            check(!exact_pmt.empty(), "30k. ComputePayment answers for the payoff-timing case");
+
+            sensen::finance::PayoffTimingRequest req;
+            req.set_current_loan_balance("495000");
+            req.set_annual_rate("0.0675");
+            // ComputePayment returns the outflow as negative; this field is the
+            // payment a borrower makes, quoted unsigned.
+            req.set_current_monthly_payment(exact_pmt.starts_with("-") ? exact_pmt.substr(1)
+                                                                       : exact_pmt);
+            req.set_extra_monthly_payment("0");
+            req.set_payments_per_year(12);
+            sensen::finance::PayoffTimingResponse resp;
+            auto ctx = make_context();
+            const auto st = stub.ComputePayoffTiming(ctx.get(), req, &resp);
+            check(st.ok(), "30l. ComputePayoffTiming answers for an exactly-360-month loan");
+            if (st.ok()) {
+                check(resp.original_months_remaining() == 360,
+                      "30m. a loan that amortizes in exactly 360 months reports 360, not 361 "
+                      "-- got " + std::to_string(resp.original_months_remaining()));
+                check(resp.months_saved() == 0,
+                      "30n. no extra payment saves no months -- got " +
+                          std::to_string(resp.months_saved()));
+            }
+        }
+
+        // A payment smaller than the first period's interest passes the sign
+        // rule and never retires the loan. That post-check is the safety net
+        // documented in the handler, and it reads the BigDecimal now rather
+        // than a double -- so it is asserted here to still fire.
+        {
+            sensen::finance::PeriodsRequest never;
+            never.set_rate("0.005625");
+            never.set_payment("-100");        // interest alone is ~2,784/mo
+            never.set_present_value("495000");
+            sensen::finance::DecimalResponse resp;
+            auto ctx = make_context();
+            check(!stub.ComputePeriods(ctx.get(), never, &resp).ok(),
+                  "30j. a payment below the first period's interest is still REFUSED");
         }
     }
 
