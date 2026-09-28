@@ -4923,6 +4923,20 @@ Two residue findings from the same sweep:
   so it was never read, but it is the same class as the four headers libc++ 23
   removed. Gone with the wholesale replacement.
 
+  **CORRECTION, 2026-09-28: "never read" was true of THIS repository and false
+  of the toolchain, and removing it broke a different project.** Clang searches
+  the triple path first only when clang is doing the searching. A build that
+  passes **`-nostdinc++`** and then hand-adds one libc++ directory suppresses
+  that search entirely, and the two directories are not interchangeable: the
+  triple one holds `__config_site`, the flat one holds the `__config` that
+  includes it. ThinButQuickWebFramework adds only the flat path, so it had been
+  reading the stray file for months; deleting it killed all 828 of its targets
+  with `'__config_site' file not found`, which reads as a broken libc++ release
+  rather than as a half-specified include path. Fixed there by deriving the
+  per-target directory from `clang++ -print-target-triple`. **The lesson is
+  narrower than "diff the file lists": a file being shadowed is a statement
+  about one consumer's search order, not a property of the file.**
+
 **THE 12 SGEE FAILURES WERE A CLANG BUG, NOT SGEE CODE — 10 of 12 cleared on the
 patch bump alone.** This file's SGEE re-bump had been blocked on 12/142 failing
 in the EMBEDDED build while SGEE was clean standalone, and an agent reading the
