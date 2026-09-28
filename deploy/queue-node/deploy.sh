@@ -49,6 +49,12 @@ stage() {
     #
     # Excluding CosyVoice also removes the dangling symlinks at their source
     # rather than only pruning them afterwards.
+    #
+    # prof/, perf.data* and *.nsys-rep are TRACKED in sensen (41 files, 3.7 MB
+    # and 2.2 MB respectively) -- profiling output committed to that repository,
+    # which is sensen's business and not this image's. Nothing compiles them and
+    # the queue node profiles nothing, so they are ~12 MB of pure upload weight
+    # against a `railway up` deadline this script has already lost to twice.
     rsync -a --quiet \
         --exclude 'build/' --exclude 'build-*/' --exclude '*.log' \
         --exclude 'models/' --exclude 'node_modules/' --exclude '__pycache__/' \
@@ -59,6 +65,8 @@ stage() {
         --exclude 'sensen/demo_qwen3/' --exclude 'sensen/benchmarks/' \
         --exclude 'sensen/tests/' --exclude 'sensen/python/' \
         --exclude 'sensen/examples/' --exclude 'sensen/docs/' \
+        --exclude 'sensen/prof/' --exclude 'sensen/perf.data*' \
+        --exclude 'sensen/*.nsys-rep' --exclude 'sensen/*.ncu-rep' \
         "${REPO_ROOT}/backend/" "${dest}/backend/"
     cp "${HERE}/railway.json" "${dest}/railway.json"
 
@@ -73,6 +81,34 @@ stage() {
     dangling=$(find "${dest}" -xtype l -print -delete | wc -l)
     if [ "${dangling}" -gt 0 ]; then
         echo "[deploy] pruned ${dangling} dangling symlink(s) from the staged upload"
+    fi
+
+    # A LOOP IS NOT A DANGLING LINK, and the prune above cannot see it.
+    # `-xtype l` finds links whose target does NOT exist. A link that points at
+    # its own directory resolves perfectly and is therefore kept -- and then the
+    # Railway CLI's indexer aborts the upload outright:
+    #   File system loop found: .../third_party/ggml_mmvq/ggml-cuda
+    #                           points to an ancestor .../third_party/ggml_mmvq
+    # backend/sensen/third_party/ggml_mmvq/ggml-cuda is exactly that: a tracked
+    # symlink whose target is `.`, so `#include "ggml-cuda/foo.cuh"` resolves
+    # within the same directory. Harmless to a compiler, fatal to a tree walker.
+    # It landed in sensen on 2026-09-14 and made every queue-node upload fail
+    # with three retries and no deployment created -- a GENUINE upload failure,
+    # correctly reported as such, with nothing naming the symlink as the cause.
+    #
+    # Removed from the STAGE only; the working tree and sensen are untouched,
+    # exactly as with the dangling prune, and nothing in this image's build
+    # follows it (the queue node compiles no CUDA at all).
+    local loops
+    loops=$(find "${dest}" -type l -print0 | while IFS= read -r -d '' l; do
+        tgt=$(readlink -f "$l" 2>/dev/null) || continue
+        dir=$(cd "$(dirname "$l")" 2>/dev/null && pwd -P) || continue
+        case "$dir" in
+            "$tgt"|"$tgt"/*) rm -f "$l"; printf 'x' ;;
+        esac
+    done | wc -c)
+    if [ "${loops}" -gt 0 ]; then
+        echo "[deploy] pruned ${loops} self-referential symlink(s) (filesystem loops) from the staged upload"
     fi
 
     # A staged tree that is missing the Dockerfile or the SGEE sources produces
