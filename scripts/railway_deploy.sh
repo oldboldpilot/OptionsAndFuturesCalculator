@@ -188,18 +188,43 @@ if [[ ! -f backend/build/CMakeCache.txt ]]; then
     echo "  Configure it once (cmake -B backend/build -S backend) to enable this."
 else
     PARK_DIR="$(mktemp -d -t railway-parked-XXXXXX)"
+    # THE KEY IS THE WHOLE PATH, NOT THE BASENAME, AND THAT IS NOT A TIDY-UP.
+    #
+    # `.railwayignore` parks TWO trees called `docs` -- backend/sensen/docs and
+    # backend/external/SGEE/docs. Keyed by basename, the first parks as
+    # PARK/docs and the second `mv`s INTO it, becoming PARK/docs/docs. Restore
+    # then moves the whole nest back to whichever path it tries first, and the
+    # other tree is never restored at all: SGEE's docs/ silently ended up inside
+    # sensen's, and SGEE's own was gone. That happened three times before it was
+    # attributed -- it looks like an unrelated "docs moved" mystery because the
+    # deploy that caused it had already exited and restored its trap.
+    #
+    # A path-derived key cannot collide, and the guard below turns any future
+    # collision into a LOUD failure instead of a silent nesting.
+    park_key() { local p="${1#./}"; printf '%s' "${p//\//__}"; }
     restore_parked() {
-        local t
+        local t k
         for t in "${PARKED_TREES[@]}"; do
-            if [[ -d "${PARK_DIR}/$(basename "$t")" && ! -d "$t" ]]; then
-                mv "${PARK_DIR}/$(basename "$t")" "$t"
+            k="${PARK_DIR}/$(park_key "$t")"
+            if [[ -d "$k" && ! -d "$t" ]]; then
+                mkdir -p "$(dirname "$t")"
+                mv "$k" "$t"
             fi
         done
         rm -rf "$PARK_DIR"
     }
     trap restore_parked EXIT
     for t in "${PARKED_TREES[@]}"; do
-        [[ -d "$t" ]] && mv "$t" "${PARK_DIR}/$(basename "$t")"
+        [[ -d "$t" ]] || continue
+        PARK_TARGET="${PARK_DIR}/$(park_key "$t")"
+        if [[ -e "$PARK_TARGET" ]]; then
+            echo "PARK COLLISION: '$t' would overwrite '$PARK_TARGET'." >&2
+            echo "  Two excluded trees derived the same park key. Refusing rather" >&2
+            echo "  than nesting one inside the other -- that is how a tree goes" >&2
+            echo "  missing. Nothing has been uploaded." >&2
+            exit 1
+        fi
+        mv "$t" "$PARK_TARGET"
     done
     PREFLIGHT_LOG="$(mktemp -t railway-preflight-XXXXXX.log)"
     set +e
