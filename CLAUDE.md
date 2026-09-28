@@ -3085,6 +3085,54 @@ hostname, so the peers could not address each other.
 **It is a non-authoritative mirror. Postgres remains the system of record**, and
 `docs/SGEE_QUEUE_CLUSTER.md` carries the evidence for why.
 
+### The queue nodes went FIVE WEEKS stale, and nothing was watching them
+
+Rolled to `f73cb606` on 2026-09-28. The previous deployment on all three was
+**2026-08-20** — the SGEE re-promotion — so every SGEE fix merged since then
+(the clang 23.1.2 unblock, the `FencingToken` ODR split, the boot-time compiler
+banner) was in the engine's *submodule pointer* and in no running node.
+
+**The engine is only a CLIENT of this cluster, which is what let it drift.**
+Every deploy gate in this file is written against `options-calculator-backend`:
+`model is LOADED` counts, the SIMD tier, the cutover banner. None of them reads a
+queue node, so five weeks of engine deploys all passed while the thing executing
+the inference was a five-week-old binary. **A gate that only covers the service
+you deploy most often is how the other services rot.**
+
+**It could not have been rolled sooner, and the blocker was invisible from the
+error.** All three uploads failed with `File system loop found:
+.../backend/sensen/third_party/ggml_mmvq/ggml-cuda points to an ancestor`.
+`deploy/queue-node/deploy.sh` pruned only DANGLING symlinks (`find -xtype l`); a
+symlink whose target is `.` is not dangling, it is a **loop**, and `find`/`tar`
+refuse to walk it. Fixed in `34daa25` by resolving each link and removing any
+whose target is an ancestor of its own directory. Stage 112 MB -> 98 MB.
+
+**Rolled 2 -> 3 -> 1, followers first and the leader last**, because node 1 held
+leadership at the baseline — so the roll costs exactly one election rather than
+three. Measured: terms converged to **3802 with `leader_hint=3` on all three**,
+`last_applied` 834146/834146/834153 (the spread is line timestamps, not lag),
+**0 `[ERROR]`**, and every `[WARN]` a Raft leadership transition, which is what
+three restarts are supposed to produce.
+
+**`Built by: clang 23.1.2, libc++ _LIBCPP_VERSION=230102, C++23` on all three**
+is the cutover proof, and it works for **exactly this one deploy** — the marker
+exists because no previous node binary could emit it, and this file already
+records that such a marker has a shelf life of one deploy. The next roll needs a
+different discriminator.
+
+End to end afterwards: production `ComputePayment` returns the recorded
+`-3210.56057801266526493048779502036505463691`, both front ends 200, and a live
+`ParseOperation` through the partner key parses `ComputePayment{rate 0.005417,
+periods 360, present_value 420000.00}` — the whole engine -> lease -> decode ->
+writeback -> verifier chain. The engine logs **0 WARN / 0 ERROR** with no
+`SgeeAdmission` degrade branch firing, which is the negative proof that matters
+because a degraded request returns the same answer.
+
+**That zero was nearly a lie.** `grep -c '\[WARN\]'` returned 0 on all three
+nodes and was read as healthy; the logger pads the level, so the text is
+`[WARN ]` and the pattern matched nothing. `\[WARN *\]` found 1/3/2. Assert a
+positive control on the same pattern family before quoting a zero.
+
 **The first deployment crash-looped, and how it presented is the lesson.** All
 three nodes died on an uncaught `std::bad_variant_access` seconds after boot,
 while **Railway reported every deployment SUCCESS** — the healthcheck passes
