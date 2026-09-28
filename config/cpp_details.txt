@@ -106,7 +106,7 @@ in which case we should use the appropriate STL algorithms and data structures t
     (NO -fopenmp: the codebase is TBB-only as of 2026-06-06 — OpenMP was dropped from CANONICAL_FLAGS; parallelism is exclusively oneTBB.)
     -D_LIBCPP_ENABLE_EXPERIMENTAL -fexperimental-library
     -nostdinc++ -isystem external/libcxx-v1/include
-    Toolchain: clang++-23 only (moved from clang++-22 on 2026-08-29; see CLAUDE.md). AVX-512 is engaged via [[gnu::target("avx512f,avx512dq,fma")]] per-function attributes, NOT global -mavx512f flags, so the binary stays portable across machines that lack AVX-512.
+    Toolchain: clang++-23 only, MINIMUM 23.1.2 (moved from clang++-22 on 2026-08-29, floor raised to 23.1.2 on 2026-09-27: 23.1.0 miscompiles `= default` move-ctor/dtor pairs on a module-interface class, which cost 10 of 12 SGEE test failures; see CLAUDE.md). AVX-512 is engaged via [[gnu::target("avx512f,avx512dq,fma")]] per-function attributes, NOT global -mavx512f flags, so the binary stays portable across machines that lack AVX-512.
 
 51. VENDORED STD MODULE AND LIBCXX — MANDATORY (April 2026). Never use system-provided std.cppm or libc++ headers. The repo vendors both:
     - modules/std.cppm — libc++ C++23 std module export

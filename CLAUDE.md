@@ -4844,6 +4844,142 @@ since this tree's pin, and dragging those in alongside a toolchain change makes
 any failure unattributable. It is also not load-bearing here — the clang 23
 engine linked at `rc=0` before that fix.
 
+### clang 23.1.2, and the compiler bug that was NOT an SGEE defect
+
+**The LOCAL toolchain is clang 23.1.2 as of 2026-09-27**, up from 23.1.0, and the
+23.1.0 tree is at `~/usr-local-llvm23.1.0-backup.tar.zst` (5.7 GB compressed,
+24,124,528,640 bytes uncompressed, zstd-validated before the overlay). Installed
+the way this file already requires: `include/c++/v1` and
+`include/x86_64-unknown-linux-gnu/c++/v1` and `lib/clang` REPLACED wholesale,
+everything else overlaid, then **every staged file compared byte-for-byte** —
+final state 0 mismatches.
+
+**THE INSTALL REPORTED SUCCESS WHILE ONE FILE STAYED STALE, and the file-list
+diff is the only thing that caught it.** `cp` failed on `clangd` with
+`Text file busy` — a running LSP held it — and the script printed "done" anyway,
+leaving `clangd` at **23.1.0** beside a 23.1.2 everything-else. Two details make
+it worth recording: the process's `comm` is **`clangd.main`**, so `pkill -x
+clangd` matches nothing (the same 15-char/`comm` trap this file records for
+`calculator_engine`), and its PARENT was `claude` — the agent's own LSP tool was
+holding the binary it was replacing. **Diff the file lists after any overlay; the
+exit code is not the gate.**
+
+Two residue findings from the same sweep:
+
+- **`clang++-23` DID NOT EXIST**, while `config/cpp_details.txt` rule 50 names
+  `clang++-23` as *the* toolchain — a documented toolchain binary nobody could
+  invoke. Created. `clang-tidy-22` and `run-clang-tidy-22` were symlinks
+  resolving to 23.1.2, i.e. names lying about a version; removed.
+- A stray flat `include/c++/v1/__config_site` from an older install differed from
+  the per-triple one. It was **shadowed** (clang searches the triple path first)
+  so it was never read, but it is the same class as the four headers libc++ 23
+  removed. Gone with the wholesale replacement.
+
+**THE 12 SGEE FAILURES WERE A CLANG BUG, NOT SGEE CODE — 10 of 12 cleared on the
+patch bump alone.** This file's SGEE re-bump had been blocked on 12/142 failing
+in the EMBEDDED build while SGEE was clean standalone, and an agent reading the
+code found nothing. Measured, one engine, `CCACHE_DISABLE=1`, all 339 BMIs
+deleted:
+
+| | 23.1.0 | 23.1.2 |
+| --- | --- | --- |
+| `ReplicatedBrokerTests`, `TaskQueueGrpcTests`, `GrpcClusterTests` | SEGFAULT every run | **pass, 8 runs of 8** |
+| `QueueNode{Smoke,Auth,Tls,Durability,BlockingIo}Test` | fail | **pass** (consequential) |
+| full suite | 12 failed / 142 | **2 failed** |
+
+**The mechanism, and it is why there was no code to find.** `RaftNode::open()`
+builds a local `RaftNode node`, moves it into `std::expected<RaftNode, RaftError>`
+and destroys the local. `RaftNode`'s move ctor, move assign and dtor are all
+`= default` — **re-synthesised in every consuming TU from the module's serialised
+AST** — so two TUs disagreeing on the layout makes the moved-from local free
+memory the `expected` owns. That accounts for every observation: the
+`~RaftNode() -> map<uint64,uint64>::__tree_deleter` stack (`nextIndex_`/
+`matchIndex_` are real members), valgrind attributing the freed block to
+`InMemoryIndex(&&)` **in a different module**, and clean-standalone/dirty-embedded
+— which was reporting **module-graph size**, not a code difference.
+
+The competing explanation was ruled out rather than assumed: `raft_node.cppm` has
+**zero preprocessor conditionals** in the class body and every SGEE define is
+`PUBLIC` on one target, so macro-driven ODR was not available as a cause.
+
+**A defaulted special member on a module-interface class is therefore more
+sensitive to BMI fidelity than a hand-written one.** If this recurs and no
+compiler fix is available, the compiler-independent fix is to define the move
+ctor and dtor **out-of-line in a module implementation unit**, so they are
+emitted once by one TU and only that TU's layout matters — the same
+interface/impl split `strategy_store` already uses to keep libpq out of
+`calculator_service`.
+
+Verified before relying on the rebuild: clang **hard-errors** on a mismatched BMI,
+naming both git revisions, so a rebuild cannot silently mix 23.1.0 and 23.1.2
+module state.
+
+**THE PATCH LEVEL IS AN UNPINNED, CORRECTNESS-RELEVANT INPUT, AND NOTHING
+RECORDED IT.** `backend/Dockerfile`'s `ARG LLVM_VERSION=23` pins the MAJOR and
+apt.llvm.org serves a moving patch level, so two images built from the identical
+Dockerfile can carry different compilers. `main.cpp` now prints
+
+```
+Built by: clang 23.1.2, libc++ _LIBCPP_VERSION=..., C++23
+```
+
+at boot beside the SIMD tier, for exactly the reason that line exists: a fact
+that decides behaviour must be attributable to a deployment rather than argued.
+It uses preprocessor macros so it cannot drift from the compiler that actually
+ran, and `<version>` is included **textually** — `import std;` exports no macros
+(trap #1 above) and `grpcpp.h` only drags `<__config>` in by accident, which is
+the arrival the `<new>` ODR-anchor lesson warns about.
+
+### The two SGEE failures that were OURS, and neither was the compiler
+
+**`TbbSanitizeMappingShape` / `TbbSanitizeReconfigure` — `${CMAKE_SOURCE_DIR}`
+again, and `tests/CMakeLists.txt` DOCUMENTS the rule at line 9 and violated it at
+922/927.** Embedded, `CMAKE_SOURCE_DIR` is the superproject, so the text check was
+pointed at `backend/cmake/sanitizers.cmake` — **a file that does not exist** — and
+the reconfigure was handed the superproject as the tree to reconfigure. This is
+the identical defect fixed upstream in SGEE `6351d4df` for
+`capi_lease_filter_tests`; these were the last two unswept instances. Nothing in
+that file says `CMAKE_SOURCE_DIR` outside a comment now. The check script itself
+was sound — it has an explicit `if(NOT EXISTS ...) FATAL_ERROR`, so it failed
+loudly rather than passing vacuously on the missing file.
+
+**`GrpcNetworkTests` Test 13 depended on the machine being SLOW.** It holds the
+handler 1 ms and requires a 30 ms client deadline to expire, then asserts
+`abandoned > 0` — so it could only pass if spawning and connecting 32 threads
+itself took over 30 ms. On this host: 0 abandonments, 6 runs of 6, deterministically
+red. **The check is right to exist and the failure was honest** — with no
+abandonment the UAF window it describes is never opened, so the case measured
+nothing. But "the window was not reached" is **UNMEASURED, not FAILED**. Every
+8th burst now holds the handler past the deadline, so abandonment is guaranteed by
+construction; holding LONGER makes the window more certain, so this strengthens
+the case rather than relaxing it. 74/0 on 4 runs of 4.
+
+**`LifecycleTransportTests` L1 had a bound EQUAL to the component's own
+deadline.** `kJointBound` is 5000 ms and `GrpcConsensusTransport::stop()` passes
+`kServerShutdownDeadline` (5 s) to `grpc::Server::Shutdown` — the same number by
+coincidence, **zero margin** — so L1, the only case that deliberately keeps
+traffic in flight across the stop, was racing the component's own permitted
+deadline: 1 pass / 3 fail of 4. Measured directly, the binary takes 10.52 s twice
+and 15.52 s once, and that 5 s spread IS one `stop()` pinning its deadline. The
+constant is now `export`ed and the bound **derived** from it via a per-backend
+`stop_bound()` (default `kJointBound`, so backends that were already correct gain
+no obligation) — derived rather than restated, for the same reason
+`pending_enqueues_in_log()` replaced a cached counter. A bound a correct component
+cannot meet is not a bound, it is a flake generator.
+
+**BOTH MUTATION-CHECKED, AND THE FIRST MUTATION ARM WAS INVALID.** Setting
+`kAbandonEvery` to 100000 to disable the hold left `b % kAbandonEvery == 0` TRUE
+at `b == 0` — one abandon burst survived, which is all `abandoned > 0` needs, so
+the arm passed and would have "proved" the fix was unnecessary. The correct arm
+(`force_abandon = false`) reproduces 73/1 on 3 runs of 3. The L1 arm reproduces
+**1 pass / 3 fail of 4**, matching the original baseline exactly. A mutation that
+does not actually remove the thing under test is not a mutation check.
+
+**One more n=1 correction, recorded because this file keeps paying for it:** a
+single 10.52 s timing was read as "stop() is not pinning its deadline", which was
+wrong; the third sample was 15.52 s. Three samples, not one, even for a timing
+used only as supporting evidence.
+
 ## The Railway host has AVX-512; the BASELINE deliberately does not
 
 Asked and measured 2026-09-22, because "does the deploy support AVX-512" has

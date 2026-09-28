@@ -559,7 +559,8 @@ export class QueuedBackend : public InferenceBackend {
      * This is a genuine, upstream CLANG bug (not libc++, not a toolchain
      * misconfiguration here), independently reproduced with a minimal
      * 3-file example on this project's exact toolchain and canonical flags
-     * (clang 22.1.0, `scripts/build_common.sh`'s CANONICAL_FLAGS): a module
+     * (clang 22.1.0 when first diagnosed; still present on 23.1.2 unless the
+     * removal test below says otherwise, `scripts/build_common.sh`'s CANONICAL_FLAGS): a module
      * whose interface unit defines a member function OUT-OF-LINE (`inline`,
      * still inside the interface unit -- exactly `take_jobs`'s own shape,
      * required here because its body needs `PostgresLeaseSource` complete,
@@ -626,7 +627,8 @@ export class QueuedBackend : public InferenceBackend {
      *
      * WHAT WOULD LET THIS BE REMOVED: once the upstream fix lands AND stays
      * landed (is not reverted again) in a Clang release this project's
-     * canonical toolchain (`clang++-22`, `config/cpp_details.txt` rule 50)
+     * canonical toolchain (`clang++-23`, `config/cpp_details.txt` rule 50; 23.1.2
+     * as of 2026-09-27 -- the removal condition has NOT been re-measured on it)
      * adopts, delete this function and its out-of-line address-of below, and
      * confirm test_inference_admission/test_inference_admission_pg/
      * calculator_engine/every other target that imports this module still

@@ -2,6 +2,13 @@
 #include <grpcpp/grpcpp.h>
 
 
+// <version> textually, for `_LIBCPP_VERSION` in the boot banner below.
+// `import std;` exports NO MACROS (this repo's import-std trap #1), and
+// grpcpp.h happens to drag <__config> in transitively -- which is exactly
+// the kind of accidental arrival the <new> ODR-anchor lesson warns about.
+// <version> is the standard header whose only job is feature-test macros.
+#include <version>
+
 import std;
 import calculator_service;
 import finance_service;
@@ -181,6 +188,32 @@ auto RunServer() -> void {
                   << " fma3=" << (cpu.has_fma3 ? 1 : 0)
                   << "), compiled floor x86-64-v3" << std::endl;
     }
+    // The COMPILER that built this binary, for the same reason the SIMD tier
+    // above is printed: it is a correctness-relevant input that was previously
+    // unknowable after the fact.
+    //
+    // `backend/Dockerfile`'s `ARG LLVM_VERSION=23` pins the MAJOR only, and
+    // apt.llvm.org serves a MOVING patch level for a major -- so two images
+    // built from the identical Dockerfile can carry different compilers and
+    // nothing recorded which. That is not hypothetical: measured on 2026-09-27,
+    // clang 23.1.0 MISCOMPILED SGEE's `RaftNode` defaulted move-ctor/dtor pair
+    // in the embedded module graph (three tests SEGFAULTing on every run, the
+    // moved-from local freeing memory the `std::expected` owned), and 23.1.2
+    // compiles the same source clean 8 runs out of 8. A compiler patch level
+    // that can change codegen must be attributable to a deployment, and the
+    // major alone cannot do it.
+    //
+    // Preprocessor macros, so this costs nothing at run time and cannot drift
+    // from the compiler that actually ran -- unlike a version baked in by the
+    // build script, which is a second place to be wrong.
+#if defined(__clang_major__)
+    std::cout << "Built by: clang " << __clang_major__ << '.' << __clang_minor__
+              << '.' << __clang_patchlevel__
+#else
+    std::cout << "Built by: UNKNOWN compiler (not clang)"
+#endif
+              << ", libc++ _LIBCPP_VERSION=" << _LIBCPP_VERSION
+              << ", C++" << (__cplusplus / 100 % 100) << std::endl;
     // Started AFTER the listener binds, so a slow first tick can never delay the
     // health check Railway gates the deploy cutover on. The scheduler no-ops
     // when CENSUS_API_KEY or DATABASE_URL is absent, which is what keeps a

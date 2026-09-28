@@ -81,3 +81,8 @@ Testing/
 # never committed. The NAS backup is the only copy outside this machine.
 config/client_secret_*.json
 config/google_search_console_token.json
+
+# Valgrind core dumps. `config/cpp_details.txt` rule 36 makes valgrind part of
+# the workflow, so these WILL recur; a 26 MB untracked core from
+# replicated_broker_tests is what prompted this line.
+vgcore.*
