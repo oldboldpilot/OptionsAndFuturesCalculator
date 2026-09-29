@@ -5120,9 +5120,22 @@ answers by being read, not by being argued.
   vitest 4 pulls in. The build itself does not require it; the test suite does.
 - **Backend Docker Build:** `docker build -t options-backend backend/`
 - **Backend Tests:** `ninja -C backend/build build_tests && ctest --test-dir backend/build`
-  (ctest is **117/117** — 116 after `GroundingCorpusSweepTest`, and 117 once
-  SGEE `6ec13bfc` brought `CapiLeaseFilterTests` with the submodule bump of
-  2026-09-18. 83 of the 117 are SGEE-owned.)
+  (ctest is **148/148 with 2 skipped**, as of the SGEE bump to `b241317e` on
+  2026-09-29. It was 116 after `GroundingCorpusSweepTest`, 117 once SGEE
+  `6ec13bfc` brought `CapiLeaseFilterTests` on 2026-09-18, and **117 was stale
+  for eleven days while this line kept quoting it** — most of the 31 new tests
+  are SGEE's. The two skips are `SanitizerOverlayCoversEveryObject` and
+  `TbbInstrumentationMatchesSanitizer`; they were the same two before the bump,
+  which is what makes "148 passed" comparable to the 145 baseline rather than
+  just larger.
+
+  **Quote the count WITH its date, and take a baseline before a bump.** The
+  145 -> 148 comparison is the only reason +3-gained/0-lost is attributable; a
+  bare green afterwards cannot say whether anything ever passed, which is the
+  lesson the 18->38 scale cutover paid for against `mortgage-nest-egg`'s
+  contract suite. The two-skip figure is part of the count: a test that stops
+  running is indistinguishable from one that passes if only the pass total is
+  compared.)
 
   **A submodule bump must be built in the EMBEDDED configuration, because that
   is the one nobody upstream compiles.** SGEE `6ec13bfc` is green standalone and
