@@ -3668,6 +3668,183 @@ What survives and is worth keeping:
   `wget` the private bucket rejects and fails minutes later with a checksum
   error that never mentions credentials.
 
+## LLQ weight store: serving a model from its compressed image
+
+Written 2026-09-30. `sensen.lossless_quant` (LLQ) was real, gated and fast and was
+**in no binary**: `nm -C calculator_engine | grep -c lossless_quant` was **0**, so
+every LLQ speed figure was a kernel microbenchmark and no request had ever been
+served from an LLQ-held weight. It is **519** now, and a real generation has run
+through it.
+
+**THE MODULE IS `sensen.lossless_quant`, IN NAMESPACE `sensen::llq`, AND THE STRING
+`sensen.llq` APPEARS IN NO SYMBOL.** A grep for it returns 0 whether or not the
+codec is linked -- the same shape as grepping `Class::method` for a module symbol.
+Grep `lossless_quant` or `LlqGemv`. `cpu_simd_int8_gemv` stays at 0 and is correct:
+LLQ does not import it and nothing here needs it.
+
+| `nm -C calculator_engine \| grep -c` | before | after |
+| --- | --- | --- |
+| `lossless_quant` | 0 | 519 |
+| `LlqGemv` | 0 | 131 |
+| `llq_weight_store` | 0 | 72 |
+| `rotary_embedding` (control: already linked) | 50 | 50 |
+
+### It is OFF unless an operator opts in
+
+```
+MORTGAGE_WEIGHT_STORE = dense (default) | llq | llq-fused
+STRATEGY_WEIGHT_STORE = dense (default) | llq | llq-fused
+```
+
+Two variables with no fallback between them, for the reason `MORTGAGE_MODEL_PATH`
+does not fall back to `MODEL_PATH`. An unrecognised value (`LLQ`, `lql`, `llq `)
+**stops the process at boot** rather than reading as `dense`: a typo must not
+silently serve the path the operator meant to leave. `main` prints
+`Weight store: MORTGAGE_WEIGHT_STORE=... STRATEGY_WEIGHT_STORE=...` on every boot,
+so a cutover check can read it. Asked for LLQ and did not get all of it (nothing
+adopted, or any weight refused) and the assistant is **unavailable**, never served
+dense -- the `ASSISTANT_BACKEND=llamacpp` rule.
+
+### The seam, and the sensen patch behind it
+
+sensen's Q8_0 kernels receive one thing that identifies a weight: the address of
+its dense column-major buffer. `GEMM::registerQ8WeightSource` associates a
+`Q8WeightSource` with it and the two Int8 slice front doors consult it;
+`GEMM::setQuantTransposeObserver` is told about each weight as it is transposed at
+load, **with the GGUF row-major bytes still alive**, which is where the image is
+built. Nothing above the kernel -- attention, the feed-forward network, the model
+class -- knows. The bodies that carried the old names are renamed `...Dense` and
+are otherwise untouched; with nothing registered a front door costs one acquire
+load.
+
+**`backend/sensen` IS PINNED TO AN UNPUBLISHED LOCAL BRANCH, `llq-on-85f02fdc`, and
+that is the one thing to fix by hand.** The LLQ commits live in sensen
+`f2f97ebf`, whose top-level CMake `add_subdirectory()`s `external/tbqwf`
+unconditionally -- a web framework this engine has no use for and whose commit is
+not fetchable here. `sensen.lossless_quant` imports only `sensen.cpu_features` and
+`sensen.parallel`, so two commits were made on the existing `85f02fdc` pin:
+`973e6e0c` takes `lossless_quant.cppm`, `lossless_quant_kernels.cpp` and
+`cuda/lowbit_pack_math.h` **byte for byte** from `f2f97ebf`, and `1cadb685` is the
+seam in `gemm_kernels.cppm`. Both must be pushed to the sensen remote (or replaced
+by a real bump, once the tree can carry tbqwf) before anyone else can check this
+repository out. The first build attempt died on `cuda/lowbit_pack_math.h`, a header
+the module includes that the closure script cannot see.
+
+### Two modes, with DIFFERENT promises
+
+- **`llq`** -- materialise the slice's rows from the image into a Q8_0 tile and run
+  sensen's **existing** kernel on it. The kernel sees the bytes it always read, so
+  the output is **byte-identical to dense by construction**. This is the
+  accuracy-neutral tier.
+- **`llq-fused`** -- `LlqGemv::runInt8Exact` gives one exact integer per 32-weight
+  block and the float combine follows. **Not bit-identical**, and it cannot be made
+  so: sensen's dense tile keeps an 8-lane FMA accumulator and reduces once at the
+  end, and a per-block integer total has already thrown the lanes away. The integer
+  part is exact; the float order differs.
+
+### What was measured, on the deployed model
+
+`backend/models/mortgagefv-assistant-v20-q8_0.gguf`, sha256 `e885c57b...fa6024`,
+Q8_0 at 8.500 bits/weight, 12 real single-turn prompts from `val.jsonl` (sha
+`1aa3ce94...`), greedy, `repetition_penalty` 1.0, 96 new tokens.
+
+| | 196 per-layer weights |
+| --- | --- |
+| as Q8_0 | 467,927,040 B |
+| as LLQ | 468,271,104 B (**+0.07%**) |
+| outliers | **0**, base width 8 on every one |
+
+**At 8 bits LLQ is byte-neutral and this is not a size win**, as measured before
+this work. Decode throughput, interleaved 3 rounds, fresh process per run, machine
+**shared** (load average 8-27 from other work; the load is recorded per run):
+
+| threads | dense (prod default) | dense, fusion off | `llq` | `llq-fused` |
+| --- | --- | --- | --- | --- |
+| 4 | 59.16 | 58.89 | 50.52 | 54.14 |
+| 8 | 62.88 | 62.45 | 56.22 | 60.28 |
+| 16 | 62.62 | 62.20 | 58.96 | 60.15 |
+
+Decode tok/s, median; prefill is 344 -> 340 (4t), 464 -> 446 (8t), 533 -> 518 (16t)
+for dense-without-fusion -> `llq`. **`dense, fusion off` is the only dense arm
+comparable to LLQ**: an LLQ store requires `SENSEN_QKV_FUSION=0`, and the fused Q+K+V
+buffer is a second copy whose address no source is registered for -- with fusion on
+three of seven per-layer projections would silently keep serving dense while the run
+reported LLQ. Decode is flat from 4 to 16 threads. ~60 tok/s over ~633 MB of weights is
+~38 GB/s IF every byte is read once per token -- arithmetic, not a measured
+bandwidth -- which is consistent with a bandwidth-bound decode, and with 8-bit LLQ,
+which reads the same bytes, not being able to win.
+
+**Identity.** `llq`: aggregate token SHA over all 12 prompts (996 generated tokens)
+**identical to dense**, `57bbcb65...`, at every thread count. With `--release-dense`
+returning **467,144,704 B** of dense weight pages to the OS (RSS 1.897 -> 1.441 GB)
+the SHA is **still identical**: those tokens came from the image and from nothing
+else. Through the real service (`ParseOperation` on two engines, one per
+`MORTGAGE_WEIGHT_STORE`), **40 of 40** responses are identical. `llq-fused`: **10 of
+12** prompts identical at token level (prompts 1 and 9 diverge at tokens 15 and 45),
+**38 of 40** `ParseOperation` responses identical. That is a measured fact about one
+model, not a bound.
+
+**NOT COVERED: the token embedding and the tied `lm_head`.** One of 197 Q8_0 tensors
+and **26%** of the weights (155,582,464 of 595,984,384). sensen holds them row-major
+and reads them through a different kernel, so a rate from this path describes 74% of
+the weight stream. The harness counts Int8 slice calls in the front doors: in the 12-prompt
+`llq` run 1,097,600 of 1,097,600 were answered from an image and 0 by the dense
+kernel.
+
+### The harness, and why `llq_used` is measured
+
+`llq_throughput_probe` (one configuration per process) records the model, its
+sha256, the dominant quantisation and **measured** bits per weight, the store,
+whether LLQ was used, the thread count, prompt and generated token counts, prefill
+and decode rates **separately** (the streaming callback stamps the first token, which
+belongs to prefill) and an aggregate token SHA. `scripts/llq_throughput_sweep.py`
+interleaves arms and refuses to start unless exactly one engine holds `:50051`.
+
+`llq_used` is **derived from the kernel counters, not from the scope's report.** The
+scope says an image was built and registered; only a counter says a kernel read it.
+An LLQ run in which the dense kernel answered any slice exits 3 with
+`FATAL ... did NOT measure LLQ, and its rate is the dense rate`.
+
+**Comparing two engines' `ParseOperation` responses byte for byte is invalid**: the
+params are a protobuf `map<string,string>`, whose iteration order differs between
+processes (this file records it above). Same sizes, same entries, different bytes --
+22 of 24 "differed" before `scripts/probe_weight_store_parity.py` compared the
+canonical form. Its `--self-test` proves equal-when-permuted and different-when-one-
+digit-changes.
+
+### Mutation arms, each restored, each with `CCACHE_DISABLE=1`
+
+| arm | symptom reproduced |
+| --- | --- |
+| observer adopts and reports but never registers | scope says **196 adopted**; harness exits 3, dense answered 608,384 of 608,384, `llq_used:false`, rate 60.6 (the dense figure) |
+| sensen front door never consults the registry | 7 checks fail (every bit-identity arm); harness exits 3 at 61.7 tok/s; with `--release-dense` the token SHA becomes `6deced41...` against `1c75bd1a...` |
+| group-size check removed from `adopt` | group 64 **and** group 0 images are adopted (2 checks fail) |
+| Q8_0 block scale taken from the next block | 16 checks fail |
+
+**A group size other than 32 is refused, not reinterpreted**, for a concrete reason:
+a Q8_0 block is 32 codes and one fp16 scale. A group-64 image holds half the scales,
+so rebuilding blocks from it would have to invent the rest, and the arithmetic would
+then be a different model with no error anywhere. `adopt` accepts exactly 8 source
+bits, group 32, fp16-exact scales.
+
+### What was NOT done
+
+- **Only Q8_0 is wired.** Q4_0, Q5_0, K-quants and 16-bit go through different
+  kernels and were not touched: there is **no 4-bit or 16-bit tok/s figure** and this
+  work does not produce one. The owner's 4 / 8 / 16 table has its 8-bit row.
+- **The bandwidth win the LLQ kernels were benchmarked for cannot show at 8 bits**
+  on this model -- 0 outliers means the image is the same size, so a bandwidth-bound
+  decode reads the same bytes. It is the 4- and 16-bit tiers that could, and they are
+  not here.
+- **Single-copy residency is a measurement, not a feature.** `--release-dense` proves
+  the tokens come from the image; the services do not free the dense copies, so a
+  served LLQ model holds **both** (RSS 1.90 GB against 1.38 GB dense).
+- **The pre-change engine was not compared token for token.** "Byte-identical when
+  not opted in" rests on the dense front door forwarding to the unchanged renamed
+  body, and on the dense arm equalling the LLQ arm; no pre-patch binary was kept.
+- **Not run on the GPU or on Railway.** This is CPU, on a shared 16-core Ryzen 9
+  9955HX.
+
 ## Memory, and what the Railway bill is actually buying
 
 **94% of the bill is RAM, and Railway's receipt states it in MB-MINUTES.** The
@@ -5144,8 +5321,9 @@ answers by being read, not by being argued.
   vitest 4 pulls in. The build itself does not require it; the test suite does.
 - **Backend Docker Build:** `docker build -t options-backend backend/`
 - **Backend Tests:** `ninja -C backend/build build_tests && ctest --test-dir backend/build`
-  (ctest is **148/148 with 2 skipped**, as of the SGEE bump to `b241317e` on
-  2026-09-29. It was 116 after `GroundingCorpusSweepTest`, 117 once SGEE
+  (ctest is **149/149 with 2 skipped**, as of 2026-09-30 -- `LlqWeightStoreTest`
+  is the one new test; before it the suite was **148/148 with 2 skipped** as of
+  the SGEE bump to `b241317e` on 2026-09-29. It was 116 after `GroundingCorpusSweepTest`, 117 once SGEE
   `6ec13bfc` brought `CapiLeaseFilterTests` on 2026-09-18, and **117 was stale
   for eleven days while this line kept quoting it** — most of the 31 new tests
   are SGEE's. The two skips are `SanitizerOverlayCoversEveryObject` and
