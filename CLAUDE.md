@@ -1297,11 +1297,35 @@ neither is a supported image.
 
 Two things to hold on to before trusting its output:
 
-- **THE MODEL OF RECORD IS v18 as of 2026-09-16** (promoted from v15). This
-  section previously recorded v12 as of 2026-08-28 — that was STALE; production
-  subsequently served v15, and the local `config/.env` pin was found matching
-  v2 while Railway actually served v15, so the local `.env` is not evidence of
-  what production runs: Railway's service variables are.
+- **THE MODEL OF RECORD IS v20, AND THIS LINE SAID v18 UNTIL 2026-09-29.** The
+  v18 promotion below is real and stays as history; what was wrong is the claim
+  about the PRESENT. Measured the way this section itself prescribes — in the
+  container, not from a variable and not from a local pin:
+
+  ```bash
+  railway ssh --service options-calculator-backend -- sha256sum /app/model/mortgage-assistant.gguf
+  # -> e885c57b0ca139476fd86c34694c9a130ceaba10335211ab4c15cfbf9dfa6024
+  #    == backend/models/mortgagefv-assistant-v20-q8_0.gguf, staged 2026-09-27
+  ```
+
+  `MORTGAGE_MODEL_SHA256` on the Railway service agrees, and v18's recorded
+  `a4439a6b…` matches `mortgagefv-assistant-v18-q8_0.gguf` — a real file, just
+  not the deployed one. The strategy model is `eab97cf531b0…`.
+
+  **THIS FILE ALREADY CONTRADICTED ITSELF, which is the tell to look for.** The
+  section "A TAG IS A KIND, NOT A FIELD" measures "v20 Q8_0 through the real
+  `ParseOperation`" — so one part of the document had moved to v20 while this
+  headline still said v18. Two copies of one fact in one file, disagreeing, is
+  the same defect as the four label-space tables and `ALLOWED_OPERATIONS`' fifth
+  copy in another repository; being in the same file does not make it one copy.
+
+  This line has now been stale three times over — it recorded v12 as of
+  2026-08-28 while production served v15, then v18 while production served v20.
+  The rule it states is right and keeps being proved by its own violation: the
+  local `config/.env` pin is NOT evidence of what production runs (it was found
+  matching v2 while Railway served v15), and neither is this sentence. **Only a
+  checksum taken inside the container is**, and every promotion must re-read
+  this line as part of the procedure rather than only appending a new table.
 
   All three models scored on the SAME holdout:
   `agent/dataset/data_mortgage/val.jsonl`, sha256 `849e8a349a2470b6...`, 600
