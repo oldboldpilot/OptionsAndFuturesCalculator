@@ -1,0 +1,5 @@
+generations            : 721
+aggregate decode tok/s : 63.30  (75361 tok / 1190 s)
+median decode tok/s    : 64.06
+median prefill ms      : 167.4
+median output tokens   : 96
