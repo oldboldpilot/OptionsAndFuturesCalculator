@@ -382,7 +382,33 @@ case "${1:?usage: $0 <1|2|3|all|stage DIR>}" in
     # repository root and fails from the staged upload is a difference worth
     # finding on this machine rather than in a build log.
     stage) stage "${2:?usage: $0 stage <dir>}" ;;
-    1|2|3) deploy_one "$1" ;;
+    # ONE NODE, AND GATED -- await_healthy is called here, not only in `all`.
+    #
+    # It was missing from this branch until 2026-09-29, and this is the branch a
+    # careful Raft roll uses: one node at a time, followers first, the leader
+    # last, with the operator reading /statusz between steps. `deploy_one`
+    # returns when the UPLOAD is accepted -- that is what `railway up --detach`
+    # means -- so `deploy.sh 2` printed a build-log URL, exited 0, and looked
+    # exactly like a finished deploy while the image had not been built yet.
+    #
+    # That is the SAME trap this file already documents pointing the other way:
+    # a `railway up` timeout is a statement about the CLIENT, not the server. So
+    # is its success. Measured during the b241317e roll: all three nodes
+    # returned rc=0 within seconds and the containers were replaced six to nine
+    # MINUTES later, so anything reading that exit code as the cutover would
+    # have gone on to the next node with two of three replaced at once -- which
+    # for a three-node Raft cluster is the loss of quorum the `all` branch below
+    # exists to prevent.
+    #
+    # `all` had the gate and the per-node path did not. A check that only one of
+    # two entry points reaches is the shape of defect this tree keeps paying
+    # for: the four label-space tables, ALLOWED_OPERATIONS' fifth copy in
+    # another repository, and `lease()` missing the compensation `enqueue()` had
+    # twenty lines above it.
+    1|2|3)
+        deploy_one "$1"
+        await_healthy "sgee-queue-$1"
+        ;;
     all)
         # ROLLING, and actually serialized. This branch used to fire three
         # uploads back to back and print "Confirm it is healthy before the
