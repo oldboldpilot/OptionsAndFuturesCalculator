@@ -3717,8 +3717,51 @@ class -- knows. The bodies that carried the old names are renamed `...Dense` and
 are otherwise untouched; with nothing registered a front door costs one acquire
 load.
 
-**`backend/sensen` IS PINNED TO AN UNPUBLISHED LOCAL BRANCH, `llq-on-85f02fdc`, and
-that is the one thing to fix by hand.** The LLQ commits live in sensen
+**THE PIN IS PUBLISHED AS OF 2026-09-30 and this paragraph's headline is corrected
+rather than deleted, because the reasoning below is still why the pin has the shape
+it does.** `llq-on-85f02fdc` is pushed to both sensen remotes as
+`lane/llq-on-85f02fdc`, so `1cadb685` is fetchable and this repository can be
+checked out by anyone. The seam is ALSO on sensen master now (`124ab33f`), carried
+across with `git am` so its authorship date survives -- `origin/master` had no
+`registerQ8Weight` and no `findQ8Weight` at all, so a bump would have DELETED the
+seam silently and with a green build, since its absence only shows when something
+tries to register a weight.
+
+**THE FULL BUMP TO MASTER IS DEFERRED ON TWO MEASURED BLOCKERS, neither of which is
+a code fix.** `external/tbqwf` is optional in sensen now (`SENSEN_TBQWF=AUTO`
+presence-detects, and configure NAMES the targets that therefore do not exist), so
+tbqwf is no longer the obstacle. What is:
+
+ 1. **TWO `add_library(sgee)` IN ONE PROJECT.** sensen now consumes SGEE for Raft
+    and adds it as a subproject; this engine has embedded SGEE at
+    `backend/external/SGEE` since the inference queue was built. Configure dies
+    with `add_library cannot create target "sgee" because another target with the
+    same name already exists ... CMP0002`, and the same for `sgee_capi` and
+    `sgee-gen`. `SENSEN_USE_SGEE OFF` clears it -- but see (2), which that exposes.
+    Adopting one target for both is NOT free either: the versions skew (this
+    engine at `b241317e`, sensen expecting `65912da8`).
+ 2. **THE `std.pcm` FLAG UNION IS NOT WHAT THIS FILE SAYS IT IS.** With sensen's
+    SGEE off, the build stops on `precompiled file 'std.pcm' was compiled with the
+    target feature '+aes' but the current translation unit is not`, and the same
+    for `+pclmul`. Deleting the BMI does not help -- the REBUILT one has them too.
+    The flags come from **abseil's `randen_hwaes` inside gRPC**, which puts `-maes
+    -msse4.1` on its own target, and they reach the `std.pcm` rule's scope while
+    sensen's module TUs get plain `CANONICAL_FLAGS`. It was invisible because
+    sensen's own SGEE happened to add the same flags to sensen's scope, so the
+    match was ACCIDENTAL; turning it off broke it.
+
+    So the section above on `import std;` -- "there is exactly ONE `std.pcm` ...
+    built from the union of what every subproject compiles with, so a BMI mismatch
+    cannot arise" -- is **true of the subprojects this file enumerates and false of
+    gRPC**, which contributes per-target flags the union never sees.
+
+    The obvious repair, adding `-maes -mpclmul` to `CANONICAL_FLAGS`, RAISES THE
+    REQUIRED CPU BASELINE that this file pins at `-march=x86-64-v3` deliberately,
+    for cross-host FP parity and durable-replay determinism. That is an owner
+    decision, not a build fix, and it is why the bump stopped here rather than
+    being forced through.
+
+Everything below this block is the original account and still accurate. The LLQ commits live in sensen
 `f2f97ebf`, whose top-level CMake `add_subdirectory()`s `external/tbqwf`
 unconditionally -- a web framework this engine has no use for and whose commit is
 not fetchable here. `sensen.lossless_quant` imports only `sensen.cpu_features` and
