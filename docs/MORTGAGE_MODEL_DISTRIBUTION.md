@@ -74,7 +74,21 @@ belongs with the service that owns it
 | served from | `MORTGAGE_MODEL_PATH` (`/app/model/mortgage-assistant.gguf` in the image) |
 | promoted | 2026-09-16 |
 
-**v18 is the model of record as of 2026-09-16. v15 is the rollback target and is saved in the bucket under `mortgagefv-assistant-v15-q8_0.gguf`.**
+**CORRECTION 2026-09-29: PRODUCTION SERVES v20, NOT v18. The table above describes v18, which is a real artifact and not the deployed one.** Verified the way this document requires — inside the container, not from a variable and not from a local pin:
+
+```bash
+railway ssh --service options-calculator-backend -- sha256sum /app/model/mortgage-assistant.gguf
+# -> e885c57b0ca139476fd86c34694c9a130ceaba10335211ab4c15cfbf9dfa6024
+#    == mortgagefv-assistant-v20-q8_0.gguf, staged into the image 2026-09-27
+```
+
+`MORTGAGE_MODEL_SHA256` on the Railway service agrees. **The rollback target is therefore v19** (`a00e4bd1e22363cf89fc17287b324b73daed6aa9be7cd231aefd9bc8f94eae97`), not v15.
+
+**THIS IS THE SECOND COPY OF THAT STALE CLAIM.** `CLAUDE.md` said v18 too and was corrected the same day; that line had already been wrong twice before (v12 while production served v15, then v18 while it served v20). Two documents asserting one fact are two copies, and this file's own warning below — that the local `config/.env` is not evidence of what production runs — applies to the sentence you are reading. Only a checksum taken inside the container is evidence. Re-read BOTH files as part of the promotion procedure rather than appending a new table to one of them.
+
+**LOCAL AND NAS ARTIFACT RETENTION, 2026-09-29.** `backend/models/` and its NAS mirror now hold exactly four mortgage GGUFs: **v2** (the original trained model — there is no v1), and **v18, v19, v20** (the three latest). v3, v4, v5, v6, v15, v16 and v17 were deleted from both locations at the owner's instruction, recovering 4.2 GB in each. The four survivors were re-hashed after the delete and match the values recorded before it.
+
+**That prune says NOTHING about the bucket, which was not touched or inspected.** The bucket remains the distribution authority and the only thing `MORTGAGE_MODEL_URL` reads; if it still holds v15 or v17 they are still fetchable, and if it does not, they are gone. Older versions named in this document and in `RETRAIN_V16_RENTAL_CASH_FLOW.md` (v17) are historical references, not local files — do not follow them to `backend/models/` and conclude something is missing.
 
 (This table previously recorded v6 as of 2026-08-20, while production subsequently served v15. Note also that the local `config/.env` pin was found matching v2 while Railway actually served v15, so the local `.env` is not evidence of what production runs — Railway's service variables are.)
 
