@@ -21,6 +21,7 @@ import sensen.tokenizer;  // Tokenizer, for the grammar's id -> text vocabulary
 import sensen.cuda_backend;
 import fastjson;
 import logger;
+import llq_weight_store;
 import quota;
 import api_key;
 import assistant_verification;
@@ -370,6 +371,13 @@ class SensenBackend final : public QueuedBackend {
     [[nodiscard]] static auto create(const std::string& model_path, std::size_t max_concurrent,
                                      std::size_t queue_depth, std::size_t kv_max_seq_len,
                                      int threads, Device device) -> std::unique_ptr<SensenBackend> {
+        // Opt-in LLQ weight store. Dense (the default) yields an inert scope, so
+        // with the variable unset this function is byte-for-byte what it was.
+        auto weight_scope = llq_weight_store::open_scope_from_env("MORTGAGE_WEIGHT_STORE");
+        if (!weight_scope) {
+            logger::Logger::getInstance().error("mortgage assistant weight store: {}", weight_scope.error());
+            return nullptr;
+        }
         std::unique_ptr<sensen::LLMPipeline> pipeline;
         try {
             pipeline = sensen::LLMPipeline::fromGGUF(model_path)
@@ -391,6 +399,16 @@ class SensenBackend final : public QueuedBackend {
                 "mortgage assistant: LLMPipeline::Builder::build() returned null for {}",
                 model_path);
             return nullptr;
+        }
+
+        if (const auto verdict = (*weight_scope)->finish(); !verdict) {
+            // Asked for LLQ and did not get all of it: the assistant stays
+            // unavailable rather than silently serving a different numeric path.
+            logger::Logger::getInstance().error("mortgage assistant weight store: {}", verdict.error());
+            (*weight_scope)->withdraw();
+            return nullptr;
+        } else if ((*weight_scope)->mode() != llq_weight_store::Mode::Dense) {
+            logger::Logger::getInstance().info("mortgage assistant weight store: {}", verdict->summary());
         }
 
         return std::unique_ptr<SensenBackend>(

@@ -749,6 +749,14 @@ target_sources(sensen_slim
             "${SENSEN_SRC}/weight_tier.cppm"
             "${SENSEN_SRC}/context_parallel.cppm"
             "${SENSEN_SRC}/cpu_features.cppm"
+            # LLQ (lossless compression of quantised weights), added 2026-09-30.
+            # The MODULE is `sensen.lossless_quant` in namespace `sensen::llq`; the
+            # string `sensen.llq` appears in no symbol, so `nm | grep sensen.llq` is
+            # 0 whether or not the codec is linked. Grep `lossless_quant` or `Llq`.
+            # It reached backend/sensen as two files taken from sensen f2f97ebf onto
+            # the older pin, because f2f97ebf's top-level CMakeLists requires the
+            # external/tbqwf submodule and this engine has no use for it.
+            "${SENSEN_SRC}/lossless_quant.cppm"
             "${SENSEN_SRC}/cuda_backend.cppm"
             "${SENSEN_SRC}/diffusion_core.cppm"
             "${SENSEN_SRC}/dlm.cppm"
@@ -916,6 +924,11 @@ target_sources(sensen_slim
         # the error names the symbol rather than the file that was removed.
         "${SENSEN_SRC}/paged_kv_dispatch_pool.cpp"
         "${SENSEN_SRC}/numa_bind.cpp"
+        # Implementation unit of sensen.lossless_quant: every SIMD kernel and the
+        # fused GEMV bodies, deliberately kept off the BMI. Invisible to the
+        # closure script for the same reason numa_bind.cpp is, and it fails at
+        # LINK, naming a symbol rather than this file.
+        "${SENSEN_SRC}/lossless_quant_kernels.cpp"
         # numa_bind.cpp is not the implementation unit of any module, which is
         # why the closure script does not report it: it defines two plain
         # `extern "C"` helpers (sensen_available_cpu_count,
@@ -1204,7 +1217,7 @@ endif()
 
 # Core engine binary
 add_executable(calculator_engine src/main.cpp src/issue_key.cpp src/modules/calculator_service.cpp src/modules/finance_service.cpp src/modules/quota.cpp src/modules/api_key.cpp src/modules/assistant_service.cpp src/modules/mortgage_assistant_service.cpp src/modules/inference_queue.cpp src/modules/inference_admission.cpp src/modules/sgee_queue_client.cpp src/modules/strategy_store.cpp src/modules/state_refresh.cpp)
-target_sources(calculator_engine PUBLIC FILE_SET CXX_MODULES FILES src/modules/calculator_service.cppm src/modules/market_data.cppm src/modules/finance_service.cppm src/modules/quota.cppm src/modules/api_key.cppm src/modules/fips_mode.cppm src/modules/state_refresh.cppm src/modules/strategy_catalogue.cppm src/modules/assistant_verification.cppm src/modules/assistant_service.cppm src/modules/mortgage_verification.cppm src/modules/mortgage_explanation.cppm src/modules/mortgage_derivation.cppm src/modules/mortgage_grammar.cppm src/modules/mortgage_assistant_service.cppm src/modules/pg.cppm src/modules/inference_queue.cppm src/modules/sgee_queue_client.cppm src/modules/inference_admission.cppm src/modules/strategy_store.cppm)
+target_sources(calculator_engine PUBLIC FILE_SET CXX_MODULES FILES src/modules/calculator_service.cppm src/modules/market_data.cppm src/modules/finance_service.cppm src/modules/quota.cppm src/modules/api_key.cppm src/modules/fips_mode.cppm src/modules/state_refresh.cppm src/modules/strategy_catalogue.cppm src/modules/assistant_verification.cppm src/modules/assistant_service.cppm src/modules/mortgage_verification.cppm src/modules/mortgage_explanation.cppm src/modules/mortgage_derivation.cppm src/modules/mortgage_grammar.cppm src/modules/mortgage_assistant_service.cppm src/modules/pg.cppm src/modules/inference_queue.cppm src/modules/sgee_queue_client.cppm src/modules/inference_admission.cppm src/modules/strategy_store.cppm src/modules/llq_weight_store.cppm)
 target_link_libraries(calculator_engine PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto sgee)
 # PostgreSQL::PostgreSQL is linked into calculator_engine further down, right
 # after find_package(PostgreSQL REQUIRED) runs (see that comment block) --
@@ -1681,6 +1694,17 @@ target_sources(test_state_refresh
         src/modules/state_refresh.cppm)
 add_test(NAME StateRefreshTest COMMAND test_state_refresh)
 
+# The LLQ weight store: a Q8_0 weight held as an LLQ image and served from it by
+# sensen's own kernels. Links sensen_slim (GEMM and sensen.lossless_quant) and
+# nothing else -- no libpq, no engine.
+add_executable(test_llq_weight_store tests/test_llq_weight_store.cpp)
+target_sources(test_llq_weight_store
+    PRIVATE
+    FILE_SET CXX_MODULES FILES
+        src/modules/llq_weight_store.cppm)
+target_link_libraries(test_llq_weight_store PRIVATE sensen_slim)
+add_test(NAME LlqWeightStoreTest COMMAND test_llq_weight_store)
+
 add_executable(test_vendored_proto_drift tests/test_vendored_proto_drift.cpp)
 target_compile_definitions(test_vendored_proto_drift PRIVATE
     kBackendDir="${CMAKE_CURRENT_SOURCE_DIR}"
@@ -1991,6 +2015,8 @@ target_sources(test_assistant_service
     PRIVATE
     FILE_SET CXX_MODULES FILES
         src/modules/assistant_service.cppm
+        # The service imports it to honour *_WEIGHT_STORE; inert unless that is set.
+        src/modules/llq_weight_store.cppm
         src/modules/market_data.cppm
         src/modules/quota.cppm
         src/modules/api_key.cppm
@@ -2021,6 +2047,8 @@ target_sources(test_mortgage_assistant_service
     PRIVATE
     FILE_SET CXX_MODULES FILES
         src/modules/mortgage_assistant_service.cppm
+        # The service imports it to honour *_WEIGHT_STORE; inert unless that is set.
+        src/modules/llq_weight_store.cppm
         src/modules/mortgage_verification.cppm
         # Graph C imports this; a target compiling the service must carry it.
         src/modules/mortgage_derivation.cppm
@@ -2468,6 +2496,18 @@ if(ENABLE_LLAMACPP_BACKEND)
     # sensen alone; it measures this engine rather than comparing two.
     add_executable(assistant_throughput_probe src/assistant_throughput_probe.cpp)
     target_link_libraries(assistant_throughput_probe PRIVATE sensen_slim)
+
+    # The same measurement, per WEIGHT STORE (dense | llq | llq-fused), with the
+    # model's sha256 and quantisation recorded and an aggregate hash over every
+    # generated token id so two arms can be compared for identity. See the
+    # probe's own header. Needs the llq_weight_store module and OpenSSL (sha256).
+    add_executable(llq_throughput_probe src/llq_throughput_probe.cpp)
+    target_sources(llq_throughput_probe
+        PRIVATE
+        FILE_SET CXX_MODULES FILES
+            src/modules/llq_weight_store.cppm
+    )
+    target_link_libraries(llq_throughput_probe PRIVATE sensen_slim OpenSSL::Crypto)
 
     # DIAGNOSTIC, not a shipped feature -- see the probe's own header comment.
     # Reproduces, in isolation, sensen's CPU/Q8_0 batched quantized-matvec

@@ -16,6 +16,7 @@ import assistant_service;
 import mortgage_assistant_service;
 import api_key;
 import fips_mode;
+import llq_weight_store;
 import state_refresh;
 import sensen.cpu_features;
 
@@ -103,6 +104,28 @@ auto RunServer() -> void {
             // by, where a deployment reported SUCCESS while crash-looping.
             std::exit(1);
         }
+    }
+
+    // Which numeric path each assistant's weights are served from. Decided
+    // BEFORE any model loads: sensen reads SENSEN_QKV_FUSION once into a static,
+    // and an LLQ store needs it off. An unrecognised value stops the process --
+    // a typo in `llq` must not silently serve the dense path the operator meant
+    // to leave. Printed unconditionally so a cutover check can read it.
+    {
+        std::string banner = "Weight store:";
+        for (const std::string_view var : {"MORTGAGE_WEIGHT_STORE", "STRATEGY_WEIGHT_STORE"}) {
+            const auto mode = llq_weight_store::mode_from_env(var);
+            if (!mode) {
+                std::cerr << "FATAL: " << mode.error() << ". Refusing to start." << std::endl;
+                std::exit(1);
+            }
+            if (const auto ready = llq_weight_store::prepare_process_environment(*mode); !ready) {
+                std::cerr << "FATAL: " << ready.error() << ". Refusing to start." << std::endl;
+                std::exit(1);
+            }
+            banner += std::format(" {}={}", var, llq_weight_store::mode_name(*mode));
+        }
+        std::cout << banner << std::endl;
     }
 
     builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
