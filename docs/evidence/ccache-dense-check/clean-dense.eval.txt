@@ -1,0 +1,112 @@
+holdout   : /home/muyiwa/Development/OptionsAndFuturesCalculator/agent/dataset/data_mortgage/val.jsonl
+            sha256 1aa3ce94c344217e...  600 rows, 560 with gold <params>
+[ok] holdout is disjoint from /home/muyiwa/Development/OptionsAndFuturesCalculator/agent/dataset/data_mortgage/train.jsonl (11400 train rows)
+[600 rows, 1822.6s, 3038 ms/row]
+
+=== clean-dense ===
+-- 1. RAW MODEL ACCURACY (pre-verification, comparable to evaluate.py)
+params exact-match   : 414/560 = 73.9%
+emitted valid <params>: 560/560 = 100.0%
+<params> but bad JSON: 0/560 = 0.0%
+non-params correct   : 38/40 = 95.0%
+asked-when-ambiguous : 11/86 raw, 64/86 served = 12.8% raw   (clarification rows)
+answered-when-stated : 68/68 raw, 68/68 served = 100.0% raw   (modification rows, first turn)
+
+-- 2. SERVED OUTCOME (what a user gets, post-GP-ARA)
+  params         536/600 = 89.3%
+  clarification  32/600 = 5.3%
+  refusal        32/600 = 5.3%
+  refusal reasons:
+      26  INVALID_PARAMETERS/other
+       6  OUT_OF_SCOPE/other
+  served params exactly matching gold: 431/560
+  served vs gold, by difference SHAPE (dropped-fields/sign are service translations, not model errors):
+     431  exact
+       8  dropped-fields
+      23  sign
+       1  extra-fields
+      72  value
+  served agreeing with gold up to service translation: 462/560
+  (of the 40 rows whose gold is prose: {'clarification': 32, 'refusal': 7, 'params': 1})
+
+-- 3. PER-OPERATION, raw AND served
+  ComputeFutureValueDetailed       raw   7/41   served  40/41    <- serving recovers 33
+  ComputeDetailedAmortization      raw  32/60   served  52/60    <- serving recovers 20
+  ComputeAmortization              raw  63/78   served  78/78    <- serving recovers 15
+  ComputePayment                   raw  44/58   served  51/58    <- serving recovers 7
+  ComputeRentalRoi                 raw  13/25   served  13/25 
+  ComputeHeloc                     raw  28/39   served  28/39 
+  ComputeRentalCashFlow            raw  26/34   served  26/34 
+  ComputePaybackPeriod             raw  22/27   served   6/27 
+  ComputeRentVsBuy                 raw  18/22   served  18/22 
+  ComputeCumulative                raw  10/13   served  11/13    <- serving recovers 1
+  ComputeFutureValue               raw   4/6    served   4/6  
+  ComputeClosingCosts              raw  18/20   served  18/20 
+  ComputeAmortizationBatch         raw   3/5    served   0/5     <- serving loses EVERY correct parse
+  ComputePresentValue              raw   5/6    served   6/6     <- serving recovers 1
+  ComputeDepreciation              raw  12/13   served   0/13    <- serving loses EVERY correct parse
+  ComputeRefinance                 raw  28/29   served  28/29 
+  ComputeInterestPayment           raw   6/7    served   7/7     <- serving recovers 1
+  ComputeXirr                      raw   2/3    served   0/3     <- serving loses EVERY correct parse
+  ComputeXnpv                      raw   4/5    served   0/5     <- serving loses EVERY correct parse
+  ComputeRate                      raw  11/11   served   0/11    <- serving loses EVERY correct parse
+  ComputeIrr                       raw   5/5    served   5/5  
+  ComputePayoffTiming              raw  12/12   served  12/12 
+  ComputePrincipalPayment          raw  10/10   served  10/10 
+  ComputeMortgageRecast            raw   7/7    served   7/7  
+  ComputeNpv                       raw   5/5    served   4/5  
+  ComputePeriods                   raw  12/12   served   0/12    <- serving loses EVERY correct parse
+  ComputeHomeFutureValue           raw   4/4    served   4/4  
+  ComputeHomeNpv                   raw   3/3    served   3/3  
+
+-- 4. OPERATION-NAME CONFUSION (the model named a DIFFERENT operation)
+    34  ComputeFutureValueDetailed -> ComputeFutureValue SIBLING
+    28  ComputeDetailedAmortization -> ComputeAmortization
+     1  ComputeCumulative -> ComputeAmortization
+     1  ComputeXnpv -> ComputeNpv
+  64 of 146 raw failures are the wrong OPERATION, not wrong values.
+
+-- raw failures (first 8)
+
+  user : $14,500 out of pocket for new windows that saves me about $1,400 a year. Using a 3.14% discount rate, how many
+  gold : {"operation": "ComputePaybackPeriod", "values": [-14500, 1400, 1400, 1400, 1400, 1400, 1400, 1400, 1400, 1400, 1400, 1400, 1400, 1400, 1400, 1400, 1400, 1400, 1400, 1400, 1400], "discounted": true, "rate": 0.0314}
+  raw  : '<think>\n\n</think>\n\n<params>{"operation":"ComputePaybackPeriod","values":[14500,1400,1400,1400,1400,1400,1400,1400,1400,1400,1400,1400,1400,1400,1400,1400,1400,1400,1400,1400,1400],"discounted":true,"rate":0.0314}</params>'
+  served: params 
+
+  user : Amortize $740,700 at 5.79% over 20-year. I'm in the 23.58% tax bracket.
+  reply: now add $750 extra a month
+  gold : {"operation": "ComputeDetailedAmortization", "loan_amount": "740700.00", "annual_rate": "0.0579", "term_months": 240, "monthly_overpayment": "750.00", "pmi_annual_rate": "0.0000", "original_home_value": "740700.00", "annual_tax_rate": "0.2358", "annual_repairs": "0.00", "annual_insurance": "0.00", "annual_cost_growth": "0.0000"}
+  raw  : '<think>\n\n</think>\n\n<params>{"operation":"ComputeAmortization","loan_amount":"740700.00","annual_rate":"0.0579","term_months":240,"monthly_overpayment":"750.00","pmi_annual_rate":"0.0000","original_home_value":"740700.00","annual_repairs":"0.00","annual_insurance":"0.00","annual_cost_growth":"0.0000"}</params>'
+  served: params 
+
+  user : Rental worth $524,800, $125,600 cash invested, rent $1,900/month, mortgage payment $1,400/month. What's my ret
+  reply: $600
+  gold : {"operation": "ComputeRentalRoi", "property_value": "524800.00", "total_cash_invested": "125600.00", "periodic_gross_rent": "1900.00", "periodic_operating_expenses": "600.00", "periodic_mortgage_payment": "1400.00", "periods_per_year": 12}
+  raw  : '<think>\n\n</think>\n\n<params>{"operation":"ComputeRentalRoi","property_value":"524800.00","total_cash_invested":"125600.00","periodic_gross_rent":"1900.00","periodic_operating_expenses":"1400.00","periodic_mortgage_payment":"0.00","periods_per_year":12}</params>'
+  served: refusal "periodic_mortgage_payment" = 0.00 does not correspond to anything in the request (the nearest figure you gave is 600)
+
+  user : $625,600, 4.99%, 10-year -- total principal paid from month 12 through month 35?
+  gold : {"operation": "ComputeCumulative", "component": "PRINCIPAL", "rate": 0.004158, "periods": 120, "present_value": 625600, "start_period": 12, "end_period": 35, "timing": "END_OF_PERIOD"}
+  raw  : '<think>\n\n</think>\n\n<params>{"operation":"ComputeCumulative","component":"PRINCIPAL","rate":0.004075,"periods":120,"present_value":625600,"start_period":12,"end_period":35,"timing":"END_OF_PERIOD"}</params>'
+  served: refusal "rate" = 0.004075 does not correspond to anything in the request (the nearest figure you gave is 4.99)
+
+  user : Amortize $217,700 at 7.78% over 30-year. I'm in the 34.71% tax bracket.
+  reply: now add $200 extra a month
+  gold : {"operation": "ComputeDetailedAmortization", "loan_amount": "217700.00", "annual_rate": "0.0778", "term_months": 360, "monthly_overpayment": "200.00", "pmi_annual_rate": "0.0000", "original_home_value": "217700.00", "annual_tax_rate": "0.3471", "annual_repairs": "0.00", "annual_insurance": "0.00", "annual_cost_growth": "0.0000"}
+  raw  : '<think>\n\n</think>\n\n<params>{"operation":"ComputeAmortization","loan_amount":"217700.00","annual_rate":"0.0778","term_months":360,"monthly_overpayment":"200.00","pmi_annual_rate":"0.0000","original_home_value":"217700.00","annual_repairs":"0.00","annual_insurance":"0.00","annual_cost_growth":"0.0000"}</params>'
+  served: params 
+
+  user : I'm putting $17,200 into equipment for my rental that saves me about $4,700 a year. Using a 5.58% discount rat
+  gold : {"operation": "ComputePaybackPeriod", "values": [-17200, 4700, 4700, 4700, 4700, 4700, 4700, 4700, 4700, 4700, 4700, 4700, 4700, 4700, 4700, 4700, 4700, 4700, 4700, 4700, 4700], "discounted": true, "rate": 0.0558}
+  raw  : '<think>\n\n</think>\n\n<params>{"operation":"ComputePaybackPeriod","values":[-17200,4700,4700,4700,4700,4700,4700,4700,4700,4700,4700,4700,4700,4700,4700,4700,4700,4700,4700,4700,4700],"discounted":false,"rate":0.0558}</params>'
+  served: params 
+
+  user : At 6.84% for 20-year, what loan amount does a $4,947.34 payment support?
+  gold : {"operation": "ComputePresentValue", "rate": "0.005700", "periods": 240, "payment": "4947.34", "future_value": "0.00", "timing": "END_OF_PERIOD"}
+  raw  : '<think>\n\n</think>\n\n<params>{"operation":"ComputePresentValue","rate":"0.005683","periods":240,"payment":"4947.34","future_value":"0.00","timing":"END_OF_PERIOD"}</params>'
+  served: params 
+
+  user : Work out the cash flow on a $319,500 buy-to-let over 10 years. $95,800 deposit, $6,500 closing, 6.57% for 30 y
+  gold : {"operation": "ComputeRentalCashFlow", "property_price": "319500.00", "down_payment": "95800.00", "closing_costs": "6500.00", "loan_annual_rate": "0.0657", "loan_term_years": 30, "monthly_gross_rent": "2300.00", "annual_rent_increase": "0.0000", "occupancy_rate": "0.9000", "annual_property_tax": "5500.00", "annual_insurance": "1300.00", "annual_repairs": "4400.00", "annual_capex_reserve": "3400.00", "monthly_hoa": "0.00", "management_fee_rate": "0.0000", "annual_other_expenses": "0.00", "annual_expense_increase": "0.0000", "annual_appreciation": "0.0000", "selling_cost_percent": "0.0000", "years": 10, "heloc_drawn_amount": "0.00", "heloc_annual_rate": "0.0000", "heloc_term_years": 0}
+  raw  : '<think>\n\n</think>\n\n<params>{"operation":"ComputeRentalCashFlow","property_price":"319500.00","down_payment":"95800.00","closing_costs":"6500.00","loan_annual_rate":"0.0657","loan_term_years":30,"monthly_gross_rent":"2300.00","annual_rent_increase":"0.0000","occupancy_rate":"0.90","annual_property_tax":"5500.00","annual_insurance":"1300.00","annual_repairs":"4400.00","annual_capex_reserve":"3400.00'
+  served: params 

@@ -1,7 +1,23 @@
 /**
- * Serving a Q8_0 model from an LLQ image instead of the dense Q8_0 buffer.
+ * Serving a Q8_0 or BF16 model from an LLQ image instead of the dense buffer.
  *
  * @author Olumuyiwa Oluwasanmi
+ *
+ * ---------------------------------------------------------------------------
+ * THE 16-BIT TIER IS bf16, AND 16 BITS IS THE ONLY WIDTH WHERE FEWER BYTES CAN
+ * PAY. At 8 bits the image is 0.074% LARGER than Q8_0 on the deployed mortgage
+ * checkpoint -- every panel chose base 8 with ZERO outliers, because Q8_0 already
+ * spends exactly 8 bits on a value whose scale was fitted per 32-weight group, so
+ * there is no redundancy for an exponent code to find. A bf16 word is different in
+ * kind: its 8-bit exponent field is nearly constant across a weight matrix (the
+ * deployed model uses 26 of 256 exponents), so the exponent plane codes in a few
+ * bits and the 7-bit mantissa plus sign is stored raw.
+ *
+ * F16 IS NOT SERVED, deliberately, and `LlqBf16Source`'s header says why: the
+ * codec's field widths are bf16's, an F16 word split with them would encode
+ * without error and describe nothing, and there is no F16 plane split in sensen.
+ * An F16 model is left dense, which -- because asking for LLQ and getting none of
+ * it refuses -- means it does not start under an LLQ store.
  *
  * ---------------------------------------------------------------------------
  * WHAT THIS IS
@@ -38,17 +54,34 @@
  *
  * TWO MODES, WITH DIFFERENT PROMISES:
  *
- *   `llq`        materialise the slice's rows from the LLQ image into a Q8_0 tile
- *                and run sensen's EXISTING kernel on it. The kernel sees the same
- *                bytes it always did, so the output is byte-identical to the
- *                dense path BY CONSTRUCTION. This measures the cost of decoding
- *                on the decode path, and is the accuracy-neutral tier.
+ *   `llq`        materialise the slice's rows from the LLQ image back into the
+ *                dense layout and run sensen's EXISTING kernel on it. The kernel
+ *                sees the same bytes it always did, so the output is
+ *                byte-identical to the dense path BY CONSTRUCTION. It is the
+ *                identity REFERENCE and the fallback, and it is NOT the tier to
+ *                serve: rebuilding the words and then reading them is strictly
+ *                more work for the same bytes, so it can only be slower. A
+ *                bandwidth win can only exist where the GEMV consumes the packed
+ *                image directly, which is what `llq-fused` does.
  *
- *   `llq-fused`  compute the slice with `LlqGemv::runInt8Exact`, one integer per
- *                32-weight block, and combine in float. The integer part is
- *                exact; the float accumulation ORDER differs from sensen's
- *                8-lane FMA tile, so this is NOT promised to be bit-identical and
- *                the harness reports token agreement rather than assuming it.
+ *   `llq-fused`  compute the slice from the packed image itself, so the smaller
+ *                image is smaller BYTES READ. What that costs in accuracy is
+ *                different for the two widths and the difference is not a
+ *                preference:
+ *
+ *                  Q8_0 -- `LlqGemv::runInt8Exact`, one exact integer per
+ *                  32-weight block, combined in float. The integer part is
+ *                  exact and the float accumulation ORDER differs from sensen's
+ *                  8-lane FMA tile, so this is NOT promised to be bit-identical.
+ *
+ *                  BF16 -- `LlqGemv::runBf16Slice`, which runs `runBf16`'s
+ *                  per-row body over the slice. Rebuilding a bf16 word from an
+ *                  exponent plane and a raw sign|mantissa plane is a BIT JOIN,
+ *                  not arithmetic, so there is nothing to reorder: the same
+ *                  floats are summed in the same canonical order as the dense
+ *                  kernel and the result IS bit-identical. So at 16 bits fused
+ *                  execution, bit-identical output and fewer bytes hold
+ *                  together, which at 8 bits they cannot. Measured, not assumed.
  *
  * ---------------------------------------------------------------------------
  * WHAT IS AND IS NOT COVERED
@@ -372,17 +405,204 @@ class LlqQ8Source final : public sensen::GEMM::Q8WeightSource {
     Mode mode_;
 };
 
+// ── The 16-bit tier: bf16, and DELIBERATELY not F16 ─────────────────────────
+//
+// A bf16 word is sign(1) | exponent(8) | mantissa(7). `llq::LlqBf16Matrix`
+// splits it into an LLQ-coded exponent plane and a RAW sign|mantissa byte, and
+// the round trip is exact for every bf16 value -- so the words this source hands
+// back are the words the GGUF held, bit for bit, and the existing 16-bit kernel
+// then computes exactly what it computed from the dense buffer.
+//
+// THIS TIER IS bf16 AND CANNOT BE F16, and that is a measurement about the codec
+// rather than a preference. An IEEE half is sign(1) | exponent(5) | mantissa(10).
+// `LlqBf16Matrix::fromBits` extracts bits 7..14 as "the exponent" and histograms
+// them over 256 buckets; on an F16 word those eight bits are the top three
+// mantissa bits joined to the five exponent bits. The encode would SUCCEED, the
+// round trip would still be exact (it is a bit join either way), and the image
+// would compress badly -- a mantissa spread across the exponent plane has no
+// narrow band to code. Nothing would error. What makes it unusable is not the
+// arithmetic but the claim: an F16 "LLQ bits/weight" would be a number about a
+// field split that does not describe the format, so `adopt` takes QType::BF16
+// only and sensen's front door consults the bf16 registry only for BF16. An F16
+// model is LEFT DENSE and the operator is told, which -- because asking for LLQ
+// and getting none of it refuses -- means an F16 model does not start under an
+// LLQ store rather than serving quietly from the dense path.
+//
+// Serving an F16 model would need its own plane split with F16's field widths
+// (5-bit exponent, 10-bit mantissa, so a 32-bucket histogram and a 2-byte raw
+// plane holding sign+10 mantissa bits). That is a codec change in sensen, not a
+// change here, and it is NOT done.
+inline constexpr std::size_t kBf16Bytes = 2;
+
+/// One BF16 weight held as LLQ panels. Immutable after construction, so every
+/// worker thread may call it concurrently.
+class LlqBf16Source final : public sensen::GEMM::Bf16WeightSource {
+  public:
+    /// Build from GGUF row-major bf16 bytes: `rows` rows of `k` 16-bit words.
+    [[nodiscard]] static auto from_bf16_row_major(std::span<const std::uint8_t> bytes,
+                                                 std::size_t rows, std::size_t k, Mode mode)
+        -> std::expected<std::shared_ptr<const LlqBf16Source>, AdoptError> {
+        if (rows == 0 || k == 0) {
+            return std::unexpected(AdoptError::ShapeMismatch);
+        }
+        if (k % 64 != 0) {
+            return std::unexpected(AdoptError::ColumnsNotMultiple);
+        }
+        if (bytes.size() != rows * k * kBf16Bytes) {
+            return std::unexpected(AdoptError::ShapeMismatch);
+        }
+        std::vector<llq::LlqBf16Matrix> panels;
+        panels.reserve((rows + kPanelRows - 1) / kPanelRows);
+        std::vector<std::uint16_t> words;
+        for (std::size_t r0 = 0; r0 < rows; r0 += kPanelRows) {
+            const std::size_t pr = std::min(kPanelRows, rows - r0);
+            words.resize(pr * k);
+            // memcpy rather than a reinterpreted span: the GGUF mapping carries
+            // no alignment guarantee for a 16-bit read.
+            std::memcpy(words.data(), bytes.data() + (r0 * k * kBf16Bytes), pr * k * kBf16Bytes);
+            auto m = llq::LlqBf16Matrix::fromBits(words, pr, k);
+            if (!m) {
+                return std::unexpected(AdoptError::Encode);
+            }
+            panels.push_back(std::move(*m));
+        }
+        return std::shared_ptr<const LlqBf16Source>(
+            new LlqBf16Source(std::move(panels), rows, k, mode));
+    }
+
+    [[nodiscard]] auto rows() const noexcept -> std::size_t { return rows_; }
+    [[nodiscard]] auto cols() const noexcept -> std::size_t { return k_; }
+    [[nodiscard]] auto mode() const noexcept -> Mode { return mode_; }
+
+    /// Bytes this weight occupies as LLQ: the exponent plane's packed base and
+    /// CSR, plus the raw sign|mantissa plane. Its unit scales are never stored.
+    [[nodiscard]] auto resident_bytes() const noexcept -> std::size_t {
+        std::size_t total = 0;
+        for (const auto& p : panels_) {
+            total += p.payloadBytes();
+        }
+        return total;
+    }
+    [[nodiscard]] auto outlier_count() const noexcept -> std::size_t {
+        std::size_t total = 0;
+        for (const auto& p : panels_) {
+            total += p.exponent().outlierCount();
+        }
+        return total;
+    }
+    /// Smallest and largest exponent-plane base width across panels. This is the
+    /// coded plane's width; a bf16 weight also carries 8 raw bits per value, so
+    /// the bits/weight a caller should quote is derived from the BYTE counts and
+    /// never from this range.
+    [[nodiscard]] auto base_bits_range() const noexcept -> std::pair<std::uint32_t, std::uint32_t> {
+        std::uint32_t lo = 8;
+        std::uint32_t hi = 0;
+        for (const auto& p : panels_) {
+            lo = std::min(lo, p.exponent().baseBits());
+            hi = std::max(hi, p.exponent().baseBits());
+        }
+        return {lo, hi};
+    }
+
+    /// The FUSED path, and for bf16 this is the tier that can actually pay: the
+    /// row kernel reads the packed exponent plane and the raw sign|mantissa plane
+    /// directly, so the 26% fewer bytes are 26% fewer bytes READ. `materialise`
+    /// rebuilds the dense words first and then runs the ordinary kernel over
+    /// them, which is strictly more work for the same bytes and can only be
+    /// slower -- it is kept as the identity REFERENCE and as the fallback, not as
+    /// the thing to serve.
+    ///
+    /// BIT-IDENTICAL, and not by luck. `runBf16Slice` runs `runBf16`'s per-row
+    /// body unchanged over this slice, and joining an exponent plane to a raw
+    /// sign|mantissa plane is a bit operation, so the floats summed and their
+    /// order are the dense kernel's. Gated by measurement all the same.
+    [[nodiscard]] auto gemvSlice(std::span<const float> a, std::span<float> c,
+                                 std::size_t r_start, std::size_t r_end) const noexcept
+        -> bool override {
+        if (mode_ != Mode::LlqFused) {
+            return false;
+        }
+        if (a.size() != k_ || c.size() != r_end - r_start || r_start >= r_end || r_end > rows_) {
+            return false;
+        }
+        llq::LlqGemv gemv;
+        (void)gemv.withSerialExecution(true);  // already inside a worker's slice
+        for (std::size_t p = r_start / kPanelRows; p * kPanelRows < r_end; ++p) {
+            const auto& panel = panels_[p];
+            const std::size_t base = p * kPanelRows;
+            const std::size_t lo = std::max(r_start, base);
+            const std::size_t hi = std::min(r_end, base + panel.rows());
+            if (lo >= hi) {
+                continue;
+            }
+            if (!gemv.runBf16Slice(panel, a, c.subspan(lo - r_start, hi - lo), lo - base,
+                                   hi - base)) {
+                return false;  // declined: the caller materialises instead
+            }
+        }
+        return true;
+    }
+
+    /// Rows [r_start, r_end) as a self-contained column-major bf16 tile of width
+    /// w: element (col, t) at ((col * w) + t) * 2 bytes.
+    [[nodiscard]] auto materialise(std::size_t r_start, std::size_t r_end,
+                                   std::span<std::uint8_t> dst) const noexcept -> bool override {
+        const std::size_t w = r_end - r_start;
+        if (r_start >= r_end || r_end > rows_ || dst.size() < k_ * w * kBf16Bytes) {
+            return false;
+        }
+        // Decode row-major first, then transpose. The decode is inherently
+        // row-wise (a row's exponent codes are one packed bit-field run) and the
+        // kernel wants column-major, so doing both at once would write k values
+        // at a w*2-byte stride per row and touch a cache line per column.
+        thread_local std::vector<std::uint16_t> staged;
+        thread_local std::vector<std::int8_t> codes;
+        staged.resize(w * k_);
+        codes.resize(k_);
+        for (std::size_t t = 0; t < w; ++t) {
+            const std::size_t r = r_start + t;
+            const auto& panel = panels_[r / kPanelRows];
+            const std::size_t pr = r % kPanelRows;
+            panel.exponent().decodeRow(pr, codes);
+            const auto sm = panel.signMantissa().subspan(pr * k_, k_);
+            const auto centre = static_cast<std::int32_t>(panel.centre());
+            for (std::size_t c = 0; c < k_; ++c) {
+                staged[(t * k_) + c] = llq::bf16Join(
+                    sm[c], static_cast<std::uint8_t>(static_cast<std::int32_t>(codes[c]) + centre));
+            }
+        }
+        for (std::size_t c = 0; c < k_; ++c) {
+            for (std::size_t t = 0; t < w; ++t) {
+                const std::uint16_t word = staged[(t * k_) + c];
+                std::memcpy(dst.data() + (((c * w) + t) * kBf16Bytes), &word, sizeof(word));
+            }
+        }
+        return true;
+    }
+
+  private:
+    LlqBf16Source(std::vector<llq::LlqBf16Matrix> panels, std::size_t rows, std::size_t k, Mode mode)
+        : panels_(std::move(panels)), rows_(rows), k_(k), mode_(mode) {}
+
+    std::vector<llq::LlqBf16Matrix> panels_;
+    std::size_t rows_;
+    std::size_t k_;
+    Mode mode_;
+};
+
 // ── Load scope ──────────────────────────────────────────────────────────────
 
 /// What a scope did. Reading this is the difference between "LLQ was used" and
 /// "LLQ was asked for".
 struct Report {
     Mode mode{Mode::Dense};
-    std::size_t adopted{0};          ///< Q8_0 weights now served from an LLQ image
-    std::size_t left_dense{0};       ///< quantized weights of another type, untouched
-    std::size_t refused{0};          ///< Q8_0 weights LLQ could not hold (still dense)
+    std::size_t adopted{0};          ///< weights now served from an LLQ image, BOTH types
+    std::size_t adopted_q8{0};       ///< of those, Q8_0
+    std::size_t adopted_bf16{0};     ///< of those, BF16
+    std::size_t left_dense{0};       ///< quantized weights of a type no tier holds, untouched
+    std::size_t refused{0};          ///< weights of a served type LLQ could not hold (still dense)
     std::uint64_t adopted_weights{0};
-    std::uint64_t dense_bytes{0};    ///< what the adopted weights cost as Q8_0
+    std::uint64_t dense_bytes{0};    ///< what the adopted weights cost in their SOURCE type
     std::uint64_t llq_bytes{0};      ///< what they cost as LLQ
     std::uint64_t outliers{0};
     std::uint32_t base_bits_min{8};
@@ -392,12 +612,43 @@ struct Report {
     [[nodiscard]] auto fully_adopted() const noexcept -> bool {
         return refused == 0 && adopted > 0;
     }
+
+    /// Bits per weight AS LLQ, MEASURED from the byte counts above -- never taken
+    /// from a codec docstring or from the base-bit range, which for bf16 omits the
+    /// 8 raw sign|mantissa bits entirely.
+    [[nodiscard]] auto llq_bits_per_weight() const noexcept -> double {
+        return adopted_weights == 0
+                   ? 0.0
+                   : static_cast<double>(llq_bytes) * 8.0 / static_cast<double>(adopted_weights);
+    }
+    [[nodiscard]] auto source_bits_per_weight() const noexcept -> double {
+        return adopted_weights == 0
+                   ? 0.0
+                   : static_cast<double>(dense_bytes) * 8.0 / static_cast<double>(adopted_weights);
+    }
+    /// Which source type(s) this run actually adopted, so a figure cannot be
+    /// quoted against the wrong format.
+    [[nodiscard]] auto adopted_kind() const -> std::string {
+        if (adopted_q8 != 0 && adopted_bf16 != 0) {
+            return "Q8_0+BF16";
+        }
+        if (adopted_bf16 != 0) {
+            return "BF16";
+        }
+        if (adopted_q8 != 0) {
+            return "Q8_0";
+        }
+        return "none";
+    }
+
     [[nodiscard]] auto summary() const -> std::string {
         std::string s = std::format(
-            "weight store {}: {} Q8_0 weights served from LLQ ({} weights, {} B as Q8_0 -> {} B as "
-            "LLQ, {} outliers, base {}..{} bits), {} refused, {} left dense (other qtype); "
-            "token embedding and tied lm_head are NOT covered",
-            mode_name(mode), adopted, adopted_weights, dense_bytes, llq_bytes, outliers,
+            "weight store {}: {} {} weights served from LLQ ({} Q8_0, {} BF16; {} weights, "
+            "{} B as source -> {} B as LLQ, {:.4f} -> {:.4f} bits/weight, {} outliers, exponent/base "
+            "{}..{} bits), {} refused, {} left dense (other qtype); token embedding and tied "
+            "lm_head are NOT covered",
+            mode_name(mode), adopted, adopted_kind(), adopted_q8, adopted_bf16, adopted_weights,
+            dense_bytes, llq_bytes, source_bits_per_weight(), llq_bits_per_weight(), outliers,
             base_bits_min, base_bits_max, refused, left_dense);
         for (const auto& r : refusals) {
             s += "\n  refused: " + r;
@@ -415,33 +666,20 @@ class Observer final : public sensen::GEMM::QuantTransposeObserver {
     auto onTransposed(const void* src_row_major, const void* dense_key, std::size_t n_rows,
                       std::size_t k, sensen::GEMM::QType qtype) noexcept -> void override {
         std::lock_guard lock(mu_);
-        if (qtype != sensen::GEMM::QType::Q8_0) {
+        // Exactly two source types have a tier. Anything else -- F16 included,
+        // for the reason LlqBf16Source's header gives -- is left dense and
+        // counted, which makes an LLQ store REFUSE such a model rather than serve
+        // it quietly from the dense path.
+        if (qtype != sensen::GEMM::QType::Q8_0 && qtype != sensen::GEMM::QType::BF16) {
             ++report_.left_dense;
             return;
         }
         try {
-            const std::size_t bytes = n_rows * (k / kQ8BlockValues) * kQ8BlockBytes;
-            const auto blocks = std::span(static_cast<const std::uint8_t*>(src_row_major), bytes);
-            auto src = LlqQ8Source::from_q8_0_row_major(blocks, n_rows, k, mode_);
-            if (!src) {
-                ++report_.refused;
-                if (report_.refusals.size() < 8) {
-                    report_.refusals.push_back(std::format("{}x{}: {}", n_rows, k,
-                                                           describe(src.error())));
-                }
-                return;
+            if (qtype == sensen::GEMM::QType::BF16) {
+                adopt_bf16(src_row_major, dense_key, n_rows, k);
+            } else {
+                adopt_q8(src_row_major, dense_key, n_rows, k);
             }
-            const auto& s = **src;
-            ++report_.adopted;
-            report_.adopted_weights += static_cast<std::uint64_t>(n_rows) * k;
-            report_.dense_bytes += bytes;
-            report_.llq_bytes += s.resident_bytes();
-            report_.outliers += s.outlier_count();
-            const auto [lo, hi] = s.base_bits_range();
-            report_.base_bits_min = std::min(report_.base_bits_min, lo);
-            report_.base_bits_max = std::max(report_.base_bits_max, hi);
-            sensen::GEMM::registerQ8WeightSource(dense_key, *src);
-            keys_.emplace_back(dense_key, bytes);
         } catch (...) {
             ++report_.refused;
             if (report_.refusals.size() < 8) {
@@ -455,12 +693,18 @@ class Observer final : public sensen::GEMM::QuantTransposeObserver {
         return report_;
     }
 
-    /// Withdraw every registration this observer made.
+    /// Withdraw every registration this observer made, from the registry it went
+    /// into. The two registries are separate, so the KIND has to be remembered:
+    /// unregistering a bf16 key from the Q8 map is a silent no-op that leaves a
+    /// live registration pointing at a freed buffer.
     auto withdraw() -> void {
         std::lock_guard lock(mu_);
-        for (const auto& [key, bytes] : keys_) {
-            (void)bytes;
-            sensen::GEMM::unregisterQ8WeightSource(key);
+        for (const auto& reg : keys_) {
+            if (reg.kind == sensen::GEMM::QType::BF16) {
+                sensen::GEMM::unregisterBf16WeightSource(reg.key);
+            } else {
+                sensen::GEMM::unregisterQ8WeightSource(reg.key);
+            }
         }
         keys_.clear();
     }
@@ -475,10 +719,10 @@ class Observer final : public sensen::GEMM::QuantTransposeObserver {
         std::lock_guard lock(mu_);
         constexpr std::uintptr_t kPage = 4096;
         std::size_t released = 0;
-        for (const auto& [key, bytes] : keys_) {
-            const auto base = reinterpret_cast<std::uintptr_t>(key);
+        for (const auto& reg : keys_) {
+            const auto base = reinterpret_cast<std::uintptr_t>(reg.key);
             const auto lo = (base + kPage - 1) & ~(kPage - 1);
-            const auto hi = (base + bytes) & ~(kPage - 1);
+            const auto hi = (base + reg.dense_bytes) & ~(kPage - 1);
             if (hi > lo && madvise(reinterpret_cast<void*>(lo), hi - lo, MADV_DONTNEED) == 0) {
                 released += hi - lo;
             }
@@ -487,10 +731,68 @@ class Observer final : public sensen::GEMM::QuantTransposeObserver {
     }
 
   private:
+    /// One registration: which map it went into, and the dense buffer it shadows.
+    struct Registration {
+        const void* key;
+        std::size_t dense_bytes;
+        sensen::GEMM::QType kind;
+    };
+
+    auto adopt_q8(const void* src_row_major, const void* dense_key, std::size_t n_rows,
+                  std::size_t k) -> void {
+        const std::size_t bytes = n_rows * (k / kQ8BlockValues) * kQ8BlockBytes;
+        const auto blocks = std::span(static_cast<const std::uint8_t*>(src_row_major), bytes);
+        auto src = LlqQ8Source::from_q8_0_row_major(blocks, n_rows, k, mode_);
+        if (!src) {
+            note_refusal(n_rows, k, src.error());
+            return;
+        }
+        const auto& s = **src;
+        ++report_.adopted;
+        ++report_.adopted_q8;
+        account(n_rows, k, bytes, s.resident_bytes(), s.outlier_count(), s.base_bits_range());
+        sensen::GEMM::registerQ8WeightSource(dense_key, *src);
+        keys_.push_back({dense_key, bytes, sensen::GEMM::QType::Q8_0});
+    }
+
+    auto adopt_bf16(const void* src_row_major, const void* dense_key, std::size_t n_rows,
+                    std::size_t k) -> void {
+        const std::size_t bytes = n_rows * k * kBf16Bytes;
+        const auto words = std::span(static_cast<const std::uint8_t*>(src_row_major), bytes);
+        auto src = LlqBf16Source::from_bf16_row_major(words, n_rows, k, mode_);
+        if (!src) {
+            note_refusal(n_rows, k, src.error());
+            return;
+        }
+        const auto& s = **src;
+        ++report_.adopted;
+        ++report_.adopted_bf16;
+        account(n_rows, k, bytes, s.resident_bytes(), s.outlier_count(), s.base_bits_range());
+        sensen::GEMM::registerBf16WeightSource(dense_key, *src);
+        keys_.push_back({dense_key, bytes, sensen::GEMM::QType::BF16});
+    }
+
+    auto account(std::size_t n_rows, std::size_t k, std::size_t dense_bytes, std::size_t llq_bytes,
+                 std::size_t outliers, std::pair<std::uint32_t, std::uint32_t> base) -> void {
+        report_.adopted_weights += static_cast<std::uint64_t>(n_rows) * k;
+        report_.dense_bytes += dense_bytes;
+        report_.llq_bytes += llq_bytes;
+        report_.outliers += outliers;
+        report_.base_bits_min = std::min(report_.base_bits_min, base.first);
+        report_.base_bits_max = std::max(report_.base_bits_max, base.second);
+    }
+
+    auto note_refusal(std::size_t n_rows, std::size_t k, AdoptError e) -> void {
+        ++report_.refused;
+        if (report_.refusals.size() < 8) {
+            report_.refusals.push_back(std::format("{}x{}: {}", n_rows, k, describe(e)));
+        }
+    }
+
     Mode mode_;
     mutable std::mutex mu_;
     Report report_;
-    std::vector<std::pair<const void*, std::size_t>> keys_;  ///< dense key, dense bytes
+    std::vector<Registration> keys_;
 };
 
 }  // namespace detail
@@ -546,12 +848,14 @@ class LoadScope {
             return r;
         }
         if (r.adopted == 0) {
-            return std::unexpected("LLQ was requested but no Q8_0 weight was adopted: this model "
-                                   "would be served entirely from the dense path. " + r.summary());
+            return std::unexpected("LLQ was requested but no weight was adopted: this model "
+                                   "would be served entirely from the dense path. Only Q8_0 and "
+                                   "BF16 have a tier -- an F16 model reaches here, by design. " +
+                                   r.summary());
         }
         if (r.refused != 0) {
-            return std::unexpected("LLQ was requested but some Q8_0 weights could not be held: "
-                                   "serving a mixture would misreport what was measured. " +
+            return std::unexpected("LLQ was requested but some weights of a served type could not "
+                                   "be held: serving a mixture would misreport what was measured. " +
                                    r.summary());
         }
         return r;

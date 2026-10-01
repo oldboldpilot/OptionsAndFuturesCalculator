@@ -1,0 +1,16 @@
+2026-09-30 17:01:34 [INFO ] Thread pool created with 8 threads
+2026-09-30 17:01:34 [INFO ] Loading GGUF model from /tmp/bw16/v20-bf16.gguf
+2026-09-30 17:01:34 [INFO ] Loading weights: layers=28, hidden=1024, vocab=151936, threads=32
+2026-09-30 17:01:34 [INFO ]   token_embd.weight loaded
+2026-09-30 17:01:34 [INFO ]   output_norm.weight loaded
+  [QUANT-LMHEAD] output.weight kept quantized: qtype=30, [151936×1024], 311164928 bytes (F32 would be 622329856)
+2026-09-30 17:01:34 [INFO ]   output.weight loaded (quantized, no F32 expansion)
+2026-09-30 17:01:36 [INFO ]   Loaded layer 8/28
+2026-09-30 17:01:36 [INFO ]   Loaded layer 16/28
+2026-09-30 17:01:36 [INFO ]   Loaded layer 24/28
+2026-09-30 17:01:36 [INFO ]   Loaded layer 28/28
+2026-09-30 17:01:36 [INFO ] quantised 196 tensors: 196 BF16
+2026-09-30 17:01:36 [INFO ] All weights loaded successfully
+2026-09-30 17:01:36 [INFO ] Model initialized: layers=28 heads=16 vocab=151936 hidden=1024
+2026-09-30 17:01:36 [INFO ] Pipeline ready (max_agents=1, kv_max_seq_len=2048)
+weight store llq: 196 BF16 weights served from LLQ (0 Q8_0, 196 BF16; 440401920 weights, 880803840 B as source -> 650878944 B as LLQ, 16.0000 -> 11.8234 bits/weight, 13528736 outliers, exponent/base 3..4 bits), 0 refused, 0 left dense (other qtype); token embedding and tied lm_head are NOT covered

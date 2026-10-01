@@ -1788,6 +1788,50 @@ a distinction that was already argued and already tested.
 | v20 + the fix above | 412/560 | 433 | **46/86** | 68/68 |
 | **v20 + claimed-literal narrowing** | 414/560 | 435 | **69/86** | 68/68 |
 
+**THE `served` AND `asked_ok` COLUMNS OF THAT SECOND ROW ARE RETIRED AS
+UNQUOTABLE, as of 2026-09-30 — not withdrawn as wrong, and not deleted, because
+they are what the asking work was gated on at the time.** Re-measured on the same
+holdout sha, `raw` reproduces EXACTLY and the other two do not:
+
+| | raw | served | asked_ok |
+| --- | --- | --- | --- |
+| this record (2026-09-18) | 414/560 | 435 | 69/86 |
+| **three runs, two independently built binaries (2026-09-30)** | **414/560** | **431** | **64/86** |
+
+`raw 414/560` reproducing to the row is the control that says the model and the
+decode path are the same ones. What moved is `served` and `asked_ok`, and the
+three candidate causes were eliminated rather than argued:
+
+- **not the binary.** An engine built independently with `CCACHE_DISABLE=1` gives
+  431/64, and a row-level diff against the other binary's run shows **0 of 560
+  rows differing** in `raw_exact`, `served_exact` or `outcome`
+  (`scripts/diff_eval_rows.py`).
+- **not `313319e`.** Its 18-line weight-scope block was REMOVED entirely (service
+  file taken from `git show 744352d:`, 0 `llq_weight_store` references) and the
+  result is again 431/64, **0 of 560 rows differing**. Inert, row for row.
+- **the serving code is byte-identical to the record commit.**
+  `mortgage_verification.cppm` and `eval_grpc_mortgage.py` have not changed since
+  `744352d`; every line that decides `asked_ok` is the one that produced 69/86.
+
+**So what is missing is the RECORD'S HARNESS, and that is this section's own rule
+one level up.** It opens by insisting *"Quote the sha or the number means
+nothing"* — about the HOLDOUT — and then records a served/asked pair whose
+measurement ENVIRONMENT is nowhere: the session log
+(`docs/session_logs/session_2026-09-18_tag_is_a_kind_and_the_ask_sweep.md`) gives
+`:50051` and the table and **no command, no env, no per-row JSON**. The holdout
+sha was pinned and the harness was not. A figure whose harness is unrecorded
+cannot be compared to one whose harness is, which is why these two are retired
+rather than contradicted.
+
+**The figures to quote are 414 / 431 / 64**, reproducible from
+`scripts/measure_bit_width_arm.sh`, which forces `INFERENCE_QUEUE=local`, an empty
+`DATABASE_URL`, `PRO_GATE_MODE=off` and `QUOTA_POLICY=` and asserts each against
+`/proc/<pid>/environ` rather than against the command line that asked for them.
+Evidence: `docs/evidence/bit-width-llq/q8_0-dense.*` and
+`docs/evidence/ccache-dense-check/{clean-dense,no-weightscope}.*`.
+
+The paragraph below is the 2026-09-18 reading of that row and is kept as history.
+
 `asked_ok` **+23 and ZERO lost**, row-paired. `answered_ok` stays 68/68, so
 nothing began asking on a complete request. raw/served move +2 with McNemar
 **p = 0.7539 -- not significant**, gained 6 and lost 4, every one of them
@@ -3705,6 +3749,15 @@ so a cutover check can read it. Asked for LLQ and did not get all of it (nothing
 adopted, or any weight refused) and the assistant is **unavailable**, never served
 dense -- the `ASSISTANT_BACKEND=llamacpp` rule.
 
+`llq` covers **Q8_0 and BF16**. Two things follow from that and both are refusals:
+**`llq-fused` is the tier to SERVE, for both widths**, and `llq` is the identity
+reference rather than a serving option: it rebuilds the dense words from the image
+and then runs the ordinary kernel over them, which is strictly more work for the
+same bytes read and can only be slower. A bandwidth win exists only where the GEMV
+consumes the packed image directly. An **F16** model adopts nothing and is
+therefore **refused at boot** -- see "The 16-bit tier" below for why serving it
+would be a wrong number rather than a slow one.
+
 ### The seam, and the sensen patch behind it
 
 sensen's Q8_0 kernels receive one thing that identifies a weight: the address of
@@ -3716,6 +3769,45 @@ built. Nothing above the kernel -- attention, the feed-forward network, the mode
 class -- knows. The bodies that carried the old names are renamed `...Dense` and
 are otherwise untouched; with nothing registered a front door costs one acquire
 load.
+
+**THE LANE BRANCH NOW CARRIES master's CODEC VERBATIM PLUS ONE ADDITION, and the
+split matters for who owns what.** `src/lossless_quant.cppm` and
+`src/lossless_quant_kernels.cpp` were taken **byte for byte from
+`origin/master`** -- the same move `973e6e0c` made from `f2f97ebf`, and legitimate
+for the same measured reason: both files import only `std`, `sensen.cpu_features`
+and `sensen.parallel` and include one header, and that dependency set is
+**identical on master and on the pin**, so they are drop-in. That is what brings
+`rowBf16FusedAvx512Vbmi2` and the bf16 four-chain kernels (sensen `30666a13`) onto
+the pin without the full bump, whose two blockers are unchanged.
+
+The ONE thing added on top is `LlqGemv::runBf16Slice`, because master has no
+row-range bf16 GEMV and the slice level is the only place per-worker row ranges
+exist. It is deliberately a faithful restriction of `runBf16`: same per-row body,
+same arguments, serial because the caller already owns a range. **A reimplemented
+row body would have needed its own identity proof; a restricted one inherits
+`runBf16`'s.**
+
+**The 16-bit half is a SECOND registry and a second front door, deliberately, and
+the separation is the safety property.** `Bf16WeightSource`,
+`registerBf16WeightSource` and `Bf16SourceCounters` mirror the Q8 set, and the
+front door is `matvecQuantizedTiledSlice` -- the per-worker slice entry every
+16-bit decode and prefill call already funnels through (`matvecQuantizedTiled`'s
+`parallel_for`, `matvecQuantizedBatch`, and `matvecFusedGateUpSlice`'s fallback),
+with its old body renamed `matvecQuantizedTiledSliceDense`. One registry keyed on
+a buffer address could NOT have served both formats: an F16 and a bf16 weight have
+the same width and the same dense layout, so `qtype` is the only thing that can
+tell them apart, and it is tested **before any atomic load** -- which makes it both
+the discriminator and the cheap exit for every model that is not bf16.
+
+The 16-bit dense layout is a plain element transpose (`quantBlockValues` is 1 and
+`quantBlockBytes` 2 for F16/BF16), so `materialise` writes element (col, t) at
+`((col * w) + t) * 2` and the unchanged kernel then runs on the tile -- the same
+by-construction identity argument as the Q8 tier, resting on
+`LlqBf16Matrix`'s round trip being exact for every bf16 value. The decode is
+row-wise (a row's exponent codes are one packed bit-field run) and the kernel wants
+column-major, so the source stages `w` rows row-major and transposes once; doing
+both at once would write `k` values at a `w*2`-byte stride and touch a cache line
+per column.
 
 **THE PIN IS PUBLISHED AS OF 2026-09-30 and this paragraph's headline is corrected
 rather than deleted, because the reasoning below is still why the pin has the shape
@@ -3740,26 +3832,59 @@ tbqwf is no longer the obstacle. What is:
     `sgee-gen`. `SENSEN_USE_SGEE OFF` clears it -- but see (2), which that exposes.
     Adopting one target for both is NOT free either: the versions skew (this
     engine at `b241317e`, sensen expecting `65912da8`).
+
+    **Measured on `origin/master` = `24db2ed7` (2026-09-30): sensen's top-level
+    `CMakeLists.txt` does not itself call `add_library(sgee)`.** It has five
+    `sgee` matches -- four comment lines and one `include(cmake/SensenSGEE.cmake)`
+    at line 2810 -- so the duplicate target can only arrive from the `external/SGEE`
+    submodule that file adds when `SENSEN_USE_SGEE` is ON, and `SENSEN_USE_SGEE OFF`
+    is still the documented lever. A report that the grep "returns empty" is wrong
+    on the letter; the useful form of the claim is that the collision is
+    CONDITIONAL on that option, not unconditional on the include.
  2. **THE `std.pcm` FLAG UNION IS NOT WHAT THIS FILE SAYS IT IS.** With sensen's
     SGEE off, the build stops on `precompiled file 'std.pcm' was compiled with the
     target feature '+aes' but the current translation unit is not`, and the same
     for `+pclmul`. Deleting the BMI does not help -- the REBUILT one has them too.
-    The flags come from **abseil's `randen_hwaes` inside gRPC**, which puts `-maes
-    -msse4.1` on its own target, and they reach the `std.pcm` rule's scope while
-    sensen's module TUs get plain `CANONICAL_FLAGS`. It was invisible because
-    sensen's own SGEE happened to add the same flags to sensen's scope, so the
-    match was ACCIDENTAL; turning it off broke it.
 
-    So the section above on `import std;` -- "there is exactly ONE `std.pcm` ...
-    built from the union of what every subproject compiles with, so a BMI mismatch
-    cannot arise" -- is **true of the subprojects this file enumerates and false of
-    gRPC**, which contributes per-target flags the union never sees.
+    **THE ATTRIBUTION IN THIS ITEM WAS WRONG, AND IT WAS WRONG IN THE WAY THAT
+    STOPS A FIX: it named a source that cannot produce half the error.** It read
+    *"the flags come from abseil's `randen_hwaes` inside gRPC, which puts `-maes
+    -msse4.1` on its own target, and they reach the `std.pcm` rule's scope"*.
+    Measured on this build tree on 2026-09-30, three facts kill that:
 
-    The obvious repair, adding `-maes -mpclmul` to `CANONICAL_FLAGS`, RAISES THE
-    REQUIRED CPU BASELINE that this file pins at `-march=x86-64-v3` deliberately,
-    for cross-host FP parity and durable-replay determinism. That is an owner
-    decision, not a build fix, and it is why the bump stopped here rather than
-    being forced through.
+    - abseil defines `ABSL_RANDOM_HWAES_X64_FLAGS` as **`-maes;-msse4.1`**
+      (`GENERATED_AbseilCopts.cmake:227`) and **never `-mpclmul`** -- so it cannot
+      explain the `+pclmul` half of the error at all.
+    - abseil applies its copts with `target_compile_options(${_NAME} PRIVATE ...)`
+      (`CMake/AbseilHelpers.cmake:275`). A PRIVATE per-target option **cannot
+      reach another directory's `CMAKE_CXX_FLAGS`**, which is what sensen's
+      `std_module_precompile` rule is built from. The mechanism named was not
+      available.
+    - **sensen MASTER's own `CMakeLists.txt:2003`** appends `-maes -mpclmul` to
+      `CMAKE_CXX_FLAGS` in sensen's own directory scope -- both features, the
+      exact pair the error names -- and the pinned `1cadb685` appends **neither**
+      (`git grep maes\|mpclmul` on each). sensen's scope is where its std.pcm rule
+      lives, so this source reaches it and abseil's does not.
+
+    So the `import std;` section's claim that the one `std.pcm` is "built from the
+    union of what every subproject compiles with, so a BMI mismatch cannot arise"
+    is **false whenever a subproject edits `CMAKE_CXX_FLAGS` after this repo has
+    set `CANONICAL_FLAGS`** -- which sensen master does and the pinned sensen does
+    not. It is not about gRPC.
+
+    **The repair is what sensen master itself argues for, and it is NOT the
+    baseline-raising owner call this file recorded.** Its comment at 1988-2002 says
+    `-maes -mpclmul` are absorbed into the floor rather than reached at run time,
+    that *neither instruction set touches floating point* -- so the stated reason
+    for the `-march=x86-64-v3` floor, cross-host FP parity and durable-replay
+    determinism, is untouched -- and that every v3-class CPU has both. That is why
+    they are safe in the floor where `-mavx512f` deliberately is not.
+
+    **NOT DONE HERE, and the reason is that nothing needs it yet.** The pin is
+    `1cadb685`, which adds neither flag, so this build has no mismatch and adding
+    the pair to `CANONICAL_FLAGS` would be an unmeasurable change -- there is no
+    red to turn green and no gate that would move. It becomes a one-line
+    prerequisite of the master bump, not a fix to carry ahead of it.
 
 Everything below this block is the original account and still accurate. The LLQ commits live in sensen
 `f2f97ebf`, whose top-level CMake `add_subdirectory()`s `external/tbqwf`
@@ -3777,15 +3902,35 @@ the module includes that the closure script cannot see.
 
 - **`llq`** -- materialise the slice's rows from the image into a Q8_0 tile and run
   sensen's **existing** kernel on it. The kernel sees the bytes it always read, so
-  the output is **byte-identical to dense by construction**. This is the
-  accuracy-neutral tier.
+  the output is **byte-identical to dense by construction**. That makes it the
+  accuracy-neutral REFERENCE, and **not a tier to serve**: it reads the same bytes
+  as dense and pays a decode on top, so it can only be slower, and the measured
+  0.91x (8-bit) and 0.56x (16-bit) are that cost rather than a property of LLQ.
 - **`llq-fused`** -- `LlqGemv::runInt8Exact` gives one exact integer per 32-weight
   block and the float combine follows. **Not bit-identical**, and it cannot be made
   so: sensen's dense tile keeps an 8-lane FMA accumulator and reduces once at the
   end, and a per-block integer total has already thrown the lanes away. The integer
   part is exact; the float order differs.
 
-### What was measured, on the deployed model
+**BF16 BREAKS THE TRADE-OFF ABOVE, and that is the single most useful fact about
+the 16-bit tier.** Its `llq` arm is byte-identical for the materialise reason --
+the tile holds the GGUF's own bf16 words, because `LlqBf16Matrix`'s plane split
+round-trips every bf16 value exactly, subnormals, infinities and NaN payloads
+included (asserted). Its **`llq-fused` arm is ALSO bit-identical**, which the Q8_0
+fused arm can never be: rebuilding a bf16 word from an exponent plane and a raw
+sign|mantissa plane is a **BIT JOIN, not arithmetic**, so there is no accumulation
+to reorder and the fused kernel sums the same floats in the same canonical order
+as the dense one. sensen `30666a13` says so in its title ("bit-identical") and
+`runBf16`'s own comment states the canonical order it shares with `runBf16Dense`.
+
+So at 16 bits **fused execution, bit-identical output and 26% fewer bytes hold
+together**, where at 8 bits fusing costs identity. The gate therefore does NOT get
+relaxed when the bf16 tier moves from `llq` to `llq-fused`: if identity fails
+there, that is a defect to report, not a property of the tier.
+
+### What was measured at 8 bits, on the deployed model
+
+(The 16-bit tier has its own section below; this one is Q8_0 throughout.)
 
 `backend/models/mortgagefv-assistant-v20-q8_0.gguf`, sha256 `e885c57b...fa6024`,
 Q8_0 at 8.500 bits/weight, 12 real single-turn prompts from `val.jsonl` (sha
@@ -3834,6 +3979,38 @@ the weight stream. The harness counts Int8 slice calls in the front doors: in th
 `llq` run 1,097,600 of 1,097,600 were answered from an image and 0 by the dense
 kernel.
 
+### Three arms at 8 bits: fused is PARITY, and the reason is the byte count
+
+Measured 2026-09-30, three arms alternating, `SENSEN_QKV_FUSION=0` throughout,
+slice counts equal at **398,272** and the paths provably disjoint
+(source/dense counters 398,272/0 against 0/398,272):
+
+| arm | decode tok/s | token sha |
+| --- | --- | --- |
+| dense | 49.49, 48.47 | `a1168d29480d` |
+| `llq` | 44.52, 44.65 | `a1168d29480d` |
+| `llq-fused` | 48.22, 47.41 | **`fbaa459f8bf3`** |
+
+Fusing recovers **7.2%** of the materialise cost and still does not reach dense,
+and the sha differs exactly as `runInt8Exact`'s reduction order predicts.
+
+**That is the expected outcome at 8 bits, not a defect, and the reason is in the
+size table above: base 8-of-8 with ZERO outliers means no bytes are saved, so a
+fused kernel has nothing to go faster reading.** `llq` is slower because it reads
+the same bytes *and* pays a decode; `llq-fused` removes the decode and arrives
+back at roughly where the bytes put it.
+
+**DO NOT read a bf16 result the same way.** At 16 bits the image is **26%
+smaller**, which is the whole difference between a tier that cannot win and one
+that can. The 8-bit row is what makes the 16-bit row interesting rather than
+redundant.
+
+**`llq-fused`'s ACCURACY at 8 bits is an open question, not an identity**, because
+the sha differs: `docs/evidence/fused/` is measuring it on the full 560-row
+holdout, to be compared row-level against dense's 414/431. Until that lands, the
+Q8_0 fused tier is measured for speed and unmeasured for cost, and "parity on
+throughput" is not a reason to offer it.
+
 ### The harness, and why `llq_used` is measured
 
 `llq_throughput_probe` (one configuration per process) records the model, its
@@ -3847,6 +4024,32 @@ interleaves arms and refuses to start unless exactly one engine holds `:50051`.
 scope says an image was built and registered; only a counter says a kernel read it.
 An LLQ run in which the dense kernel answered any slice exits 3 with
 `FATAL ... did NOT measure LLQ, and its rate is the dense rate`.
+
+**It now sums BOTH registries' counters, and reading only the Q8 pair would have
+reported every bf16 run as having measured nothing.** The two tiers have separate
+front doors, so a bf16 run that served every slice from an image leaves
+`q8SourceCounters()` at 0/0 -- which `llq_used` would read as false and the probe
+would then refuse a correct run. Summing is safe because a weight has exactly one
+source type, so no slice is counted twice.
+
+**It runs THREE arms by default -- `dense llq llq-fused` -- and
+`scripts/llq_paired_summary.py` REFUSES the table unless two things hold.** Equal
+slice counts across arms, because identical tokens with a different number of
+kernel calls is a different amount of work rather than a different weight store
+(the QKV-fusion contamination was caught exactly that way); and one token sha per
+arm, the same across arms. A two-arm `dense` vs `llq` table was the wrong
+comparison to begin with: `llq` is the reference, not a serving tier.
+
+**`scripts/measure_llq_paired_probe.sh` is the paired driver for the 16-bit tier,
+and `measure_llq_paired_throughput.sh` cannot be used there.** That script drives
+the real engine and `eval_grpc_mortgage.py`, which is the stronger instrument and
+is what Q8_0 used; at 16 bits a bf16 model decodes at single-digit tok/s (see the
+throughput section) and a 100-row RPC sweep does not finish in a usable time. The
+probe measures the two things that matter -- an aggregate token sha256 over every
+generated token, and the rates -- one process per arm. It passes
+`--count-coverage` on **both** arms so the DENSE arm carries a positive control:
+`dense_calls > 0` proves the dense kernel really ran there, where the default 0/0
+is indistinguishable from counting being switched off.
 
 **Comparing two engines' `ParseOperation` responses byte for byte is invalid**: the
 params are a protobuf `map<string,string>`, whose iteration order differs between
@@ -3870,15 +4073,294 @@ so rebuilding blocks from it would have to invent the rest, and the arithmetic w
 then be a different model with no error anywhere. `adopt` accepts exactly 8 source
 bits, group 32, fp16-exact scales.
 
+### The 16-bit tier: bf16, NOT F16, and the only width where fewer bytes pay
+
+Added 2026-09-30. `MORTGAGE_WEIGHT_STORE=llq` now serves a **BF16** model from an
+LLQ image as well as a Q8_0 one. **This is where the compression the codec was
+built for actually appears**, and the 8-bit row is what proves it had to:
+
+| tier | source bytes | LLQ bytes | bits/weight | outliers |
+| --- | --- | --- | --- | --- |
+| Q8_0 (deployed v20) | 467,927,040 | 468,271,104 | 8.5000 -> **8.5062** (+0.07%) | **0** |
+| BF16 (v20 from merged bf16) | 880,803,840 | 650,878,944 | 16.0000 -> **11.8234** (**-26.1%**) | 13,528,736 |
+
+**The two rows differ for a reason about the FORMAT, not about the codec.** Q8_0
+already spends exactly 8 bits on a value whose scale was fitted per 32-weight
+group, so there is no redundancy an exponent code can find -- every panel chose
+base 8 with zero outliers and the image came out LARGER by its own headers. A
+bf16 word is a different shape: `sign(1)|exponent(8)|mantissa(7)`, and the
+exponent field is nearly constant across a weight matrix. Measured on
+`blk.0.ffn_gate.weight`: **26 distinct exponents of 256**, range 98..125. So the
+exponent plane codes in **3..4 bits** across the model and the 7-bit mantissa plus
+sign is stored raw -- about 12 bits where bf16 spends 16.
+
+**The 64-row PANEL is what gets the base down to 3..4, and that is visible in the
+gap between two measurements here.** A whole matrix spans 26 exponents, which needs
+five signed bits; the model measures 3..4 because each panel is encoded
+independently, with its own centre, and 64 rows span fewer octaves than 3072 do.
+The unit test's synthetic matrix -- deliberately seeded with subnormals, infinities
+and NaN payloads, whose exponent fields are 0x00 and 0xFF -- measures base 5..5 for
+exactly that reason. Panelling was inherited from the Q8 tier for slice locality
+and it turns out to pay a second time in compression.
+
+**`bits_per_weight` is computed from the BYTE COUNTS and never from the base
+width**, and for bf16 that distinction is half the number: the base range names
+the *exponent plane* only, so quoting `3..4 bits` as bits/weight would omit the 8
+raw sign|mantissa bits entirely. `Report::llq_bits_per_weight()` divides
+`llq_bytes` by `adopted_weights`, and a unit check asserts the measured figure
+sits **above** the base width and **under** 16.
+
+**F16 IS NOT SERVED, AND THAT IS A MEASUREMENT ABOUT THE CODEC RATHER THAN A
+GAP LEFT FOR LATER.** `LlqBf16Matrix::fromBits` extracts bits 7..14 as "the
+exponent" and histograms them over 256 buckets -- those are **bf16's** field
+widths. An IEEE half is `sign(1)|exponent(5)|mantissa(10)`, so on an F16 word
+those eight bits are the top three mantissa bits joined to the five exponent bits.
+Handing F16 bits to it would **encode without error**, would still round-trip
+exactly (it is a bit join either way), and would produce an image whose
+"bits/weight" describes a field split the format does not have. Nothing would
+fail. That is precisely the shape of defect this file records against the LIVE
+badge and against `ComputeRate`'s 38 zero-padded places: **a number claiming to
+be about something it is not.**
+
+So the refusal is structural in two places at once, and a test pins both:
+
+- `llq_weight_store`'s observer offers only `Q8_0` and `BF16` to a tier; an F16
+  weight is counted `left_dense`. Because asking for LLQ and adopting **nothing**
+  is an error rather than a fallback, **an F16 model does not start under an LLQ
+  store** -- it is refused at boot, not served quietly from the dense path.
+- sensen's new front door consults the bf16 registry **only when
+  `qtype == QType::BF16`**. The two formats share a width and a dense layout, so
+  no property of the buffer could tell them apart; the qtype is the only
+  discriminator there is, and it is checked before any registry load (which also
+  makes it the cheap exit for every non-bf16 model).
+
+Serving F16 would need its own plane split with F16's field widths -- a 32-bucket
+exponent histogram and a 2-byte raw plane for sign plus 10 mantissa bits. **That
+is a codec change in sensen and it is NOT done.**
+
+**THE SERVED bf16 TIER IS `llq-fused`, and getting there needed one sensen
+addition.** `LlqGemv::runBf16` computes **every** row, and the slice level is the
+only place per-worker row ranges exist -- so a whole-matrix GEMV would have
+recomputed the whole matrix in every worker. `runBf16Slice` runs `runBf16`'s
+per-row body over `[r_start, r_end)` and is always serial because the caller
+already owns a worker's range. **The per-row computation is untouched, which is
+what carries the bit-identity claim over unchanged** rather than requiring a new
+one: `y[i]` equals `runBf16`'s `y[r_start + i]`, and so equals `runBf16Dense`'s.
+
+`materialise` is kept as the fallback and as the identity reference, and
+`Mode::Llq` sources DECLINE the fused path (asserted) -- otherwise `llq` would
+quietly serve the fused kernel and the two tiers would stop being
+distinguishable, which is the measurement defect this module exists to prevent.
+
+### Where the 16-bit gain comes from, against sensen's own compression evidence
+
+sensen master carries `docs/technical/LLQ_COMPRESSION_EVIDENCE.md` (`a8e272cb`),
+which sets the fair baseline as **LLQ bytes ÷ the same values stored densely** and
+models a coded plane as `bits/weight ≈ B + f·c`, paying while `f < (S − B)/c`. The
+bf16 result sits inside that framework and **extends it rather than filling a row
+in it**, because that document has no 16-bit row and frames its 8-bit case as
+needing heavy tails.
+
+**The image splits exactly, and the split is the explanation:**
+
+| | bytes | bits/weight |
+| --- | --- | --- |
+| dense bf16 (440,401,920 weights) | 880,803,840 | 16.0000 |
+| raw sign\|mantissa plane | 440,401,920 | **8.0000** (one raw byte per weight, by construction) |
+| coded exponent plane | 210,477,024 | **3.8234** (source field is 8 bits) |
+| **LLQ total** | **650,878,944** | **11.8234** |
+
+So the 26.10% saving is **entirely** the exponent field going 8 → 3.8234 bits, a
+ratio of **0.4779**, while the mantissa and sign are stored untouched. By the
+evidence document's own baseline — identical values, bit-exact — that is
+legitimate LLQ compression, and it is a larger gain than any row that document
+records (its best lossless case is 4-bit per-row at ≈0.91 of dense S = 4).
+
+**Its model applies to the exponent plane, and the honest statement is
+CONSISTENCY, not confirmation.** With S = 8, the measured outlier fraction
+f = 13,528,736/440,401,920 = **0.030719**, and a CSR residual costing c = 24 bits
+(u16 index + i8 delta), `B + f·c = 3.8234` implies **B_avg = 3.086**. That is
+*derived from* the measured plane size, so quoting "predicted equals measured"
+would be circular. What it is worth: 3.086 falls inside the **independently
+reported base range of 3..4** and sits near 3, which is what a mostly-base-3 model
+should give; and the payoff condition is satisfied with a wide margin —
+`f < (S − B)/c = 0.2047` against a measured `f = 0.0307`.
+
+**THE MECHANISM IS A THIRD ONE, and naming it is the point.** That document's §4
+ties 8-bit gains to heavy-tailed codes: Student-t(3)/(4) pass its 0.88 footprint
+check and Gaussian fails. bf16's gain is not about tails at all — it is **low
+CARDINALITY in a fixed-width field**. A trained weight matrix uses 26 of 256
+exponent values (measured on `blk.0.ffn_gate.weight`, range 98..125), so a byte
+reserved for the exponent carries about 4.7 bits of entropy globally and fewer
+inside any one 64-row panel. The format overspends; LLQ reclaims the difference.
+Nothing about the weights' distribution has to be heavy-tailed for that to work.
+
+**Two of that document's conclusions are independently confirmed here, at a
+different group size.** It reports 4-bit **group-64** as no gain — "a scale per 64
+weights spreads each group across its full range, so no code falls outside
+B = 4, B = S, there is no residual" — and our Q8_0 route is **group-32**, one fp16
+scale per 32 codes, and lands in exactly that state: base 8 on every panel, **zero
+outliers**, and an image 0.07% LARGER than dense once headers are counted. Same
+mechanism, different group size, measured independently.
+
+**And the group-vs-per-row question does not even arise for the bf16 plane**,
+which is worth stating so nobody looks for it: `LlqBf16Matrix::fromBits` codes the
+exponent plane with unit scales — its own comment is *"the exponent plane carries
+no scale"* — so there is no scale granularity to spread codes across. That is why
+a format whose 8-bit companion route is the document's own negligible case still
+compresses by a quarter at 16 bits.
+
+### Three arms at 16 bits: fused is 7.5x dense AND byte-identical — and most of that is a KERNEL, not LLQ
+
+Measured 2026-09-30, `scripts/measure_llq_paired_probe.sh`, 3 rounds alternating,
+3 prompts x 12 tokens, 8 threads, `SENSEN_QKV_FUSION=0` on every arm, on the
+genuine BF16 GGUF (`llq_bits_per_weight` 11.8234 reported by both LLQ arms):
+
+| round | dense | `llq` | `llq-fused` |
+| --- | --- | --- | --- |
+| 1 | 5.64 | 3.91 | **42.77** |
+| 2 | 7.60 | 4.38 | **42.19** |
+| 3 | 5.41 | 3.43 | **34.42** |
+| median | 5.64 | 3.91 (0.693x) | **42.19 (7.480x)** |
+| prefill | 9.0 | 3.2 | **143.8** |
+
+Both gates passed before any of that is quotable: **slice counts EQUAL at 128,968
+across all three arms**, paths provably disjoint (0/128,968 dense against
+128,968/0 source on both LLQ arms), and **one token sha, `36ff21bd6fc6158f`, on
+all three arms across all three rounds** — so the fused arm generated the same
+tokens with the same number of kernel calls, faster. **BYTE IDENTITY HOLDS AT THE
+FUSED TIER**, as sensen `30666a13` claims and as the bit-join argument predicts.
+
+**DO NOT QUOTE 7.5x AS AN LLQ SPEEDUP. It is mostly a bad baseline.** sensen's
+16-bit dense path has no vector kernel: `matvecQuantizedTiledSliceDense` falls to
+its generic tail with `quantBlockValues == 1`, so it calls `dot(a, block, 1)`
+through a FUNCTION POINTER once per element. That is what 5.64 tok/s is. The fused
+arm runs `rowBf16FusedAvx512Vbmi2`, a real SIMD row kernel. So the honest split is:
+
+- **vs the comparable dense bf16 arm: 7.48x**, and most of it is replacing
+  per-element dispatch with a vector kernel. LLQ is the vehicle, not the cause.
+- **vs Q8_0 dense (48-62 tok/s, measured above): about 0.7-0.9x.** A bf16 model
+  served from an LLQ-fused image gets CLOSE to the 8-bit model's speed while
+  carrying 16-bit weights at 11.82 bits/weight. That is the comparison a product
+  decision rests on, and it is the one worth quoting.
+- `llq` at 0.693x is the materialise cost, as at 8 bits, and is not a serving tier.
+
+**Limits of this table, stated rather than implied.** The box was shared and
+loaded (load average 8.03 to 13.85 across the run, recorded per arm boundary), and
+the spreads are wide — dense 5.41..7.60, fused 34.42..42.77. The EFFECT is an
+order of magnitude larger than the spread, so the direction is safe and the third
+decimal is not. The identity sample is also **weaker than the Q8_0 tier's**: 3
+prompts x 12 tokens x 3 rounds against Q8_0's 12 prompts x 96 tokens, because at
+5.6 tok/s a larger sweep does not finish. It is the same KIND of evidence, less of
+it.
+
+### The 16-bit GGUF had to be made, and an upcast would not have done
+
+There was **no 16-bit GGUF of the deployed model**, and the one lying around
+(`~/llq-scratch/v20-f16.gguf`) is an **upcast of Q8_0** -- 8-bit values in 16-bit
+containers. An upcast cannot support either claim wanted here: its mantissas take
+only the few values Q8_0's 8-bit codes can reach, so its LLQ image would compress
+far better than a real bf16 model's and the bits/weight figure would be fiction.
+
+**That it is an upcast is MEASURED, not taken on trust, and the discriminator is
+one number.** On `blk.0.ffn_gate.weight`, against the deployed Q8_0 file's own
+dequantization:
+
+| | exactly equal to Q8_0 dequant | max abs diff |
+| --- | --- | --- |
+| `~/llq-scratch/v20-f16.gguf` (F16) | **573,836 of 3,145,728 = 18.2%** | **1.20e-4** |
+| the new `v20-bf16.gguf` (BF16) | 9,200 of 3,145,728 = 0.29% | 1.50e-3 |
+
+An order of magnitude apart, in both columns. The F16 file's residual 1.2e-4 is
+just F16's own rounding of numbers that were already Q8_0 products -- ten mantissa
+bits cannot hold every one of them -- whereas the bf16 file's 1.5e-3 **is Q8_0's
+quantization error**, which is what a genuine original must differ by. Note that
+the F16 file is *closer* to Q8_0, which is the opposite of what "more bits is more
+accurate" would suggest and is exactly the tell: it has more bits and no more
+information.
+
+The genuine source is `/home/muyiwa/Development/model-archive/v20merged-bf16-2026-09-16/model.safetensors`
+-- **310 tensors, every one `BF16`**, `saved_by: merged_16bit`, LoRA rank 64,
+which is v20's own provenance. Converted with **llama.cpp's
+`convert_hf_to_gguf.py --outtype bf16`, and that is declared rather than
+preferred**: this repo's rule is that sensen is the standard for conversion, and
+`convert_safetensors_to_gguf` accepts `f16|q8_0|q6_k|q4_k|q5_k` and **no bf16** --
+on the pinned sensen *and on `origin/master`*, measured. llama.cpp is used here in
+its one legitimate role, as an independent converter, and the output is verified
+against the deployed Q8_0 rather than trusted.
+
+It needed two local patches to run at all, neither on the Qwen3 path: three
+`gguf.MODEL_ARCH` members the script names do not exist in the installed
+`gguf` 0.18.0 (`GEMMA4`, `MISTRAL4`, `DEEPSEEK2OCR`, all aliased to siblings), and
+`Qwen2Model.set_vocab` catching only `FileNotFoundError` around
+`_set_vocab_sentencepiece` while the real throw is `ModuleNotFoundError` -- there
+is no `tokenizer.model` in the directory, so the BPE fallback was the intended
+path and simply was not reached.
+
+**Proven genuine, not assumed**, against the deployed Q8_0 file on the same
+tensor:
+
+| check | result |
+| --- | --- |
+| tensor types | **197 BF16 + 113 F32** -- the Q8_0 checkpoint's own 197/113 split |
+| distinct mantissas | **128 of 128** -- full entropy; an upcast could not be |
+| distinct exponents | 26 of 256, range 98..125 |
+| max \|Q8_0 dequant - bf16\| | 0.00149536 on a 0.390625 absmax = **0.38%**, i.e. Q8_0's own error |
+| elements exactly equal | **9,200 of 3,145,728** -- so it is not a round trip of Q8_0 |
+
+**The bandwidth win the LLQ kernels were benchmarked for cannot show at 8 bits**
+on this model -- 0 outliers means the image is the same size, so a bandwidth-bound
+decode reads the same bytes. **At 16 bits the image is 26% smaller and the win
+still does not appear**, for a reason that is about sensen's 16-bit weight path
+rather than about LLQ: see the throughput section below.
+
+### The first 16-bit throughput run was INVALID, and the count is what caught it
+
+The dense arm ran with **QKV fusion ON** and the LLQ arm with it **OFF**, so the
+two columns were not the same experiment. `prepare_process_environment` sets
+`SENSEN_QKV_FUSION=0` when an LLQ mode is requested and **returns early for
+Dense**, so the dense arm simply kept the default. This file already states that
+the only comparable dense arm is dense-with-fusion-off; the harness did not
+enforce it, and `scripts/measure_llq_paired_probe.sh` now exports the variable for
+both arms and **asserts `qkv_fusion` is false on each** from the probe's own
+report.
+
+**The tell was a COUNT, not a rate, and that is the part worth keeping.** The two
+arms produced **byte-identical tokens** -- same aggregate sha256 -- while the
+front-door slice counters read **170,072 (dense) against 198,744 (LLQ)**, a 16.9%
+gap. Identical output with a different number of kernel calls cannot be a numeric
+difference; it is a different amount of work, and fusion is exactly that (Q, K and
+V computed in one matvec instead of three). A rate comparison alone would have
+shown the LLQ arm "1.8x slower" and been believed, because a slower LLQ arm is
+what everyone already expected. **When two arms agree on output and disagree on
+call count, the harness is misconfigured -- check that before reading the rates.**
+The invalid run is kept under `docs/evidence/bit-width-llq-16-invalid-fusion/`
+rather than deleted, because the counter pair is the evidence.
+
 ### What was NOT done
 
-- **Only Q8_0 is wired.** Q4_0, Q5_0, K-quants and 16-bit go through different
-  kernels and were not touched: there is **no 4-bit or 16-bit tok/s figure** and this
-  work does not produce one. The owner's 4 / 8 / 16 table has its 8-bit row.
-- **The bandwidth win the LLQ kernels were benchmarked for cannot show at 8 bits**
-  on this model -- 0 outliers means the image is the same size, so a bandwidth-bound
-  decode reads the same bytes. It is the 4- and 16-bit tiers that could, and they are
-  not here.
+- **Q4_0, Q5_0 and the K-quants are still not wired.** They go through different
+  kernels and were not touched, so there is **no 4-bit tok/s figure** and this work
+  does not produce one. The owner's 4 / 8 / 16 table has its 8-bit and 16-bit rows.
+- **`llq` must not be quoted as an LLQ throughput figure, at either width.** It
+  materialises the image back into the dense layout and runs the ordinary kernel,
+  so it reads the same bytes AND pays a decode -- strictly more work, and the
+  0.91x and 0.56x ratios measured for it are measuring that, not LLQ. It exists to
+  be the identity reference. Only `llq-fused` reads the packed image.
+- **F16 is refused, not served** -- see the tier section above for why that is the
+  honest outcome and what a real F16 tier would need.
+- **The pin was NOT bumped to sensen `origin/master` (`24db2ed7`), and the reason
+  is a measurement:** master's `gemm_kernels.cppm` seam is **byte-for-byte the one
+  on the lane branch -- Q8_0 only**, and `LlqBf16Matrix`/`runBf16` are consumed
+  there by nothing but `lossless_quant*` itself and `autograd_cuda.cppm`. Master's
+  wired LLQ decode path lives in `qwen38_cpu_serving_model.cppm`, which
+  `sensen_slim` **excludes** and which is not the model class serving these
+  assistants (`llama_model` / `MultiHeadAttention` / `transformer_block`). So
+  **master contains no 16-bit serving seam either**; the bump would have supplied
+  neither the seam nor a bf16 GGUF writer, and the 16-bit work had to be written
+  regardless. What master does add to the codec over the pin is
+  `fromInt8Requantised` and `decideBf16Base` (a timing-based base chooser) --
+  neither of which this seam uses.
 - **Single-copy residency is a measurement, not a feature.** `--release-dense` proves
   the tokens come from the image; the services do not free the dense copies, so a
   served LLQ model holds **both** (RSS 1.90 GB against 1.38 GB dense).
@@ -5424,6 +5906,46 @@ answers by being read, not by being argued.
   gives a consumer whose text never changed a **cache HIT**, and it keeps the
   OLD inlined body. `touch` does not help: touching changes mtime, which ninja
   reads, and ccache ignores.
+
+  **IT IS NOT ONLY A MUTATION-CHECK HAZARD. IT SILENTLY PRODUCED A BROKEN DEPLOY
+  BINARY FROM CORRECT SOURCE, on 2026-09-30, and the symptom read exactly like a
+  code regression on the production default path.** Adding two members to
+  `Report` in `llq_weight_store.cppm` changed that type's LAYOUT.
+  `mortgage_assistant_service.cpp`'s own text did not change, so ccache returned a
+  HIT for it -- and its object kept the OLD layout and the OLD inlined `finish()`.
+  The built engine then did this with `MORTGAGE_WEIGHT_STORE` unset, i.e. the
+  configuration production runs:
+
+  ```
+  [INFO ] quantised 196 tensors: 196 Q8_0        <- the model loaded fine
+  [ERROR] mortgage assistant weight store:       <- an EMPTY message
+  [INFO ] Mortgage assistant model is UNAVAILABLE
+  ```
+
+  **Same source, `CCACHE_DISABLE=1`: `Mortgage assistant model is LOADED`.** That
+  one-variable A/B is the whole proof, and it was reached only after a `git stash`
+  bisect had already shown the pre-change module working -- which looked like
+  confirmation of a source regression and was not.
+
+  Three things to carry from it:
+
+  - **"My diff does not touch that code" is a statement about SOURCE and says
+    nothing about the OBJECT.** Here the Dense path was textually untouched,
+    `open_scope_from_env` and `finish()` were byte-identical, and a unit test
+    driving them directly passed 97/97 -- while the engine built from that same
+    source refused. Every static argument was correct and irrelevant.
+  - **The empty message was not a missing message.** Both error strings on that
+    path are non-empty literals; the emptiness was a `std::string` read at the
+    wrong offset. So there is nothing to fix in the logging, and adding a
+    "(no reason given)" fallback would be defending against undefined behaviour
+    rather than naming a refusal -- the opposite of the `QueueError` lesson, which
+    is about errors that were never written down.
+  - **ninja is not at fault and did schedule the recompile.** CMake's module
+    scanning saw the BMI change and queued the consumer; ccache then answered that
+    compile from its cache. So the hazard is `CMAKE_CXX_COMPILER_LAUNCHER=ccache`
+    plus C++23 modules, not a stale dependency graph. **Build with
+    `CCACHE_DISABLE=1` whenever a module interface changed and the binary is going
+    to be measured or deployed**, not only when mutating one.
 
   Measured on 2026-09-03 while gating the `xnpv` span guard. The guard was
   deleted from `financial.cppm`, `financial.cppm.o` recompiled, the BMI was

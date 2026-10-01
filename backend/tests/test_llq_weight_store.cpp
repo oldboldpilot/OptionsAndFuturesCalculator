@@ -364,6 +364,251 @@ auto main() -> int {
         check(GEMM::q8WeightSourceCount() == 0, "no registration survives the scopes");
     }
 
+    // ── the 16-bit tier ───────────────────────────────────────────────────
+    //
+    // The claim is the same shape as the Q8 one and rests on a different fact:
+    // LlqBf16Matrix splits a bf16 word into an LLQ-coded exponent plane and a raw
+    // sign|mantissa byte, and rejoining them is exact for EVERY bf16 value. So the
+    // words the source hands back are the words the GGUF held, and the unchanged
+    // 16-bit kernel computes what it computed from the dense buffer.
+    section("bf16: rows materialise byte-identically, including the values that usually break codecs");
+    {
+        // Half the rows are ordinary trained-weight magnitudes; the rest are the
+        // awkward ones. A codec that special-cases zero, flushes subnormals or
+        // canonicalises a NaN payload passes a test made only of normal numbers.
+        const std::size_t rows = 192;
+        const std::size_t k = 256;
+        std::vector<std::uint16_t> words(rows * k);
+        std::uint32_t s = 2463534242U;
+        const std::array<std::uint16_t, 8> awkward{
+            0x0000,  // +0
+            0x8000,  // -0
+            0x0001,  // smallest positive subnormal
+            0x807F,  // negative subnormal
+            0x7F80,  // +inf
+            0xFF80,  // -inf
+            0x7FC1,  // NaN with a payload
+            0xFFFF,  // NaN, all bits set
+        };
+        for (std::size_t i = 0; i < words.size(); ++i) {
+            s ^= s << 13;
+            s ^= s >> 17;
+            s ^= s << 5;
+            if ((i % 37) == 0) {
+                words[i] = awkward[(i / 37) % awkward.size()];
+            } else {
+                // A narrow exponent band, as a real weight matrix has: this is what
+                // gives the exponent plane a small base width.
+                const std::uint32_t exp = 118U + (s % 9U);
+                words[i] = static_cast<std::uint16_t>(((s & 0x8000U)) | (exp << 7U) | (s & 0x7FU));
+            }
+        }
+        // The dense column-major buffer the 16-bit kernels read: element (col,row)
+        // at (col * rows + row).
+        std::vector<std::uint16_t> dense(rows * k);
+        for (std::size_t r = 0; r < rows; ++r) {
+            for (std::size_t c = 0; c < k; ++c) {
+                dense[(c * rows) + r] = words[(r * k) + c];
+            }
+        }
+        const auto bytes = std::span(reinterpret_cast<const std::uint8_t*>(words.data()),
+                                     words.size() * 2);
+        const auto src = ws::LlqBf16Source::from_bf16_row_major(bytes, rows, k, ws::Mode::Llq);
+        check(src.has_value(), "a bf16 weight adopts");
+        if (src.has_value()) {
+            const auto [lo, hi] = (*src)->base_bits_range();
+            check(hi < 8, std::format("the exponent plane codes in {}..{} bits, under bf16's 8", lo, hi));
+            // Bits per weight must come from the BYTES. The base range above omits
+            // the 8 raw sign|mantissa bits entirely, so quoting it as bits/weight
+            // would understate the image by half.
+            const double bpw = static_cast<double>((*src)->resident_bytes()) * 8.0 /
+                               static_cast<double>(rows * k);
+            check(bpw > static_cast<double>(hi) && bpw < 16.0,
+                  std::format("measured {:.3f} bits/weight sits above the base width and under 16", bpw));
+
+            const std::array<std::pair<std::size_t, std::size_t>, 5> slices{
+                {{0, 192}, {0, 1}, {5, 77}, {63, 129}, {191, 192}}};
+            for (const auto& [r0, r1] : slices) {
+                const std::size_t width = r1 - r0;
+                std::vector<std::uint8_t> tile(k * width * 2, 0xEE);
+                const bool ok = (*src)->materialise(r0, r1, tile);
+                bool same = ok;
+                for (std::size_t c = 0; same && c < k; ++c) {
+                    for (std::size_t t = 0; same && t < width; ++t) {
+                        std::uint16_t got = 0;
+                        std::memcpy(&got, tile.data() + (((c * width) + t) * 2), sizeof(got));
+                        same = got == dense[(c * rows) + (r0 + t)];
+                    }
+                }
+                check(same, std::format("bf16 rows [{}, {}) are bit-identical to the dense buffer",
+                                        r0, r1));
+            }
+            std::vector<std::uint8_t> small(4, 0);
+            check(!(*src)->materialise(0, 192, small), "a bf16 destination that is too small is refused");
+            std::vector<std::uint8_t> tile2(k * 64 * 2);
+            check(!(*src)->materialise(150, 250, tile2), "bf16 rows beyond the weight are refused");
+        }
+
+        // The seam, through sensen's own kernel, with the dense buffer destroyed.
+        for (const std::size_t m : {std::size_t{1}, std::size_t{5}}) {
+            const auto a = make_activation(m, k, static_cast<std::uint32_t>(700 + m));
+            std::vector<float> ref(m * rows, -1.0F);
+            GEMM::clearBf16WeightSources();
+            GEMM::matvecQuantizedBatch(a.data(), dense.data(), ref.data(), m, k, rows,
+                                       GEMM::QType::BF16);
+
+            const auto s2 = ws::LlqBf16Source::from_bf16_row_major(bytes, rows, k, ws::Mode::Llq);
+            check(s2.has_value(), "the bf16 source rebuilds for the seam arm");
+            if (!s2.has_value()) {
+                continue;
+            }
+            GEMM::registerBf16WeightSource(dense.data(), *s2);
+            const auto saved = dense;
+            std::ranges::fill(dense, 0xA5A5);
+
+            std::vector<float> got(m * rows, -2.0F);
+            GEMM::matvecQuantizedBatch(a.data(), dense.data(), got.data(), m, k, rows,
+                                       GEMM::QType::BF16);
+            check(bit_equal(ref, got),
+                  std::format("bf16 m = {}: LLQ output is bit-identical to dense", m));
+
+            GEMM::unregisterBf16WeightSource(dense.data());
+            std::vector<float> garbage(m * rows, -3.0F);
+            GEMM::matvecQuantizedBatch(a.data(), dense.data(), garbage.data(), m, k, rows,
+                                       GEMM::QType::BF16);
+            check(!bit_equal(ref, garbage),
+                  std::format("bf16 m = {}: the poisoned dense buffer gives a DIFFERENT answer "
+                              "(positive control)", m));
+            dense = saved;
+        }
+        check(GEMM::bf16WeightSourceCount() == 0, "no bf16 registration is left behind");
+
+        // ── FUSED bf16: the tier that is actually served, and it must be
+        // bit-identical too ────────────────────────────────────────────────
+        //
+        // This is the opposite of the Q8_0 fused tier, which trades identity for
+        // the fused kernel because per-block integer totals have thrown the dense
+        // tile's 8-lane FMA structure away. Rejoining an exponent plane and a raw
+        // sign|mantissa plane is a BIT JOIN, so the fused bf16 kernel sums the
+        // same floats in the same canonical order and identity SURVIVES. Asserted
+        // rather than argued, because if it does not hold that is a defect and not
+        // a property of the tier.
+        for (const std::size_t m : {std::size_t{1}, std::size_t{5}}) {
+            const auto a = make_activation(m, k, static_cast<std::uint32_t>(900 + m));
+            std::vector<float> ref(m * rows, -1.0F);
+            GEMM::clearBf16WeightSources();
+            GEMM::matvecQuantizedBatch(a.data(), dense.data(), ref.data(), m, k, rows,
+                                       GEMM::QType::BF16);
+
+            const auto sf = ws::LlqBf16Source::from_bf16_row_major(bytes, rows, k,
+                                                                   ws::Mode::LlqFused);
+            check(sf.has_value(), "llq-fused ADOPTS a bf16 weight");
+            if (!sf.has_value()) {
+                continue;
+            }
+            GEMM::registerBf16WeightSource(dense.data(), *sf);
+            const auto saved = dense;
+            std::ranges::fill(dense, 0xA5A5);
+
+            std::vector<float> got(m * rows, -2.0F);
+            GEMM::matvecQuantizedBatch(a.data(), dense.data(), got.data(), m, k, rows,
+                                       GEMM::QType::BF16);
+            check(bit_equal(ref, got),
+                  std::format("bf16 FUSED m = {}: output is bit-identical to dense", m));
+
+            GEMM::unregisterBf16WeightSource(dense.data());
+            std::vector<float> garbage(m * rows, -3.0F);
+            GEMM::matvecQuantizedBatch(a.data(), dense.data(), garbage.data(), m, k, rows,
+                                       GEMM::QType::BF16);
+            check(!bit_equal(ref, garbage),
+                  std::format("bf16 FUSED m = {}: the poisoned dense buffer gives a DIFFERENT "
+                              "answer (positive control)", m));
+            dense = saved;
+        }
+        check(GEMM::bf16WeightSourceCount() == 0, "no fused bf16 registration is left behind");
+
+        // A non-fused source must DECLINE gemvSlice, or `llq` would quietly serve
+        // the fused kernel and the two tiers would stop being distinguishable.
+        {
+            const auto plain = ws::LlqBf16Source::from_bf16_row_major(bytes, rows, k, ws::Mode::Llq);
+            const std::vector<float> act(k, 1.0F);
+            std::vector<float> out(rows, 0.0F);
+            check(plain.has_value() && !(*plain)->gemvSlice(act, out, 0, rows),
+                  "a Mode::Llq bf16 source DECLINES the fused path");
+        }
+
+        // The refusals, in the direction that matters.
+        std::vector<std::uint8_t> odd(rows * 100 * 2, 0);
+        check(!ws::LlqBf16Source::from_bf16_row_major(odd, rows, 100, ws::Mode::Llq).has_value(),
+              "a column count that is not a multiple of 64 is refused");
+        check(!ws::LlqBf16Source::from_bf16_row_major(bytes, rows, k * 2, ws::Mode::Llq).has_value(),
+              "a byte count that disagrees with the declared shape is refused");
+    }
+
+    // ── an F16 model must NOT be adopted as bf16 ──────────────────────────
+    //
+    // This is the sharpest refusal in the module. An F16 word is
+    // sign|exp(5)|mantissa(10) and a bf16 word is sign|exp(8)|mantissa(7); they
+    // are the same width and the same dense layout, so nothing about the buffer
+    // could tell them apart. Reading F16 bits with bf16 field widths would encode
+    // WITHOUT ERROR and describe a field split the format does not have. The
+    // registry is therefore consulted only for BF16, and an F16 weight is left
+    // dense -- which, because adopting nothing refuses, stops the process.
+    section("F16 is left dense, not adopted as bf16");
+    {
+        const std::size_t rows = 64;
+        const std::size_t k = 64;
+        std::vector<std::uint16_t> f16(rows * k);
+        for (std::size_t i = 0; i < f16.size(); ++i) {
+            f16[i] = static_cast<std::uint16_t>(0x3C00U + (i % 512U));  // ordinary F16 values
+        }
+        std::vector<std::uint16_t> f16_dense(rows * k);
+        auto scope = ws::LoadScope::open(ws::Mode::Llq);
+        GEMM::transposeQuantizedWeights(f16.data(), f16_dense.data(), rows, k, GEMM::QType::F16);
+        const auto rep = scope->report();
+        check(rep.adopted == 0 && rep.left_dense == 1,
+              "an F16 weight is counted left-dense and never adopted");
+        check(GEMM::bf16WeightSourceCount() == 0, "nothing is registered in the bf16 map for F16");
+        const auto v = scope->finish();
+        check(!v.has_value(),
+              "so an LLQ store REFUSES an F16 model rather than serving it from the dense path");
+        scope->withdraw();
+    }
+
+    // ── the DEFAULT path, through the entry point the services actually call ──
+    //
+    // Every other check here drives `LoadScope::open(Mode)` directly. The services
+    // call `open_scope_from_env`, and NOTHING exercised that on the Dense path --
+    // which is the configuration production runs. That gap let a regression reach
+    // a built engine: the mortgage assistant logged an EMPTY weight-store error and
+    // went UNAVAILABLE with `MORTGAGE_WEIGHT_STORE` unset. A default that breaks is
+    // worse than a feature that does, so it gets its own section.
+    section("the DEFAULT path: open_scope_from_env + finish() with no selector set");
+    {
+        for (const char* sel : {static_cast<const char*>(nullptr), "dense"}) {
+            if (sel == nullptr) {
+                ::unsetenv("MORTGAGE_WEIGHT_STORE");
+            } else {
+                ::setenv("MORTGAGE_WEIGHT_STORE", sel, 1);
+            }
+            const std::string what = sel == nullptr ? "unset" : "explicitly dense";
+            auto scope = ws::open_scope_from_env("MORTGAGE_WEIGHT_STORE");
+            check(scope.has_value(),
+                  std::format("{}: open_scope_from_env succeeds (error: '{}')", what,
+                              scope.has_value() ? std::string{} : scope.error()));
+            if (!scope.has_value()) {
+                continue;
+            }
+            check((*scope)->mode() == ws::Mode::Dense, std::format("{}: the scope is Dense", what));
+            const auto v = (*scope)->finish();
+            check(v.has_value(), std::format("{}: finish() succeeds (error: '{}')", what,
+                                             v.has_value() ? std::string{} : v.error()));
+            check(GEMM::q8WeightSourceCount() == 0 && GEMM::bf16WeightSourceCount() == 0,
+                  std::format("{}: a Dense scope registers nothing in either map", what));
+        }
+        ::unsetenv("MORTGAGE_WEIGHT_STORE");
+    }
+
     // ── process environment ───────────────────────────────────────────────
     section("process environment: QKV fusion must be off for an LLQ store");
     {

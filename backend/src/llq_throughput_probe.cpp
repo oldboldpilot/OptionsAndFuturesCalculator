@@ -440,12 +440,23 @@ auto main(int argc, char** argv) -> int {
     // first (it says the image was built and registered, not that a kernel read it).
     if (a.count_coverage || *mode != llq_weight_store::Mode::Dense) {
         sensen::GEMM::resetQ8SourceCounters();
+        sensen::GEMM::resetBf16SourceCounters();
         sensen::GEMM::setQ8SourceCounting(true);
+        sensen::GEMM::setBf16SourceCounting(true);
         for (std::size_t p = 0; p < std::min<std::size_t>(a.timed, prompts.size()); ++p) {
             (void)run_once(*pipe, prompts[p], cfg);
         }
         sensen::GEMM::setQ8SourceCounting(false);
-        cov = sensen::GEMM::q8SourceCounters();
+        sensen::GEMM::setBf16SourceCounting(false);
+        // BOTH registries, summed. The two tiers have separate front doors, so
+        // reading only the Q8 counters would report a bf16 run as having measured
+        // nothing -- and `llq_used` would then be false for a run that did serve
+        // every slice from an image. Summing is safe because a given weight has
+        // exactly one source type, so no slice is counted twice.
+        const auto q8 = sensen::GEMM::q8SourceCounters();
+        const auto bf16 = sensen::GEMM::bf16SourceCounters();
+        cov.source_calls = q8.source_calls + bf16.source_calls;
+        cov.dense_calls = q8.dense_calls + bf16.dense_calls;
     }
 
     // Measured, not requested: LLQ served this run only if at least one slice was
@@ -458,7 +469,9 @@ auto main(int argc, char** argv) -> int {
     std::println(
         "RESULT {{\"label\":\"{}\",\"model\":\"{}\",\"model_sha256\":\"{}\",\"model_bytes\":{},"
         "\"quantisation\":\"{}\",\"bits_per_weight\":{:.3f},\"tensors_2d\":{},"
-        "\"store\":\"{}\",\"llq_used\":{},\"llq_weights_adopted\":{},\"llq_bytes\":{},"
+        "\"store\":\"{}\",\"llq_used\":{},\"llq_weights_adopted\":{},"
+        "\"llq_adopted_kind\":\"{}\",\"llq_adopted_q8\":{},\"llq_adopted_bf16\":{},"
+        "\"llq_bits_per_weight\":{:.4f},\"llq_source_bits_per_weight\":{:.4f},\"llq_bytes\":{},"
         "\"dense_bytes_of_adopted\":{},\"llq_outliers\":{},\"llq_base_bits\":\"{}..{}\","
         "\"threads\":{},\"qkv_fusion\":{},\"prompts\":{},\"max_new_tokens\":{},"
         "\"identity_prompt_tokens\":{},\"identity_generated_tokens\":{},"
@@ -468,7 +481,8 @@ auto main(int argc, char** argv) -> int {
         "\"rss_kib_loaded\":{},\"rss_kib_before_load\":{},\"dense_released_bytes\":{},"
         "\"rss_kib_after_release\":{},\"coverage_source_calls\":{},\"coverage_dense_calls\":{}}}",
         a.label, a.model, sha, file_bytes, qname, bpw, tensors_2d, mode_name(*mode),
-        llq_measured ? "true" : "false", rep.adopted, rep.llq_bytes,
+        llq_measured ? "true" : "false", rep.adopted, rep.adopted_kind(), rep.adopted_q8,
+        rep.adopted_bf16, rep.llq_bits_per_weight(), rep.source_bits_per_weight(), rep.llq_bytes,
         rep.dense_bytes, rep.outliers, rep.base_bits_min, rep.base_bits_max, a.threads,
         qkv_fusion_on ? "true" : "false", prompts.size(), a.tokens, total_prompt, total_gen,
         std::min(a.timed, prompts.size()), timed_prompt, timed_gen, a.reps, dec, dmin, dmax, pre,
@@ -476,8 +490,9 @@ auto main(int argc, char** argv) -> int {
         cov.dense_calls);
     if (*mode != llq_weight_store::Mode::Dense && !llq_measured) {
         std::println(stderr,
-                     "FATAL: --store {} was requested but the dense kernel answered {} of {} Int8 "
-                     "slice calls: this run did NOT measure LLQ, and its rate is the dense rate",
+                     "FATAL: --store {} was requested but the dense kernel answered {} of {} "
+                     "quantized slice calls: this run did NOT measure LLQ, and its rate is the "
+                     "dense rate",
                      a.store, cov.dense_calls, cov.dense_calls + cov.source_calls);
         return 3;
     }
