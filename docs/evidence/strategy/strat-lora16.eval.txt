@@ -1,0 +1,28 @@
+[1500 rows, 1859.1s, 1239 ms/row]
+
+=== strat-lora16 ===
+params exact-match : 1410/1496 = 94.3%
+  symbol           1420/1496 = 94.9%
+  asset_class      1427/1496 = 95.4%
+  strategy         1427/1496 = 95.4%
+  expiration_days  1417/1496 = 94.7%
+  quantity         1427/1496 = 95.4%
+non-params correct : 4/4 = 100.0%
+asked-when-ambiguous: 279/513 = 54.4%
+
+first mismatches:
+  user: put butterfly ethereum 1 days out please
+    want {'symbol': 'ETH', 'asset_class': 'CRYPTO', 'strategy': 'put_butterfly', 'expiration_days': 1, 'quantity': 1}
+    got  None
+  user: I want to horizontal spread bitcoin a year
+    want {'symbol': 'BTC', 'asset_class': 'CRYPTO', 'strategy': 'calendar_spread', 'expiration_days': 365, 'quantity': 1}
+    got  None
+  user: Pull up a double diagonal on ethereum at 180 days out
+    want {'symbol': 'ETH', 'asset_class': 'CRYPTO', 'strategy': 'double_diagonal', 'expiration_days': 180, 'quantity': 1}
+    got  None
+  user: pull up a put butterfly on bitcoin at 365 days
+    want {'symbol': 'BTC', 'asset_class': 'CRYPTO', 'strategy': 'put_butterfly', 'expiration_days': 365, 'quantity': 1}
+    got  None
+  user: eth straddle two months
+    want {'symbol': 'ETH', 'asset_class': 'CRYPTO', 'strategy': 'long_straddle', 'expiration_days': 60, 'quantity': 1}
+    got  None

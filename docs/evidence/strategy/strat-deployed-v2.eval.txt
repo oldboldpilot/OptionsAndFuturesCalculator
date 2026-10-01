@@ -1,0 +1,28 @@
+[1500 rows, 1871.3s, 1248 ms/row]
+
+=== strat-deployed-v2 ===
+params exact-match : 1044/1496 = 69.8%
+  symbol           1056/1496 = 70.6%
+  asset_class      1114/1496 = 74.5%
+  strategy         1110/1496 = 74.2%
+  expiration_days  1107/1496 = 74.0%
+  quantity         1115/1496 = 74.5%
+non-params correct : 4/4 = 100.0%
+asked-when-ambiguous: 318/513 = 62.0%
+
+first mismatches:
+  user: i want to trade bull spread
+    want {'symbol': 'TSLA', 'asset_class': 'EQUITY', 'strategy': 'bull_call_spread', 'expiration_days': 30, 'quantity': 1}
+    got  None
+  user: i want to carry trade nasdaq futures two weeks
+    want {'symbol': 'NQ', 'asset_class': 'FUTURES', 'strategy': 'cash_and_carry', 'expiration_days': 14, 'quantity': 1}
+    got  None
+  user: the dow etf bull spread expiring in 5 days
+    want {'symbol': 'DIA', 'asset_class': 'EQUITY', 'strategy': 'bull_call_spread', 'expiration_days': 5, 'quantity': 1}
+    got  None
+  user: I want to short straddle coin 180d
+    want {'symbol': 'COIN', 'asset_class': 'EQUITY', 'strategy': 'short_straddle', 'expiration_days': 180, 'quantity': 1}
+    got  None
+  user: i want to synthetic long nvidia two months
+    want {'symbol': 'NVDA', 'asset_class': 'EQUITY', 'strategy': 'synthetic_long', 'expiration_days': 60, 'quantity': 1}
+    got  None

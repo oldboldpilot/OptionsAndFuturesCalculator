@@ -1,0 +1,7 @@
+generations            : 30
+aggregate decode tok/s : 41.66  (3046 tok / 73 s)
+median decode tok/s    : 40.90
+median prefill ms      : 218.0
+median output tokens   : 112
+store-in-force: MORTGAGE_WEIGHT_STORE=llq
+env-in-force: MORTGAGE_WEIGHT_STORE=llq SENSEN_QKV_FUSION=0

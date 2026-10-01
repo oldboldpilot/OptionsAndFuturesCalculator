@@ -5,7 +5,7 @@
 Measured 2026-09-30 on `oluwasanmi-fedora-server` (AMD Ryzen 9 9955HX, 16 cores /
 32 threads, no GPU, `n_gpu_layers = 0`), through the real
 `mortgage.assistant.MortgageAssistant/ParseOperation` RPC on **sensen**.
-The LLQ rows are **pending another agent's work** and are deliberately not filled.
+The LLQ rows are measured below; §A records what each instrument can and cannot see.
 
 ## The table
 
@@ -14,9 +14,44 @@ The LLQ rows are **pending another agent's work** and are deliberately not fille
 | 4 (Q4_0, **double-quantised**) | no | **241/560 = 43.0%** | 291/560 = 52.0% | **39.5** (paired; 41.6 / 39.9 / 37.0) | **~1,040** | `ee23f62fe7c0b037c0da918ab1b8275b27be376ee4e230645e5fcc85bc19041e` |
 | 8 (Q8_0, deployed v20) | no | **414/560 = 73.9%** | 431/560 = 77.0% | **62.2** (paired; 63.6 / 63.2 / 59.7) | **~165** | `e885c57b0ca139476fd86c34694c9a130ceaba10335211ab4c15cfbf9dfa6024` |
 | 16 (F16, **upcast from Q8_0**) | no | **76/95 = 80.0%** on the first 100 rows only (Q8_0 on the same rows: 73/95) | 73/95 (Q8_0: 72/95) | **4.7** (paired; 4.79 / 4.87 / 4.50) | **~11,900** | `ec7248c4708d672be1123923aacc7a8f3370d68b13069262526f1686eaec8272` |
-| 4 | yes | pending another agent | pending | pending | pending | pending |
-| 8 | yes | pending another agent | pending | pending | pending | pending |
-| 16 | yes | pending another agent | pending | pending | pending | pending |
+| 4 | yes | **REFUSED at boot** -- the store adopts 0 of 196 weights (`196 left dense (other qtype)`) and the engine logs `LLQ was requested but no Q8_0 weight was adopted` and makes the assistant unavailable. Not a gap: it is what stops a run being quoted as an LLQ number while the dense path executed. |
+| 8 | yes, `llq` | **414/560 = 73.9%, IDENTICAL to dense** | **431/560, identical** | **44.59** | ~same | same file, `e885c57b...fa6024` |
+| 8 | yes, `llq-fused` | **415/560 = 74.1%** (paired vs dense: +8 / -7, net **+1**, McNemar **p = 1.0**) | **431/560, same total** | **47.82** | ~same | same file |
+| 16 | yes | not served yet -- the fused bf16 tier is being wired | — | — | — | `v21-bf16.gguf`, 1,198,182,496 B |
+
+**AT 8 BITS LLQ IS A NO-OP IN ALL THREE DIMENSIONS, and that is the result
+rather than a disappointment.** Bytes +0.07%, decode 0.91x materialising and
+0.976x fused, accuracy indistinguishable. The cause is one measurable property:
+GGUF Q8_0 refits a scale every 32 weights, so within a block the codes already
+fill their range -- the byte-minimal base comes out EQUAL to the source width on
+all 197 tensors, the CSR residual is zero bytes and the outlier fraction is
+0.0000%. With no bytes saved there is nothing for a fused kernel to read faster.
+
+sensen's own `docs/technical/LLQ_COMPRESSION_EVIDENCE.md` (`a8e272cb`) states
+this as a general property from the other direction, measured on Qwen3.8-27B at
+group-64: *"A scale per 64 weights spreads each group across its full 4-bit
+range, so no code falls outside B = 4, B = S, there is no residual, and LLQ
+stores exactly the dense codes."* Its §6 decision table tells a group-scaled
+caller to keep the dense codes. We are that caller at 8 bits, and these rows are
+the same conclusion reached independently at group-32.
+
+**The 15 rows that move under `llq-fused` move in BOTH directions, which is the
+signature to expect.** `LlqGemv::runInt8Exact` computes an exact integer total
+per 32-weight block, where the dense kernel keeps an 8-lane FMA accumulator and
+reduces once; the integer arithmetic is exact and only the float reduction ORDER
+differs, so greedy decoding flips near-ties either way. 8 gained and 7 lost at
+p = 1.0 is that, and it is NOT a licence to treat the tier as identical -- a
+future model could sit closer to more ties.
+
+**THE TWO 8-BIT LLQ ROWS ARE DIFFERENT TIERS AND MUST NOT BE MERGED.** `llq`
+materialises the image back into a Q8_0 tile and runs sensen's EXISTING kernel,
+so its output is byte-identical to dense by construction -- and it does strictly
+more work for the same bytes read, which is why it is the slowest arm.
+`llq-fused` runs `LlqGemv::runInt8Exact` on the packed image: the integer dot
+product is exact, but it replaces an 8-lane FMA accumulator with per-block
+integer totals, so the float reduction ORDER differs and near-ties flip.
+Measured: token sha `a1168d29480d` for dense and `llq`, `fbaa459f8bf3` for
+`llq-fused`. An accuracy figure from one tier says nothing about the other.
 
 Other harness cells, all measured: 4-bit `asked_ok` 66/86, `answered_ok` 50/68,
 0 errors; 8-bit `asked_ok` 64/86, `answered_ok` 68/68, 0 errors (reproduces the

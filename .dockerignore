@@ -70,3 +70,18 @@ backend/sensen/docs
 # is the case it was written for.
 !backend/models/*.gguf
 
+# model-archive/ holds MERGED BF16 CHECKPOINTS -- the safetensors a training run
+# produces, ~1.2-1.8 GB each, which are the INPUT to a GGUF conversion and reach
+# the image through nothing. The `**/*.gguf` rule above does NOT cover them,
+# because they are not .gguf, and that cost a failed deploy on 2026-10-01:
+# `gzip: stdout: Disk quota exceeded` staging the upload tarball, with 5 GB of
+# checkpoints in it. The tell is that the failure is in TAR, before Railway is
+# reached at all, so it reads as a quota problem rather than as a missing
+# exclusion.
+#
+# .gitignore got this entry the same day. TWO ignore files is two things to
+# forget, and a weight file is exactly the shape that makes forgetting one
+# expensive -- gitignored keeps it out of git and says nothing about the build
+# context.
+model-archive/
+

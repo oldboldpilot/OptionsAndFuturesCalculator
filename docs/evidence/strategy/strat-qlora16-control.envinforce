@@ -1,0 +1,1 @@
+env-in-force: MODEL_PATH=/home/muyiwa/llq-scratch/strategy-qlora16-control-q8_0.gguf PRO_GATE_MODE=off 

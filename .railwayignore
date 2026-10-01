@@ -133,3 +133,21 @@ current-ui.png
 # CTest scratch, generated at whatever directory ctest runs from.
 Testing
 **/Testing
+
+# model-archive/ holds MERGED BF16 CHECKPOINTS -- the safetensors a training run
+# produces, ~1.2-1.8 GB each. They are the INPUT to a GGUF conversion and reach
+# the image through nothing.
+#
+# THIS IS THE THIRD IGNORE FILE AND THE ONE THE UPLOAD ACTUALLY READS, which is
+# why the entry belongs here most and was missing here longest. .gitignore and
+# .dockerignore both got it on 2026-10-01; this file did not, and two of three
+# lists carrying a rule is the sweep-the-class defect recorded all over
+# CLAUDE.md -- a rule applied correctly to one member of a family and never
+# carried to the rest. `railway up` reads THIS list, so a .dockerignore entry
+# cannot keep a 5 GB directory out of the upload; that is what put 4,030 MB
+# through the edge and earned a Cloudflare 413.
+#
+# The directory lives at ~/model-archive today, OUTSIDE the repository, and that
+# is the actual fix -- an ignore entry only has to be right if the bytes are
+# present. This is defence in depth for the day one is staged here again.
+model-archive/

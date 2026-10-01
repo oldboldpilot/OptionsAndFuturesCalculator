@@ -1,0 +1,1 @@
+env-in-force: MODEL_PATH=/home/muyiwa/PrimaryNAS/DataFolder/model_checkpoints/param-agent-qlora-v2-Q8_0.gguf PRO_GATE_MODE=off 

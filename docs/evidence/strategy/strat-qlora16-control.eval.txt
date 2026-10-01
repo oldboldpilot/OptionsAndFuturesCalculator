@@ -1,0 +1,28 @@
+[1500 rows, 1702.6s, 1135 ms/row]
+
+=== strat-qlora16-control ===
+params exact-match : 1231/1496 = 82.3%
+  symbol           1258/1496 = 84.1%
+  asset_class      1304/1496 = 87.2%
+  strategy         1292/1496 = 86.4%
+  expiration_days  1289/1496 = 86.2%
+  quantity         1304/1496 = 87.2%
+non-params correct : 4/4 = 100.0%
+asked-when-ambiguous: 240/513 = 46.8%
+
+first mismatches:
+  user: pull up a iron fly on tsla at a month
+    want {'symbol': 'TSLA', 'asset_class': 'EQUITY', 'strategy': 'iron_butterfly', 'expiration_days': 30, 'quantity': 1}
+    got  {'symbol': 'TSLA', 'asset_class': 'EQUITY', 'strategy': 'iron_butterfly', 'expiration_days': 90, 'quantity': 1}
+  user: i want to trade bull spread
+    want {'symbol': 'TSLA', 'asset_class': 'EQUITY', 'strategy': 'bull_call_spread', 'expiration_days': 30, 'quantity': 1}
+    got  {'symbol': 'TSLA', 'asset_class': 'EQUITY', 'strategy': 'bull_put_spread', 'expiration_days': 30, 'quantity': 1}
+  user: The nasdaq etf put ratio backspread 120 days out
+    want {'symbol': 'QQQ', 'asset_class': 'EQUITY', 'strategy': 'put_backspread', 'expiration_days': 120, 'quantity': 1}
+    got  None
+  user: put butterfly ethereum 1 days out please
+    want {'symbol': 'ETH', 'asset_class': 'CRYPTO', 'strategy': 'put_butterfly', 'expiration_days': 1, 'quantity': 1}
+    got  None
+  user: diagonal on the nasdaq etf 60 days
+    want {'symbol': 'QQQ', 'asset_class': 'EQUITY', 'strategy': 'diagonal_spread', 'expiration_days': 60, 'quantity': 1}
+    got  None

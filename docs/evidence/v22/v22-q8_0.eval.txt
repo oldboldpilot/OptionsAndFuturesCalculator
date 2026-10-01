@@ -1,0 +1,104 @@
+holdout   : /home/muyiwa/Development/OptionsAndFuturesCalculator/agent/dataset/data_mortgage/val.jsonl
+            sha256 1aa3ce94c344217e...  600 rows, 560 with gold <params>
+[ok] holdout is disjoint from /home/muyiwa/Development/OptionsAndFuturesCalculator/agent/dataset/data_mortgage/train.jsonl (11400 train rows)
+[600 rows, 1701.0s, 2835 ms/row]
+
+=== v22-q8_0 ===
+-- 1. RAW MODEL ACCURACY (pre-verification, comparable to evaluate.py)
+params exact-match   : 530/560 = 94.6%
+emitted valid <params>: 560/560 = 100.0%
+<params> but bad JSON: 0/560 = 0.0%
+non-params correct   : 40/40 = 100.0%
+asked-when-ambiguous : 86/86 raw, 86/86 served = 100.0% raw   (clarification rows)
+answered-when-stated : 68/68 raw, 68/68 served = 100.0% raw   (modification rows, first turn)
+
+-- 2. SERVED OUTCOME (what a user gets, post-GP-ARA)
+  params         560/600 = 93.3%
+  clarification  34/600 = 5.7%
+  refusal        6/600 = 1.0%
+  refusal reasons:
+       6  OUT_OF_SCOPE/other
+  served params exactly matching gold: 489/560
+  served vs gold, by difference SHAPE (dropped-fields/sign are service translations, not model errors):
+     489  exact
+       8  dropped-fields
+      23  sign
+      40  value
+  served agreeing with gold up to service translation: 520/560
+  (of the 40 rows whose gold is prose: {'clarification': 34, 'refusal': 6})
+
+-- 3. PER-OPERATION, raw AND served
+  ComputeAmortization              raw  64/78   served  78/78    <- serving recovers 14
+  ComputePayment                   raw  47/58   served  54/58    <- serving recovers 7
+  ComputeDetailedAmortization      raw  55/60   served  60/60    <- serving recovers 5
+  ComputePaybackPeriod             raw  27/27   served  10/27 
+  ComputePresentValue              raw   6/6    served   6/6  
+  ComputeCumulative                raw  13/13   served  13/13 
+  ComputeRentalRoi                 raw  25/25   served  25/25 
+  ComputeRate                      raw  11/11   served   0/11    <- serving loses EVERY correct parse
+  ComputeDepreciation              raw  13/13   served   0/13    <- serving loses EVERY correct parse
+  ComputeHeloc                     raw  39/39   served  39/39 
+  ComputeRentalCashFlow            raw  34/34   served  34/34 
+  ComputeFutureValue               raw   6/6    served   6/6  
+  ComputeRentVsBuy                 raw  22/22   served  22/22 
+  ComputeClosingCosts              raw  20/20   served  20/20 
+  ComputeRefinance                 raw  29/29   served  29/29 
+  ComputeFutureValueDetailed       raw  41/41   served  41/41 
+  ComputeIrr                       raw   5/5    served   5/5  
+  ComputeInterestPayment           raw   7/7    served   7/7  
+  ComputePayoffTiming              raw  12/12   served  12/12 
+  ComputePrincipalPayment          raw  10/10   served  10/10 
+  ComputeMortgageRecast            raw   7/7    served   7/7  
+  ComputeNpv                       raw   5/5    served   4/5  
+  ComputeXirr                      raw   3/3    served   0/3     <- serving loses EVERY correct parse
+  ComputePeriods                   raw  12/12   served   0/12    <- serving loses EVERY correct parse
+  ComputeXnpv                      raw   5/5    served   0/5     <- serving loses EVERY correct parse
+  ComputeAmortizationBatch         raw   5/5    served   0/5     <- serving loses EVERY correct parse
+  ComputeHomeFutureValue           raw   4/4    served   4/4  
+  ComputeHomeNpv                   raw   3/3    served   3/3  
+
+-- raw failures (first 8)
+
+  user : Amortize $1,056,300 at 6.44% over 10-year.
+  reply: what if the rate is 5.94% instead?
+  gold : {"operation": "ComputeAmortization", "loan_amount": "1056300.00", "annual_rate": "0.0594", "term_months": 120, "monthly_overpayment": "0.00", "pmi_annual_rate": "0.0000", "original_home_value": "1056300.00", "annual_repairs": "0.00", "annual_insurance": "0.00", "annual_cost_growth": "0.0000"}
+  raw  : '<think>\n\n</think>\n\n<params>{"operation":"ComputeAmortization","loan_amount":"1056300.00","annual_rate":"0.0644","term_months":120,"monthly_overpayment":"0.00","pmi_annual_rate":"0.0000","original_home_value":"1056300.00","annual_repairs":"0.00","annual_insurance":"0.00","annual_cost_growth":"0.0000"}</params>'
+  served: params 
+
+  user : Amortize $1,003,700 at 4.86% over 20-year.
+  reply: try 6.36%
+  gold : {"operation": "ComputeAmortization", "loan_amount": "1003700.00", "annual_rate": "0.0636", "term_months": 240, "monthly_overpayment": "0.00", "pmi_annual_rate": "0.0000", "original_home_value": "1003700.00", "annual_repairs": "0.00", "annual_insurance": "0.00", "annual_cost_growth": "0.0000"}
+  raw  : '<think>\n\n</think>\n\n<params>{"operation":"ComputeAmortization","loan_amount":"1003700.00","annual_rate":"0.0486","term_months":240,"monthly_overpayment":"0.00","pmi_annual_rate":"0.0000","original_home_value":"1003700.00","annual_repairs":"0.00","annual_insurance":"0.00","annual_cost_growth":"0.0000"}</params>'
+  served: params 
+
+  user : Amortize $1,003,000 at 6.05% over 30-year. I'm in the 34.24% tax bracket.
+  reply: what if the rate is 6.55% instead?
+  gold : {"operation": "ComputeDetailedAmortization", "loan_amount": "1003000.00", "annual_rate": "0.0655", "term_months": 360, "monthly_overpayment": "0.00", "pmi_annual_rate": "0.0000", "original_home_value": "1003000.00", "annual_tax_rate": "0.3424", "annual_repairs": "0.00", "annual_insurance": "0.00", "annual_cost_growth": "0.0000"}
+  raw  : '<think>\n\n</think>\n\n<params>{"operation":"ComputeDetailedAmortization","loan_amount":"1003000.00","annual_rate":"0.0605","term_months":360,"monthly_overpayment":"0.00","pmi_annual_rate":"0.0000","original_home_value":"1003000.00","annual_tax_rate":"0.3424","annual_repairs":"0.00","annual_insurance":"0.00","annual_cost_growth":"0.0000"}</params>'
+  served: params 
+
+  user : I'm buying a $1,474,000 house with a 10% deposit. 5.76%, 30-year fixed -- what's the payment?
+  gold : {"operation": "ComputePayment", "rate": "0.004800", "periods": 360, "present_value": "1326600.00", "future_value": "0.00", "timing": "END_OF_PERIOD"}
+  raw  : '<think>\n\n</think>\n\n<params>{"operation":"ComputePayment","rate":"0.004800","periods":360,"present_value":"1385600.00","future_value":"0.00","timing":"END_OF_PERIOD"}</params>'
+  served: params 
+
+  user : Amortize $938,800 at 5.86% over 30-year. I'm in the 26.72% tax bracket.
+  reply: try 6.36%
+  gold : {"operation": "ComputeDetailedAmortization", "loan_amount": "938800.00", "annual_rate": "0.0636", "term_months": 360, "monthly_overpayment": "0.00", "pmi_annual_rate": "0.0000", "original_home_value": "938800.00", "annual_tax_rate": "0.2672", "annual_repairs": "0.00", "annual_insurance": "0.00", "annual_cost_growth": "0.0000"}
+  raw  : '<think>\n\n</think>\n\n<params>{"operation":"ComputeDetailedAmortization","loan_amount":"938800.00","annual_rate":"0.0586","term_months":360,"monthly_overpayment":"0.00","pmi_annual_rate":"0.0000","original_home_value":"938800.00","annual_tax_rate":"0.2672","annual_repairs":"0.00","annual_insurance":"0.00","annual_cost_growth":"0.0000"}</params>'
+  served: params 
+
+  user : I'm buying a $1,328,000 house with 30% down. 7.76%, 15-year fixed -- what's the payment?
+  gold : {"operation": "ComputePayment", "rate": "0.006467", "periods": 180, "present_value": "929600.00", "future_value": "0.00", "timing": "END_OF_PERIOD"}
+  raw  : '<think>\n\n</think>\n\n<params>{"operation":"ComputePayment","rate":"0.006467","periods":180,"present_value":"981600.00","future_value":"0.00","timing":"END_OF_PERIOD"}</params>'
+  served: params 
+
+  user : What's the monthly payment on a $1,297,000 home with 20% down at 4.75% over 10-year?
+  gold : {"operation": "ComputePayment", "rate": "0.003958", "periods": 120, "present_value": "1037600.00", "future_value": "0.00", "timing": "END_OF_PERIOD"}
+  raw  : '<think>\n\n</think>\n\n<params>{"operation":"ComputePayment","rate":"0.003958","periods":120,"present_value":"1017600.00","future_value":"0.00","timing":"END_OF_PERIOD"}</params>'
+  served: params 
+
+  user : Amortize the loan on a $940,000 property, 5% down payment, 5.45%, 20-year.
+  gold : {"operation": "ComputeAmortization", "loan_amount": "893000.00", "annual_rate": "0.0545", "term_months": 240, "monthly_overpayment": "0.00", "pmi_annual_rate": "0.0000", "original_home_value": "940000.00", "annual_repairs": "0.00", "annual_insurance": "0.00", "annual_cost_growth": "0.0000"}
+  raw  : '<think>\n\n</think>\n\n<params>{"operation":"ComputeAmortization","loan_amount":"889000.00","annual_rate":"0.0545","term_months":240,"monthly_overpayment":"0.00","pmi_annual_rate":"0.0000","original_home_value":"940000.00","annual_repairs":"0.00","annual_insurance":"0.00","annual_cost_growth":"0.0000"}</params>'
+  served: params 
