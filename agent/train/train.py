@@ -16,6 +16,18 @@ way, and the gap is not close:
     --method qlora   rank 16, alpha 16, all 7 projections   95.0% params exact-match
     --method full    int8 QAT, every one of 398M params      49.8% params exact-match
 
+`--method lora` is a THIRD option and it is not a variant of either: a BF16
+frozen base with the same LoRA adapters. It exists because "load the base at
+16 bits" and "train adapters" were a single boolean here, so the only way to
+reach a 16-bit base was `--method full`, which also drops LoRA and adds int8
+QAT -- i.e. it changed three things to vary one. Use it when the question is
+what the NF4 round trip on the frozen base costs: qlora quantises the base to
+4 bits before the adapters ever see it, so the pretrained weights the adapters
+are fitted against are not the ones that were released. The merge is
+`merged_16bit` either way, so the ARTEFACT is 16-bit in both cases and the
+difference is entirely in what was trained against. Its accuracy against
+qlora's is measured, not assumed -- quote the measurement, not this paragraph.
+
 On a 0.6B model, updating all 398M parameters (`--method full`) damaged the
 pretrained representations faster than it learned this task -- a five-field
 JSON extraction problem does not need, and cannot survive, that much of the
@@ -350,9 +362,13 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=3407)
     ap.add_argument(
         "--method",
-        choices=["qlora", "full"],
+        choices=["qlora", "lora", "full"],
         default="qlora",
-        help="qlora: 4-bit frozen base + LoRA adapters. " "full: full fine-tune with int8 QAT.",
+        help="qlora: 4-bit frozen base + LoRA adapters. "
+        "lora: BF16 frozen base + LoRA adapters -- the base is downloaded and "
+        "trained against at 16 bits, so no NF4 round trip stands between the "
+        "pretrained weights and the adapters. "
+        "full: full fine-tune with int8 QAT.",
     )
     # LoRA capacity. r=16 on a 0.6B model is generous for a task whose output is
     # a five-field JSON object; it is here to be lowered if the adapter overfits,
@@ -369,13 +385,20 @@ def main() -> None:
     )
     args = ap.parse_args()
 
-    qlora = args.method == "qlora"
+    # TWO QUESTIONS, NOT ONE, AND CONFLATING THEM IS WHY A 16-BIT BASE WAS
+    # UNREACHABLE. "Does the base load quantised?" and "are we training
+    # adapters?" were a single `qlora` boolean, so the only way to get a
+    # bf16 base was `--method full`, which also turns off LoRA and turns on
+    # int8 QAT over all 398M parameters -- measured at 49.8% against qlora's
+    # 95.0%. `--method lora` is the combination that was missing.
+    load_4bit = args.method == "qlora"
+    use_lora = args.method in ("qlora", "lora")
     # 2e-4 is the standard LoRA rate and ~4x the full fine-tuning rate. The
     # adapters start at zero and are the only thing being trained, so they have
     # to move much further per step than a full model whose weights are already
     # in a good place -- 5e-5 on LoRA underfits and reads as "LoRA is worse".
     if args.lr is None:
-        args.lr = 2e-4 if qlora else 5e-5
+        args.lr = 2e-4 if use_lora else 5e-5
     print(f"method={args.method}  lr={args.lr}")
 
     data = Path(args.data)
@@ -432,9 +455,9 @@ def main() -> None:
         model_name=MODEL_ID,
         max_seq_length=args.max_seq_length,
         dtype=torch.bfloat16,
-        load_in_4bit=qlora,
-        full_finetuning=not qlora,
-        **({} if qlora else {"qat_scheme": QAT_SCHEME}),
+        load_in_4bit=load_4bit,
+        full_finetuning=not use_lora,
+        **({} if use_lora else {"qat_scheme": QAT_SCHEME}),
     )
 
     # Vocabulary extension happens BETWEEN loading and get_peft_model, and the
@@ -455,7 +478,7 @@ def main() -> None:
             model, tokenizer, toks
         )
 
-    if qlora:
+    if use_lora:
         model = FastLanguageModel.get_peft_model(
             model,
             r=args.lora_r,
@@ -688,7 +711,7 @@ def main() -> None:
             print(f"  {name} failed: {type(e).__name__}: {e}")
             return False
 
-    if qlora:
+    if use_lora:
         # Adapters first, and on their own. They are a few MB, they are the only
         # thing training actually produced, and they save without touching the
         # tied-lm_head problem at all. Saving them before attempting the merge
@@ -768,10 +791,13 @@ def main() -> None:
             {
                 "model": MODEL_ID,
                 "method": args.method,
-                "qat_scheme": None if qlora else QAT_SCHEME,
+                "qat_scheme": None if use_lora else QAT_SCHEME,
+                # RECORDED, because the artefact must say how the base was
+                # loaded rather than leaving it to the command somebody ran.
+                "base_load_bits": 4 if load_4bit else 16,
                 "lora": (
                     {"r": args.lora_r, "alpha": args.lora_alpha, "dropout": args.lora_dropout}
-                    if qlora
+                    if use_lora
                     else None
                 ),
                 "lr": args.lr,
