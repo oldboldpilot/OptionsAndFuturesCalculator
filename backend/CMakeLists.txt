@@ -92,36 +92,57 @@ set(CMAKE_CXX_SCAN_FOR_MODULES ON)
 # TBB; with libstdc++ out of the picture it names nothing and has been dropped
 # rather than left as a define that only looks meaningful.
 #
-# -maes -mpclmul ARE IN THE FLOOR BECAUSE THE ONE std.pcm CARRIES THEM, and the
-# flags are a consequence of that rather than a request for the instructions.
-# sensen's own CMakeLists.txt appends them to CMAKE_CXX_FLAGS in SENSEN's
-# directory scope, and it does so BEFORE declaring std_module_precompile -- so
-# the single std.pcm this tree compiles against records "+aes" and "+pclmul" as
-# target features. Clang then refuses, PER TRANSLATION UNIT, any consumer built
-# without them:
+# -maes -mpclmul ARE DELIBERATELY *NOT* HERE, AND THIS BLOCK RECORDS A MISTAKE
+# RATHER THAN A RULE, because the reasoning that put them here for one commit was
+# wrong in a way that reads as careful.
 #
-#   precompiled file 'std.pcm' was compiled with the target feature '+aes' but
-#   the current translation unit is not
+# The mismatch they were added to fix is real: sensen appends the pair to
+# CMAKE_CXX_FLAGS in SENSEN's directory scope and declares std_module_precompile
+# afterwards, so the single std.pcm recorded "+aes"/"+pclmul" while every TU here
+# was built from CANONICAL_FLAGS without them, and clang refuses such a consumer
+# per translation unit ("compiled with the target feature '+aes' but the current
+# translation unit is not" -- a diagnostic naming the BMI, not the flag).
 #
-# which names the BMI and not the flag. Every TU in THIS directory is built from
-# CANONICAL_FLAGS, so without this pair the engine cannot consume the std module
-# that sensen builds for it.
+# ADDING THEM HERE MADE THAT GO AWAY AND INTRODUCED A WORSE PROBLEM. Three
+# measurements, none of which the original audit made:
 #
-# IT IS SAFE IN THE FLOOR FOR THE REASON sensen RECORDS, and that reason is
-# specifically about floating point: neither AES-NI nor PCLMUL touches FP, so
-# the stated justification for the -march=x86-64-v3 floor -- cross-host FP
-# parity and durable-replay determinism -- is untouched by adding them, and
-# every v3-class CPU has both. That is what separates them from -mavx512f, which
-# is deliberately NOT in the floor because AVX-512 is reached through
-# per-function [[gnu::target]] tiers selected by CPUID at run time.
+#   1. The justification was "every v3-class CPU has both", which is true of real
+#      silicon and FALSE of the architecture level -- and a floor states the
+#      level. The x86-64 psABI puts AES and PCLMULQDQ in NO micro-architecture
+#      level; both are independent CPUID bits, and `clang -march=x86-64-v3 -dM -E`
+#      defines __AVX__/__AVX2__/__BMI2__/__F16C__/__FMA__/__LZCNT__ and neither
+#      __AES__ nor __PCLMUL__.
+#   2. A floor flag is NOT inert metadata even when this project's own code emits
+#      nothing. It defines __PCLMUL__ for every dependency built with the floor,
+#      and abseil's CRC32 gates on exactly that -- `#if defined(__x86_64__) &&
+#      defined(__SSE4_2__) && defined(__PCLMUL__)` -> ABSL_CRC_INTERNAL_HAVE_X86_SIMD
+#      -> ABSL_INTERNAL_CAN_USE_SIMD_CRC32C. __SSE4_2__ is already set two flags
+#      to the left, so __PCLMUL__ was the only missing term, and 756 vpclmul*
+#      instructions duly appeared in crc_x86_arm_combined.cc.o, which does not
+#      pass -mpclmul on its own target. (randen_hwaes.cc.o does, carrying -maes
+#      twice, and was unaffected -- which is what makes this attributable.)
+#   3. abseil's x86 dispatch has NO runtime guard for it: its `default:` case
+#      returns an accelerated implementation for any unrecognised CPU, where the
+#      aarch64 `default:` asks SupportsArmCRC32PMULL() first and may return
+#      nullptr. On a host without PCLMUL those instructions are reachable, so the
+#      failure mode is SIGILL, not a slow path.
 #
-# THE ATTRIBUTION HERE WAS WRONG ONCE AND IS WORTH STATING: this file blamed
-# abseil's randen_hwaes inside gRPC. abseil's ABSL_RANDOM_HWAES_X64_FLAGS is
-# "-maes;-msse4.1" -- it never names -mpclmul, so it cannot explain half the
-# error -- and abseil applies its copts with target_compile_options(... PRIVATE),
-# which cannot reach another directory's CMAKE_CXX_FLAGS at all. sensen's own
-# scope is where its std.pcm rule lives; abseil's mechanism was never available.
-set(CANONICAL_FLAGS "-stdlib=libc++ -fPIC -O3 -march=x86-64-v3 -mtune=generic -mavx -mavx2 -mfma -msse2 -msse3 -mssse3 -msse4.1 -msse4.2 -maes -mpclmul -pthread -fstack-protector-strong -DNDEBUG -Wno-error=stringop-overflow -Wno-error=array-bounds -Wno-error=unused-variable -Wno-error=unused-parameter -Wno-error=unused-but-set-variable -Wno-error=pedantic -Wno-error=global-module -Wno-unknown-warning-option -fexperimental-library")
+# THE FIRST AUDIT "PROVED" THE OPPOSITE WITH A BROKEN GREP, which is the part
+# worth keeping. It counted `\baesenc\b` and `\bpclmul` and found zero -- but
+# under -mavx/-mavx2 the assembler emits VEX forms, `vaesenc` and
+# `vpclmullqlqdq`, and \b cannot match between 'v' and 'a'. The correct pattern
+# finds 32 and 756. A negative grep needs a positive control, which this file
+# already says elsewhere and which was not done here.
+#
+# FIXED AT THE SOURCE INSTEAD. sensen's own comment says the pair is there for
+# the embedded ThinButQuickWebFramework build, and TBQWF is NOT embedded here
+# (external/tbqwf has 0 entries and the generated build has 0 tbqwf targets), so
+# the flags were buying nothing. sensen now gates the append on TBQWF actually
+# being present and ANNOUNCES which arm it took at configure time ("SIMD floor:
+# ..."), so this tree's std.pcm no longer records the features and no consumer
+# needs them. Do not add them back to work around a BMI mismatch; check what
+# sensen's configure line says about the SIMD floor first.
+set(CANONICAL_FLAGS "-stdlib=libc++ -fPIC -O3 -march=x86-64-v3 -mtune=generic -mavx -mavx2 -mfma -msse2 -msse3 -mssse3 -msse4.1 -msse4.2 -pthread -fstack-protector-strong -DNDEBUG -Wno-error=stringop-overflow -Wno-error=array-bounds -Wno-error=unused-variable -Wno-error=unused-parameter -Wno-error=unused-but-set-variable -Wno-error=pedantic -Wno-error=global-module -Wno-unknown-warning-option -fexperimental-library")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${CANONICAL_FLAGS}")
 
 # The linker needs to be told as well, and separately: -stdlib= is a driver
@@ -881,6 +902,11 @@ target_sources(sensen_slim
             "${SENSEN_SRC}/llama_model_kernels.cppm"
             "${SENSEN_SRC}/llama_model_types.cppm"
             "${SENSEN_SRC}/llm_interfaces.cppm"
+            # constrained_decode.cppm arrived with the sensen bump to 5a510a3d and is
+            # imported by llm_pipeline.cppm. The slim module list is HAND-MAINTAINED,
+            # so nothing derives this -- scripts/sensen_module_closure.py --check names
+            # the missing entry in one command, and it is the FOURTH bump to need one.
+            "${SENSEN_SRC}/constrained_decode.cppm"
             "${SENSEN_SRC}/llm_pipeline.cppm"
             "${SENSEN_SRC}/lora.cppm"
             "${SENSEN_SRC}/memory.cppm"
