@@ -445,6 +445,94 @@ auto main() -> int {
         }
     }
 
+    std::printf("\n18. a revised PRINCIPAL, where the operation has no other money\n");
+    {
+        // THE v22 RESIDUE. On the 560-row holdout the layer recovered 26 of the
+        // 30 rows the model got wrong, and the 4 it did not were ONE family:
+        // ComputePayment revised by a lone money figure. The model answered the
+        // OPENING turn's principal on all four -- a figure that parses, grounds
+        // and satisfies every bound, so nothing downstream could object.
+        struct Row { const char* open; const char* revise; const char* want; const char* wrong; };
+        const std::vector<Row> rows{
+            {"Payment on $490,200 at 7.2% over 30-year?", "what about $540,200 instead?", "540200", "490200.00"},
+            {"Payment on $673,800 at 6.8% over 30-year?", "what about $723,800 instead?", "723800", "673800.00"},
+            {"Payment on $406,300 at 6.54% over 30-year?", "redo it for $456,300", "456300", "406300.00"},
+            {"Payment on $323,700 at 6.35% over 15-year?", "redo it for $398,700", "398700", "323700.00"},
+        };
+        for (const auto& r : rows) {
+            const auto c = md::derive_candidates_in_turns("ComputePayment", r.open, r.revise);
+            const auto pv = only(c, "present_value");
+            check(pv.size() == 1 && std::stod(pv.front()) == std::stod(r.want),
+                  std::string{"revision \""} + r.revise + "\" -> present_value "
+                    + r.want + " (got " + (pv.empty() ? std::string{"none"} : pv.front()) + ")");
+            const std::map<std::string, std::string> emitted{{"present_value", r.wrong}};
+            const auto rec = md::reconcile(c, emitted);
+            check(rec.replace.size() == 1 && rec.replace.front().field == "present_value"
+                      && std::stod(rec.replace.front().values.front()) == std::stod(r.want),
+                  std::string{"the opening turn's "} + r.wrong
+                    + " is replaced at the model's own precision");
+        }
+
+        // A model that already revised is left alone.
+        {
+            const auto c = md::derive_candidates_in_turns(
+                "ComputePayment", rows[0].open, rows[0].revise);
+            check(md::reconcile(c, {{"present_value", "540200.00"}}).replace.empty(),
+                  "an already-revised present_value is not rewritten");
+        }
+
+        // FIRST TURN UNCHANGED BY CONSTRUCTION: no turn above 0 exists.
+        check(only(md::derive_candidates("ComputePayment", rows[0].open),
+                   "present_value").empty(),
+              "a first-turn call derives no principal -- nothing can have been revised");
+
+        // NO EARLIER FIGURE TO RESTATE: a lone money literal in a revision with
+        // nothing before it introduces a figure, it does not replace one.
+        check(only(md::derive_candidates_in_turns("ComputePayment",
+                                                  "Payment at 7.2% over 30-year?",
+                                                  "what about $540,200 instead?"),
+                   "present_value").empty(),
+              "a revision with no earlier money restates nothing and derives nothing");
+
+        // A DEPOSIT STATED ANYWHERE hands the principal to the net-loan rules.
+        // The gross revised figure would be exactly the wrong answer there.
+        {
+            const auto c = md::derive_candidates_in_turns(
+                "ComputePayment", "A $796,000 home with 10% down at 5.97% over 30-year?",
+                "redo it for $817,400");
+            const auto pv = only(c, "present_value");
+            check(pv.size() == 1 && std::stod(pv.front()) == 735660.0,
+                  "with a stated deposit the revised price still nets to 735660 (got "
+                    + (pv.empty() ? std::string{"none"} : pv.front()) + ")");
+        }
+
+        // TWO FIGURES IN ONE REVISION: ambiguous, so the model keeps selecting.
+        check(only(md::derive_candidates_in_turns("ComputePayment", rows[0].open,
+                                                  "try $540,200 or $560,200"),
+                   "present_value").size() == 2,
+              "two figures in one revision turn stay ambiguous");
+
+        // THE SCOPE: only an operation whose loan slot is its SOLE money field
+        // (future_value aside). Where another money slot exists, the revised
+        // figure may belong to it and nothing here can tell.
+        for (const char* op : {"ComputePayment", "ComputeInterestPayment",
+                               "ComputePrincipalPayment", "ComputeCumulative"}) {
+            check(only(md::derive_candidates_in_turns(op, rows[0].open, rows[0].revise),
+                       "present_value").size() == 1,
+                  std::string{op} + " takes a revised principal");
+        }
+        for (const char* op : {"ComputeFutureValue", "ComputePeriods", "ComputeRate"}) {
+            check(only(md::derive_candidates_in_turns(op, rows[0].open, rows[0].revise),
+                       "present_value").empty(),
+                  std::string{op} + " has a payment slot, so a lone figure is NOT assumed to be the principal");
+        }
+        check(only(md::derive_candidates_in_turns(
+                       "ComputeAmortization", "Amortize $451,300 at 5.25% over 20-year.",
+                       "what if insurance is $4,000/yr?"),
+                   "loan_amount").empty(),
+              "an insurance revision on ComputeAmortization is not read as a new loan");
+    }
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

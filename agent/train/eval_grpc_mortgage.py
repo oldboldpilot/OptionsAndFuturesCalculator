@@ -288,7 +288,22 @@ def encode_like_service(value) -> str:
     if isinstance(value, int):
         return str(value)
     if isinstance(value, float):
-        return repr(value)
+        # repr(0.0) is "0.0" and the SERVICE writes "0", so a gold float whose
+        # value is integral was scored a `value` MISMATCH on formatting alone.
+        # Measured on v22 (2026-09-30): ALL 36 rows that the model got right and
+        # the served comparison called wrong were this, across six operations --
+        # ComputePaybackPeriod 17, ComputeDepreciation 5, ComputeXnpv 5,
+        # ComputeAmortizationBatch 5, ComputeXirr 3, ComputeNpv 1, and zero rows
+        # unexplained. It read as the derivation layer rewriting correct answers
+        # and cost a wrong diagnosis of that layer.
+        #
+        # It only became visible on a STRONG model. At 74% raw the layer's
+        # genuine recoveries (+17) outweighed it and `served_exact` looked like a
+        # net gain; at 94.6% the same artefact turned into an apparent -41. A
+        # harness defect that hides behind a weak model is the shape this file
+        # already records three times -- phrase_money's impossible labels, the
+        # llama-cli phantom, and the evaluate.py bf16 gap.
+        return str(int(value)) if value == int(value) else repr(value)
     if isinstance(value, list):
         return "[" + ",".join(encode_like_service(v) for v in value) + "]"
     return str(value)

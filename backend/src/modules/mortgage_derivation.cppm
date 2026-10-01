@@ -305,6 +305,44 @@ derive(F, V) :- loan_slot(F), money(P, Tp), \+ superseded_money(Tp),
 derive(F, V) :- loan_slot(F), money(P, Tp), \+ superseded_money(Tp),
                 down_money(Dn, Td), \+ superseded_down(Td), P > Dn, V is P - Dn.
 
+% A deposit, in either spelling, stated in ANY turn. A zero-arity predicate on
+% purpose: negating `down_pct(_, _)` directly makes the solver FAIL OUTRIGHT on
+% a revision turn, and `derive_candidates_in_turns` answers an empty set when the
+% solve errors -- which would have dropped every OTHER derivation on the row
+% too, the rate and the term included.
+down_stated :- down_pct(_, _).
+down_stated :- down_money(_, _).
+
+% --- a REVISED principal, when the operation has no other money to be -----
+% "Payment on $490,200 at 7.2% over 30-year?" revised by "what about $540,200
+% instead?" restates the one money slot the operation HAS. v22 answered the
+% opening turn's $490,200 on 4 of the 4 such holdout rows -- every one of them a
+% figure that parses, grounds and satisfies its bounds, because the user really
+% did say it -- and no rule reached them because `loan_slot` only derived a
+% principal through a down payment.
+%
+% THREE premises, each of which is what keeps this from being a second hijack:
+%   * `principal_slot` is emitted only for a loan slot that is the operation's
+%     SOLE money field (bar a future value), so on an operation with an
+%     insurance or repairs slot the revised figure may belong to that slot and
+%     nothing here can tell -- it derives nothing there.
+%   * an EARLIER money literal exists (T0 < T), so the later one restates a
+%     figure rather than introducing one. This is also what makes a first-turn
+%     call unchangeable by construction: it emits only turn 0, and no literal is
+%     earlier than that. A separate `T > 0` premise was written first and a
+%     mutation arm proved it redundant -- it passed with the premise deleted --
+%     so it was removed rather than kept as a guard that guards nothing.
+%
+% `\+ superseded_money(T)` is UNREACHABLE today -- a call carries at most two
+% turns, so nothing can be later than turn 1 -- and is kept because every other
+% money rule states it and a third turn would otherwise make this one derive the
+% stale figure. A mutation arm removing it passes; do not read it as coverage.
+%   * no down payment is stated in any turn: with one, the net-loan rules above
+%     are the derivation and the gross figure is exactly the wrong answer.
+derive(F, V) :- principal_slot(F), money(P, T), \+ superseded_money(T),
+                money(_, T0), T0 < T,
+                \+ down_stated, V is P.
+
 % --- GRAPH DEPENDENCY: the home value IS the price ----------------------
 % PMI drops off against the property, not the loan, so this field takes the
 % gross figure where `loan_amount` takes the net one.
@@ -524,6 +562,18 @@ auto derive_candidates_in_turns(std::string_view operation, std::string_view ear
         emit_literal_facts(latest, 1, facts);
     }
 
+    // A loan slot is a SOLE PRINCIPAL when no other money field competes for a
+    // revised figure. `future_value` is not a competitor: it is the TVM
+    // convention zero on every operation that has it (kConventionValues), and
+    // counting it would exclude ComputePayment, the one operation this exists
+    // for.
+    std::size_t competing_money = 0;
+    for (const auto& f : fields) {
+        if (mv::classify_slot(f.field) == mv::SlotKind::Money && f.field != "future_value") {
+            ++competing_money;
+        }
+    }
+
     for (const auto& f : fields) {
         const std::string name{f.field};
         switch (mv::classify_slot(f.field)) {
@@ -566,6 +616,9 @@ auto derive_candidates_in_turns(std::string_view operation, std::string_view ear
 
                 if (std::ranges::contains(kLoanSlotFields, name)) {
                     facts += "loan_slot(" + name + ").\n";
+                    if (competing_money == 1) {
+                        facts += "principal_slot(" + name + ").\n";
+                    }
                 } else if (std::ranges::contains(kPurchasePriceFields, name)) {
                     facts += "price_slot(" + name + ").\n";
                 } else if (std::ranges::contains(kExtraSlotFields, name)) {
