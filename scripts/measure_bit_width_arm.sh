@@ -2,7 +2,8 @@
 # Score ONE mortgage-assistant weight file: accuracy through the real
 # ParseOperation RPC plus decode throughput from the engine's own timing lines.
 #
-# Optional env: EXTRA_SET=K=V (one more engine variable), EVAL_ARGS="--n 120".
+# Optional env: EXTRA_SET="K=V [K2=V2 ...]" (extra engine variables, space
+# separated), EVAL_ARGS="--n 120".
 # Usage: measure_bit_width_arm.sh <label> <gguf> <port> <engine-binary-copy> <outdir>
 #
 # Runs a PRIVATE copy of the engine on <port> (ENGINE_GRPC_PORT, never PORT),
@@ -19,9 +20,16 @@ log=$out/$label.engine.log
 sha=$(sha256sum "$gguf" | cut -d' ' -f1)
 echo "$label sha256 $sha" | tee "$out/$label.sha"
 
+# One --set per EXTRA_SET word, as an ARRAY. Splitting is deliberate and the
+# array is what makes it safe: a single "$EXTRA_SET" would hand
+# run_with_env.py one "K=V K2=V2" blob and it would set a variable named
+# after the whole string -- a silently WRONG configuration, not an error.
+extra=()
+for kv in ${EXTRA_SET:-}; do extra+=(--set "$kv"); done
+
 python3 "$root/scripts/run_with_env.py" \
   --set MORTGAGE_MODEL_PATH="$gguf" --set ENGINE_GRPC_PORT="$port" \
-  --set INFERENCE_QUEUE=local --set DATABASE_URL= --set PRO_GATE_MODE=off --set QUOTA_POLICY= ${EXTRA_SET:+--set $EXTRA_SET} \
+  --set INFERENCE_QUEUE=local --set DATABASE_URL= --set PRO_GATE_MODE=off --set QUOTA_POLICY= "${extra[@]}" \
   -- "$engine" >"$log" 2>&1 &
 wrapper=$!
 trap 'pkill -f -- "^$engine\$" 2>/dev/null || true; kill $wrapper 2>/dev/null || true' EXIT
@@ -38,6 +46,25 @@ n_bin=$(pgrep -fc -- "^$engine\$" || true)
 n_listen=$(ss -ltnH "sport = :$port" | wc -l)
 echo "one-engine: copies_running=$n_bin listeners_on_$port=$n_listen" | tee "$out/$label.oneengine"
 [ "$n_bin" = 1 ] && [ "$n_listen" = 1 ] || { echo "ONE-ENGINE ASSERTION FAILED"; exit 1; }
+
+# EVERY EXTRA_SET PAIR IS ASSERTED IN THE ENGINE'S OWN ENVIRONMENT, not in the
+# command line that asked for it. Two reasons, both already paid for here:
+# config/.env is applied AFTER the inherited environment, so an ordinary export
+# of the same name is silently overridden (PRO_GATE_MODE=enforce beat a shell
+# export once); and a variable the engine never logs cannot be checked from the
+# log, so a grep for it is a check that cannot fail. /proc/<pid>/environ is what
+# the process actually holds.
+if [ -n "${EXTRA_SET:-}" ]; then
+  pid=$(pgrep -f -- "^$engine\$" | head -1)
+  for kv in $EXTRA_SET; do
+    if ! tr '\0' '\n' < "/proc/$pid/environ" | grep -qxF -- "$kv"; then
+      echo "ENV ASSERTION FAILED: $kv is not in /proc/$pid/environ"
+      tr '\0' '\n' < "/proc/$pid/environ" | grep -E "^${kv%%=*}=" || echo "  (name absent entirely)"
+      exit 1
+    fi
+  done
+  echo "env-in-force: $EXTRA_SET" | tee "$out/$label.envinforce"
+fi
 
 python3 "$root/agent/train/eval_grpc_mortgage.py" --addr "localhost:$port" \
   --val "$root/agent/dataset/data_mortgage/val.jsonl" --engine-log "$log" \

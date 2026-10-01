@@ -43,6 +43,13 @@ __pycache__/
 # never touches.
 **/*.gguf
 
+# Merged bf16 checkpoints. `**/*.gguf` already keeps quantised artefacts out;
+# these are the 16-bit safetensors a merge produces, ~1.2 GB each, and they are
+# the INPUT to a conversion rather than anything a reader of this repository
+# needs. They live here so a bit-width measurement can name the exact bytes it
+# used -- the provenance belongs in the evidence directory, not in git objects.
+model-archive/
+
 # Scratch output of agent/dataset/build_dataset.py. The CANONICAL training set is
 # agent/dataset/data/ -- that is what train.py consumes (--data ../dataset/data).
 # Keeping both tracked invites measuring the wrong one: out/ held 11,400 rows while
