@@ -3819,10 +3819,14 @@ across with `git am` so its authorship date survives -- `origin/master` had no
 seam silently and with a green build, since its absence only shows when something
 tries to register a weight.
 
-**THE FULL BUMP TO MASTER IS DEFERRED ON TWO MEASURED BLOCKERS, neither of which is
-a code fix.** `external/tbqwf` is optional in sensen now (`SENSEN_TBQWF=AUTO`
+**THE FULL BUMP TO MASTER IS DONE as of 2026-10-01: the pin is
+`6aca1b9265e5`, on sensen MASTER, and this project's commit is `4e64664` on
+`origin` and `gitea` alike.** Both blockers below were real and neither was a code
+fix; the account of each is kept because it is why the repair has the shape it
+does, and because the second one's *attribution* was wrong in a way that stopped
+the fix for weeks. `external/tbqwf` is optional in sensen now (`SENSEN_TBQWF=AUTO`
 presence-detects, and configure NAMES the targets that therefore do not exist), so
-tbqwf is no longer the obstacle. What is:
+tbqwf was never the obstacle. What was:
 
  1. **TWO `add_library(sgee)` IN ONE PROJECT.** sensen now consumes SGEE for Raft
     and adds it as a subproject; this engine has embedded SGEE at
@@ -3880,11 +3884,28 @@ tbqwf is no longer the obstacle. What is:
     determinism, is untouched -- and that every v3-class CPU has both. That is why
     they are safe in the floor where `-mavx512f` deliberately is not.
 
-    **NOT DONE HERE, and the reason is that nothing needs it yet.** The pin is
-    `1cadb685`, which adds neither flag, so this build has no mismatch and adding
-    the pair to `CANONICAL_FLAGS` would be an unmeasurable change -- there is no
-    red to turn green and no gate that would move. It becomes a one-line
-    prerequisite of the master bump, not a fix to carry ahead of it.
+    **DONE on 2026-10-01, as the one-line prerequisite of the master bump this
+    item predicted.** `CANONICAL_FLAGS` carries `-maes -mpclmul`, and the pair is
+    what makes the bump possible at all: with the pin on master, sensen's scope
+    builds the single `std.pcm` with both features and every TU here was refused
+    without them.
+
+    **THE FLAGS EMIT ZERO INSTRUCTIONS, which turns sensen's claim into a
+    measurement.** Its comment says they are "ABSORBED INTO THE FLOOR, not reached
+    at run time"; on the linked engine `objdump` finds **0**
+    `aesenc`/`aesdec`/`aeskeygenassist` and **0** `pclmul`. The compiler was
+    PERMITTED to use AES-NI and PCLMUL and used neither, because nothing in this
+    engine does AES or carry-less multiplication. So the pair changes what the BMI
+    RECORDS -- the entire fix -- and not one instruction in the binary. The nominal
+    floor rises; the exercised floor does not.
+
+    **WHY IT WAS INVISIBLE UNTIL THE BUMP, stated because the obvious reading is
+    wrong:** sensen is GREEN STANDALONE, and that is consistent with the blocker
+    rather than evidence against it. Standalone, sensen's own scope both sets the
+    flags and builds the `std.pcm`, so floor and BMI are the same flag set and
+    nothing can mismatch. Only the EMBEDDED build splits them. This is the
+    `CMAKE_SOURCE_DIR` lesson again -- a submodule bump must be built in the
+    embedded configuration, because that is the one nobody upstream compiles.
 
 Everything below this block is the original account and still accurate. The LLQ commits live in sensen
 `f2f97ebf`, whose top-level CMake `add_subdirectory()`s `external/tbqwf`
@@ -4284,8 +4305,18 @@ The genuine source is `/home/muyiwa/Development/model-archive/v20merged-bf16-202
 which is v20's own provenance. Converted with **llama.cpp's
 `convert_hf_to_gguf.py --outtype bf16`, and that is declared rather than
 preferred**: this repo's rule is that sensen is the standard for conversion, and
-`convert_safetensors_to_gguf` accepts `f16|q8_0|q6_k|q4_k|q5_k` and **no bf16** --
-on the pinned sensen *and on `origin/master`*, measured. llama.cpp is used here in
+`convert_safetensors_to_gguf` accepted `f16|q8_0|q6_k|q4_k|q5_k` and **no bf16** --
+on the sensen pinned at the time *and on the `origin/master` of that day*,
+measured. **THAT IS NO LONGER TRUE, as of the bump to `6aca1b9265e5` on
+2026-10-01: sensen's own converter now takes `bf16`** (`model_converter.cppm:185`
+and `:952`), and its docstring states the sharper point -- *"bf16 IS THE LOSSLESS
+CHOICE FOR A bf16 CHECKPOINT and f16 is not"*, which is this file's own F16-is-not-
+a-widening-of-bf16 finding arrived at independently upstream. So the declared
+deviation below is CLOSED: a future bf16 GGUF should be written with sensen, and
+llama.cpp drops back to being only the independent cross-check. The existing
+`v20-bf16.gguf` was not reconverted, so every 16-bit figure in this file still
+describes the llama.cpp-produced file that was verified against the deployed
+Q8_0. llama.cpp is used here in
 its one legitimate role, as an independent converter, and the output is verified
 against the deployed Q8_0 rather than trusted.
 
@@ -4349,8 +4380,10 @@ rather than deleted, because the counter pair is the evidence.
   be the identity reference. Only `llq-fused` reads the packed image.
 - **F16 is refused, not served** -- see the tier section above for why that is the
   honest outcome and what a real F16 tier would need.
-- **The pin was NOT bumped to sensen `origin/master` (`24db2ed7`), and the reason
-  is a measurement:** master's `gemm_kernels.cppm` seam is **byte-for-byte the one
+- **The pin was not bumped AT THE TIME, and the measurement behind that is still
+  the reason the 16-bit seam had to be written here rather than inherited. IT IS
+  BUMPED NOW -- `6aca1b9265e5`, 2026-10-01 -- which changes none of what follows:**
+  master's `gemm_kernels.cppm` seam is **byte-for-byte the one
   on the lane branch -- Q8_0 only**, and `LlqBf16Matrix`/`runBf16` are consumed
   there by nothing but `lossless_quant*` itself and `autograd_cuda.cppm`. Master's
   wired LLQ decode path lives in `qwen38_cpu_serving_model.cppm`, which
@@ -5846,7 +5879,9 @@ answers by being read, not by being argued.
   vitest 4 pulls in. The build itself does not require it; the test suite does.
 - **Backend Docker Build:** `docker build -t options-backend backend/`
 - **Backend Tests:** `ninja -C backend/build build_tests && ctest --test-dir backend/build`
-  (ctest is **149/149 with 2 skipped**, as of 2026-09-30 -- `LlqWeightStoreTest`
+  (ctest is **149/149 with 2 skipped**, re-verified 2026-10-01 against sensen
+  master `6aca1b9265e5` with a 149/2 BASELINE taken on the previous pin first, so
+  the bump is attributable rather than merely green -- `LlqWeightStoreTest`
   is the one new test; before it the suite was **148/148 with 2 skipped** as of
   the SGEE bump to `b241317e` on 2026-09-29. It was 116 after `GroundingCorpusSweepTest`, 117 once SGEE
   `6ec13bfc` brought `CapiLeaseFilterTests` on 2026-09-18, and **117 was stale
