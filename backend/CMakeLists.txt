@@ -91,7 +91,37 @@ set(CMAKE_CXX_SCAN_FOR_MODULES ON)
 # a libstdc++ macro, telling libstdc++'s parallel algorithms not to route through
 # TBB; with libstdc++ out of the picture it names nothing and has been dropped
 # rather than left as a define that only looks meaningful.
-set(CANONICAL_FLAGS "-stdlib=libc++ -fPIC -O3 -march=x86-64-v3 -mtune=generic -mavx -mavx2 -mfma -msse2 -msse3 -mssse3 -msse4.1 -msse4.2 -pthread -fstack-protector-strong -DNDEBUG -Wno-error=stringop-overflow -Wno-error=array-bounds -Wno-error=unused-variable -Wno-error=unused-parameter -Wno-error=unused-but-set-variable -Wno-error=pedantic -Wno-error=global-module -Wno-unknown-warning-option -fexperimental-library")
+#
+# -maes -mpclmul ARE IN THE FLOOR BECAUSE THE ONE std.pcm CARRIES THEM, and the
+# flags are a consequence of that rather than a request for the instructions.
+# sensen's own CMakeLists.txt appends them to CMAKE_CXX_FLAGS in SENSEN's
+# directory scope, and it does so BEFORE declaring std_module_precompile -- so
+# the single std.pcm this tree compiles against records "+aes" and "+pclmul" as
+# target features. Clang then refuses, PER TRANSLATION UNIT, any consumer built
+# without them:
+#
+#   precompiled file 'std.pcm' was compiled with the target feature '+aes' but
+#   the current translation unit is not
+#
+# which names the BMI and not the flag. Every TU in THIS directory is built from
+# CANONICAL_FLAGS, so without this pair the engine cannot consume the std module
+# that sensen builds for it.
+#
+# IT IS SAFE IN THE FLOOR FOR THE REASON sensen RECORDS, and that reason is
+# specifically about floating point: neither AES-NI nor PCLMUL touches FP, so
+# the stated justification for the -march=x86-64-v3 floor -- cross-host FP
+# parity and durable-replay determinism -- is untouched by adding them, and
+# every v3-class CPU has both. That is what separates them from -mavx512f, which
+# is deliberately NOT in the floor because AVX-512 is reached through
+# per-function [[gnu::target]] tiers selected by CPUID at run time.
+#
+# THE ATTRIBUTION HERE WAS WRONG ONCE AND IS WORTH STATING: this file blamed
+# abseil's randen_hwaes inside gRPC. abseil's ABSL_RANDOM_HWAES_X64_FLAGS is
+# "-maes;-msse4.1" -- it never names -mpclmul, so it cannot explain half the
+# error -- and abseil applies its copts with target_compile_options(... PRIVATE),
+# which cannot reach another directory's CMAKE_CXX_FLAGS at all. sensen's own
+# scope is where its std.pcm rule lives; abseil's mechanism was never available.
+set(CANONICAL_FLAGS "-stdlib=libc++ -fPIC -O3 -march=x86-64-v3 -mtune=generic -mavx -mavx2 -mfma -msse2 -msse3 -mssse3 -msse4.1 -msse4.2 -maes -mpclmul -pthread -fstack-protector-strong -DNDEBUG -Wno-error=stringop-overflow -Wno-error=array-bounds -Wno-error=unused-variable -Wno-error=unused-parameter -Wno-error=unused-but-set-variable -Wno-error=pedantic -Wno-error=global-module -Wno-unknown-warning-option -fexperimental-library")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${CANONICAL_FLAGS}")
 
 # The linker needs to be told as well, and separately: -stdlib= is a driver
@@ -427,6 +457,25 @@ target_link_libraries(proto_lib PUBLIC grpc++ libprotobuf)
 set(BUILD_PYTHON_BINDINGS OFF CACHE BOOL "Disable sensen python bindings" FORCE)
 set(BUILD_TESTS OFF CACHE BOOL "Disable sensen tests" FORCE)
 set(BUILD_EXAMPLES OFF CACHE BOOL "Disable sensen examples" FORCE)
+#
+# SENSEN_USE_SGEE OFF BECAUSE THIS ENGINE ALREADY HAS ONE, AND TWO WOULD NOT
+# EVEN CONFIGURE. sensen consumes SGEE for Raft and adds it as a subproject;
+# this engine has embedded SGEE at backend/external/SGEE since the inference
+# queue was built. Both call add_library(sgee), so leaving sensen's copy on dies
+# at configure time, before a single file compiles:
+#
+#   add_library cannot create target "sgee" because another target with the same
+#   name already exists ... CMP0002
+#
+# and the same for sgee_capi and sgee-gen. Adopting ONE target for both is not
+# free either -- the versions skew, this engine at b241317e against the commit
+# sensen expects -- so the cheap, correct answer is that the engine keeps its
+# own SGEE and sensen's is switched off. Nothing here consumes sensen's Raft.
+#
+# FORCE is load-bearing, like every other line in this block: a set(... CACHE)
+# without it is sticky, so an option that once landed wrong stays wrong for the
+# build directory's life and a fresh configure hides it.
+set(SENSEN_USE_SGEE OFF CACHE BOOL "This engine embeds its own SGEE; two add_library(sgee) cannot coexist" FORCE)
 # ENABLE_CUDA -- propagated into sensen's cache, deliberately WITHOUT FORCE,
 # unlike every other line in this block.
 #
