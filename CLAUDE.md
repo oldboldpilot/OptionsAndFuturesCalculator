@@ -6434,3 +6434,80 @@ caught by construction rather than by memory.
 The block-alignment refusal is general and is exercised with a forged 256-block
 route against a width of 384 -- MiniLM's width, which is the case that would
 have exported a corrupt file.
+
+### A NaN narrowed to bf16 or tf32 became Inf or ZERO, in 43 places
+
+Found 2026-10-02 while sweeping the AVX-512 bf16 NaN fix across its siblings --
+which is the whole point of the sweep, because the defect was never in one
+kernel. **The same six-line round-to-nearest-even narrowing had been copied into
+FOURTEEN vector kernels across seven modules**, on top of `float_types.cppm`'s
+own, plus a handful of scalars and four CUDA device twins, and **not one had a
+correct NaN rule.**
+
+They failed in the two ways one mistake can, and the counts are what identify
+which copy you are reading:
+
+| shape | mechanism | NaN patterns lost (of 16,777,214) |
+| --- | --- | --- |
+| no NaN branch at all (11 vector copies) | the mantissa's rounding carry walks into the exponent | **131,072** each (65,536 -> Inf, 65,536 -> +-0) |
+| truncate the non-finite lane instead (`model_converter`'s 3, and TF32 everywhere) | dodges the carry; a NaN whose payload lies wholly in the dropped bits truncates to Inf | **131,070** at bf16, **16,382** at tf32 |
+
+TF32 loses fewer because it drops 13 bits where bf16 drops 16 — the figure is a
+property of the width, not of the kernel.
+
+**THE TREE ASSERTED THE CONTRACT IN THREE COMMENTS AND NO IMPLEMENTATION HELD
+IT.** `fp32_to_tf32`'s own "Preserve NaN/Inf", `simd.cppm`'s "NaN/Inf are
+preserved bit-for-bit and never rounded into a different class", and
+`test_float_types`' "TF32: NaN preserved (not -> Inf)". The rule is now what
+those sentences always claimed: **a NaN stays a NaN** — sign and top payload
+kept, quiet bit forced, the rule `fp32_to_bf16` already applied — and **Inf is
+exact**.
+
+**Why it is worse than it looks, and it is the LIVE-badge defect again.** A GEMM
+operand that was NaN and became Inf is not an error anyone sees: `Inf * 1` is a
+definite Inf, where `NaN * 1` would have poisoned the output visibly. The
+narrowing turns a value that announces "no answer" into one that announces a
+definite wrong answer. Zero is worse still.
+
+**Why every existing test passed.** `test_float_types` feeds the scalar only the
+canonical qNaN `0x7FC00000`, whose quiet bit is ALREADY SET, and its
+batch-kernel sweep draws finite exponents only. `test_cpu_bf16_grad_sr` fed the
+same single value. **A NaN test that uses one NaN tests one bit pattern of
+16,777,214.**
+
+**ONE implementation, and the inventory is the mechanism.** Fixing fourteen
+copies separately buys fourteen chances to fix them differently, and the next
+copy gets written from whichever one its author happens to open — the
+`ALLOWED_OPERATIONS` lesson at register level. So `float_types.cppm` holds the
+only arithmetic, every other site calls it, `tools/bf16_narrow_copies.txt` names
+each place it is still spelled out with the reason it is allowed to be, and
+`tools/check_bf16_narrow_copies.sh` (ctest `policy_bf16_narrow_copies`) fails the
+build when a new spelling appears. The three CUDA twins and the Triton port
+cannot import the module, so each restates the rule and each is gated separately.
+
+**THE GATES WERE WRITTEN AND NOTHING RAN THEM**, which is
+`GroundingCorpusSweepTest` exactly: all four artefacts were left with a hand-off
+snippet saying "NOT merged into tests/CMakeLists.txt". They are registered now
+(`test_bf16_narrow_sites` x6 arms, `policy_bf16_narrow_copies` + self-test,
+`test_bf16_narrow_python`, four CUDA targets). **A gate nothing invokes is not a
+gate**, and the snippet was deleted rather than committed, because its own first
+sentence had become false.
+
+**What is verified, and what is NOT — this container could not run ctest.**
+Verified: the TF32 rule independently re-derived and swept over the whole NaN
+band (16,382 -> **0**, Inf exact on both signs, `0x7F800001` -> `0x7FC00000`);
+`test_bf16_narrow_python` 9 checks / 0 failures with a positive control (131,070)
+and a negative control (the pre-fix arithmetic losing 131,072), skipping parts
+2-3 without torch rather than passing vacuously; the policy gate and its
+self-test; `float_types.cppm` compiling under clang 23.1.2.
+**NOT verified: no ctest run at all.** There is no configured build tree here and
+the AVX-512/AMX symbol sets come from a `check_cxx_source_compiles` config header
+that needs a full configure, so a hand-built closure cannot reach `sensen.gemm`
+with consistent macro state — `test_bf16_narrow_sites.cpp` (43 sites) has never
+been compiled or run, nor has the engine's embedded build, which carries **6 of
+the 11 modified modules** in `sensen_slim`. The CUDA twins compile only. Treat
+that as the standing gap.
+
+**`bench_llq_bf16_order` is registered and has never been run**, so the
+`DenseOrder`-vs-`Canonical` cost the LLQ section calls UNMEASURED is still
+unmeasured. It refuses `--repeats` under 5, citing this file's own n=1 scar.
