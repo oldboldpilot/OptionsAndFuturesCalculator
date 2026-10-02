@@ -279,3 +279,65 @@ policy. Both histories were rewritten to `Olumuyiwa Oluwasanmi`, verified 0
 remaining including in file content, and force-pushed. The branches were renamed
 to drop the AI prefix. Recorded here rather than quietly fixed, because the
 policy's own Violation Response section asks for exactly this remedy.
+
+
+---
+
+## 12. FINAL NUMBERS (appended after both runs completed)
+
+Both corpora reach **100% row accuracy on the SERVABLE architecture** (RMSNorm +
+SwiGLU + RoPE, no biases), read from the runs' own `metrics.json` rather than
+from a report:
+
+| corpus | run | params | row_acc | field_acc | op_acc | <NONE> rows |
+| --- | --- | --- | --- | --- | --- | --- |
+| mortgage | `mort_f5s`, 6 epochs | 1,062,551 | **1.0** | 1.0 | 1.0 | 56/56 |
+| strategy | `strat_f5`, 12 epochs | 692,175 | **1.0** | 1.0 | 1.0 | 4/4 |
+
+against the recorded decoder figures of **73.9% raw / 77.0% served** (mortgage
+v20) and **95.0%** (strategy). `row_acc` is computed through the same
+`reconstruct` + `params_match` pair as `eval_encoder_params.py`, so it IS the
+params-exact-match quantity and not a different metric wearing the same name.
+
+**THE IN-DISTRIBUTION CAVEAT STANDS AND IS THE MOST IMPORTANT LINE HERE.** Val
+comes from the same synthetic generator as train, and the decoder figures come
+from different holdouts and were never re-run. So this is NOT a like-for-like
+claim that the encoder is a better assistant. What it does establish is that the
+architecture is not the limiting factor: a 0.7-1.1M-parameter encoder saturates
+the label space these corpora define.
+
+### `train_encoder_min.py` underperforms on mortgage, and the cause is identified
+
+The minimal trainer plateaued at literal exact-set **0.5444** and ROW **0.1233**
+on mortgage from epoch 3 onward, with train loss at 0.0606 and the operation and
+convention heads both perfect. The cause is not capacity or the optimiser: it
+omits the per-literal **tag and magnitude** features that `encoder_model.py`
+feeds its pair head.
+
+With 109 multi-label (slot, map) pairs, the model must otherwise infer from
+token context alone whether a literal is money or a percent and roughly how
+large -- which is exactly what decides WHICH money slot a given amount fills.
+Given those features the same task goes to 1.0. On strategy the minimal trainer
+is fine (ROW 0.9933 at epoch 11) because that corpus has only **2** pairs, so
+there is almost nothing to disambiguate. **The gap between the two corpora is
+the measurement that isolates the cause**, and it is why the minimal trainer was
+kept rather than deleted: it is the control arm.
+
+### A robustness shortcut the fresh-digits probe cannot see
+
+After digit augmentation the remaining in-distribution failures were rates of
+10-11% returning `MISSING`. A two-digit percent is usually a TAX BRACKET in this
+corpus, and only 497 of 13,855 rate pointers sit at 10% or above, so magnitude
+has become a shortcut for the slot. The fresh-digits probe preserves digit
+count, so it is structurally incapable of detecting this -- a probe that cannot
+fail for the reason you care about is not evidence about that reason.
+
+### The model cannot abstain, and fails confidently
+
+On the strategy checkpoint, 6 of 14 wrong defect-holdout rows carry operation
+confidence of 0.999 or above, so no softmax threshold can refuse them. The class
+heads have no "missing" class; strategy has only 62 `<NONE>` training rows and
+the first run got 0 of 2 declines right. The POINTER slots do abstain properly,
+and training on first turns alone moved the ask probe from 68.7% to 100%. The
+defect holdout's own ceiling is 9/16 because GC, CL and ZB are not in the
+20-symbol class vocabulary -- a corpus limit, not a model one.
