@@ -12,6 +12,33 @@ and MLX equivalents, and move the toolchain to clang 23.1.2.
 Every figure below was measured in this session. Where something was not run it
 says so.
 
+## 0. THE ANSWER TO "WHICH MODEL": none of the four, and no pretrained base at all
+
+Added because the body of this log measured a model it never named, which makes
+the whole thing unreplicable. **The four candidates in the question were all
+surveyed and all rejected, and nothing was fine-tuned from any of them.** What
+was trained is a from-scratch encoder, random init:
+
+| model | role |
+| --- | --- |
+| `unsloth/Qwen3-0.6B` ×2 (QLoRA r16 strategy, r64 mortgage) | the **incumbents** this would replace |
+| `all-MiniLM-L6-v2` (~22M), ModernBERT, `flan-t5-small` (77M), `SmolLM2-135M/360M` | **surveyed, not used** |
+| `agent/train/encoder_model.py` via `train_encoder.py --servable` | **the models of record** — §12 |
+| `agent/train/train_encoder_min.py` | the **control arm** — §6, §12 |
+
+**From scratch is forced, not preferred, and §6 is the reason:** sensen's serving
+attention applies RoPE unconditionally with no off switch, and
+`text_encoder.cppm` reuses `TransformerBlock`, whose GGUF loader refuses any FFN
+but SwiGLU and any norm but RMSNorm. Every BERT-family candidate carries learned
+absolute positions, so fine-tuning one would mean either changing the engine or
+shipping weights the engine cannot load. They also each carry a 30k–151k
+pretrained vocabulary for a task whose own corpus needs **698** (strategy) and
+**1,349** (mortgage) WordPiece types.
+
+The exact spec, the corpus sha256s and the `--servable` flag set are in
+`backend/sensen/docs/HANDOFF_2026-10-02.md` §9, which is the version other
+repositories should read.
+
 ---
 
 ## 1. The finding that decided the design
@@ -152,10 +179,20 @@ absolute positions would have produced weights the serving path cannot run — b
 the norm and FFN were not.
 
 `train_encoder_min.py` now uses RMSNorm, SwiGLU and no biases, and both corpora
-were relaunched on it (0.58M parameters for the strategy geometry). Accuracy
-for that arm is not yet available. RMSNorm-vs-LayerNorm and SwiGLU-vs-GELU are
-near-equivalent at this scale, so the §4 figure is expected to carry over, but
-that is a prediction and not a measurement.
+were relaunched on it. **Both relaunches completed, and the prediction this
+paragraph used to end on — "the §4 figure is expected to carry over" — held on
+strategy and failed on mortgage:**
+
+| arm | vocab | parameters | best ROW | op | literal (slot+map) | conv |
+| --- | --- | --- | --- | --- | --- | --- |
+| strategy | 698 | 591,951 | **0.9940** @ ep6 (0.9933 to ep11) | 1.0000 | 0.9934 | 0.9990 |
+| mortgage | 1,349 | 1,265,591 | **0.1233** @ ep7 | 1.0000 | **0.5444** | 1.0000 |
+
+0 orphan literals on both. So RMSNorm-vs-LayerNorm and SwiGLU-vs-GELU were
+indeed near-equivalent — strategy moved 0.9753 → 0.9940 across the change — and
+the mortgage shortfall is something else entirely, diagnosed in §12. The §4
+figure of **0.50M / 497,231 parameters belongs to the pre-`1981705`
+LayerNorm+GELU arm** and is not comparable to either row above.
 
 ## 7. sensen defects found and fixed
 
@@ -322,6 +359,19 @@ is fine (ROW 0.9933 at epoch 11) because that corpus has only **2** pairs, so
 there is almost nothing to disambiguate. **The gap between the two corpora is
 the measurement that isolates the cause**, and it is why the minimal trainer was
 kept rather than deleted: it is the control arm.
+
+**ONE THING IN THAT ATTRIBUTION DOES NOT ADD UP, flagged rather than resolved.**
+`--servable` sets `lit_features=False` (`encoder_model.py::cfg_kwargs`), and its
+own docstring says the tag/magnitude features are among the inputs a sensen
+serving path does not supply — so `mort_f5s`, recorded above as servable, should
+not have had them either, and it reached 1.0. Either that run was not purely
+servable, or something else is doing the work (`lr 2e-3` against `3e-4`,
+`batch_size 64` against 32, digit/format augmentation, first-turn examples,
+`--digits`). **Do not repeat the tag/magnitude explanation as established until
+the flag set of that run is recovered and the ablation is run on one trainer.**
+Two artefacts say the servable stack cannot carry those features and this one
+says they are what fixed it; that is the three-copies-one-disagreeing shape this
+project has paid for repeatedly.
 
 ### A robustness shortcut the fresh-digits probe cannot see
 

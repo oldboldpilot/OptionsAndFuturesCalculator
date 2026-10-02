@@ -6273,23 +6273,59 @@ The proto's own comment already said its label space IS "one of 26 RPCs plus
 that RPC's own fields" — the contract was always shaped like a classifier plus
 per-field extraction.
 
-**First measured arm, LayerNorm+GELU+RoPE, 0.50M parameters, strategy corpus:**
-epoch 1 gave operation 0.9973, literal 0.9896, convention 0.9941 and **ROW
-0.9753** — every head simultaneously correct on 97.53% of rows, against this
-file's recorded **95.0% params exact-match**, from a model ~1,200x smaller.
-Two caveats travel with that number: ROW is not the same metric as "emitted
-params JSON matches gold" (the rendered comparison has NOT been run), and the
-mortgage corpus was REGENERATED so it is not the `1aa3ce94…` holdout the 414/560
-figure used.
+**THE MODEL IS TRAINED FROM SCRATCH AND THERE IS NO PRETRAINED BASE.** Not
+`all-MiniLM-L6-v2`, not ModernBERT, not `flan-t5-small`, not `SmolLM2-135M/360M`
+— those four were surveyed and all four rejected, and nothing was fine-tuned
+from any of them. **From scratch is forced rather than preferred:** sensen's
+serving attention applies RoPE unconditionally with no off switch, and
+`text_encoder.cppm` reuses `TransformerBlock`, whose GGUF loader refuses any FFN
+but SwiGLU and any norm but RMSNorm — so every BERT-family candidate's learned
+absolute positions would mean either changing the engine or shipping weights the
+engine cannot load. They also each carry a 30k–151k pretrained vocabulary for a
+task whose own corpus needs **698** (strategy) and **1,349** (mortgage)
+WordPiece types. What trains it is `agent/train/encoder_model.py` driven by
+`train_encoder.py --servable`, which is the one flag that matters: it sets
+`norm=rmsnorm, ffn=swiglu, bias=False, pos=rope` and drops every input and head
+the engine would have to grow. The exact spec, the corpus sha256s and the seed
+are in `backend/sensen/docs/HANDOFF_2026-10-02.md` §9.
 
-**THAT ARM IS UNSERVABLE.** `text_encoder.cppm` reuses sensen's
-`TransformerBlock`, which is RMSNorm + SwiGLU, and its loader refuses any other
-FFN activation. RoPE was matched deliberately — sensen applies it
-unconditionally with no off switch, so learned absolute positions produce
-weights the engine cannot run — but the norm and FFN were not.
-`train_encoder_min.py` is now RMSNorm + SwiGLU + no biases and both corpora were
-relaunched on it. The two are near-equivalent at this scale so the figure is
-expected to carry, but that is a prediction, not a measurement.
+**The models of record**, read from each run's own `metrics.json`, where
+`row_acc` is computed through the same `reconstruct` + `params_match` pair as
+`eval_encoder_params.py` and so IS the params-exact-match quantity:
+
+| corpus | run | parameters | row_acc |
+| --- | --- | --- | --- |
+| strategy | `strat_f5`, 12 epochs | **692,175** | **1.0** |
+| mortgage | `mort_f5s`, 6 epochs | **1,062,551** | **1.0** |
+
+against this file's recorded **95.0%** (strategy) and **73.9% raw / 77.0%
+served** (mortgage v20). The parameter count is a RESULT, not a setting — the
+vocabulary and every head width are derived from the corpus.
+
+**THE IN-DISTRIBUTION CAVEAT IS THE LOAD-BEARING LINE.** Val comes from the same
+synthetic generator as train, and the decoder figures come from different
+holdouts and were never re-run, so this is **not** a like-for-like claim that the
+encoder is a better assistant. What it establishes is narrower: the architecture
+is not the limiting factor, because a 0.7–1.1M-parameter encoder saturates the
+label space these corpora define. Three further limits: the model **cannot
+abstain** and fails confidently (6 of 14 wrong defect-holdout rows carry
+operation confidence ≥ 0.999, and the class heads have no "missing" class); a
+magnitude shortcut has become a proxy for the slot on rates, which the
+fresh-digits probe cannot detect because it preserves digit count; and the
+mortgage corpus was REGENERATED, so it is not the `1aa3ce94…` holdout the
+414/560 figure used.
+
+**`train_encoder_min.py` is the CONTROL ARM and its numbers are not the
+model's.** It reaches ROW 0.9940 on strategy and **0.1233** on mortgage, where
+its literal head plateaus at 0.5444 with *more* parameters (1,265,591) than the
+model that scores 1.0 — so the cause is neither capacity nor the optimiser. The
+session log attributes it to the per-literal tag/magnitude features that
+`encoder_model.py` feeds its pair head, **and that attribution has an open
+contradiction**: `--servable` sets `lit_features=False`, so `mort_f5s` should not
+have had them either. Do not repeat it as established until the flag set of that
+run is recovered and the ablation is run on one trainer. The earlier recorded
+**0.50M / 497,231-parameter, ROW 0.9753** figure belongs to the pre-`1981705`
+LayerNorm+GELU arm, which the loader cannot serve, and is comparable to neither.
 
 **bf16: A CONCLUSION OF MINE THAT WAS WRONG, kept because the mechanism is the
 useful part.** Reported first as "bf16 is 10.6x slower, use fp32". That was
