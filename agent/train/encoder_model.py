@@ -51,6 +51,24 @@ agreement is from READING the source, not from a parity run against sensen.
 Segment ids and the literal tag/magnitude embeddings are further inputs a sensen
 serving path does not supply today.
 
+SERVABLE (`--servable`). The defaults above (LayerNorm, GeGLU, biases, a segment
+embedding, a CLS pooler, tag/magnitude features) are NOT what sensen can load:
+`text_encoder.cppm` reuses `TransformerBlock`, which is RMSNorm + SwiGLU with no
+biases, and its GGUF loader refuses any other FFN activation. `--servable` builds
+exactly that stack, with RoPE, and drops every input and head the engine would have
+to grow: its token ids are the only input, the heads are single Linears. What it does
+NOT decide is the engine's side of the pairing; see RoPE LAYOUT below. The defaults are
+kept as the specified recipe and so that the checkpoints already trained still load
+(`EncoderConfig.from_json` fills the new fields with the old behaviour).
+
+RoPE LAYOUT. The pairs rotated together are (i, i + d_head/2) here and in sensen
+(`RotaryEmbedding::apply_rotation_inplace`, scalar fallback: `data[i]` with
+`data[i + half_dim]`). A trainer that rotates ADJACENT pairs (x[0::2], x[1::2], the
+GPT-J layout) produces q/k weights whose channels are permuted relative to that, and
+the engine would compute different attention scores from them unless the exporter
+reorders the q and k output channels of every head (new i <- old 2i, new i + d/2 <-
+old 2i + 1). Same frequencies either way; only the pairing differs.
+
 PARAMETER COUNT is printed exactly by `python encoder_model.py ...` and broken
 down by component; the embedding table is V x d and, at d=128, is a third of
 the network.
@@ -83,8 +101,8 @@ class EncoderConfig:
     d_model: int = 128
     n_layers: int = 3
     n_heads: int = 4
-    ffn: str = "geglu"            # geglu | gelu
-    ffn_mult: float = 0.0         # 0 -> equal-parameter default (8/3 d for geglu, 4 d for gelu)
+    ffn: str = "geglu"            # geglu | swiglu | gelu
+    ffn_mult: float = 0.0         # 0 -> equal-parameter default (8/3 d for geglu/swiglu, 4 d for gelu)
     dropout: float = 0.1
     n_segments: int = 3
     n_tags: int = 8
@@ -93,12 +111,23 @@ class EncoderConfig:
     lit_features: bool = True
     pos: str = "learned"          # learned | rope
     rope_base: float = 10000.0
+    # --- the pieces `--servable` switches off (see the SERVABLE paragraph of the docstring)
+    norm: str = "layernorm"       # layernorm | rmsnorm
+    bias: bool = True             # biases on every Linear of the transformer stack
+    emb_norm: bool = True         # a norm over the summed embeddings
+    segments: bool = True         # segment embedding (first user / question / reply)
+    pooler: bool = True           # CLS -> Linear -> GELU before the op and class heads
+    lit_mlp: bool = True          # [pooled | CLS | tag | mag] -> Linear -> GELU before the pair head
+
+    @property
+    def gated(self) -> bool:
+        return self.ffn in ("geglu", "swiglu")
 
     @property
     def d_ffn(self) -> int:
         if self.ffn_mult:
             return int(round(self.ffn_mult * self.d_model))
-        return int(round(self.d_model * (8 / 3 if self.ffn == "geglu" else 4) / 8) * 8)
+        return int(round(self.d_model * (8 / 3 if self.gated else 4) / 8) * 8)
 
     def to_json(self) -> dict:
         return asdict(self)
@@ -124,6 +153,26 @@ def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.T
     return torch.cat([x1 * c - x2 * s, x1 * s + x2 * c], dim=-1)
 
 
+class RMSNorm(nn.Module):
+    """x * w / sqrt(mean(x^2) + eps): no mean subtraction, no bias. The reduction runs
+    in fp32 whatever the activation dtype, because under bf16 a mean of squares
+    accumulated at 8 mantissa bits is where a norm quietly stops being one."""
+
+    def __init__(self, d: int, eps: float = 1e-6) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(d))
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x32 = x.float()
+        n = x32 * torch.rsqrt(x32.pow(2).mean(-1, keepdim=True) + self.eps)
+        return (n * self.weight.float()).to(x.dtype)
+
+
+def make_norm(c: EncoderConfig) -> nn.Module:
+    return RMSNorm(c.d_model) if c.norm == "rmsnorm" else nn.LayerNorm(c.d_model)
+
+
 class Block(nn.Module):
     """Pre-norm self-attention + feed-forward. Pre-norm because it trains
     stably at a high learning rate without warm-up tuning, which is what a
@@ -134,14 +183,16 @@ class Block(nn.Module):
         d = c.d_model
         if d % c.n_heads:
             raise ValueError("d_model must be divisible by n_heads")
+        if c.ffn not in ("geglu", "swiglu", "gelu") or c.norm not in ("layernorm", "rmsnorm"):
+            raise ValueError(f"unknown ffn {c.ffn!r} or norm {c.norm!r}")
         self.h = c.n_heads
-        self.ln1 = nn.LayerNorm(d)
-        self.qkv = nn.Linear(d, 3 * d)
-        self.proj = nn.Linear(d, d)
-        self.ln2 = nn.LayerNorm(d)
-        self.geglu = c.ffn == "geglu"
-        self.fc = nn.Linear(d, (2 if self.geglu else 1) * c.d_ffn)
-        self.out = nn.Linear(c.d_ffn, d)
+        self.ln1 = make_norm(c)
+        self.qkv = nn.Linear(d, 3 * d, bias=c.bias)
+        self.proj = nn.Linear(d, d, bias=c.bias)
+        self.ln2 = make_norm(c)
+        self.kind = c.ffn
+        self.fc = nn.Linear(d, (2 if c.gated else 1) * c.d_ffn, bias=c.bias)   # gate and up fused
+        self.out = nn.Linear(c.d_ffn, d, bias=c.bias)
         self.drop = nn.Dropout(c.dropout)
 
     def forward(self, x: torch.Tensor, keep: torch.Tensor | None,
@@ -154,11 +205,11 @@ class Block(nn.Module):
         a = F.scaled_dot_product_attention(q, k, v, attn_mask=keep)
         x = x + self.drop(self.proj(a.transpose(1, 2).reshape(b, t, d)))
         y = self.fc(self.ln2(x))
-        if self.geglu:
-            g, u = y.chunk(2, dim=-1)
-            y = F.gelu(g) * u
-        else:
+        if self.kind == "gelu":
             y = F.gelu(y)
+        else:
+            g, u = y.chunk(2, dim=-1)
+            y = (F.silu(g) if self.kind == "swiglu" else F.gelu(g)) * u
         return x + self.drop(self.out(y))
 
 
@@ -175,19 +226,21 @@ class TinyEncoder(nn.Module):
             cos, sin = rope_tables(c.max_len, d // c.n_heads, c.rope_base)
             self.register_buffer("rope_cos", cos, persistent=False)
             self.register_buffer("rope_sin", sin, persistent=False)
-        self.seg = nn.Embedding(c.n_segments, d)
-        self.emb_ln = nn.LayerNorm(d)
+        self.seg = nn.Embedding(c.n_segments, d) if c.segments else None
+        self.emb_ln = make_norm(c) if c.emb_norm else None
         self.drop = nn.Dropout(c.dropout)
         self.blocks = nn.ModuleList(Block(c) for _ in range(c.n_layers))
-        self.ln_f = nn.LayerNorm(d)
-        self.pool = nn.Linear(d, d)
+        self.ln_f = make_norm(c)
+        self.pool = nn.Linear(d, d) if c.pooler else None
         self.op_head = nn.Linear(d, c.n_ops)
         self.conv_heads = nn.ModuleDict({n: nn.Linear(d, k) for n, k in c.conv_sizes.items()})
-        self.tag = nn.Embedding(c.n_tags, c.tag_dim)
-        self.mag = nn.Embedding(c.n_mag, c.tag_dim)
-        d_lit = 2 * d + (2 * c.tag_dim if c.lit_features else 0)
-        self.lit_mlp = nn.Linear(d_lit, d)
-        self.pair_head = nn.Linear(d, c.n_pairs)
+        self.tag = nn.Embedding(c.n_tags, c.tag_dim) if c.lit_features else None
+        self.mag = nn.Embedding(c.n_mag, c.tag_dim) if c.lit_features else None
+        # with the literal MLP the head reads [pooled | CLS | tag | mag]; without it, a single
+        # Linear reads [pooled | tag | mag] (just `pooled` when the features are off too)
+        d_feat = d + (2 * c.tag_dim if c.lit_features else 0)
+        self.lit_mlp = nn.Linear(d_feat + d, d) if c.lit_mlp else None
+        self.pair_head = nn.Linear(d if c.lit_mlp else d_feat, c.n_pairs)
         self.apply(self._init)
         scale = 0.02 / math.sqrt(2 * c.n_layers)
         for blk in self.blocks:        # residual-branch outputs start small (GPT-2 style)
@@ -210,18 +263,20 @@ class TinyEncoder(nn.Module):
         """ids/seg [B,T]; pad [B,T] bool (True = real token) or None when there is
         no padding (batch 1, the serving shape); lit_* [B,L]."""
         b, t = ids.shape
-        e = self.tok(ids) + self.seg(seg)
+        e = self.tok(ids)
+        if self.seg is not None:
+            e = e + self.seg(seg)
         rope = None
         if self.pos is not None:
             e = e + self.pos(torch.arange(t, device=ids.device))[None]
         else:
             rope = (self.rope_cos, self.rope_sin)
-        x = self.drop(self.emb_ln(e))
+        x = self.drop(e if self.emb_ln is None else self.emb_ln(e))
         keep = None if pad is None else pad[:, None, None, :]
         for blk in self.blocks:
             x = blk(x, keep, rope)
         x = self.ln_f(x)
-        cls = F.gelu(self.pool(x[:, 0]))
+        cls = x[:, 0] if self.pool is None else F.gelu(self.pool(x[:, 0]))
         out: dict[str, torch.Tensor] = {"op": self.op_head(cls)}
         for n, head in self.conv_heads.items():
             out["conv:" + n] = head(cls)
@@ -229,10 +284,14 @@ class TinyEncoder(nn.Module):
         p = torch.arange(t, device=ids.device)[None, None, :]
         m = ((p >= lit_s[..., None]) & (p < lit_e[..., None]) & lit_ok[..., None]).to(x.dtype)
         pooled = torch.bmm(m, x) / m.sum(-1, keepdim=True).clamp(min=1)
-        feats = [pooled, cls[:, None, :].expand(-1, pooled.shape[1], -1)]
+        feats = [pooled]
+        if self.lit_mlp is not None:
+            feats.append(cls[:, None, :].expand(-1, pooled.shape[1], -1))
         if self.c.lit_features:
             feats += [self.tag(lit_tag.long()), self.mag(lit_mag.long())]
-        h = F.gelu(self.lit_mlp(self.drop(torch.cat(feats, dim=-1))))
+        h = self.drop(torch.cat(feats, dim=-1))
+        if self.lit_mlp is not None:
+            h = F.gelu(self.lit_mlp(h))
         out["pair"] = self.pair_head(h)
         return out
 
@@ -241,10 +300,10 @@ class TinyEncoder(nn.Module):
 
     def breakdown(self) -> dict[str, int]:
         def n(*mods) -> int:
-            return sum(p.numel() for m in mods for p in m.parameters())
+            return sum(p.numel() for m in mods if m is not None for p in m.parameters())
         return {
             "token embedding": n(self.tok),
-            "position embedding": n(self.pos) if self.pos is not None else 0,
+            "position embedding": n(self.pos),
             "segment embedding": n(self.seg), "embedding norm": n(self.emb_ln),
             f"{self.c.n_layers} transformer blocks": n(*self.blocks),
             "final norm + CLS pooler": n(self.ln_f, self.pool),
@@ -272,7 +331,18 @@ def add_model_args(ap: argparse.ArgumentParser) -> None:
     g.add_argument("--max-len", type=int, default=160,
                    help="position-table size; measured corpus maxima are 150 (mortgage) and "
                         "29 (strategy) WordPiece tokens")
-    g.add_argument("--ffn", choices=["geglu", "gelu"], default="geglu")
+    g.add_argument("--ffn", choices=["geglu", "swiglu", "gelu"], default="geglu")
+    g.add_argument("--norm", choices=["layernorm", "rmsnorm"], default="layernorm")
+    g.add_argument("--no-bias", action="store_true", help="no biases in the transformer stack")
+    g.add_argument("--no-emb-norm", action="store_true", help="no norm over the summed embeddings")
+    g.add_argument("--no-segments", action="store_true", help="no segment embedding")
+    g.add_argument("--no-pooler", action="store_true", help="op and class heads read CLS directly")
+    g.add_argument("--no-lit-mlp", action="store_true",
+                   help="the pair head is one Linear over the pooled literal (no MLP, no CLS)")
+    g.add_argument("--servable", action="store_true",
+                   help="the architecture sensen's TransformerBlock can load: RMSNorm + SwiGLU, no "
+                        "biases, RoPE, and none of the extra inputs and heads (segments, tag and "
+                        "magnitude features, pooler, literal MLP). Overrides the options above")
     g.add_argument("--pos", choices=["learned", "rope"], default="learned",
                    help="positions: learned absolute (as specified) or RoPE (what sensen's "
                         "attention applies unconditionally)")
@@ -282,8 +352,14 @@ def add_model_args(ap: argparse.ArgumentParser) -> None:
 
 
 def cfg_kwargs(a: argparse.Namespace) -> dict:
-    return dict(d_model=a.d_model, n_layers=a.n_layers, n_heads=a.n_heads, max_len=a.max_len,
-                ffn=a.ffn, dropout=a.dropout, lit_features=not a.no_lit_features, pos=a.pos)
+    kw = dict(d_model=a.d_model, n_layers=a.n_layers, n_heads=a.n_heads, max_len=a.max_len,
+              ffn=a.ffn, dropout=a.dropout, lit_features=not a.no_lit_features, pos=a.pos,
+              norm=a.norm, bias=not a.no_bias, emb_norm=not a.no_emb_norm,
+              segments=not a.no_segments, pooler=not a.no_pooler, lit_mlp=not a.no_lit_mlp)
+    if a.servable:
+        kw.update(norm="rmsnorm", ffn="swiglu", bias=False, pos="rope", emb_norm=False,
+                  segments=False, pooler=False, lit_mlp=False, lit_features=False)
+    return kw
 
 
 def selftest() -> int:
@@ -297,9 +373,13 @@ def selftest() -> int:
         bad += not cond
         print(f"  {'PASS' if cond else 'FAIL'}: {what}")
 
+    SERVABLE = dict(norm="rmsnorm", ffn="swiglu", bias=False, pos="rope", emb_norm=False,
+                    segments=False, pooler=False, lit_mlp=False, lit_features=False)
+
     def mk(pos: str) -> TinyEncoder:
+        kw = SERVABLE if pos == "servable" else dict(pos=pos)
         m = build(EncoderConfig(vocab_size=50, n_ops=5, n_pairs=7, conv_sizes={"f": 3}, max_len=32,
-                                d_model=32, n_layers=2, n_heads=4, dropout=0.0, pos=pos))
+                                d_model=32, n_layers=2, n_heads=4, dropout=0.0, **kw))
         m.eval()
         return m
 
@@ -315,7 +395,7 @@ def selftest() -> int:
             kw["pad"] = torch.arange(pad_to)[None] < t
         return kw
 
-    for pos in ("learned", "rope"):
+    for pos in ("learned", "rope", "servable"):
         m = mk(pos)
         x = inputs(12)
         with torch.no_grad():
@@ -336,6 +416,22 @@ def selftest() -> int:
         parts = m.breakdown()
         check(sum(parts.values()) == m.n_params(), f"[{pos}] parameter breakdown sums to the total "
                                                    f"({m.n_params():,})")
+    # the servable stack really is what sensen's TransformerBlock holds: no bias anywhere in
+    # it, RMSNorm weights only, and a SwiGLU FFN with the same shapes (so the same parameter
+    # count) as the GeGLU one it replaces
+    m = mk("servable")
+    stack = [n for n, _ in m.named_parameters() if n.startswith(("blocks", "ln_f"))]
+    check(stack and not any(n.endswith("bias") for n in stack),
+          f"[servable] the transformer stack has no bias parameter ({len(stack)} tensors)")
+    check(all(isinstance(mod, RMSNorm) for n, mod in m.named_modules() if n.endswith(("ln1", "ln2", "ln_f"))),
+          "[servable] every norm is an RMSNorm")
+    cfg_g = EncoderConfig(vocab_size=50, n_ops=5, n_pairs=7, d_model=32, n_layers=2, n_heads=4, ffn="geglu")
+    cfg_s = EncoderConfig(vocab_size=50, n_ops=5, n_pairs=7, d_model=32, n_layers=2, n_heads=4, ffn="swiglu")
+    check(build(cfg_g).n_params() == build(cfg_s).n_params(), "SwiGLU and GeGLU cost the same parameters")
+    old_cfg = EncoderConfig.from_json({k: v for k, v in cfg_g.to_json().items()
+                                       if k not in ("norm", "bias", "emb_norm", "segments", "pooler", "lit_mlp")})
+    check(old_cfg.norm == "layernorm" and old_cfg.bias and old_cfg.segments and old_cfg.pooler,
+          "a config saved before these options existed loads with the old behaviour")
     # RoPE: a score depends on the DISTANCE between positions, not on the positions
     cos, sin = rope_tables(40, 8, 10000.0)
     q, k = torch.randn(1, 1, 1, 8), torch.randn(1, 1, 1, 8)

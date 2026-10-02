@@ -927,6 +927,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"[model] PARAMETERS: {n_params:,}  ({n_params / 1e6:.3f} M)   d={cfg.d_model} "
           f"layers={cfg.n_layers} heads={cfg.n_heads} ffn={cfg.ffn}({cfg.d_ffn}) "
           f"max_len={cfg.max_len} bf16={bf16} threads={a.threads}")
+    print(f"[model] stack: norm={cfg.norm} bias={cfg.bias} pos={cfg.pos}   inputs/heads: "
+          f"segments={cfg.segments} emb_norm={cfg.emb_norm} lit_features={cfg.lit_features} "
+          f"pooler={cfg.pooler} lit_mlp={cfg.lit_mlp}"
+          + ("   (--servable: what sensen's TransformerBlock can load)" if a.servable else ""))
     for k, v in model.breakdown().items():
         print(f"           {k:36s} {v:>10,}")
     departures = [f"--pos {a.pos}"] if a.pos != "learned" else []
