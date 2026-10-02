@@ -8,8 +8,10 @@ WHAT IS MEASURED, AND THE SHAPE IT IS MEASURED AT. Serving is BATCH 1: one
 request, one sequence, no padding, so the benchmark feeds `pad=None` exactly as
 `encoder_model.TinyEncoder` documents. Latency is the median of >= 200 timed
 forward passes over distinct real validation requests (their natural lengths,
-not one repeated shape), and `tokens/s` is total tokens over total time across
-those same passes. Every variant is also scored for ACCURACY on the whole
+not one repeated shape). `tokens/s` is reported two ways: total tokens over total
+time across those passes (a throughput that every slow outlier drags down), and
+mean tokens over the MEDIAN latency (what a typical request sees); on an idle host
+they agree, on a busy one the gap between them is the contention. Every variant is also scored for ACCURACY on the whole
 validation split, because a quantised model that is faster and wrong has not
 been measured, only sped up.
 
@@ -178,7 +180,11 @@ def bench(model: nn.Module, inputs: list[dict], autocast: bool, n_timed: int, pa
     return dict(n=len(times), median_ms=1e3 * statistics.median(times), mean_ms=1e3 * statistics.mean(times),
                 p95_ms=1e3 * q(0.95), p99_ms=1e3 * q(0.99), min_ms=1e3 * s[0],
                 cpu_median_ms=1e3 * statistics.median(cpu),
+                # two readings of "tokens per second": total tokens over total time (the
+                # throughput, dragged down by every slow outlier a busy host produces) and mean
+                # tokens over the MEDIAN latency (what a typical request sees)
                 tok_per_s=sum(toks) / sum(times), mean_tokens=statistics.mean(toks),
+                tok_per_s_at_median=statistics.mean(toks) / statistics.median(times),
                 distinct_shapes=len({int(x["ids"].shape[1]) for x in inputs}))
 
 
@@ -321,13 +327,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     # ---- table
     base = rows[0]["bench"][a.threads[0]]["median_ms"]
     print(f"\n{'variant':16s} {'size MB':>8s} {'row acc':>8s} {'op acc':>7s}"
-          + "".join(f" | {nt}T ms med (p95)   tok/s " for nt in a.threads) + " speedup")
+          + "".join(f" | {nt}T ms med (p95)  tok/s total / @med " for nt in a.threads) + " speedup")
     for r in rows:
         line = f"{r['variant']:16s} {r['size_mb']:8.2f} "
         line += (f"{100 * r['row_acc']:7.2f}% {100 * r['op_acc']:6.2f}%" if "row_acc" in r else "       -       -")
         for nt in a.threads:
             b = r["bench"][nt]
-            line += f" | {b['median_ms']:6.2f} ({b['p95_ms']:6.2f}) {b['tok_per_s']:8.0f}"
+            line += (f" | {b['median_ms']:6.2f} ({b['p95_ms']:6.2f}) "
+                     f"{b['tok_per_s']:7.0f} / {b['tok_per_s_at_median']:7.0f}")
             if nt == 1:
                 line += f" [cpu {b['cpu_median_ms']:.2f}]"
         line += f"   {base / r['bench'][a.threads[0]]['median_ms']:.2f}x"

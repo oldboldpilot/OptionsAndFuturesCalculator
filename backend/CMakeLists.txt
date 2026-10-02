@@ -837,6 +837,20 @@ target_sources(sensen_slim
             "${SENSEN_SRC}/fp64_reference.cppm"
             "${SENSEN_SRC}/gemm_jit.cppm"
             "${SENSEN_SRC}/gemm_kernels.cppm"
+            # The encoder has to be EXPORTED, not just read: the small
+            # bidirectional model that replaces the two Qwen3-0.6B decoders is
+            # trained outside the tree and shipped as GGUF, and until now the
+            # writer was reachable from nothing the engine builds. All six of
+            # its sensen imports were already listed, so the closure grows by
+            # exactly this one module (104 -> 105).
+            #
+            # `scripts/sensen_module_closure.py --check` will report it EXTRA
+            # until something under backend/src imports it, because that script
+            # derives the closure from `import sensen.*` in backend/src. That is
+            # the same standing exception this file already carries for
+            # sensen.llm_pipeline -- not a new kind of debt, and the entry is
+            # load-bearing before the importer lands.
+            "${SENSEN_SRC}/gguf_exporter.cppm"
             "${SENSEN_SRC}/gguf_parser.cppm"
             "${SENSEN_SRC}/gguf_weight_loader.cppm"
             "${SENSEN_SRC}/gp_ara_interfaces.cppm"
