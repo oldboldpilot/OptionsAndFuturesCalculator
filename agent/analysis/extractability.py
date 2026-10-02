@@ -37,10 +37,21 @@ from decimal import ROUND_HALF_UP, Decimal, InvalidOperation, getcontext
 getcontext().prec = 60
 
 # ---------------------------------------------------------------- lexer
+# THE MAGNITUDE SUFFIX MUST BE WORD-BOUNDED, AND THIS PATTERN WAS NOT.
+# It read `\s*(?P<suffix>[kKmM])?`, so the space-then-m of "$500 more a month"
+# matched as a MEGA suffix and the literal lexed as 500,000,000. That is the
+# whole of the residue this script reported as UNEXPLAINED for
+# `monthly_overpayment` (1152/1408 explained) and `extra_monthly_payment`
+# (201/388): the values WERE stated, and the lexer had eaten them. Word-bounding
+# the suffix takes both to 1408/1408 and 388/388.
+#
+# Two changes: no `\s*` before the suffix (a space then a letter is a word, not
+# a unit), and a negative lookahead so "500k" matches while "500 more",
+# "500 months" and "500kg" do not.
 _NUM = re.compile(
     r"""(?P<dollar>\$)?\s*
         (?P<num>\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)
-        \s*(?P<suffix>[kKmM])?
+        (?P<suffix>[kKmM](?![A-Za-z]))?
         \s*(?P<pct>%)?
     """,
     re.VERBOSE,

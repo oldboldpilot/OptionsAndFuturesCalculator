@@ -98,22 +98,37 @@ def encode(tok, text: str, max_len: int):
 # MODEL
 # =========================================================================
 class Rope(nn.Module):
-    """Rotary positions, matching what sensen's attention applies anyway."""
+    """Rotary positions, in SENSEN'S PAIRING.
+
+    THE PAIRING IS NOT A DETAIL AND THIS CLASS HAD IT WRONG. There are two
+    conventions in the wild: rotate ADJACENT channels (i, i+1) -- the
+    interleaved/NeoX form, which `x[..., 0::2]` / `x[..., 1::2]` implements --
+    or rotate the HALVES (i, i + d/2), the LLaMA form. They are different
+    rotations, not different spellings of one.
+
+    sensen's `rotary_embedding.cppm` pairs `data[i]` with `data[i + half_dim]`
+    on its scalar, AVX2 and AVX-512 paths alike. A model trained with the
+    interleaved form therefore has its q/k channels permuted relative to what
+    the engine will rotate, so the engine computes different attention scores
+    from the same weights -- silently, with no error and no obviously broken
+    output. Match the engine; the alternative is permuting q/k output channels
+    per head in the exporter, which is a second place to get it wrong.
+    """
 
     def __init__(self, head_dim: int, max_len: int, base: float = 10000.0):
         super().__init__()
-        inv = 1.0 / (base ** (torch.arange(0, head_dim, 2).float() / head_dim))
-        t = torch.arange(max_len).float()
-        f = torch.outer(t, inv)
+        half = head_dim // 2
+        inv = 1.0 / (base ** (torch.arange(0, half).float() * 2.0 / head_dim))
+        f = torch.outer(torch.arange(max_len).float(), inv)
         self.register_buffer("cos", f.cos()[None, None, :, :], persistent=False)
         self.register_buffer("sin", f.sin()[None, None, :, :], persistent=False)
 
     def forward(self, x):  # x: [B, H, T, D]
-        t = x.shape[2]
-        x1, x2 = x[..., 0::2], x[..., 1::2]
+        t, d = x.shape[2], x.shape[-1]
+        h = d // 2
+        x1, x2 = x[..., :h], x[..., h:]
         c, s = self.cos[:, :, :t, :], self.sin[:, :, :t, :]
-        o1, o2 = x1 * c - x2 * s, x1 * s + x2 * c
-        return torch.stack((o1, o2), dim=-1).flatten(-2)
+        return torch.cat((x1 * c - x2 * s, x1 * s + x2 * c), dim=-1)
 
 
 class RMSNorm(nn.Module):

@@ -74,8 +74,11 @@ RUN IT (from agent/train/; the two corpora differ only in --op-key):
     python quantize_encoder.py --checkpoint OUT/encoder_fp32.pt --val <the same val> --out-dir OUT_Q
   `--limit N` and `--epochs` bound a smoke run (a tiny `--limit` also needs `--min-coverage 0
   --min-class-count 5`, because the class and pair vocabularies are counted over the rows it
-  keeps). `--pos rope`, `--augment-digits P` and `--first-turn-examples F` are the
-  options that depart from the specified recipe; each is off by default.
+  keeps). `--pos rope`, `--servable`, `--digits single`, `--augment-digits P`,
+  `--augment-format P` and `--first-turn-examples F` are the options that depart from
+  the specified recipe; each is off by default, and `[recipe]` in the run header lists
+  the ones that were on. `--servable` is the architecture sensen's TransformerBlock can
+  load (see encoder_model.py).
 """
 from __future__ import annotations
 
@@ -933,7 +936,8 @@ def main(argv: Sequence[str] | None = None) -> int:
           + ("   (--servable: what sensen's TransformerBlock can load)" if a.servable else ""))
     for k, v in model.breakdown().items():
         print(f"           {k:36s} {v:>10,}")
-    departures = [f"--pos {a.pos}"] if a.pos != "learned" else []
+    departures = ["--servable"] if a.servable else []
+    departures += [f"--pos {a.pos}"] if (a.pos != "learned" and not a.servable) else []
     departures += [f"--{n.replace('_', '-')} {getattr(a, n)}" for n in
                    ("augment_digits", "augment_format", "first_turn_examples") if getattr(a, n) > 0]
     departures += ["--digits single"] if a.digits == "single" else []
