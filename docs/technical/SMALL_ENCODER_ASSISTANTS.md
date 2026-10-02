@@ -174,24 +174,43 @@ The five, and why the first one settles it:
 | `occupancy_rate` | `M10 complement%` vs `M2 percent/100` |
 | `values[]` | `M1 identity`, `M1 identity#rep20`, `M8 negate` |
 
-`rate` is the one that cannot be given up: percent/100 against annual->monthly is
-exactly the distinction behind the "20% down priced as a 20% interest rate" defect
-this project already caught in production. Independent slot and map heads would
-not be FORCED to keep the pairing, and the loader refuses an unexpected tensor set
+`rate` is the one that looks worst: percent/100 against annual->monthly is exactly
+the distinction behind the "20% down priced as a 20% interest rate" defect this
+project already caught in production. The loader refuses an unexpected tensor set
 deliberately, "because a tensor the trainer applied and this loader ignores is a
 silent train/serve mismatch".
+
+**BUT THE SCHEMA VIEW OVERSTATES THE COST, AND THE DATA VIEW IS THE ONE TO QUOTE.**
+"5 of 97 slots take several maps" counts the VOCABULARY. What decides the accuracy
+is how often a real literal's pair set fails to be reconstructed from its slot and
+map marginals -- i.e. how often `slots x maps` is bigger than the true set:
+
+| corpus | labelled literals | carry 1 pair | carry 2 pairs | `slots x maps` != the true set |
+| --- | --- | --- | --- | --- |
+| mortgage | 3,216 | 3,058 (95.1%) | 158 (4.9%) | **13 (0.40%)** |
+| strategy | 972 | 972 (100%) | 0 | **0 (0.00%)** |
+
+So factorising costs **0.40% of mortgage literals**, not 5% of slots. Because a row
+fails if ANY of its literals does, those 13 bound the row-level cost at about
+**2.2% of rows** -- factorised heads would cap mortgage near **97.8%** against the
+pair head's measured **99.83%**. Strategy pays nothing.
 
 So **strategy exports today and mortgage does not.** Two ways to close it, and the
 choice is an owner call rather than a detail:
 
-1. **Retrain mortgage with factorised slot and map heads and MEASURE the cost.**
-   Cheap (1.2 min on the GPU) and it answers whether option 2 is needed at all.
-   `pair.map_acc_given_slot` is 1.0 today, so the model already resolves these from
-   context; what is unknown is whether it still does when the heads cannot see each
-   other.
-2. **Add an `encoder.pair.weight` `{d, n_pairs}` tensor to sensen's loader.** This
-   preserves exactly what the trainer learned and what the oracle proves is 100%
-   representable, at the cost of a sensen change with its own gate.
+1. **Export strategy NOW with slot and map heads.** Zero measured loss, no decision
+   needed, and it exercises the whole export path end to end against a loader that
+   has never seen a PyTorch-produced GGUF.
+2. **For mortgage, add an `encoder.pair.weight` `{d, n_pairs}` tensor to sensen's
+   loader.** This is the recommendation: it preserves exactly what the trainer
+   learned and what the oracle proves is 100% representable, where factorised heads
+   forfeit a bounded ~2.2% of rows for nothing in return. The cost is a sensen
+   change with its own gate, against a measured 2-point accuracy loss -- and the
+   loader already refuses unknown tensors, so the new one has to be declared
+   rather than tolerated.
+3. The factorised retrain stays available as the cheap fallback if the sensen
+   change is unwelcome: 1.2 min on the GPU, and the 0.40%/2.2% figures above say
+   what it would cost before it is run.
 
 Recorded also because the loader's own header says what nobody had checked:
 "**NOT checked: a GGUF produced by `src/gguf_exporter.cppm` or by a PyTorch
