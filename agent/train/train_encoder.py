@@ -491,7 +491,20 @@ def perturb_example(ex: C.Example, sch: C.Schema, rng: random.Random, mode: str,
                   are in range and from the generator's own value sets, so what
                   moves is the COMBINATION, not the support.
     The gap between the two is the finding: a model that holds up under `pool` and
-    falls under `all` is reading the range of a value, not just its context."""
+    falls under `all` is reading the range of a value, not just its context.
+
+    TWO LIMITS OF THIS PROBE, both found by reading its failures:
+      * It preserves digit count, so it never moves a number into a new order of
+        magnitude. A model that uses magnitude as a slot cue ("a two-digit percent is a
+        tax bracket") is therefore NOT caught by `one`/`all`; it surfaced in `pool`, where
+        a 10.81% rate came back MISSING.
+      * It trusts the labels' pointers. A revision that restates a value in words ("same
+        but next month" after "30 days") has its label on the first-turn literal only
+        because the two values are equal; resample that literal and the expected params
+        follow it while the model, correctly, follows the words. On the strategy corpus
+        that is 6 of 852 rows (0.7%), read one by one, and the same six (operation, field)
+        failures appear for every model trained here, which is how it was recognised as
+        the probe's floor rather than a model's."""
     if ex.gold is None:
         return None
     idx = [i for i, ps in enumerate(ex.pairs) if ps]

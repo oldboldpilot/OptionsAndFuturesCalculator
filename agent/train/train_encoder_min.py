@@ -116,8 +116,35 @@ class Rope(nn.Module):
         return torch.stack((o1, o2), dim=-1).flatten(-2)
 
 
+class RMSNorm(nn.Module):
+    """x * w / sqrt(mean(x^2) + eps). No mean subtraction and no bias.
+
+    NOT a style choice. sensen's serving block (`transformer_block.cppm`, reused
+    by `text_encoder.cppm`) is RMSNorm + SwiGLU and its GGUF loader REFUSES any
+    other FFN activation. A LayerNorm+GELU encoder trains perfectly well and
+    then cannot be loaded by the engine that is supposed to serve it, which is
+    the whole point of training it. Match the engine.
+    """
+
+    def __init__(self, d: int, eps: float = 1e-6):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(d))
+        self.eps = eps
+
+    def forward(self, x):
+        dt = x.dtype
+        x32 = x.float()
+        n = x32 * torch.rsqrt(x32.pow(2).mean(-1, keepdim=True) + self.eps)
+        return (n * self.weight.float()).to(dt)
+
+
 class Block(nn.Module):
-    """Pre-norm, BIDIRECTIONAL. No causal mask anywhere -- that is the point."""
+    """Pre-norm, BIDIRECTIONAL. No causal mask anywhere -- that is the point.
+
+    RMSNorm + SwiGLU + RoPE and NO biases, because that is exactly what sensen's
+    `TransformerBlock` implements. Every deviation here is a weight the engine's
+    loader will reject.
+    """
 
     # Set once from the CLI rather than per instance: every block makes the same
     # choice, and threading it through each constructor buys nothing.
@@ -126,10 +153,13 @@ class Block(nn.Module):
     def __init__(self, d: int, h: int, ffn: int, rope: Rope, drop: float):
         super().__init__()
         self.h, self.dh = h, d // h
-        self.n1, self.n2 = nn.LayerNorm(d), nn.LayerNorm(d)
-        self.qkv = nn.Linear(d, 3 * d)
-        self.proj = nn.Linear(d, d)
-        self.fc1, self.fc2 = nn.Linear(d, ffn), nn.Linear(ffn, d)
+        self.n1, self.n2 = RMSNorm(d), RMSNorm(d)
+        self.qkv = nn.Linear(d, 3 * d, bias=False)
+        self.proj = nn.Linear(d, d, bias=False)
+        # SwiGLU: down(silu(gate(x)) * up(x)). Three projections, not two.
+        self.gate = nn.Linear(d, ffn, bias=False)
+        self.up = nn.Linear(d, ffn, bias=False)
+        self.down = nn.Linear(ffn, d, bias=False)
         self.rope = rope
         self.drop = nn.Dropout(drop)
         # Softmax is reduced in fp32 and cast back: the probabilities are a
@@ -169,7 +199,8 @@ class Block(nn.Module):
                 att.softmax(dim=-1, dtype=torch.float32).to(v.dtype)) @ v
         y = self.proj(y.transpose(1, 2).reshape(B, T, D))
         x = x + self.drop(y)
-        return x + self.drop(self.fc2(F.gelu(self.fc1(self.n2(x)))))
+        h = self.n2(x)
+        return x + self.drop(self.down(F.silu(self.gate(h)) * self.up(h)))
 
 
 class TinyEncoder(nn.Module):
@@ -179,7 +210,7 @@ class TinyEncoder(nn.Module):
         self.emb = nn.Embedding(vocab, d, padding_idx=0)
         rope = Rope(d // heads, max_len)
         self.blocks = nn.ModuleList(Block(d, heads, ffn, rope, drop) for _ in range(layers))
-        self.norm = nn.LayerNorm(d)
+        self.norm = RMSNorm(d)
         self.op_head = nn.Linear(d, n_ops)
         self.pair_head = nn.Linear(d, n_pairs)          # multi-label, see docstring
         self.conv_heads = nn.ModuleList(nn.Linear(d, n) for n in conv_sizes)

@@ -23,8 +23,9 @@ PROPOSED THIS DESIGN (the copy was taken from a file that is byte-identical to
 the tracked one, sha256 7f264d71...). It is copied rather than imported so the
 analysis script stays a frozen record of what was measured while this file is
 free to change. It is copied VERBATIM EXCEPT FOR ONE
-DEFECT, found by running it, and `--compare-reference` reproduces the
-reference's own accounting beside this one so the effect is a measurement:
+DEFECT, found by running it, and ONE ADDITION (last bullet below);
+`--compare-reference` reproduces the reference's own accounting beside this one
+so the effect of the defect is a measurement:
 
   * THE LEXER'S SUFFIX WAS NOT WORD-BOUNDED. `\\s*(?P<suffix>[kKmM])?` allows
     whitespace before the suffix and no boundary after it, so "$304,500
@@ -36,6 +37,13 @@ reference's own accounting beside this one so the effect is a measurement:
     reference reported ComputeRefinance, ComputeHeloc and ComputeMortgageRecast
     as 1-8% row-extractable: the loan balance and the remaining months were
     unreadable. Fixed lexer alone: rows fully covered 80.96% -> 88.77%.
+  * THE ADDITION: the word "percent" / "per cent" lexes as "%". The corpora never
+    write it (0 of 27,764 mortgage user segments), so no label moves and
+    `--compare-reference` is unaffected; it exists because `train_encoder.py`'s
+    format probe showed a model whose lexer calls "6.5 percent" a BARE number has
+    never seen a rate spelled that way, and the label builder could not even label
+    such a row: `M2 percent/100` is a candidate only for a percent-tagged literal, and
+    the fallback `M2' /100` is a pair the vocabulary dropped as too rare.
 
 FIVE FURTHER TRAPS, EACH MEASURED ON THESE CORPORA, EACH WHY THE ATTRIBUTION
 BELOW IS NOT THE ONE-LINER IT LOOKS LIKE ("minimum absolute error", exact
@@ -1588,6 +1596,9 @@ def selftest() -> int:
           "(the defect this file fixed)")
     lit = lex("at 6.5% for a while")[0]
     check("at 6.5% for a while"[lit.start:lit.end] == "6.5%", "a literal's span excludes trailing whitespace")
+    pw = lex("a 6.5 percent rate, 5 percentage points, 30 percentile")
+    check([(str(l.value), l.tag) for l in pw] == [("6.5", "percent"), ("5", "bare"), ("30", "bare")],
+          "the WORD percent is a percent sign, but 'percentage' and 'percentile' are not")
 
     # ---- zero is the absence of a statement (Rule Z')
     ex, ap = unary_cands(Decimal("0.00"), lex("a 100% financed purchase, rate 7.2%"))

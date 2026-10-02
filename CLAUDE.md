@@ -6084,3 +6084,167 @@ is `"0.i"`). Roughly one id in five thousand came out under four characters.
 two legs sharing an id is one edit applied to both and one delete removing both,
 silently. Now a counter — unique by construction for the life of the tab, which
 is the only scope a leg id has.
+
+## The assistants are doing EXTRACTION while served by an architecture that GENERATES
+
+Asked on 2026-10-02 whether `all-MiniLM-L6-v2` (~22M) or ModernBERT could
+replace the two fine-tuned Qwen3-0.6B assistants to cut the latency users are
+complaining about, later widened to `flan-t5-small`, SmolLM2-135M/360M and
+"the smallest barebones model that can do the job".
+
+**The answer is yes, and the reason is not model size.** Both corpora are
+EXTRACTIVE: a gold parameter value is almost never a free-form number, it is
+recoverable from a numeric literal in the utterance under a transformation
+`mortgage_verification.cppm` ALREADY enumerates (M1 identity, M2 percent/100,
+M3 annual→per-period, M5 years→months, M9 the binary a−b / a×(1−p), M10
+complement, …), or it is a small-cardinality constant.
+
+Measured by `agent/analysis/extractability.py` and routed by
+`agent/train/encoder_corpus.py`:
+
+```
+train  rows 21503/21520 = 99.92%   fields 211177/211194 = 99.99%
+val    rows  1144/1144  = 100.00%  fields  11131/11131  = 100.00%
+
+point:exact 62.92%  class 28.94%  class(cat) 3.58%  point:approx 1.50%
+array:group 1.39%   array:anchor 1.17%  point:exact-binary 0.51%
+```
+
+28 operations + NONE, 114 (slot, map) pairs, 5 small class heads, and **40
+fields carrying a single constant, which need no head at all.** On the strategy
+corpus the entire residue is ONE field — `expiration_days`, cardinality 6
+(`{7,14,30,60,90,365}`); "next week" → 7 is a six-way classifier, not generation.
+
+**ARCHITECTURE CLASS DOMINATES MODEL SIZE, and that is the whole finding.**
+Mortgage input is mean 40 tokens and output mean **128**, so a decoder does ~128
+sequential forward passes where an encoder does one. Decode here is
+bandwidth-bound (~60 tok/s over 604 MB of Q8_0), so answering one mortgage
+question reads about `128 × 604 MB`. A 135M decoder still pays the 128×; only an
+encoder pays 1×. So SmolLM2-135M buys ~4.5x, flan-t5-small ~8x, an encoder two
+to three orders of magnitude on weight bytes read.
+
+**The honest ceiling must be quoted alongside it:** ~71 ms per call is network,
+TLS, Envoy and gRPC framing, and `ParseOperation` measures 2.18 s live. The
+realistic win is **2.18 s → ~80 ms, about 27x**, after which the request is
+network-bound and no further model work helps. A larger figure is quoting weight
+bytes, not latency.
+
+**IT IS ALSO MORE PRECISE THAN WHAT SHIPS, which is the counter-intuitive half.**
+The corpus rounds per-period rates to 6 places: 7.21% → `0.0721/12 =
+0.00600833…` is labelled `0.006008`, and that rounding is why 14.68% of values
+matched only at label precision. A pointer + map lets the serving layer compute
+in 256-bit `BigDecimal` at 38 places from the literal TEXT, so the rounding
+currently baked into the training labels disappears. A decoder cannot do this —
+it has to emit the digits, one per token, which is where the digit-loop and
+fullwidth-zero defects came from.
+
+And **the documented dangerous failure becomes impossible rather than refused**:
+`present_value = 304000.00` against a 495,000 utterance cannot be named by a
+model that emits (literal index, map id). The grounding gate stops being a
+filter and becomes a type.
+
+**WIRE-COMPATIBLE.** `ParseResponse` is a oneof of `FinanceParams` /
+`Clarification` / `Refusal`, and `FinanceParams` is `string operation` +
+`map<string,string> params`. The serving layer still renders decimal strings, so
+no proto changes, and `nest-egg-loan` and both front ends need no change at all.
+The proto's own comment already said its label space IS "one of 26 RPCs plus
+that RPC's own fields" — the contract was always shaped like a classifier plus
+per-field extraction.
+
+**First measured arm, LayerNorm+GELU+RoPE, 0.50M parameters, strategy corpus:**
+epoch 1 gave operation 0.9973, literal 0.9896, convention 0.9941 and **ROW
+0.9753** — every head simultaneously correct on 97.53% of rows, against this
+file's recorded **95.0% params exact-match**, from a model ~1,200x smaller.
+Two caveats travel with that number: ROW is not the same metric as "emitted
+params JSON matches gold" (the rendered comparison has NOT been run), and the
+mortgage corpus was REGENERATED so it is not the `1aa3ce94…` holdout the 414/560
+figure used.
+
+**THAT ARM IS UNSERVABLE.** `text_encoder.cppm` reuses sensen's
+`TransformerBlock`, which is RMSNorm + SwiGLU, and its loader refuses any other
+FFN activation. RoPE was matched deliberately — sensen applies it
+unconditionally with no off switch, so learned absolute positions produce
+weights the engine cannot run — but the norm and FFN were not.
+`train_encoder_min.py` is now RMSNorm + SwiGLU + no biases and both corpora were
+relaunched on it. The two are near-equivalent at this scale so the figure is
+expected to carry, but that is a prediction, not a measurement.
+
+**bf16: A CONCLUSION OF MINE THAT WAS WRONG, kept because the mechanism is the
+useful part.** Reported first as "bf16 is 10.6x slower, use fp32". That was
+measuring `torch.autocast`, which keeps fp32 master weights, casts per op, and
+hits a CPU `scaled_dot_product_attention` with no bf16 kernel at these shapes.
+Casting the WEIGHTS and dropping autocast: fp32 48 s, **pure bf16 36 s**,
+autocast 164 s. **The fast arms still cannot be ranked from that data** — the
+same `sdpa`+fp32 config measured 19 s idle and 41 s while the box carried six
+agents at load average 88.7, and a 22 s swing on one config exceeds the 12 s
+spread between arms. Only the autocast result survives, at ~4x.
+
+### Four sensen defects found while building it, and two nobody asked about
+
+**`ops::crossEntropyLoss`'s backward was `softmax - t`, which is wrong whenever
+`sum(t) != 1`.** The true gradient is `softmax*sum(t) - t`. On the exact `[3,5]`
+shape `tests/test_distill.cpp` uses, tape/finite-difference came to
+**2.999999** — a live consumer has been training against a 3x wrong gradient. It
+also took ONE softmax over the whole flat buffer, so
+`[[0,1,2],[1000,1001,1002]]` returned 18.83 where the true per-row loss is
+0.815, and a `+1e-8` floor capped `[[0,40]]` at 18.42 instead of 40. Repaired in
+place; the flat semantics are public so turning them per-row is an owner call.
+New `ops::crossEntropyLossIndexed` adds the per-row masked op the tree lacked,
+with `Mean` over NON-IGNORED rows. Verified against PyTorch 2.14.1 in float64
+over **5,506 configurations**: max difference 2.8e-14 on the loss, 2.2e-15 on
+the gradient.
+
+**`tokenizer.cppm` assigned `num_tokens` AFTER padding, so padded positions
+carried `attention_mask = 1` and never 0.** Harmless for one causal sequence; it
+silently corrupts every padded ENCODER batch, because attention would attend to
+`[PAD]`. Found while surveying for offsets, not looked for. Also truncation ran
+after appending EOS and could cut the `[SEP]` it had just added, and `fromParser`
+with an unrecognised `tokenizer.ggml.model` fell back silently to a raw-byte trie
+whose unk id is 0 — `[PAD]` in a BERT vocab, the worst failure available because
+it yields plausible ids. Gated by 340,160 byte-identical encodings, 26 of 27
+mutation arms killed, and the BasicTokenizer compared against HuggingFace's over
+**all 1,112,064 codepoints** with 0 unexplained mismatches.
+
+**THE `ExportTensor::shape` COMMENT WAS THE WRONG ONE.** It said "row-major,
+outermost first"; `TensorPlan::shape`'s "GGUF order, inner-most first" was right
+— `write()` emits dims verbatim and every production caller reverses first. So
+the K-quant guard, which checked the TOTAL element count rather than the ROW
+length ggml requires, let a `[384, 768]` tensor (MiniLM's width) export a file
+ggml refuses to load. Fixing it turned five existing tests red because their
+fixtures followed the wrong comment; all five are fixed.
+`test_qwen3_ckpt_export` needed a geometry change too, because a row length of 8
+cannot hold one 32-element Q8_0 block in EITHER order — and its own comment said
+"multiples of 32 so every 2-D tensor's FLAT ELEMENT COUNT divides evenly", a
+verbatim statement of the bug it was asserting. Emitted bytes unchanged: 343
+files, 886,048 bytes, 0 differing, same aggregate sha256.
+
+Also a generic `extra_kv` hook, because an encoder's `pooling_type`,
+`attention.causal`, `layer_norm_epsilon` and cls/sep/mask ids were unwritable.
+Note the asymmetry that made this easy to miss: `gguf_parser.cppm` ALREADY parses
+`<arch>.attention.causal` into `ModelConfig::is_causal` and nothing wrote it, and
+it reads eps only from `layer_norm_rms_epsilon`, defaulting to 1e-6 where
+HuggingFace BERT uses **1e-12** — so `layer_norm_eps` is MIRRORED onto that key.
+
+### Two library-wide findings that reach past the encoder
+
+**`GEMM::PrecisionScope` and `SENSEN_PRECISION_MODE=FP32` DO NOT GIVE FP32.** On
+an AMX host, slices of 16 or more rows go to a tile kernel that ignores the
+arithmetic mode: fp32 below 64 rows, bf16-level error (2.3e-3) at 64 and above.
+
+**`GEMM::matmul` IS NOT BIT-REPRODUCIBLE UNDER CONCURRENCY** under the default
+reduction, because a call's bits depend on whether it got the worker pool —
+`parallel.cpp:187` runs a second concurrent caller inline. Four threads, 26
+tokens, 120 calls, against a lone caller: FP32/AUTO 78 calls differed, the
+library default TF32/AUTO 84, BF16/AUTO 63, and pinned `{FP32,TREE}` /
+`{BF16,TREE}` **0**. The encoder route cells are pinned to
+`GemmReduction::TREE`. This matters to this repository specifically because so
+many of its gates are byte-identity across repeated runs. Not checked against
+the production EPYC fleet, and it matters only on AMX hosts.
+
+**`ctest` HAS NOT RUN for any of this.** sensen's `external/` submodules are not
+populated in the container this was done in, so the project cannot be
+configured. Every C++ result above came from hand-driven clang 23.1.2 builds of
+module closures, or from self-contained g++ harnesses compiled from text
+extracted verbatim from the modules; the five fixture results were measured on
+scratch copies. Treat that as the standing gap until a real `ctest` run
+confirms it.
