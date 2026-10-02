@@ -6370,3 +6370,67 @@ module closures, or from self-contained g++ harnesses compiled from text
 extracted verbatim from the modules; the five fixture results were measured on
 scratch copies. Treat that as the standing gap until a real `ctest` run
 confirms it.
+
+### CORRECTION 2026-10-02: BF16 `llq-fused` is NOT bit-identical to the DENSE kernel
+
+The LLQ section above says of the 16-bit tier that its "`llq-fused` arm is ALSO
+bit-identical, which the Q8_0 fused arm can never be", on the grounds that
+rebuilding a bf16 word from an exponent plane and a raw sign|mantissa plane is
+"a BIT JOIN, not arithmetic, so there is no accumulation to reorder and the
+fused kernel sums the same floats in the same canonical order as the dense one."
+
+**The first half is right and the second half is wrong, and the difference is
+the accumulation ORDER rather than the words.** Measured while making the
+encoder's quantisation axis generic: `LlqGemv::runBf16Slice` differs from the
+DENSE kernel in **3,395 of 3,968 floats**, largest difference 1.2e-6. It is
+bit-identical only to its OWN reference, `runBf16Dense`. The bit join does
+reconstruct every bf16 word exactly -- that part was never in doubt -- but
+`runBf16`'s canonical summation order is not sensen's dense tile order, and a
+reordered sum of identical floats is a different float.
+
+So the claim was true of the VALUES and false of the REDUCTION, which is the
+same distinction this file already draws for the Q8_0 fused tier ("the dense
+tile keeps an 8-lane FMA accumulator and reduces once at the end, and a
+per-block integer total has already thrown the lanes away"). The 16-bit tier was
+assumed exempt from that reasoning because its words are exact. Exact words do
+not buy an identical sum.
+
+**The gate was NOT relaxed, which is the part that matters.** The encoder serves
+BF16 `llq-fused` with a dense-ORDER fused kernel that reads the packed planes
+directly, so byte-identity against dense still holds and the assertion stays as
+written. `Bf16FusedOrder::Canonical` remains reachable and unused. The cost is
+SIMD speed and it is UNMEASURED. The alternative -- keep the canonical kernel
+and relax the gate to a tolerance -- was rejected because a tolerance there
+cannot tell a reordered sum from a wrong one.
+
+Mutation-checked in the direction that matters: making the BF16 fused tier use
+the library's canonical order makes **5,325 of 6,020** floats differ through a
+whole encoder forward, and the identity check catches it.
+
+**A SECOND FINDING, and it means the Q8_0 fused tier was never fused for an
+encoder.** `llq-fused` at Q8_0 served every `m > 1` call by MATERIALISING, so for
+a model that processes all tokens at once it was `llq` under another name --
+reading the same bytes as dense plus a decode, which is exactly what this file
+says `llq` is and `llq-fused` is not. `GEMM::Q8WeightSource::gemmSlice` closes
+it. Q8 fused now differs from dense by at most 3.6e-7, bounded by an elementwise
+absolute sum; a first version of that bound used block totals and was violated
+by 1.36x, so the bound is derived rather than fitted.
+
+Gated by `test_encoder_quant_matrix` (250 checks) and `test_encoder_dispatch`
+(107), both passing under a real `ctest`. The surface is 3 pooling x 3 head x
+**14** precision x 3 weight-store x **7** backend x 2 mode = **5,292 cells**, 80
+served and 5,212 gaps each carrying the fact that decides it. The precision and
+backend axes are DERIVED from `QuantPrecision`, `NnBackend`, `QuantCalibBackend`
+and `GgufEncodeBackend` by enumerator probing -- clang 23.1.2 has no
+`std::meta`, so it reads `__PRETTY_FUNCTION__`. Proven by appending a real
+twelfth `QuantPrecision` enumerator to a scratch copy and changing nothing else:
+the axis grew 14 -> 15, the surface to 5,670 cells, an independent oracle agreed
+on all of them, and the test failed EXACTLY the three checks naming stale
+hand-written copies (`kAllQuantCalibPrecisions` 11 against 12, `nn::precisionBits`
+11 against 12, and the new member's width). That is the four-tables drift being
+caught by construction rather than by memory.
+
+**K-quants cannot be route keys** because they are not `QuantPrecision` members.
+The block-alignment refusal is general and is exercised with a forged 256-block
+route against a width of 384 -- MiniLM's width, which is the case that would
+have exported a corrupt file.
