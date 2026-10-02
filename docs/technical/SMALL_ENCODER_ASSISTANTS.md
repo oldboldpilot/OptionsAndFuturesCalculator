@@ -71,6 +71,133 @@ utterance ──> WordPiece (char offsets) ──> 3-layer encoder ──┬─ 
                                                              └─ per-literal──> pair head (slot x map, multi-label)
 ```
 
+### 2a. The model, and the same model in sensen and in PyTorch
+
+One forward pass. `L` is the literal count for the row, `d` = 128, `ffn` = 344.
+
+```
+            "payment on a $495,000 loan at 6.5% over 30 years"
+                              |
+                    WordPiece (char offsets kept -- a literal's character
+                              |                   span must map to token indices)
+                    ids [T]            T <= max_len 160
+                              |
+                 token_embd [vocab, d]        <-- NO position embedding: RoPE instead
+                              |
+     ___________________ 3 x transformer block ___________________
+    |                                                             |
+    |   x ---> RMSNorm ---> q,k,v = W_qkv x        (bias-free)     |
+    |            |            |                                   |
+    |            |          RoPE(q), RoPE(k)   base 10000          |
+    |            |            |                                   |
+    |            |          softmax(qk^T/sqrt(32)) v   BIDIRECTIONAL
+    |            |            |                   (attention.causal = false)
+    |            +---------> + W_o                                |
+    |   x ---> RMSNorm ---> SwiGLU: (W_gate x) * silu(W_up x) -> W_down
+    |            +---------> +                                    |
+    |_____________________________________________________________|
+                              |
+                        output_norm (RMSNorm)
+                              |
+          +-------------------+--------------------+
+          |                   |                    |
+      h[CLS]              h[CLS]            h[literal j]  (gathered at each
+          |                   |                    |        literal's span)
+      op head             convention          pair head
+    [d -> n_ops]       heads [d -> k_i]    [d -> n_pairs]  MULTI-LABEL
+          |                   |                    |
+    operation id        per-field class     set of (slot, map) per literal
+          |                   |                    |
+          +-------------------+--------------------+
+                              |
+              encoder_corpus.reconstruct()  -- the ONLY place a number is computed,
+                              |                in 256-bit BigDecimal from the literal
+                        params dict
+```
+
+**THE TWO IMPLEMENTATIONS, AND THE TENSOR NAMES THAT JOIN THEM.** The PyTorch side
+trains; the sensen side serves; the GGUF in the middle is the contract. GGUF dims
+are `{in, out}` while the native rows are `[out][in]`, so every row of this table
+is also a transpose statement.
+
+| PyTorch (`agent/train/encoder_model.py`) | GGUF tensor | dims | sensen (`src/text_encoder.cppm`) |
+| --- | --- | --- | --- |
+| `TinyEncoder.tok` (`nn.Embedding`) | `token_embd.weight` | `{d, vocab}` | vocab is READ from this tensor, never from metadata |
+| `Block.n1` (`RMSNorm`) | `blk.<i>.attn_norm.weight` | `{d}` | `TransformerBlock` pre-attention norm |
+| `Block.qkv` (`nn.Linear`, fused) | `blk.<i>.attn_q/attn_k/attn_v.weight` | `{d, d}` each | SPLIT into three: the fused `qkv` must be sliced on export |
+| `Block.proj` | `blk.<i>.attn_output.weight` | `{d, d}` | attention output projection |
+| `Block.n2` (`RMSNorm`) | `blk.<i>.ffn_norm.weight` | `{d}` | pre-FFN norm |
+| `Block.fc` (gate and up FUSED) | `blk.<i>.ffn_gate.weight`, `ffn_up.weight` | `{d, ffn}` each | SPLIT into two: sensen keeps them separate |
+| `Block.out` | `blk.<i>.ffn_down.weight` | `{ffn, d}` | FFN down projection |
+| `TinyEncoder.norm` | `output_norm.weight` | `{d}` | final norm before the heads |
+| `TinyEncoder.op_head` | `encoder.operation.weight` / `.bias` | `{d, n_ops}` / `{n_ops}` | operation classifier |
+| `TinyEncoder.pair_head` | **`encoder.slot` + `encoder.map`** | `{d, n_slots}`, `{d, n_maps}` | **MISMATCH -- see 2d** |
+| `TinyEncoder.conv_heads` | *(no tensor)* | — | carried as `operation_count`/`slot_count`/`map_count` metadata and the convention vocab |
+
+Metadata, all under the `sensen-encoder.` prefix and **all fourteen required** --
+the parser's own `getConfig()` silently defaults `context_length` to 4096, eps to
+1e-6 and `rope.freq_base` to 10000, which for a model trained at other values is
+silent corruption, so the encoder loader refuses a missing key instead:
+`context_length`, `embedding_length`, `block_count`, `attention.head_count`,
+`feed_forward_length`, `attention.layer_norm_rms_epsilon` (the ONLY eps key the
+parser reads), `rope.freq_base`, `attention.causal` (**must be false**),
+`operation_count`, `slot_count`, `map_count`, `pooling` (`cls|mean|none`),
+`literal_reduction` (`mean_logits|first_token`), `ffn_activation` (**must be
+`swiglu`**). Optional: `cls_token_id`, and `attention.head_count_kv` only when it
+equals `head_count` -- grouped-query attention is not served.
+
+`general.architecture` is **`sensen-encoder`**, and the name is constrained rather
+than chosen: `GGUFParser` detects architectures by SUBSTRING, so a name containing
+`llama`, `qwen`, `phi`, `gemma`, `mistral`, `mixtral`, `deepseek` or `starcoder`
+would be silently classified as that family -- "graphic" contains "phi". A
+`static_assert` in the module pins the chosen name against that list.
+
+### 2d. THE HEAD STRUCTURES DO NOT MATCH, and for mortgage the difference is lossy
+
+PyTorch learns ONE multi-label `pair_head` over `n_pairs` (slot, map) pairs.
+sensen's loader expects TWO independent heads, `encoder.slot` and `encoder.map`.
+Those are only interchangeable if the map is a function of the slot. Measured on
+the training corpora:
+
+| corpus | pairs | slots | maps | slots taking MORE THAN ONE map | factorisation |
+| --- | --- | --- | --- | --- | --- |
+| strategy | 2 | 2 | 1 | 0 | **lossless** |
+| mortgage | 109 | 97 | 11 | **5** | **LOSSY** |
+
+The five, and why the first one settles it:
+
+| slot | maps it takes |
+| --- | --- |
+| `rate` | `M2 percent/100` **vs** `M3 annual%->monthly` |
+| `loan_amount` | `M1 identity`, `M9 a-b#A`, `M9 a-b#B`, `M9 a*(1-p)#A`, `M9 a*(1-p)#B` |
+| `present_value` | the same five |
+| `occupancy_rate` | `M10 complement%` vs `M2 percent/100` |
+| `values[]` | `M1 identity`, `M1 identity#rep20`, `M8 negate` |
+
+`rate` is the one that cannot be given up: percent/100 against annual->monthly is
+exactly the distinction behind the "20% down priced as a 20% interest rate" defect
+this project already caught in production. Independent slot and map heads would
+not be FORCED to keep the pairing, and the loader refuses an unexpected tensor set
+deliberately, "because a tensor the trainer applied and this loader ignores is a
+silent train/serve mismatch".
+
+So **strategy exports today and mortgage does not.** Two ways to close it, and the
+choice is an owner call rather than a detail:
+
+1. **Retrain mortgage with factorised slot and map heads and MEASURE the cost.**
+   Cheap (1.2 min on the GPU) and it answers whether option 2 is needed at all.
+   `pair.map_acc_given_slot` is 1.0 today, so the model already resolves these from
+   context; what is unknown is whether it still does when the heads cannot see each
+   other.
+2. **Add an `encoder.pair.weight` `{d, n_pairs}` tensor to sensen's loader.** This
+   preserves exactly what the trainer learned and what the oracle proves is 100%
+   representable, at the cost of a sensen change with its own gate.
+
+Recorded also because the loader's own header says what nobody had checked:
+"**NOT checked: a GGUF produced by `src/gguf_exporter.cppm` or by a PyTorch
+trainer**". The exporter is the missing piece, and this mismatch is what it ran
+into first.
+
 ### 2a. Exact configuration (`--servable`)
 
 | | |
@@ -352,8 +479,68 @@ sensen master carries the C++ serving side, and it **compiles and passes here**:
 
 `test_text_encoder` proves `encode()` is **bit-identical under concurrency at f32,
 bf16 AND int8** (4 threads x 36 calls x 3 trials over 6 input lengths), and that
-INT8 is served when `d_model` and `d_ffn` are both multiples of 32. The 5 n/a are
-the CUDA and Triton numerical-agreement cells, which **need the GPU server**.
+INT8 is served when `d_model` and `d_ffn` are both multiples of 32.
+
+### 7b. ON THE GPU SERVER: the device arms, run for the first time
+
+Built on `oluwasanmi-multigpu-server` with `ENABLE_CUDA=ON`, clang 23.1.2, **CUDA
+13.4.92**, against sensen MASTER (the pin needs master's `float-types-simd-odr`
+fix -- see below). `test_text_encoder_device` goes from **12 passed / 2 n/a** on a
+CPU host to **25 passed / 1 failed / 0 n/a**: the device cells RUN.
+
+| cell | worst \|device - CPU\| | bound | argmax decisions | verdict |
+| --- | --- | --- | --- | --- |
+| **CUDA F32** | **1.730e-04** | 1e-03 | 35 of 35 identical | **PASS**, 5.8x inside |
+| **CUDA BF16** | 9.108e-03 | 8e-02 | 34 of 34 identical | **PASS** |
+| **Triton F32** | **3.060e-03** | 1e-03 | 35 of 35 identical | **FAIL**, 3.1x over |
+| Triton BF16 | 1.630e-02 | 8e-02 | 34 of 34 identical | PASS |
+
+**Every figure reproduced to the last digit across three consecutive runs**, so
+none of this is noise.
+
+**THE TRITON F32 FAILURE IS A KERNEL DEFICIENCY, NOT A BOUND SET TOO TIGHT, and
+the evidence is the cell beside it.** CUDA F32 meets the SAME 1e-03 bound at
+1.730e-04 -- **17.7x tighter than Triton on the identical check** -- so the bound
+is demonstrably achievable and widening it to make the suite green would be the
+moved-goalpost this repository forbids. TF32 was the obvious suspect and is
+innocent: measured on the server, `torch.backends.cuda.matmul.allow_tf32` is
+**False** and `float32_matmul_precision` is **highest**, so the Triton GEMM is
+genuinely fp32 and the divergence is its tiled accumulation order
+(`_gemm_kn_kernel`) compounding over three layers. It is not a correctness
+emergency -- every scored argmax decision is the CPU's, deterministically -- but
+the bound should stay and the kernel is what needs the work.
+
+**WHAT "EVERY BACKEND" MEANS HERE, per flavour, because `encoder_dispatch.cppm`
+makes each absent arm name itself rather than nearest-match onto a neighbour:**
+
+| flavour | status for the encoder |
+| --- | --- |
+| Cpu | **served**, 260 passed / 0 failed |
+| Cuda | **served and now MEASURED** -- the figures above |
+| **Cublas** | **served, with NO DISTINCT ARM BY DESIGN**: `sensen_ag_gemm`'s default backend IS cuBLAS, so the Cuda arm's GEMMs already are `cublasGemmEx` under `CUBLAS_DEFAULT_MATH` -- strict fp32, no TF32 down-conversion. The CUDA row above IS the cuBLAS measurement. |
+| Triton | **served and measured** -- F32 over its bound, BF16 inside it |
+| Cutile | **a declared GAP that refuses.** FP32-only CUTLASS-3.x/CuTe SIMT for sm_120, and "cuTile is FP32-only: BF16 arith always falls back to cuBLAS", so a BF16 request is REFUSED (`FlavourCannotHonour`, `gap:flavour_cutile_bf16_fallback`) rather than answered by a different kernel. `text_encoder_cuda.cpp` never selects it. |
+| CudaGraph | **a declared GAP that refuses** -- a captured graph replays one recorded launch sequence, which an encoder with varying sequence length cannot use as written |
+| Mlx | **implementation exists** (`python/sensen/mlx_text_encoder.py`, 847 lines) and is **UNEXERCISED on this fleet**: the Linux `mlx` wheel installs the Python package without `libmlx.so`, at both the current version and the 0.32.3 a previous session used, so `import mlx.core` fails. MLX is an Apple-silicon framework; this needs a Mac or a source build. |
+
+**ONE SENSEN COMMENT IS NOW STALE BECAUSE OF THIS RUN.**
+`encoder_dispatch.cppm`'s Cuda cell reads "**UNCOMPILED AND NOT RUN. A gap until
+`tests/test_text_encoder_device.cpp` passes on the GPU server.**" It has now been
+compiled and run there, and it passes. The gap is closed and that line should say
+so -- recorded here because a stale note saying something is unverified is exactly
+what stops the next reader from trusting a measurement that exists.
+
+**THE CUDA BUILD NEEDS SENSEN MASTER, and the reason is a defect worth knowing.**
+At the pin (`80ec18a5`) the CUDA build dies at 1131/1143 with "definition with same
+mangled name `_ZL17_mm512_set1_epi32i` as another definition". `<immintrin.h>`
+intrinsics are `static inline`, so a module interface that CALLS one carries the
+global-module-fragment's copy in its BMI, and every importer that also includes the
+header holds a second definition of the same internal-linkage name. **96 of 391
+sensen modules put `<immintrin.h>` in a global module fragment**, and `qwen38.cppm`
+-- compiled only when CUDA is on -- imports six of them. Master fixes it in
+`2bfbaa1d lane/sen-float-types-simd-odr` by spelling the lane expressions with
+clang's generic vector operators so no `_mm*` call appears in an inline body. The
+CPU build was never affected, which is why 378 checks passed there first.
 
 Built with `scripts/build_cpu.sh --fresh --dir build-enc`, `CXX` set to the real
 compiler. **Two traps cost a build each and are worth knowing:** sensen's configure
