@@ -134,6 +134,39 @@ def make_data(examples: list[C.Example], tok: EncoderTokenizer, sch: C.Schema, m
     return Data(C.tensorize(examples, tok, sch, max_len), examples)
 
 
+# The device every batch and mask is moved to. Set once by main() from --device and
+# read by get_batch/make_masks, so there is ONE place that decides and no call site
+# can disagree with another. The row INDEX tensors stay on the host deliberately:
+# they index the pinned corpus tensors, which never leave it.
+_DEVICE: torch.device = torch.device("cpu")
+
+
+def set_device(d: torch.device) -> None:
+    global _DEVICE
+    _DEVICE = d
+
+
+def _to_dev(x):
+    return x.to(_DEVICE, non_blocking=True) if isinstance(x, torch.Tensor) else x
+
+
+_MASK_CACHE: dict[tuple[int, str], torch.Tensor] = {}
+
+
+def _dev_mask(t: torch.Tensor) -> torch.Tensor:
+    """A device copy of a host mask, cached. The masks are built once and never change,
+    so transferring them every step would be a pure waste; keyed on the host tensor's
+    identity and the device so a second device cannot be served the first one's copy."""
+    if t.device == _DEVICE:
+        return t
+    key = (id(t), str(_DEVICE))
+    got = _MASK_CACHE.get(key)
+    if got is None:
+        got = t.to(_DEVICE)
+        _MASK_CACHE[key] = got
+    return got
+
+
 def get_batch(d: Data, idx: torch.Tensor, n_pairs: int, labels: bool = True,
               pad_free: bool = False) -> dict:
     """Rows `idx` -> model inputs (+ labels). Sliced to the batch's own longest
@@ -160,6 +193,8 @@ def get_batch(d: Data, idx: torch.Tensor, n_pairs: int, labels: bool = True,
             if b > a:
                 y[k, t["pair_lit"][a:b], t["pair_id"][a:b]] = 1.0
         out["pair"] = y
+    if _DEVICE.type != "cpu":
+        out = {k: _to_dev(v) for k, v in out.items()}
     return out
 
 
@@ -200,6 +235,10 @@ def make_masks(sch: C.Schema) -> Masks:
         for op, ids in sch.conv_op_mask[name].items():
             m[sch.op_index()[op], ids] = True
         cm[name] = m
+    # HOST, deliberately. These are read in two different worlds: compute_loss works on
+    # device tensors and gets a cached device copy via _dev_mask, while decode_row and
+    # the probes read them against the HOST logits predict() returns. Moving the masks
+    # to the device broke the second world with "mask on cuda:1 and self on cpu".
     return Masks(pm, cm)
 
 
@@ -217,11 +256,11 @@ def compute_loss(out: dict, b: dict, sch: C.Schema, masks: Masks, w: tuple[float
         ok = tgt != C.IGNORE
         if not ok.any():
             continue
-        logits = out["conv:" + name].float()[ok].masked_fill(~masks.conv[name][op[ok]], NEG)
+        logits = out["conv:" + name].float()[ok].masked_fill(~_dev_mask(masks.conv[name])[op[ok]], NEG)
         l_conv = l_conv + F.cross_entropy(logits, tgt[ok])
         n_heads += 1
     l_conv = l_conv / max(1, n_heads)
-    valid = b["lit_ok"][..., None] & masks.pair[op][:, None, :]
+    valid = b["lit_ok"][..., None] & _dev_mask(masks.pair)[op][:, None, :]
     bce = F.binary_cross_entropy_with_logits(out["pair"].float(), b["pair"], reduction="none")
     l_pair = (bce * valid).sum() / b["lit_ok"].sum().clamp(min=1)
     loss = w[0] * l_op + w[1] * l_conv + w[2] * l_pair
@@ -245,10 +284,11 @@ def predict(model: TinyEncoder, d: Data, sch: C.Schema, bs: int = 128, bf16: boo
         b = get_batch(d, idx, sch.n_pairs, labels=False)
         with torch.autocast("cpu", dtype=torch.bfloat16, enabled=bf16):
             out = model(**model_inputs(b))
-        op[idx] = out["op"].float()
-        pair[idx, : out["pair"].shape[1]] = out["pair"].float()
+        # back to the host: op/pair/conv are full-corpus host tensors indexed by idx
+        op[idx] = out["op"].float().cpu()
+        pair[idx, : out["pair"].shape[1]] = out["pair"].float().cpu()
         for name in sch.conv_fields:
-            conv[name][idx] = out["conv:" + name].float()
+            conv[name][idx] = out["conv:" + name].float().cpu()
     return dict(op=op, pair=pair, conv=conv)
 
 
@@ -701,15 +741,56 @@ def ask_probe(model: TinyEncoder, dialogues: list[C.Dialogue], sch: C.Schema, to
 # would then measure what was trained, not what generalises: FORMAT_REWRITES are the ones the
 # augmentation applies; HELD_OUT_REWRITES are never trained on, so the model is always unseen
 # on them whatever the flags.
+# EVERY REWRITE MUST PRESERVE THE NUMERIC LITERAL, because the pair head points AT a
+# literal: the serving layer recomputes the value from (literal text, map id), so a
+# rewrite that spells a number out ("thirty years") leaves nothing to point at. Such a
+# row cannot be labelled and `format_example` refuses it rather than teaching the model
+# to point at nothing -- which also means SPELLED-OUT NUMBERS ARE NOT LEARNABLE THROUGH
+# THIS MECHANISM AT ALL. Stated here so it is not mistaken for coverage.
 FORMAT_REWRITES: dict[str, Callable[[str], str]] = {
+    # --- the four original rewrites, measured worth 27%->trained on mortgage ---
     "drop the $ sign": lambda s: s.replace("$", ""),
     "drop thousands commas": lambda s: re.sub(r"(?<=\d),(?=\d{3}(?!\d))", "", s),
     "'6.5%' -> '6.5 percent'": lambda s: re.sub(r"(\d)\s*%", r"\1 percent", s),
     "'$250,000' -> '$250k'": lambda s: re.sub(r"\$(\d{1,3}),000(?![\d,])", r"$\1k", s),
+    # --- other ways a person writes a percentage ---
+    "'6.5%' -> '6.5 pct'": lambda s: re.sub(r"(\d)\s*%", r"\1 pct", s),
+    "'6.5%' -> '6.5 per cent'": lambda s: re.sub(r"(\d)\s*%", r"\1 per cent", s),
+    "space before % ('6.5 %')": lambda s: re.sub(r"(\d)%", r"\1 %", s),
+    "'0.5%' -> '.5%' (leading dot)": lambda s: re.sub(r"(?<![\d.])0\.(\d)", r".\1", s),
+    # --- other ways a person writes an amount ---
+    "space after $ ('$ 495,000')": lambda s: re.sub(r"\$(?=\d)", "$ ", s),
+    # A millions short form ('$1.2M') is DELIBERATELY ABSENT: it is only exact for a
+    # round million, and this corpus contains none -- measured, the rewrite changed
+    # 0 of 754 user segments. An inexact short form ($1,275,100 -> '$1.28M') would
+    # change the VALUE, so the row would stop reconstructing gold and be refused
+    # anyway. A rewrite that fires on nothing reads like coverage and is not.
+    "'495,000' -> '495 000' (space separator)": lambda s: re.sub(
+        r"(?<=\d),(?=\d{3}(?!\d))", " ", s),
+    "'$250k' uppercase K": lambda s: re.sub(r"\$(\d{1,3}),000(?![\d,])", r"$\1K", s),
+    # --- units and shorthand ---
+    "'30 years' -> '30 yrs'": lambda s: re.sub(r"\b(\d+)[- ]years?\b", r"\1 yrs", s),
+    "'per month' -> '/mo'": lambda s: re.sub(r"\b(?:per|a) month\b", "/mo", s),
+    "'per year' -> '/yr'": lambda s: re.sub(r"\b(?:per|a) year\b", "/yr", s),
+    "'months' -> 'mo'": lambda s: re.sub(r"\b(\d+)\s+months\b", r"\1 mo", s),
+    # --- sloppy typing: whitespace and case ---
+    "double spaces": lambda s: re.sub(r"(?<=\w) (?=\w)", "  ", s, count=3),
+    "UPPERCASE the request": lambda s: s.upper(),
+    "lowercase the request": lambda s: s.lower(),
+    "no space after a comma": lambda s: re.sub(r",\s+(?=[A-Za-z])", ",", s),
 }
+# NEVER TRAINED ON. The probe applies these too, so the reported number for them is
+# always a statement about GENERALISATION rather than about what was taught. Keep this
+# set non-empty and keep it in the same families as the trained set -- a held-out set
+# drawn from a different family would measure a different question.
 HELD_OUT_REWRITES: dict[str, Callable[[str], str]] = {
     "'$495,000' -> '495,000 dollars'": lambda s: re.sub(r"\$(\d[\d,]*(?:\.\d+)?)", r"\1 dollars", s),
     "'$495,000' -> 'USD 495,000'": lambda s: s.replace("$", "USD "),
+    "'$495,000' -> '495,000 USD' (suffix)": lambda s: re.sub(
+        r"\$(\d[\d,]*(?:\.\d+)?)", r"\1 USD", s),
+    "'495,000' -> '495,000.00' (explicit cents)": lambda s: re.sub(
+        r"(?<![\d.])(\d{1,3}(?:,\d{3})+)(?![\d.])", r"\1.00", s),
+    "'6.5%' -> '6.5percent' (no space)": lambda s: re.sub(r"(\d)\s*%", r"\1percent", s),
 }
 FORMAT_PERTURBATIONS = {**FORMAT_REWRITES, **HELD_OUT_REWRITES}
 
@@ -721,7 +802,13 @@ def format_example(d: C.Dialogue, sch: C.Schema, rng: random.Random) -> C.Exampl
     produce a (slot, map) pair the vocabulary dropped as too rare ("6.5 percent" read as a
     bare number would need `M2' /100`); such a row would teach the model to point at nothing,
     so it is refused here rather than trained on."""
-    names = [n for n in FORMAT_REWRITES if rng.random() < 0.5] or [rng.choice(list(FORMAT_REWRITES))]
+    # A SMALL SUBSET, not each-with-probability-one-half. With twenty rewrites the old
+    # rule applied about ten at once, which is neither a thing a person does nor usually
+    # labellable -- most such rows were refused below, so the augmentation quietly
+    # trained on far less than it appeared to. One to three is what a real mistake looks
+    # like, and it keeps the row recoverable.
+    k = rng.randint(1, 3)
+    names = rng.sample(list(FORMAT_REWRITES), k=min(k, len(FORMAT_REWRITES)))
     d2 = d
     for n in names:
         fn = FORMAT_REWRITES[n]
@@ -834,6 +921,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                          "fp32 (compute_loss casts every head), which is the other half of why "
                          "this converges where a naive all-bf16 run does not. Implies --no-bf16: "
                          "autocast must be OFF or it would cast bf16 weights per op for nothing.")
+    ap.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"],
+                    help="auto picks cuda when a device is visible, else cpu. The model is "
+                         "~1 M parameters and a full run is minutes on CPU, so cuda is for "
+                         "larger geometries and for exercising the device path, not because "
+                         "this model needs it.")
+    ap.add_argument("--cuda-device", type=int, default=0,
+                    help="which GPU, when --device resolves to cuda")
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--threshold", type=float, default=0.5)
@@ -879,6 +973,36 @@ def main(argv: Sequence[str] | None = None) -> int:
     random.seed(a.seed)
     np.random.seed(a.seed)
     torch.manual_seed(a.seed)
+
+    # ---- device. Resolved ONCE and announced, because a run that silently fell back
+    # to the host is indistinguishable in its numbers from one that did not.
+    if a.device == "auto":
+        dev_name = "cuda" if torch.cuda.is_available() else "cpu"
+    else:
+        dev_name = a.device
+    if dev_name == "cuda":
+        if not torch.cuda.is_available():
+            print("[device] --device cuda asked for, no CUDA device visible: REFUSING rather "
+                  "than training on the host and reporting it as a GPU run", flush=True)
+            return 2
+        device = torch.device(f"cuda:{a.cuda_device}")
+        torch.cuda.set_device(device)
+        torch.manual_seed(a.seed)
+        torch.cuda.manual_seed_all(a.seed)
+        # TF32 OFF: this project's standing position is that an fp32 arm must BE fp32.
+        # TF32 silently gives ~10 mantissa bits on fp32 matmuls, which would make the
+        # fp32 control a third precision rather than a baseline.
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+        cap = torch.cuda.get_device_capability(device)
+        print(f"[device] cuda:{a.cuda_device} {torch.cuda.get_device_name(device)} "
+              f"sm_{cap[0]}{cap[1]}, {torch.cuda.get_device_properties(device).total_memory // 2**20} MiB, "
+              f"TF32 off, torch {torch.__version__}", flush=True)
+    else:
+        device = torch.device("cpu")
+        print(f"[device] cpu, {a.threads} threads, torch {torch.__version__}", flush=True)
+    set_device(device)
+
     a.out_dir.mkdir(parents=True, exist_ok=True)
     # --pure-bf16 turns autocast OFF: the weights ARE bf16, so there is nothing for
     # autocast to cast and wrapping it would only add per-op overhead.
@@ -959,6 +1083,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     masks = make_masks(sch)
     masters: list[torch.Tensor] | None = None
     master_pairs: list[tuple[torch.Tensor, torch.Tensor]] = []
+    model = model.to(device)
     if a.pure_bf16:
         model = model.to(torch.bfloat16)
         # One fp32 master per parameter, in parameter order. AdamW steps the
