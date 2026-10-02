@@ -31,7 +31,8 @@ TRAPS, KEPT HERE SO THEY ARE NOT RE-LEARNED:
     first sight of each shape measures primitive creation, not inference. One
     untimed pass over the benchmark inputs precedes the timed passes.
   * A SHARED HOST LIES. Two PyTorch processes at 4 OpenMP threads each on 4 cores
-    ran more than 20x slower than one (spin-waiting barriers), and while another
+    ran roughly 20x slower than one (spin-waiting barriers; a 3,000-row smoke run that takes
+    8.7 s alone had not finished after 168 s), and while another
     job is running a latency figure describes the contention. Busy CPU is sampled
     from /proc/stat before and after each variant and recorded beside its number;
     `--wait-quiet` blocks until the host is idle, and a figure measured under load
@@ -75,6 +76,7 @@ from encoder_model import TinyEncoder, build  # noqa: E402
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=UserWarning, module="torch.ao")
+warnings.filterwarnings("ignore", message="TypedStorage is deprecated")
 
 
 # ===========================================================================
@@ -155,21 +157,54 @@ def bench(model: nn.Module, inputs: list[dict], autocast: bool, n_timed: int, pa
         for x in inputs:
             with ac():
                 model(**x)
-    times, toks = [], []
+    times, cpu, toks = [], [], []
     k = 0
     while len(times) < n_timed:
         x = inputs[k % len(inputs)]
         k += 1
+        c0 = time.thread_time()
         t0 = time.perf_counter()
         with ac():
             model(**x)
         times.append(time.perf_counter() - t0)
+        cpu.append(time.thread_time() - c0)
         toks.append(int(x["ids"].shape[1]))
     s = sorted(times)
     q = lambda p: s[min(len(s) - 1, int(p * (len(s) - 1)))]  # noqa: E731
+    # `cpu_median_ms` is the CALLING thread's CPU time per request. At 1 intra-op
+    # thread that is the whole cost of the forward pass and does not include time
+    # spent descheduled behind another process, so wall ~ cpu means the run was not
+    # starved. (With more threads it covers only the calling thread: ignore it.)
     return dict(n=len(times), median_ms=1e3 * statistics.median(times), mean_ms=1e3 * statistics.mean(times),
                 p95_ms=1e3 * q(0.95), p99_ms=1e3 * q(0.99), min_ms=1e3 * s[0],
-                tok_per_s=sum(toks) / sum(times), mean_tokens=statistics.mean(toks))
+                cpu_median_ms=1e3 * statistics.median(cpu),
+                tok_per_s=sum(toks) / sum(times), mean_tokens=statistics.mean(toks),
+                distinct_shapes=len({int(x["ids"].shape[1]) for x in inputs}))
+
+
+def requests_from(dialogues: list[C.Dialogue]) -> list[tuple[str, str, str]]:
+    """(utterance, prior_clarification, prior_question) exactly as ParseRequest carries them."""
+    return [(d.first, d.later or "", (d.question or "") if d.kind == "clarify" else "")
+            for d in dialogues]
+
+
+@torch.inference_mode()
+def bench_e2e(model: nn.Module, tok, sch: C.Schema, masks: T.Masks, reqs: list[tuple[str, str, str]],
+              n_timed: int) -> dict:
+    """The WHOLE request in Python: lex -> render -> tokenize -> spans -> forward ->
+    mask -> reconstruct (Decimal). The serving layer would be C++, so this is an
+    upper bound on non-model cost, reported so the model's share is visible."""
+    for r in reqs:
+        T.parse_request(model, tok, sch, masks, *r)          # warm every shape
+    times, k = [], 0
+    while len(times) < n_timed:
+        r = reqs[k % len(reqs)]
+        k += 1
+        t0 = time.perf_counter()
+        T.parse_request(model, tok, sch, masks, *r)
+        times.append(time.perf_counter() - t0)
+    return dict(n=len(times), median_ms=1e3 * statistics.median(times),
+                p95_ms=1e3 * sorted(times)[int(0.95 * (len(times) - 1))])
 
 
 def score(model: nn.Module, d: T.Data, sch: C.Schema, masks: T.Masks, autocast: bool) -> dict:
@@ -192,11 +227,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                     help="wait up to this long for the host to go idle before each variant")
     ap.add_argument("--quiet-limit", type=float, default=0.15,
                     help="busy-CPU fraction under which the host counts as quiet")
+    ap.add_argument("--nice", type=int, default=0,
+                    help="scheduling priority for the benchmark: a NEGATIVE value (needs privilege) "
+                         "makes it win cores from competing jobs on a shared host; the value used is "
+                         "recorded beside every number")
     ap.add_argument("--skip-accuracy", action="store_true")
     a = ap.parse_args(argv)
     if a.n_timed < 200:
         ap.error("--n-timed must be >= 200: a median of fewer is not a median")
 
+    if a.nice:
+        try:
+            os.setpriority(os.PRIO_PROCESS, 0, a.nice)
+        except OSError as e:
+            print(f"could not set niceness {a.nice}: {e}", file=sys.stderr)
+    niceness = os.getpriority(os.PRIO_PROCESS, 0)
     a.out_dir.mkdir(parents=True, exist_ok=True)
     model, cfg, sch, tok, meta = T.load_checkpoint(a.checkpoint)
     model.eval()
@@ -205,9 +250,23 @@ def main(argv: Sequence[str] | None = None) -> int:
                             for dl in C.load_dialogues(a.val)], sch)
     dval = T.make_data(xva, tok, sch, cfg.max_len)
     inputs = single_inputs(dval, sch.n_pairs, a.n_bench_inputs)
+    dvals = C.load_dialogues(a.val)
+    reqs = requests_from(dvals[:a.n_bench_inputs])
+    # the raw-string path must agree with the batched path it replaces
+    n_chk = min(100, len(xva))
+    pred = T.predict(model, T.make_data(xva[:n_chk], tok, sch, cfg.max_len), sch, bf16=False)
+    same = 0
+    for i in range(n_chk):
+        want = T.decode_row(sch, masks, xva[i], pred, i, int(pred["op"][i].argmax()), 0.5)
+        got = T.parse_request(model, tok, sch, masks, *reqs[i])
+        same += json.dumps(want, default=str, sort_keys=True) == json.dumps(got, default=str, sort_keys=True)
+    print(f"raw-string path (parse_request) returns the batched evaluator's params on {same}/{n_chk} rows",
+          flush=True)
+    print("NOTE: torch.ao.quantization is deprecated in this torch build (it warns 'will be removed "
+          "in 2.10' and still ships); torchao is the migration path and was not tested.")
     print(f"checkpoint {a.checkpoint}  params {model.n_params():,}  val rows {len(dval)}  "
           f"bench requests {len(inputs)} (mean {sum(x['ids'].shape[1] for x in inputs) / len(inputs):.1f} "
-          f"tokens)  host cores {os.cpu_count()}", flush=True)
+          f"tokens)  host cores {os.cpu_count()}  niceness {niceness}", flush=True)
 
     variants: list[tuple[str, nn.Module, bool]] = [
         ("fp32", model, False),
@@ -223,6 +282,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not a.skip_accuracy:
             row.update(score(m, dval, sch, masks, ac))
         row["bench"] = {}
+        row["e2e"] = {}
         for nt in a.threads:
             torch.set_num_threads(nt)
             before = wait_quiet(a.quiet_limit, a.wait_quiet) if a.wait_quiet else busy_fraction()
@@ -231,11 +291,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             r.update(busy_before=before, busy_after=after,
                      contended=max(before, after) > a.quiet_limit)
             row["bench"][nt] = r
+            if name in ("fp32", "int8 Linear") and nt == a.threads[0]:
+                row["e2e"][nt] = bench_e2e(m, tok, sch, masks, reqs, min(a.n_timed, 300))
         rows.append(row)
         h = row["bench"][a.threads[0]]
         print(f"  {name:16s} {row['size_mb']:6.2f} MB  "
               + (f"row acc {100 * row['row_acc']:.2f}%  " if "row_acc" in row else "")
               + f"{h['median_ms']:.2f} ms median @ {a.threads[0]}T"
+              + (f" (thread CPU {h['cpu_median_ms']:.2f} ms)" if a.threads[0] == 1 else "")
               + ("  CONTENDED" if h["contended"] else ""), flush=True)
     torch.set_num_threads(a.threads[0])
 
@@ -265,13 +328,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         for nt in a.threads:
             b = r["bench"][nt]
             line += f" | {b['median_ms']:6.2f} ({b['p95_ms']:6.2f}) {b['tok_per_s']:8.0f}"
+            if nt == 1:
+                line += f" [cpu {b['cpu_median_ms']:.2f}]"
         line += f"   {base / r['bench'][a.threads[0]]['median_ms']:.2f}x"
         print(line)
+    for r in rows:
+        for nt, e in r.get("e2e", {}).items():
+            print(f"whole request in Python (lex+tokenize+forward+decode), {r['variant']} @ {nt}T: "
+                  f"{e['median_ms']:.2f} ms median ({e['p95_ms']:.2f} p95)")
     busy = max(max(b["busy_before"], b["busy_after"]) for r in rows for b in r["bench"].values())
     print(f"\nmax host busy fraction observed around the benchmarks: {100 * busy:.0f}%  "
           f"(quiet limit {100 * a.quiet_limit:.0f}%)  load average {os.getloadavg()}")
     (a.out_dir / "bench.json").write_text(json.dumps(
-        dict(checkpoint=str(a.checkpoint), params=model.n_params(), rows=rows,
+        dict(checkpoint=str(a.checkpoint), params=model.n_params(), rows=rows, niceness=niceness,
              load_average=os.getloadavg(), artifact_bytes=art.stat().st_size,
              artifact_reload_max_abs_diff=diff), indent=1, default=str))
     return 0

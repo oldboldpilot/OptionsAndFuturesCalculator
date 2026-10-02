@@ -5,10 +5,12 @@
 
 WHY A TOKENIZER OF OUR OWN. The weights a pretrained encoder would bring
 (MiniLM, ModernBERT) are not reachable from this environment, so there is no
-vocabulary to inherit either. A 4,096-entry WordPiece trained on the 23k
-utterances is also the right size: the embedding table is the largest single
-block of a 1-5M parameter model (V x d), and a 30k vocabulary would be 4/5 of
-the network spent on words this corpus never contains.
+vocabulary to inherit either. The target is 4,096 entries, and these corpora do
+not fill it: the trainer stops at 2,661 pieces for the mortgage corpus and 689
+for the strategy one, because there are no more pieces worth a merge. That is the
+right size anyway: the embedding table is the largest single block of a model this
+small (V x d, a third of the mortgage network at d=128), and a 30k vocabulary
+would be most of the network spent on words these corpora never contain.
 
 WHY OFFSETS ARE LOAD-BEARING. The per-literal heads read the hidden states of
 the tokens a numeric literal occupies. The lexer yields CHARACTER spans; only
@@ -29,6 +31,14 @@ THE TRAPS, MEASURED ON `tokenizers` 0.23 (see `--selftest`):
   * Lowercasing is deliberate (TSLA == tsla, "Meta" == "meta"), but it is a
     property of this vocabulary, not of the corpus: the tokenizer is stored in
     the checkpoint beside the weights so the pair cannot drift apart.
+  * A WORDPIECE TRAINED ON A CLOSED SET OF NUMBERS HAS NO PIECE FOR AN UNSEEN
+    ONE. The strategy corpus states its expiries from 14 values, so the digits 3,
+    7 and 9 never occur as a NON-INITIAL character and `##3`, `##7`, `##9` were
+    never created: "73 days" became [UNK] and 987 of 2,000 random numbers
+    contained one. The mortgage corpus, whose amounts are all different, had none.
+    A model cannot point at what the tokenizer turned into [UNK], so `train`
+    seeds the trainer with every two-digit string (`DIGIT_SEED`); the seed lines
+    change the vocabulary only, never a training example.
   * Numbers are NOT delexicalised. The class heads sometimes need the digits
     ("3 months" -> 90 days) and the literal head gets magnitude and unit tag as
     explicit features instead (encoder_corpus.mag_bucket / TAGS), which a
@@ -47,6 +57,8 @@ from tokenizers import Encoding, Tokenizer, models, normalizers, pre_tokenizers,
 
 PAD, UNK, CLS, SEP, MASK = "[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]"
 SPECIALS = [PAD, UNK, CLS, SEP, MASK]
+# Every two-digit string, twice (the trainer's min_frequency is 2). See `train`.
+DIGIT_SEED = [" ".join(f"{i:02d}" for i in range(100))] * 2
 
 
 class EncoderTokenizer:
@@ -73,7 +85,7 @@ class EncoderTokenizer:
         trainer = trainers.WordPieceTrainer(
             vocab_size=vocab_size, min_frequency=min_frequency, special_tokens=SPECIALS,
             continuing_subword_prefix="##", limit_alphabet=300)
-        tk.train_from_iterator(texts, trainer)
+        tk.train_from_iterator(list(texts) + DIGIT_SEED, trainer)
         tk.post_processor = processors.TemplateProcessing(
             single=f"{CLS} $A {SEP}",
             special_tokens=[(CLS, tk.token_to_id(CLS)), (SEP, tk.token_to_id(SEP))])
@@ -150,6 +162,12 @@ def selftest() -> None:
     enc0 = tok.encode("6.5% at the start")
     a, b = tok.span_to_tokens(enc0.offsets, 0, 4)
     assert enc0.tokens[a] != CLS, enc0.tokens
+    # a corpus whose numbers come from a closed set must still tokenize an unseen one
+    closed = EncoderTokenizer.train(["spread 7 days", "spread 14 days", "spread 30 days", "spread 365 days",
+                                     "spread 180 days"] * 40, vocab_size=300)
+    check = closed.encode("spread 73 days")
+    assert closed.unk_id not in check.ids, check.tokens
+    assert closed.unk_id not in closed.encode("spread 9347281 days").ids
     # round trip through the string form the checkpoint stores
     tok2 = EncoderTokenizer.from_str(tok.to_str())
     assert tok2.encode(s).ids == enc.ids
@@ -185,6 +203,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"  {name:5s} tokens/row: mean {st['mean']:.1f}  p50 {st['p50']}  p95 {st['p95']}  "
                   f"p99 {st['p99']}  max {st['max']}   [UNK] in first 2000 rows: "
                   f"{st['unk_in_first_2000']}")
+    import random
+    rng = random.Random(0)
+    unk = sum(tok.unk_id in tok.encode(f"a spread of {rng.randrange(1, 10 ** rng.randrange(1, 8))} days").ids
+              for _ in range(2000))
+    print(f"  random numbers that tokenize to [UNK]: {unk}/2000")
     demo = texts[0]
     enc = tok.encode(demo)
     print("example:", demo[:120])

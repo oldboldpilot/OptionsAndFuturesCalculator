@@ -19,8 +19,10 @@ and `--min-coverage` refuses to continue when it falls below a floor.
 
 THE REFERENCE CODE (lexer, map table, `at_label_precision`, ...) IS COPIED
 FROM `agent/analysis/extractability.py`, WHICH IS THE MEASUREMENT THAT
-PROPOSED THIS DESIGN. It is copied rather than imported because committed code
-may not depend on a scratch path. It is copied VERBATIM EXCEPT FOR ONE
+PROPOSED THIS DESIGN (the copy was taken from a file that is byte-identical to
+the tracked one, sha256 7f264d71...). It is copied rather than imported so the
+analysis script stays a frozen record of what was measured while this file is
+free to change. It is copied VERBATIM EXCEPT FOR ONE
 DEFECT, found by running it, and `--compare-reference` reproduces the
 reference's own accounting beside this one so the effect is a measurement:
 
@@ -29,13 +31,15 @@ reference's own accounting beside this one so the effect is a measurement:
     mortgage" lexed as 304,500,000,000 and "327 months" lexed as 327,000,000
     with its `months` unit tag destroyed (the `m` was eaten). 3,427 of 140,986
     mortgage literals were wrong (2,274 "months", 595 "mortgage", 445 "more",
-    84 "monthly"); the corpus contains ZERO genuine attached suffixes
-    ("250k"), so nothing was lost by fixing it. This is why the reference
-    reported ComputeRefinance, ComputeHeloc and ComputeMortgageRecast as
-    1-8% extractable: the loan balance and the remaining months were unreadable.
+    84 "monthly", 29 "months."); the corpus contains ZERO genuine attached
+    suffixes ("250k"), so nothing was lost by fixing it. This is why the
+    reference reported ComputeRefinance, ComputeHeloc and ComputeMortgageRecast
+    as 1-8% row-extractable: the loan balance and the remaining months were
+    unreadable. Fixed lexer alone: rows fully covered 80.96% -> 88.77%.
 
-THREE FURTHER TRAPS, EACH MEASURED ON THE MORTGAGE CORPUS, EACH WHY THE
-ATTRIBUTION BELOW IS NOT THE ONE-LINER IT LOOKS LIKE:
+FIVE FURTHER TRAPS, EACH MEASURED ON THESE CORPORA, EACH WHY THE ATTRIBUTION
+BELOW IS NOT THE ONE-LINER IT LOOKS LIKE ("minimum absolute error", exact
+before approximate, which is the rule it started from and is kept):
 
   1. MINIMUM ERROR DOES NOT FIX THE ZERO-GOLD PROBLEM. `at_label_precision`
      quantises to the label's own exponent, so a gold of 0.00 "matches" every
@@ -43,27 +47,45 @@ ATTRIBUTION BELOW IS NOT THE ONE-LINER IT LOOKS LIKE:
      smallest divisor, `M3 annual%->daily`. 29,715 approximate-only matches
      existed; 26,731 (90%) were on a ZERO gold and 26,729 of those were
      attributed to `daily`. A zero is the ABSENCE of a stated value, not an
-     extraction, so RULE Z: a zero gold is never attributed to a literal (it is
-     a convention class). 3,717 further EXACT zero attributions (the
-     "complement of 100%" is 0) fall to the same rule.
-  2. A DEFAULT CAN BE EXPLAINED BY AN UNRELATED LITERAL. Strategy `quantity=1`
-     is the default for 25,101 rows and 974 of them are "explained" by the
-     "1" in "1 days". Value routing: a value that the corpus repeatedly states
-     WITHOUT any literal (>= `min_class_count` unexplained rows, pooled by
-     field name) is a CONVENTION of that field and is class-labelled. A literal
-     may ALSO be pointed at for a convention value, but only through a
-     (tag, map) the field has been seen using for its non-convention values:
-     `quantity` is only ever stated by a bare number, so "1 days" cannot be it,
-     while `expiration_days` is stated by "45 days" so "30 days" can be. That
-     second half is what lets "50 days" (never seen) work by pointing, instead
-     of silently snapping to the nearest class.
-  3. ONE LITERAL CAN FILL SEVERAL SLOTS. A stated price is both
-     `loan_amount` and `original_home_value`; one "30-year" is `periods` AND
-     `end_period`; depreciation's `life`/`recovery_period` and `period`/`year`
-     are aliases. So the per-literal target is a SET of (slot, map) pairs, not
-     a single class. When two fields want the same value and two equal
-     literals exist, the second field prefers the literal the first has not
-     claimed; with one literal they share it.
+     extraction, so RULE Z': a zero gold may be pointed at only by a literal
+     that itself says zero ("salvage $0"). 3,717 further EXACT zero
+     attributions, most of them `1 - 100%`, fall to the same rule.
+  2. AN INTEGER GOLD HAS NO ROUNDING TO UNDO. Its exponent is 0, so the same
+     quantising accepted every result in [0.5, 1.5): "compounded annually"
+     (gold 1) was "explained" by `1 - 6.06/100 = 0.9394` in ~100% of its rows,
+     when 126 of 132 have no literal at all and 6 an accidental one. Approximate
+     matching is allowed only for a decimal with >= 4 significant digits.
+  3. A DEFAULT CAN BE EXPLAINED BY AN UNRELATED LITERAL. Strategy `quantity=1`
+     is the default for 25,101 rows and 974 of them are "explained" by a "1"
+     that is an expiry (637 by "1 days", 337 by a bare "1 dte"). Value routing:
+     a value that the corpus repeatedly states WITHOUT any literal (>=
+     `min_class_count` unexplained rows, pooled by field name) is a CONVENTION
+     of that field and is class-labelled. A literal may ALSO be pointed at for a
+     convention value, but only through a (tag, map) the field is seen using for
+     its non-convention values: `quantity` is only ever stated by a bare number,
+     so "1 days" cannot be it, while `expiration_days` is stated by "45 days" so
+     "30 days" can be. That second half is what lets "50 days" (never seen) work
+     by pointing instead of silently snapping to the nearest class.
+  4. ONE LITERAL CAN FILL SEVERAL SLOTS. A stated price is both `loan_amount`
+     and `original_home_value` (and, for ComputeAmortizationBatch, element k of
+     both arrays); depreciation's `life`/`recovery_period` and `period`/`year`
+     are aliases. 21.9% of mortgage rows (4,715 of 21,520) carry such a literal
+     and 0% of strategy rows, so the per-literal target is a SET of (slot, map)
+     pairs, not a single class. Fields are matched to literals by a global
+     greedy matching, highest mechanism-affinity first, unclaimed literals
+     before shared ones: field-by-field matching labelled "3 days ... bump it to
+     3 lots" with the expiry on the lots and left "3 days" unlabelled.
+  5. "EARLIEST LITERAL, ANY MAP" IS WRONG FOR ARRAYS. It read "$500,000 ...
+     $300/month extra ... $300,000" as `[500000, 300 x1000]`: the numbers came
+     out right and the labels were wrong, found by this file's own self-test.
+     Each array slot is held to the mechanisms it is seen using.
+
+WHAT THE MAP TABLE TURNED OUT TO NEED. Of the reference's 22 unary and 6 binary
+maps, the 109 mortgage (slot, map) pairs use exactly six unary (M1 identity,
+M2 percent/100, M3 annual%->monthly, M5 years->months, M8 negate, M10
+complement%) and two binary (M9 a-b, M9 a*(1-p)); the strategy corpus uses M1
+alone. The other twenty (sixteen unary, four binary) fitted noise: with the traps above
+fixed they never fire.
 
 ARRAYS (10% of mortgage rows) need three mechanisms and each is a measured
 shape of THIS corpus, not a generalisation: (a) the anchor array (first array
@@ -92,7 +114,13 @@ WHAT IS NOT MODELLED, STATED HERE SO IT IS NOT MISTAKEN FOR COVERAGE:
     field). The corpus's first turn of a clarification dialogue is a question;
     this label set describes only the FINAL params turn, so asking would have
     to come from the serving layer's existing missing-field logic.
-  * Rows with no params at all (declines / out-of-scope) get op = <NONE>.
+    `train_encoder.py`'s ask probe measures whether that is plausible.
+  * Rows with no params at all (declines / out-of-scope) get op = <NONE>, so the
+    mortgage operation head has 29 classes, not 28, and the strategy head 48.
+  * A constant the corpus never varies cannot be learned to vary, however the
+    utterance reads: `pmi_drop_off_ltv` is 0.80 in 985 of 985 ComputeRefinance
+    rows including those that say "once I'm at 80% LTV", so a user who says 78%
+    gets 0.80 from this scheme exactly as from the decoder trained on the same data.
   * Nothing here says anything about real users: every number this file or its
     siblings report is on a held-out split of the SAME synthetic generator.
 """
@@ -1706,6 +1734,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--limit", type=int, default=None, help="first N train rows (smoke runs)")
     ap.add_argument("--compare-reference", action="store_true")
     ap.add_argument("--out", type=Path, default=None, help="write schema.json here")
+    ap.add_argument("--tensors-out", type=Path, default=None,
+                    help="directory to write train.pt / val.pt (padded tensors) and tokenizer.json; "
+                         "written only AFTER the coverage gate passes")
+    ap.add_argument("--tokenizer", type=Path, default=None,
+                    help="an existing tokenizer.json to tensorize with (default: train one on the "
+                         "train split)")
+    ap.add_argument("--vocab-size", type=int, default=4096)
+    ap.add_argument("--max-len", type=int, default=160)
     a = ap.parse_args(argv)
     if a.selftest:
         return selftest()
@@ -1720,16 +1756,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         a.out.write_text(json.dumps(sch.to_json(), indent=1))
         print(f"\nschema written to {a.out}")
     floor = a.min_coverage
+    worst = min(ctr.row_cov, cva.row_cov)
     if floor is None:
         print("\nWARNING: no --min-coverage floor set; coverage is reported, NOT gated.")
-        return 0
-    worst = min(ctr.row_cov, cva.row_cov)
-    if worst < floor:
+    elif worst < floor:
         print(f"\nREFUSING: oracle row coverage {100 * worst:.2f}% is below the floor "
               f"{100 * floor:.2f}%. The labels cannot reproduce the gold, so no model trained "
               f"on them can reach it.", file=sys.stderr)
         return 1
-    print(f"\ncoverage gate passed: {100 * worst:.2f}% >= {100 * floor:.2f}%")
+    else:
+        print(f"\ncoverage gate passed: {100 * worst:.2f}% >= {100 * floor:.2f}%")
+    if a.tensors_out:
+        import torch
+
+        from encoder_tokenizer import EncoderTokenizer
+        a.tensors_out.mkdir(parents=True, exist_ok=True)
+        tok = (EncoderTokenizer.load(a.tokenizer) if a.tokenizer
+               else EncoderTokenizer.train([e.text for e in xtr], a.vocab_size))
+        tok.save(a.tensors_out / "tokenizer.json")
+        for name, xs in (("train", xtr), ("val", xva)):
+            t = tensorize(xs, tok, sch, a.max_len)
+            torch.save(t, a.tensors_out / f"{name}.pt")
+            print(f"wrote {a.tensors_out / (name + '.pt')}: " + ", ".join(
+                f"{k}{list(v.shape)}" for k, v in t.items() if k in ("ids", "lit_s", "conv", "op")))
     return 0
 
 

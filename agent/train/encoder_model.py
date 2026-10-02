@@ -35,6 +35,22 @@ applied by the CALLER, to the logits, in training with the gold operation and in
 serving with the predicted one. The model itself is mask-free so that the
 masking policy can be measured, not baked in.
 
+POSITIONS: `--pos learned` (the requested default) or `--pos rope`. The option
+exists because of a deployment fact found while building this, not because
+learned positions were doubted. sensen's `MultiHeadAttention` builds a
+`RotaryEmbedding` for EVERY instance and rotates q and k unconditionally
+(backend/sensen/src/multi_head_attention.cppm:2598-2606, 2772-2781, line
+numbers as of the sensen commit 044de4ba), with no switch for absolute
+positions, and its bidirectional path (`AttnParams.causal = false`, :2496-2512)
+is the diffusion one. Weights trained with learned absolute
+position embeddings therefore have no home in the engine that serves everything
+else in this repository. `rope` uses the split-half layout of
+`RotaryEmbedding::apply_rotation_inplace` (rotary_embedding.cppm:318, pairs
+(i, i + d/2), base 10000) so that the same weights could be loaded by it; that
+agreement is from READING the source, not from a parity run against sensen.
+Segment ids and the literal tag/magnitude embeddings are further inputs a sensen
+serving path does not supply today.
+
 PARAMETER COUNT is printed exactly by `python encoder_model.py ...` and broken
 down by component; the embedding table is V x d and, at d=128, is a third of
 the network.
@@ -75,6 +91,8 @@ class EncoderConfig:
     n_mag: int = 16
     tag_dim: int = 16
     lit_features: bool = True
+    pos: str = "learned"          # learned | rope
+    rope_base: float = 10000.0
 
     @property
     def d_ffn(self) -> int:
@@ -88,6 +106,22 @@ class EncoderConfig:
     @classmethod
     def from_json(cls, d: dict) -> "EncoderConfig":
         return cls(**d)
+
+
+def rope_tables(t: int, dh: int, base: float) -> tuple[torch.Tensor, torch.Tensor]:
+    """cos/sin [t, dh/2], the table `RotaryEmbedding::precompute_freqs_cis` builds."""
+    inv = base ** (-torch.arange(0, dh, 2, dtype=torch.float32) / dh)
+    ang = torch.outer(torch.arange(t, dtype=torch.float32), inv)
+    return ang.cos(), ang.sin()
+
+
+def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    """Split-half rotation of [B, H, T, dh]: (x1, x2) -> (x1 cos - x2 sin, x1 sin + x2 cos),
+    the scalar fallback of `RotaryEmbedding::apply_rotation_inplace`."""
+    h = x.shape[-1] // 2
+    x1, x2 = x[..., :h], x[..., h:]
+    c, s = cos[: x.shape[-2]].to(x.dtype), sin[: x.shape[-2]].to(x.dtype)
+    return torch.cat([x1 * c - x2 * s, x1 * s + x2 * c], dim=-1)
 
 
 class Block(nn.Module):
@@ -110,9 +144,12 @@ class Block(nn.Module):
         self.out = nn.Linear(c.d_ffn, d)
         self.drop = nn.Dropout(c.dropout)
 
-    def forward(self, x: torch.Tensor, keep: torch.Tensor | None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, keep: torch.Tensor | None,
+                rope: tuple[torch.Tensor, torch.Tensor] | None = None) -> torch.Tensor:
         b, t, d = x.shape
         q, k, v = self.qkv(self.ln1(x)).view(b, t, 3, self.h, d // self.h).permute(2, 0, 3, 1, 4)
+        if rope is not None:
+            q, k = apply_rope(q, *rope), apply_rope(k, *rope)
         # No causal mask: this is an encoder. `keep` only hides padding.
         a = F.scaled_dot_product_attention(q, k, v, attn_mask=keep)
         x = x + self.drop(self.proj(a.transpose(1, 2).reshape(b, t, d)))
@@ -130,8 +167,14 @@ class TinyEncoder(nn.Module):
         super().__init__()
         self.c = c
         d = c.d_model
+        if c.pos not in ("learned", "rope"):
+            raise ValueError(f"unknown positional scheme {c.pos!r}")
         self.tok = nn.Embedding(c.vocab_size, d, padding_idx=0)
-        self.pos = nn.Embedding(c.max_len, d)
+        self.pos = nn.Embedding(c.max_len, d) if c.pos == "learned" else None
+        if c.pos == "rope":
+            cos, sin = rope_tables(c.max_len, d // c.n_heads, c.rope_base)
+            self.register_buffer("rope_cos", cos, persistent=False)
+            self.register_buffer("rope_sin", sin, persistent=False)
         self.seg = nn.Embedding(c.n_segments, d)
         self.emb_ln = nn.LayerNorm(d)
         self.drop = nn.Dropout(c.dropout)
@@ -167,11 +210,16 @@ class TinyEncoder(nn.Module):
         """ids/seg [B,T]; pad [B,T] bool (True = real token) or None when there is
         no padding (batch 1, the serving shape); lit_* [B,L]."""
         b, t = ids.shape
-        pos = torch.arange(t, device=ids.device)
-        x = self.drop(self.emb_ln(self.tok(ids) + self.pos(pos)[None] + self.seg(seg)))
+        e = self.tok(ids) + self.seg(seg)
+        rope = None
+        if self.pos is not None:
+            e = e + self.pos(torch.arange(t, device=ids.device))[None]
+        else:
+            rope = (self.rope_cos, self.rope_sin)
+        x = self.drop(self.emb_ln(e))
         keep = None if pad is None else pad[:, None, None, :]
         for blk in self.blocks:
-            x = blk(x, keep)
+            x = blk(x, keep, rope)
         x = self.ln_f(x)
         cls = F.gelu(self.pool(x[:, 0]))
         out: dict[str, torch.Tensor] = {"op": self.op_head(cls)}
@@ -195,7 +243,8 @@ class TinyEncoder(nn.Module):
         def n(*mods) -> int:
             return sum(p.numel() for m in mods for p in m.parameters())
         return {
-            "token embedding": n(self.tok), "position embedding": n(self.pos),
+            "token embedding": n(self.tok),
+            "position embedding": n(self.pos) if self.pos is not None else 0,
             "segment embedding": n(self.seg), "embedding norm": n(self.emb_ln),
             f"{self.c.n_layers} transformer blocks": n(*self.blocks),
             "final norm + CLS pooler": n(self.ln_f, self.pool),
@@ -224,6 +273,9 @@ def add_model_args(ap: argparse.ArgumentParser) -> None:
                    help="position-table size; measured corpus maxima are 150 (mortgage) and "
                         "29 (strategy) WordPiece tokens")
     g.add_argument("--ffn", choices=["geglu", "gelu"], default="geglu")
+    g.add_argument("--pos", choices=["learned", "rope"], default="learned",
+                   help="positions: learned absolute (as specified) or RoPE (what sensen's "
+                        "attention applies unconditionally)")
     g.add_argument("--dropout", type=float, default=0.1)
     g.add_argument("--no-lit-features", action="store_true",
                    help="drop the tag/magnitude embeddings from the literal head (ablation)")
@@ -231,23 +283,105 @@ def add_model_args(ap: argparse.ArgumentParser) -> None:
 
 def cfg_kwargs(a: argparse.Namespace) -> dict:
     return dict(d_model=a.d_model, n_layers=a.n_layers, n_heads=a.n_heads, max_len=a.max_len,
-                ffn=a.ffn, dropout=a.dropout, lit_features=not a.no_lit_features)
+                ffn=a.ffn, dropout=a.dropout, lit_features=not a.no_lit_features, pos=a.pos)
+
+
+def selftest() -> int:
+    """`python encoder_model.py --selftest`: the properties the docstring claims."""
+    torch.manual_seed(0)
+    bad = n = 0
+
+    def check(cond: bool, what: str) -> None:
+        nonlocal bad, n
+        n += 1
+        bad += not cond
+        print(f"  {'PASS' if cond else 'FAIL'}: {what}")
+
+    def mk(pos: str) -> TinyEncoder:
+        m = build(EncoderConfig(vocab_size=50, n_ops=5, n_pairs=7, conv_sizes={"f": 3}, max_len=32,
+                                d_model=32, n_layers=2, n_heads=4, dropout=0.0, pos=pos))
+        m.eval()
+        return m
+
+    def inputs(t: int, pad_to: int | None = None):
+        ids = torch.randint(5, 50, (1, t))
+        lit_s, lit_e = torch.tensor([[1, 4]]), torch.tensor([[2, 6]])
+        kw = dict(ids=ids, seg=torch.zeros(1, t, dtype=torch.long), pad=None, lit_s=lit_s, lit_e=lit_e,
+                  lit_tag=torch.tensor([[0, 6]]), lit_mag=torch.tensor([[3, 8]]),
+                  lit_ok=torch.ones(1, 2, dtype=torch.bool))
+        if pad_to:
+            kw["ids"] = torch.cat([ids, torch.zeros(1, pad_to - t, dtype=torch.long)], 1)
+            kw["seg"] = torch.zeros(1, pad_to, dtype=torch.long)
+            kw["pad"] = torch.arange(pad_to)[None] < t
+        return kw
+
+    for pos in ("learned", "rope"):
+        m = mk(pos)
+        x = inputs(12)
+        with torch.no_grad():
+            base = m(**x)
+            # BIDIRECTIONAL: a token at the END of the sequence moves the CLS vector and a
+            # literal at the START. In a causal model both would be unchanged.
+            y = dict(x, ids=x["ids"].clone())
+            y["ids"][0, -1] = (int(y["ids"][0, -1]) % 40) + 6
+            moved = m(**y)
+            check(not torch.allclose(base["op"], moved["op"], atol=1e-6) and
+                  not torch.allclose(base["pair"][:, 0], moved["pair"][:, 0], atol=1e-6),
+                  f"[{pos}] a later token changes an earlier literal and CLS (no causal mask)")
+            # PADDING does not leak: the same request padded to 20 gives the same logits.
+            pad = m(**inputs_like(x, 20))
+            check(torch.allclose(base["op"], pad["op"], atol=1e-5) and
+                  torch.allclose(base["pair"], pad["pair"], atol=1e-5),
+                  f"[{pos}] padding to 20 tokens leaves every head unchanged (batch 1 == padded batch)")
+        parts = m.breakdown()
+        check(sum(parts.values()) == m.n_params(), f"[{pos}] parameter breakdown sums to the total "
+                                                   f"({m.n_params():,})")
+    # RoPE: a score depends on the DISTANCE between positions, not on the positions
+    cos, sin = rope_tables(40, 8, 10000.0)
+    q, k = torch.randn(1, 1, 1, 8), torch.randn(1, 1, 1, 8)
+
+    def score(i: int, j: int) -> float:
+        qi = apply_rope(q.expand(1, 1, i + 1, 8).clone(), cos, sin)[..., i:i + 1, :]
+        kj = apply_rope(k.expand(1, 1, j + 1, 8).clone(), cos, sin)[..., j:j + 1, :]
+        return float((qi * kj).sum())
+
+    check(abs(score(5, 2) - score(15, 12)) < 1e-4 and abs(score(5, 2) - score(5, 3)) > 1e-4,
+          "RoPE score depends on the offset i - j only")
+    check(abs(float(apply_rope(q.expand(1, 1, 7, 8).clone(), cos, sin)[0, 0, 6].norm() - q.norm())) < 1e-5,
+          "RoPE preserves vector norm (it is a rotation)")
+    print(f"\n{n - bad}/{n} checks passed")
+    return 1 if bad else 0
+
+
+def inputs_like(x: dict, pad_to: int) -> dict:
+    t = x["ids"].shape[1]
+    y = dict(x)
+    y["ids"] = torch.cat([x["ids"], torch.zeros(1, pad_to - t, dtype=torch.long)], 1)
+    y["seg"] = torch.zeros(1, pad_to, dtype=torch.long)
+    y["pad"] = torch.arange(pad_to)[None] < t
+    return y
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Print the exact parameter count of the encoder.")
-    ap.add_argument("--schema", type=Path, required=True,
-                    help="schema.json written by encoder_corpus.py --out")
-    ap.add_argument("--vocab", type=int, required=True, help="tokenizer vocabulary size")
+    ap.add_argument("--schema", type=Path, help="schema.json written by encoder_corpus.py --out")
+    ap.add_argument("--vocab", type=int, help="tokenizer vocabulary size")
+    ap.add_argument("--selftest", action="store_true", help="run the built-in checks and exit")
     add_model_args(ap)
     a = ap.parse_args(argv)
+    if a.selftest:
+        return selftest()
+    if not (a.schema and a.vocab):
+        ap.error("--schema and --vocab are required unless --selftest")
     cfg = config_from_schema(json.loads(a.schema.read_text()), a.vocab, **cfg_kwargs(a))
     model = build(cfg)
     print(f"d_model={cfg.d_model} layers={cfg.n_layers} heads={cfg.n_heads} ffn={cfg.ffn}"
-          f"({cfg.d_ffn}) vocab={cfg.vocab_size} max_len={cfg.max_len}")
+          f"({cfg.d_ffn}) vocab={cfg.vocab_size} max_len={cfg.max_len} pos={cfg.pos}")
     print(f"ops={cfg.n_ops} pairs={cfg.n_pairs} conv heads={cfg.conv_sizes}")
-    for k, v in model.breakdown().items():
+    parts = model.breakdown()
+    for k, v in parts.items():
         print(f"  {k:36s} {v:>10,}")
+    assert sum(parts.values()) == model.n_params(), "breakdown does not sum to the total"
     print(f"  {'TOTAL':36s} {model.n_params():>10,}")
     return 0
 

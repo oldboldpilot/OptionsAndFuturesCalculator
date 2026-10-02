@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train the tiny encoder end to end and measure it the way that matters.
+r"""Train the tiny encoder end to end and measure it the way that matters.
 
 @author Olumuyiwa Oluwasanmi
 
@@ -28,9 +28,20 @@ DISCIPLINE ABOUT THE HELD-OUT SET.
   * Val is the SAME synthetic generator as train. These are in-distribution
     numbers. Nothing here measures robustness to how a real user phrases things.
 
-SPEED. bf16 autocast is the default because this host has AMX: a transformer-
-shaped matmul measured 26.2 ms fp32 against 6.1 ms bf16 (fwd+bwd, 4,480 x 128).
-Losses are computed in fp32 and master weights stay fp32.
+SPEED. bf16 autocast is the default because the task specified it, and no
+precision mode is faster than plain fp32 (`--no-bf16`) for this model on this
+host. The expectation came from a fair-looking microbenchmark (the host has AMX:
+one transformer-shaped matmul, 4,480 x 128, measured 26.2 ms fp32 against 6.1 ms
+bf16 forward+backward). A full training step of a 1 M parameter model does not
+follow it: at d=128 the step is made of many small ops, not of big matmuls.
+Measured as the calling thread's CPU time per 64-row mortgage batch at ONE
+thread, which other jobs on the host cannot inflate (it stayed ~100% busy):
+fp32 219 ms, bf16 autocast 244 ms, a bf16 replica with fp32 master weights
+230 ms, weights cast to bf16 outright 223 ms (medians of 3 alternating rounds x
+8 steps). Wall clock at 4 threads on the same busy host had autocast ~1.3x
+slower (308-317 ms per step against 226-255 ms), so the direction held. Losses
+are computed in fp32 and master weights stay fp32 in the default path. Accuracy
+under the modes was NOT compared, so nothing here says bf16 training is harmless.
 
 TRAPS KEPT HERE SO THEY ARE NOT RE-LEARNED:
   * Pair BCE is SUMMED over a literal's pairs and averaged over literals. A
@@ -40,8 +51,30 @@ TRAPS KEPT HERE SO THEY ARE NOT RE-LEARNED:
     GOLD operation (so the head only has to separate slots within an operation)
     and to inference with the PREDICTED one. A wrong operation therefore costs
     the row, which is the honest accounting.
+
+RUN IT (from agent/train/; the two corpora differ only in --op-key):
+    python train_encoder.py --train ../dataset/data_mortgage/train.jsonl \
+        --val ../dataset/data_mortgage/val.jsonl --op-key operation --out-dir OUT --epochs 10
+    python train_encoder.py --train ../dataset/data/train.jsonl --val ../dataset/data/val.jsonl \
+        --op-key strategy --out-dir OUT --epochs 10 --extra-val defect_holdout.jsonl
+    python quantize_encoder.py --checkpoint OUT/encoder_fp32.pt --val <the same val> --out-dir OUT_Q
+  `--limit N` and `--epochs` bound a smoke run (a tiny `--limit` also needs `--min-coverage 0
+  --min-class-count 5`, because the class and pair vocabularies are counted over the rows it
+  keeps). `--pos rope`, `--augment-digits P` and `--first-turn-examples F` are the
+  options that depart from the specified recipe; each is off by default.
 """
 from __future__ import annotations
+
+import os
+import re
+
+# Must precede the torch import. On a shared host two PyTorch processes at 4 OpenMP
+# threads each ran roughly 20x slower than one: spinning barriers steal the cores the other
+# process is computing on (measured while another job was training; a 3,000-row
+# smoke run went from 8.7 s to over 2.5 minutes without finishing). PASSIVE keeps
+# the workers asleep between kernels. It is a default, not a mandate: export
+# OMP_WAIT_POLICY=ACTIVE to override on a host that is yours alone.
+os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
 
 import argparse
 import collections
@@ -51,6 +84,7 @@ import random
 import sys
 import time
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 from typing import Sequence
 
@@ -220,6 +254,37 @@ def decode_row(sch: C.Schema, masks: Masks, ex: C.Example, pred: dict, r: int, o
     return C.reconstruct(sch, op, ex.lits, lit_pairs, conv, scores)
 
 
+@torch.inference_mode()
+def parse_request(model: torch.nn.Module, tok: EncoderTokenizer, sch: C.Schema, masks: Masks,
+                  utterance: str, prior_clarification: str = "", prior_question: str = "",
+                  threshold: float = 0.5, bf16: bool = False) -> dict | None:
+    """RAW STRINGS IN, PARAMS OUT: what a serving layer would call, with the same
+    three inputs `ParseRequest` carries. `prior_clarification` with a
+    `prior_question` is the reply to a question this service asked; without one it
+    is a revision (the contract sends no params block back, so the middle segment
+    is empty). Returns None for a request the model declines (class <NONE>).
+
+    Batch 1, no padding mask: the serving shape quantize_encoder.py benchmarks.
+    Raises ValueError for an input longer than the model's position table, which a
+    server must turn into a refusal rather than a truncated parse."""
+    if prior_clarification:
+        d = C.Dialogue("clarify" if prior_question else "revise", utterance,
+                       prior_question or None, prior_clarification, None)
+    else:
+        d = C.Dialogue("single", utterance, None, None, None)
+    r = C.render(d, sch.question_mode)
+    lits = [dict(start=l.start, end=l.end, text=l.text, tag=l.tag, value=str(l.value),
+                 mag=C.mag_bucket(l.value), seg=sg) for l, sg in zip(r.lits, r.lit_seg)]
+    ex = C.Example(r.text, r.q_start, r.u2_start, d.kind, lits, 0, [[] for _ in lits], {}, None)
+    data = Data(C.tensorize([ex], tok, sch, model.c.max_len), [ex])
+    b = get_batch(data, torch.tensor([0]), sch.n_pairs, labels=False, pad_free=True)
+    with torch.autocast("cpu", dtype=torch.bfloat16, enabled=bf16):
+        out = model(**model_inputs(b))
+    pred = dict(op=out["op"].float(), pair=out["pair"].float(),
+                conv={n: out["conv:" + n].float() for n in sch.conv_fields})
+    return decode_row(sch, masks, ex, pred, 0, int(pred["op"][0].argmax()), threshold)
+
+
 # ===========================================================================
 # EVALUATION
 # ===========================================================================
@@ -228,6 +293,7 @@ def evaluate(model: TinyEncoder, d: Data, sch: C.Schema, masks: Masks, threshold
     pred = pred or predict(model, d, sch, bf16=bf16)
     n = len(d)
     op_pred = pred["op"].argmax(1)
+    op_prob = torch.softmax(pred["op"], 1)
     op_gold = d.t["op"]
     res: dict = {"n": n}
     has = op_gold != 0
@@ -289,6 +355,11 @@ def evaluate(model: TinyEncoder, d: Data, sch: C.Schema, masks: Masks, threshold
         if ex.gold is None:
             by_kind[ex.kind + ":none"][0] += ok
             by_kind[ex.kind + ":none"][1] += 1
+            if not ok and len(failures) < collect_failures:
+                # a decline the model answered with params: the failure a serving
+                # layer can least afford, and the one a params-only list hides
+                failures.append(dict(text=ex.text, gold=None, bad=["<op>"], op_pred=sch.ops[p_op],
+                                     op_gold=sch.ops[0], op_conf=float(op_prob[r, p_op]), pred=None))
             continue
         n_params += 1
         name = sch.ops[int(op_gold[r])]
@@ -304,7 +375,7 @@ def evaluate(model: TinyEncoder, d: Data, sch: C.Schema, masks: Masks, threshold
         ok_gold_op += C.params_match(got_g, ex.gold)[0]
         if not ok and len(failures) < collect_failures:
             failures.append(dict(text=ex.text, gold=ex.gold, bad=bad,
-                                 op_pred=sch.ops[p_op], op_gold=name,
+                                 op_pred=sch.ops[p_op], op_gold=name, op_conf=float(op_prob[r, p_op]),
                                  pred=None if got is None else {k: _jsonable(v) for k, v in got.items()}))
     res["row_acc"] = ok_all / max(1, n)
     res["row_acc_params_rows"] = sum(v[0] for v in by_op.values()) / max(1, n_params)
@@ -325,6 +396,18 @@ def _jsonable(v):
     return str(v) if not isinstance(v, (str, bool, int, float)) else v
 
 
+def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    """95% Wilson interval for k successes of n: with n ~ 1,200 a headline of 97% is
+    +-1 point, which is the resolution any ablation here has to beat."""
+    if n == 0:
+        return 0.0, 0.0
+    p = k / n
+    d = 1 + z * z / n
+    c = (p + z * z / (2 * n)) / d
+    h = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
+    return c - h, c + h
+
+
 def print_eval(res: dict, title: str, ceiling: float | None = None) -> None:
     print(f"\n==== {title}  (n={res['n']}) ====")
     print(f"  operation accuracy, all rows           {100 * res['op_acc']:7.2f}%   "
@@ -338,7 +421,9 @@ def print_eval(res: dict, title: str, ceiling: float | None = None) -> None:
     for name, (acc, n) in res["conv_acc"].items():
         print(f"  convention head {name:24s}    {100 * acc:7.2f}%   (n={n})")
     print(f"  field accuracy (gold fields reproduced) {100 * res['field_acc']:6.2f}%")
+    lo, hi = wilson(round(res["row_acc"] * res["n"]), res["n"])
     print(f"  ROW ACCURACY, all fields correct       {100 * res['row_acc']:7.2f}%   "
+          f"[95% CI {100 * lo:.2f}-{100 * hi:.2f}]  "
           f"(rows with params {100 * res['row_acc_params_rows']:.2f}%; "
           f"with the gold operation supplied {100 * res['row_acc_given_gold_op']:.2f}%)"
           + (f"   oracle ceiling {100 * ceiling:.2f}%" if ceiling is not None else ""))
@@ -354,6 +439,222 @@ def print_by_op(res: dict) -> None:
         print("  most frequent failing (operation, field):")
         for (op, f), c in res["bad_fields"][:10]:
             print(f"    {c:>4}  {op}.{f}")
+
+
+# ===========================================================================
+# THE CLAIM THE DESIGN RESTS ON: "the model never emits a number"
+# ===========================================================================
+_NUMSPAN = re.compile(r"^(\d[\d,]*)(\.\d+)?(%?)$")
+
+
+def build_value_pool(examples: list[C.Example]) -> dict[frozenset, list[str]]:
+    """For every set of (slot, map) pairs a literal carries, the number spans the
+    TRAIN rows wrote there: the empirical distribution a same-distribution
+    resample draws from."""
+    pool: dict[frozenset, set[str]] = collections.defaultdict(set)
+    for ex in examples:
+        for lit, pids in zip(ex.lits, ex.pairs):
+            span = ex.text[lit["start"]:lit["end"]]
+            if pids and _NUMSPAN.match(span):
+                pool[frozenset(pids)].add(span)
+    return {k: sorted(v) for k, v in pool.items()}
+
+
+def perturb_example(ex: C.Example, sch: C.Schema, rng: random.Random, mode: str,
+                    pool: dict[frozenset, list[str]] | None = None) -> C.Example | None:
+    """A copy of `ex` whose POINTED-AT literals carry different numbers.
+
+    The labels (operation, pairs, classes) are left alone and the expected params
+    are recomputed from them by `reconstruct`, so "did the model still find the
+    right literals and maps" has an exact answer. Literals labelled NONE keep their
+    text (a superseded "30 days" or an "S&P 500" must stay what it was).
+
+      one / all   FRESH DIGITS: same digit count, decimals and comma grouping,
+                  every digit random. The number is one the generator never wrote
+                  (a 47-year term, a 3.1% rate that no corpus row has).
+      pool        SAME-DISTRIBUTION RESAMPLE: every pointed-at literal takes the
+                  text some train row wrote for the same (slot, map) set. Numbers
+                  are in range and from the generator's own value sets, so what
+                  moves is the COMBINATION, not the support.
+    The gap between the two is the finding: a model that holds up under `pool` and
+    falls under `all` is reading the range of a value, not just its context."""
+    if ex.gold is None:
+        return None
+    idx = [i for i, ps in enumerate(ex.pairs) if ps]
+    if not idx:
+        return None
+    if mode == "one":
+        idx = [rng.choice(idx)]
+    hit_slots: set[str] = set()
+    for i in idx:
+        hit_slots |= {sch.pairs[p][0] for p in ex.pairs[i]}
+    # A class label for a field whose literal just changed would now be WRONG
+    # ("30 days" -> "34 days" while the class stays 30): the pointer answers it.
+    conv = {k: v for k, v in ex.conv.items() if k not in hit_slots}
+    new_span: dict[int, str] = {}
+    for i in idx:
+        l = ex.lits[i]
+        span = ex.text[l["start"]:l["end"]]
+        m = _NUMSPAN.match(span)
+        if not m:
+            return None
+        if mode == "pool":
+            options = [c for c in (pool or {}).get(frozenset(ex.pairs[i]), []) if c != span]
+            if not options:
+                return None
+            new_span[i] = rng.choice(options)
+            continue
+        ip, dp, tail = m.group(1), m.group(2) or "", m.group(3)
+        digits = len(ip.replace(",", ""))
+        for _ in range(50):
+            ni = rng.randrange(10 ** (digits - 1) if digits > 1 else 0, 10 ** digits)
+            new_ip = f"{ni:,}" if "," in ip else str(ni)
+            new_dp = "." + "".join(str(rng.randrange(10)) for _ in dp[1:]) if dp else ""
+            if new_ip + new_dp + tail != span:
+                new_span[i] = new_ip + new_dp + tail
+                break
+        else:
+            return None
+    # rebuild the two user segments around the replacements, keeping the question
+    def rewrite(base: str, base_off: int, lit_ids: list[int]) -> str:
+        for i in sorted(lit_ids, reverse=True):
+            l = ex.lits[i]
+            base = base[:l["start"] - base_off] + new_span[i] + base[l["end"] - base_off:]
+        return base
+
+    n_first = sum(1 for l in ex.lits if l["seg"] == 0)
+    if ex.kind == "single":
+        first = rewrite(ex.text, 0, [i for i in new_span])
+        later, question = None, ""
+    else:
+        first = rewrite(ex.text[:ex.q_start - len(C.SEP)], 0, [i for i in new_span if i < n_first])
+        later = rewrite(ex.text[ex.u2_start:], ex.u2_start, [i for i in new_span if i >= n_first])
+        question = ex.text[ex.q_start:ex.u2_start - len(C.SEP)]
+    text = first if later is None else first + C.SEP + question + C.SEP + later
+    q_start = len(first) + len(C.SEP) if later is not None else len(first)
+    u2_start = q_start + len(question) + len(C.SEP) if later is not None else len(first)
+    again = C.lex(first) + ([] if later is None else [
+        _shifted(l, u2_start) for l in C.lex(later)])
+    if len(again) != len(ex.lits) or any(a.tag != l["tag"] for a, l in zip(again, ex.lits)):
+        return None
+    lits = [dict(l, start=a.start, end=a.end, text=a.text, value=str(a.value), mag=C.mag_bucket(a.value))
+            for a, l in zip(again, ex.lits)]
+    for i in range(len(lits)):
+        if i not in new_span and lits[i]["value"] != ex.lits[i]["value"]:
+            return None                       # an untouched literal must keep its value
+    gold = C.reconstruct(sch, ex.op, lits, ex.pairs, conv)
+    if gold is None or any(isinstance(v, C.Missing) or (isinstance(v, list) and any(
+            isinstance(x, C.Missing) for x in v)) for v in gold.values()):
+        return None
+    return C.Example(text, q_start, u2_start, ex.kind, lits, ex.op, ex.pairs, conv, gold)
+
+
+def _shifted(l: C.Lit, off: int) -> C.Lit:
+    return C.Lit(l.value, l.tag, l.start + off, l.end + off, l.text)
+
+
+def probe_unseen_numbers(model: TinyEncoder, examples: list[C.Example], tok: EncoderTokenizer,
+                         sch: C.Schema, masks: Masks, max_len: int, bf16: bool, seed: int = 0,
+                         pool: dict[frozenset, list[str]] | None = None) -> dict:
+    """Row accuracy when the digits are ones the model has never been shown (`one`,
+    `all`), or are in-distribution but recombined (`pool`), against its accuracy on
+    the SAME rows with their original digits."""
+    out = {}
+    for mode in ("one", "all") + (("pool",) if pool else ()):
+        rng = random.Random(seed)
+        orig, pert = [], []
+        for ex in examples:
+            p = perturb_example(ex, sch, rng, mode, pool)
+            if p is not None:
+                orig.append(ex)
+                pert.append(p)
+        if not pert:
+            continue
+        try:
+            a = evaluate(model, make_data(orig, tok, sch, max_len), sch, masks, bf16=bf16)
+            b = evaluate(model, make_data(pert, tok, sch, max_len), sch, masks, bf16=bf16)
+        except ValueError as e:                # a perturbed row longer than the position table
+            out[mode] = dict(error=str(e))
+            continue
+        out[mode] = dict(n=len(pert), original=a["row_acc"], fresh_digits=b["row_acc"],
+                         pair_f1_original=a["pair"]["f1"], pair_f1_fresh=b["pair"]["f1"],
+                         bad_fields=b["bad_fields"][:8])
+    return out
+
+
+def first_turn_example(ex: C.Example) -> C.Example | None:
+    """The FIRST TURN of a clarification dialogue as its own training row.
+
+    Without it the model never sees an incomplete request: every row it trains on
+    ends in the params turn, so on a first turn it picks the wrong operation about
+    as often as not (the ask probe measured 52.7% before this existed). The labels
+    are the final row's restricted to what the first turn states: the same
+    operation, the pairs on the first turn's literals, and NOTHING on the slot the
+    reply supplies, so the missing field stays empty and the layer above can ask.
+    Every clarification question in these corpora is about a pointer field (rate,
+    term, LTV cap, operating expenses), so the class labels carry over unchanged."""
+    if ex.kind != "clarify" or ex.gold is None:
+        return None
+    n1 = sum(1 for l in ex.lits if l["seg"] == 0)
+    first = ex.text[: ex.q_start - len(C.SEP)]
+    return C.Example(first, len(first), len(first), "single", [dict(l) for l in ex.lits[:n1]], ex.op,
+                     [list(p) for p in ex.pairs[:n1]], dict(ex.conv), None)
+
+
+def ask_probe(model: TinyEncoder, dialogues: list[C.Dialogue], sch: C.Schema, tok: EncoderTokenizer,
+              masks: Masks, max_len: int, bf16: bool, threshold: float = 0.5) -> dict:
+    """Would the serving layer know to ASK? On the FIRST turn of every clarification
+    dialogue (the reply withheld) the encoder should leave exactly the fields the
+    reply supplies EMPTY, so the layer above can turn "no value for `periods`" into
+    "Over how many years?" -- the missing-field logic the decoder contract already
+    has (`UnstatedField` in mortgage_verification.cppm).
+
+    By default nothing in training shows the model a first turn alone, so this is a
+    measurement of whether abstention comes for free from pointing, which it can for
+    a pointer slot (no literal -> no pointer -> the field is MISSING) and CANNOT for
+    a class head (`symbol` always returns one of its 20 classes; there is no ABSENT
+    class). `--first-turn-examples` adds such rows to training and the probe then
+    measures what that bought, not abstention for free.
+    Rows whose reply supplies no pointer slot are not counted, because for them
+    there is nothing this probe can see."""
+    full, trunc, expected = [], [], []
+    for d in dialogues:
+        if d.kind != "clarify" or d.gold is None:
+            continue
+        ex_full = C.build_examples([C.make_facts(d, sch.op_key, sch.question_mode)], sch)[0]
+        op_name = sch.ops[ex_full.op]
+        need = set()
+        for lit, pids in zip(ex_full.lits, ex_full.pairs):
+            if lit["seg"] == 2:
+                for pid in pids:
+                    slot = sch.pairs[pid][0]
+                    need.add(slot[:-len(C.ARRAY_SUFFIX)] if slot.endswith(C.ARRAY_SUFFIX) else slot)
+        # a field with a class or a constant to fall back on is never "missing"
+        need = {n for n in need if n not in sch.conv_fields and n not in sch.const_default
+                and n not in sch.op_default.get(op_name, {})}
+        if not need:
+            continue
+        r = C.render(C.Dialogue("single", d.first, None, None, None))
+        lits = [dict(start=l.start, end=l.end, text=l.text, tag=l.tag, value=str(l.value),
+                     mag=C.mag_bucket(l.value), seg=0) for l in r.lits]
+        trunc.append(C.Example(r.text, r.q_start, r.u2_start, "single", lits, ex_full.op,
+                               [[] for _ in lits], {}, None))
+        expected.append((need, ex_full.op))
+    if not trunc:
+        return {}
+    data = make_data(trunc, tok, sch, max_len)
+    pred = predict(model, data, sch, bf16=bf16)
+    op_pred = pred["op"].argmax(1)
+    ok = op_ok = exact_missing = 0
+    for r, (need, gold_op) in enumerate(expected):
+        got = decode_row(sch, masks, trunc[r], pred, r, int(op_pred[r]), threshold)
+        missing = set() if got is None else {k for k, v in got.items() if isinstance(v, C.Missing) or (
+            isinstance(v, list) and any(isinstance(x, C.Missing) for x in v))}
+        op_ok += int(op_pred[r]) == gold_op
+        exact_missing += missing == need
+        ok += int(op_pred[r]) == gold_op and missing == need
+    n = len(expected)
+    return dict(n=n, asks_correctly=ok / n, op_correct=op_ok / n, missing_set_exact=exact_missing / n)
 
 
 # ===========================================================================
@@ -406,7 +707,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--weight-decay", type=float, default=0.01)
     ap.add_argument("--loss-weights", type=float, nargs=3, default=(1.0, 1.0, 1.0),
                     metavar=("OP", "CONV", "PAIR"))
-    ap.add_argument("--no-bf16", action="store_true", help="fp32 autocast-off (slower on this host)")
+    ap.add_argument("--no-bf16", action="store_true",
+                    help="plain fp32, autocast off. Measured FASTER than autocast bf16 on this "
+                         "host for this model (see SPEED in the module docstring)")
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--threshold", type=float, default=0.5)
@@ -422,7 +725,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--min-pair-count", type=int, default=8)
     ap.add_argument("--vocab-size", type=int, default=4096)
     ap.add_argument("--digits", choices=["chunk", "single"], default="chunk")
+    ap.add_argument("--extra-val", type=Path, action="append", default=[],
+                    help="additional jsonl files to score once at the end under the TRAIN "
+                         "schema (e.g. agent/train/defect_holdout.jsonl); repeatable")
+    ap.add_argument("--augment-digits", type=float, default=0.0, metavar="P",
+                    help="each epoch, give this fraction of train rows fresh digits in the literals "
+                         "they point at (labels unchanged). Added after the unseen-number probe "
+                         "measured a drop without it; 0 = off, the specified recipe")
+    ap.add_argument("--first-turn-examples", type=float, default=0.0, metavar="F",
+                    help="each epoch, add the first turn ALONE of this fraction of the clarification "
+                         "dialogues as extra rows (the reply withheld, its slot left empty). 0 = off, "
+                         "the specified recipe; the ask probe is what motivated it")
     ap.add_argument("--print-failures", type=int, default=0)
+    ap.add_argument("--no-probe-unseen", dest="probe_unseen", action="store_false",
+                    help="skip the unseen-number probe")
+    ap.add_argument("--no-probe-ask", dest="probe_ask", action="store_false",
+                    help="skip the first-turn abstention probe")
     add_model_args(ap)
     a = ap.parse_args(argv)
 
@@ -448,12 +766,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     (a.out_dir / "schema.json").write_text(json.dumps(sch.to_json(), indent=1))
 
-    # ---- tokenizer (train split only)
-    tok = EncoderTokenizer.train([e.text for e in xtr], a.vocab_size, 2, a.digits)
-    tok.save(a.out_dir / "tokenizer.json")
-    print(f"[tokenizer] vocab {tok.vocab_size}")
-
-    # ---- optional dev split
+    # ---- optional dev split (cut BEFORE the tokenizer sees any text, so the dev
+    # rows influence neither the vocabulary nor the weights; the label space
+    # (class values, pair vocabulary) is derived from all of train, which is
+    # a property of the generator and not something the dev score can leak)
     xdev: list[C.Example] = []
     if a.dev_frac > 0:
         perm = list(range(len(xtr)))
@@ -462,6 +778,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         xdev = [xtr[i] for i in perm[:k]]
         xtr = [xtr[i] for i in perm[k:]]
         print(f"[data] dev split: {len(xdev)} rows held out of train")
+
+    # ---- tokenizer (fit split only)
+    tok = EncoderTokenizer.train([e.text for e in xtr], a.vocab_size, 2, a.digits)
+    tok.save(a.out_dir / "tokenizer.json")
+    print(f"[tokenizer] vocab {tok.vocab_size}")
     t0 = time.time()
     dtrain = make_data(xtr, tok, sch, a.max_len)
     dval = make_data(xva, tok, sch, a.max_len)
@@ -482,7 +803,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"           {k:36s} {v:>10,}")
     masks = make_masks(sch)
     opt = torch.optim.AdamW(param_groups(model, a.weight_decay), lr=a.lr, betas=(0.9, 0.98))
-    steps_per_epoch = math.ceil(len(dtrain) / a.batch_size)
+    clarify_rows = [e for e in xtr if e.kind == "clarify" and e.gold is not None]
+    n_ft = int(a.first_turn_examples * len(clarify_rows))
+    steps_per_epoch = math.ceil((len(dtrain) + n_ft) / a.batch_size)
     total = steps_per_epoch * a.epochs
     rng = random.Random(a.seed)
     step = 0
@@ -491,6 +814,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     for epoch in range(1, a.epochs + 1):
         model.train()
         t_ep = time.time()
+        if a.augment_digits > 0 or n_ft > 0:
+            r_aug = random.Random(a.seed * 1009 + epoch)
+            ex_epoch = list(xtr)
+            n_aug = 0
+            if a.augment_digits > 0:
+                for i in r_aug.sample(range(len(xtr)), int(a.augment_digits * len(xtr))):
+                    pe = perturb_example(xtr[i], sch, r_aug, r_aug.choice(("one", "all")))
+                    if pe is not None:
+                        ex_epoch[i] = pe
+                        n_aug += 1
+            if n_ft:
+                ex_epoch += [first_turn_example(e) for e in r_aug.sample(clarify_rows, n_ft)]
+            dtrain = make_data(ex_epoch, tok, sch, a.max_len)
+            print(f"[augment] epoch {epoch}: {n_aug} rows carry fresh digits, {n_ft} first-turn rows added",
+                  flush=True)
         agg = collections.Counter()
         n_tok = 0
         for idx in make_batches(dtrain.t["length"], a.batch_size, True, rng):
@@ -535,23 +873,109 @@ def main(argv: Sequence[str] | None = None) -> int:
     print_by_op(res)
     if ddev is not None:
         print_eval(evaluate(model, ddev, sch, masks, a.threshold, bf16), "dev split (from train)")
+    # ---- contamination: val inputs that are byte-identical to a train input. This
+    # repository has already paid for a holdout that was partly its model's
+    # own training set (304 of 600 rows), so the overlap is measured, not assumed.
+    seen = {e.text for e in xtr} | {e.text for e in xdev}
+    fresh = [e for e in xva if e.text not in seen]
+    overlap = dict(n_val=len(xva), n_identical_to_train=len(xva) - len(fresh))
+    if 0 < len(fresh) < len(xva):
+        overlap["row_acc_on_disjoint_rows"] = evaluate(
+            model, make_data(fresh, tok, sch, a.max_len), sch, masks, a.threshold, bf16)["row_acc"]
+    print(f"\n[contamination] {overlap['n_identical_to_train']}/{len(xva)} val inputs are byte-identical "
+          f"to a train input"
+          + (f"; row accuracy on the {len(fresh)} disjoint rows: "
+             f"{100 * overlap['row_acc_on_disjoint_rows']:.2f}%" if "row_acc_on_disjoint_rows" in overlap
+             else ""))
+    extra = {}
+    for path in a.extra_val:
+        fx = [C.make_facts(dl, sch.op_key, sch.question_mode) for dl in C.load_dialogues(path)]
+        # A row whose class of record is not in the label space cannot be represented at
+        # all: it is counted as WRONG, not dropped from the denominator and not a crash.
+        known = [f for f in fx if f.op is None or f.op in sch.op_index()]
+        xx = C.build_examples(known, sch)
+        cov_x = C.oracle_coverage(xx, sch)
+        ex_res = evaluate(model, make_data(xx, tok, sch, a.max_len), sch, masks, a.threshold, bf16,
+                          collect_failures=50)
+        n_all = len(fx)
+        n_ok = round(ex_res["row_acc"] * len(xx))
+        # `oracle_coverage` counts rows WITH params only; a decline is representable (class
+        # <NONE>), so it belongs in the ceiling. The first run of this block left them out
+        # and printed a ceiling two rows too low.
+        n_decl = sum(1 for x in xx if x.gold is None)
+        ceiling_rows = cov_x.rows_ok + n_decl
+        extra[path.name] = dict(n=n_all, n_unrepresentable_operation=n_all - len(known),
+                                oracle_coverage=ceiling_rows / max(1, n_all) if n_all else 0.0,
+                                row_acc=n_ok / max(1, n_all), op_acc=ex_res["op_acc"],
+                                failures=ex_res["failures"])
+        print(f"\n==== EXTRA SET {path.name} (n={n_all}, scored under the TRAIN schema) ====")
+        print(f"  rows whose operation is not in the label space: {n_all - len(known)} (counted wrong)")
+        print(f"  oracle ceiling {100 * ceiling_rows / max(1, n_all):.2f}% ({ceiling_rows}/{n_all})   "
+              f"operation accuracy {100 * ex_res['op_acc']:.2f}%   ROW ACCURACY "
+              f"{100 * n_ok / max(1, n_all):.2f}% ({n_ok}/{n_all})")
+        for f in ex_res["failures"][:20]:
+            print("   FAIL", json.dumps(dict(text=f["text"], op_gold=f["op_gold"], op_pred=f["op_pred"],
+                                              op_conf=round(f["op_conf"], 3), bad=f["bad"]), default=str)[:320])
+        wrong = [f["op_conf"] for f in ex_res["failures"] if f["op_pred"] != f["op_gold"]]
+        if wrong:
+            sure = sum(c >= 0.99 for c in wrong)
+            print(f"  operation head confidence on its {len(wrong)} wrong rows: min {min(wrong):.3f}  "
+                  f"median {sorted(wrong)[len(wrong) // 2]:.3f}  {sure} of them >= 0.99"
+                  + (" (confidently wrong: no confidence threshold can refuse those)" if sure else ""))
+    probe = {}
+    if a.probe_unseen:
+        probe = probe_unseen_numbers(model, xva, tok, sch, masks, a.max_len, bf16,
+                                     pool=build_value_pool(xtr + xdev))
+        print("\n==== NUMBER PROBE (val rows; the numbers a row points at are replaced, labels unchanged, "
+              "expected params recomputed) ====")
+        what = {"one": "ONE literal gets fresh random digits   ",
+                "all": "EVERY pointed-at literal gets fresh digits",
+                "pool": "EVERY pointed-at literal resampled from train (in-distribution)"}
+        for mode, r in probe.items():
+            if "error" in r:
+                print(f"  {mode}: {r['error']}")
+                continue
+            print(f"  {what[mode]}: {r['n']} rows  row acc {100 * r['original']:.2f}% -> "
+                  f"{100 * r['fresh_digits']:.2f}%   (pair F1 {100 * r['pair_f1_original']:.2f}% -> "
+                  f"{100 * r['pair_f1_fresh']:.2f}%)")
+            print(f"      fields that break: " + ", ".join(f"{o}.{f} x{c}" for (o, f), c in r["bad_fields"][:5]))
+    ask = {}
+    if a.probe_ask:
+        ask = ask_probe(model, dva, sch, tok, masks, a.max_len, bf16, a.threshold)
+        if ask:
+            print(f"\n==== ASK PROBE (first turn of {ask['n']} validation clarification dialogues whose "
+                  f"reply supplies a pointer slot; the reply is withheld) ====")
+            print(f"  operation right {100 * ask['op_correct']:.2f}%   the set of EMPTY fields is exactly "
+                  f"the one the reply fills {100 * ask['missing_set_exact']:.2f}%   both "
+                  f"{100 * ask['asks_correctly']:.2f}%")
+        else:
+            print("\n==== ASK PROBE: no clarification dialogue in val has a pointer slot in its reply; "
+                  "nothing to measure (class heads cannot abstain) ====")
     if a.print_failures:
         for f in res["failures"][: a.print_failures]:
             print("  FAIL", json.dumps(f, default=str)[:600])
 
+    # CPU seconds of the WHOLE process (every thread): the one cost figure that does not
+    # depend on what else the host was running. Wall minutes on a shared host describe the
+    # contention as much as the job.
+    cpu_s = time.process_time()
     meta = dict(args={k: (str(v) if isinstance(v, Path) else v) for k, v in vars(a).items()},
                 n_params=n_params, train_minutes=train_min, total_minutes=(time.time() - t_start) / 60,
+                process_cpu_seconds=cpu_s, load_average_at_end=os.getloadavg(),
                 oracle_row_coverage=dict(train=ctr.row_cov, val=cva.row_cov),
                 train_sha256=C.sha256_file(a.train), val_sha256=C.sha256_file(a.val),
                 question_mode=a.question_mode, op_key=a.op_key)
     save_checkpoint(a.out_dir / "encoder_fp32.pt", model, cfg, sch, tok, meta)
-    out = dict(meta=meta, history=history, final={k: v for k, v in res.items() if k != "failures"})
+    out = dict(meta=meta, history=history, probe=probe, extra_val=extra, ask_probe=ask,
+               contamination=overlap,
+               final={k: v for k, v in res.items() if k != "failures"})
     (a.out_dir / "metrics.json").write_text(json.dumps(out, indent=1, default=str))
     with open(a.out_dir / "failures.jsonl", "w") as fh:
         for f in res["failures"]:
             fh.write(json.dumps(f, default=str) + "\n")
-    print(f"\n[done] training {train_min:.1f} min, total {(time.time() - t_start) / 60:.1f} min; "
-          f"checkpoint {a.out_dir / 'encoder_fp32.pt'}")
+    print(f"\n[done] training {train_min:.1f} min wall, total {(time.time() - t_start) / 60:.1f} min wall; "
+          f"process CPU {cpu_s / 60:.1f} min (all threads), load average at end "
+          f"{os.getloadavg()[0]:.1f}; checkpoint {a.out_dir / 'encoder_fp32.pt'}")
     return 0
 
 
