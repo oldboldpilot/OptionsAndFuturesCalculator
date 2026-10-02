@@ -491,6 +491,15 @@ class SensenBackend final : public QueuedBackend {
         : QueuedBackend("mortgage assistant backend is shutting down"),
           pipeline_{std::move(pipeline)}, device_{device} {
         max_concurrent_ = max_concurrent;
+        // Restricted lm_head projection: ON unless explicitly switched off. The
+        // only accepted "off" spellings are 0/false/off/no; anything else leaves
+        // it on, because a typo in a deploy variable must not quietly remove a
+        // measured optimisation. The switch exists so the A/B is one variable on
+        // one binary, and so an operator can fall back without a redeploy.
+        if (const char* raw = std::getenv("MORTGAGE_RESTRICTED_PROJECTION")) {
+            const std::string_view v{raw};
+            restricted_projection_ = !(v == "0" || v == "false" || v == "off" || v == "no");
+        }
         max_queue_depth_ = queue_depth;
     }
 
@@ -830,10 +839,103 @@ class SensenBackend final : public QueuedBackend {
             agents.push_back(seq.agent.get());
         }
 
+        // PHASE A -- ADVANCE THE CONSTRAINT BEFORE THE PROJECTION, which is the
+        // whole reason this is split out of the loop below.
+        //
+        // A mask describes what may be generated NEXT, so it is only current once
+        // the automaton has accepted the token being consumed this step. The loop
+        // below used to do that AFTER the decode call, which is fine when the full
+        // vocabulary is projected and fatal when the mask chooses the rows: the
+        // candidates would be one step stale, the grammar would reject the token
+        // they produced, and it would drop itself. That was measured, not feared.
+        //
+        // ONLY the automaton moves here. `incrementPosition()` and the context /
+        // generated pushes stay exactly where they were, because the forward pass
+        // reads the agent's position and KV while it reads neither `seq.emitted`
+        // nor the grammar -- so this reordering is invisible to it. Moving the
+        // position would shift every sequence by one and corrupt attention.
+        //
+        // The eos/im_end guard mirrors the loop's own `if (!stop)`: a stop token is
+        // never fed to the automaton. The max_new_tokens half of that test is
+        // deliberately NOT replicated -- in the loop it is evaluated after this
+        // work, so accept/arm run regardless of it.
+        if (!grammar_pool_.empty()) {
+            for (std::size_t i = 0; i < active.size(); ++i) {
+                Sequence& seq = active[i];
+                const std::uint32_t consumed = tokens[i];
+                if (consumed == eos_id || consumed == im_end_id) continue;
+                if (seq.grammar != nullptr && !seq.grammar->accept(consumed)) {
+                    logger::Logger::getInstance().error(
+                        "mortgage assistant: grammar rejected token {} it had allowed -- "
+                        "constraint DROPPED for this sequence, verifier still gates the answer",
+                        consumed);
+                    release_grammar(seq);
+                }
+                seq.emitted += pipeline_->getTokenizer().decodeToken(consumed);
+                arm_grammar(seq);
+            }
+        }
+
+        // PHASE B -- the rows each sequence can actually use.
+        //
+        // EXACT, NOT APPROXIMATE, AND ONLY BECAUSE THE POLICY IS AN ARGMAX.
+        // `Sampler::sample` applies logit bias, repetition, frequency/presence and
+        // DRY penalties BEFORE the strategy switch, and every one is a transform
+        // over the WHOLE vocabulary -- so all four must be no-ops or the two paths
+        // genuinely differ. Checked here rather than assumed, so a future config
+        // change costs speed and never correctness.
+        const bool argmax_only = restricted_projection_ &&
+                                 params.strategy == sensen::SamplingStrategy::GREEDY &&
+                                 params.repetition_penalty == 1.0F &&
+                                 params.frequency_penalty == 0.0F &&
+                                 params.presence_penalty == 0.0F &&
+                                 params.dry_multiplier == 0.0F && params.logit_bias.empty();
+
+        std::vector<std::vector<std::uint32_t>> candidate_ids(active.size());
+        std::vector<std::span<const std::uint32_t>> candidates(active.size());
+        bool any_restricted = false;
+        if (argmax_only && grammar_vocab_ > 0) {
+            for (std::size_t i = 0; i < active.size(); ++i) {
+                if (active[i].grammar == nullptr) continue;
+                const std::vector<bool>& allowed = active[i].grammar->allowedMask();
+                if (allowed.size() != grammar_vocab_) continue;  // wrong width: do not guess
+                for (std::size_t t = 0; t < allowed.size(); ++t) {
+                    if (allowed[t]) candidate_ids[i].push_back(static_cast<std::uint32_t>(t));
+                }
+                // Ascending by construction, which is what makes the tie break
+                // identical: std::ranges::max_element returns the FIRST maximum, so
+                // both paths resolve a tie to the lowest token id.
+                if (!candidate_ids[i].empty()) {
+                    candidates[i] = candidate_ids[i];
+                    any_restricted = true;
+                }
+            }
+        }
+
+        // `restricted[i]` records which arm produced logits[i]: the two have
+        // DIFFERENT index spaces, so nothing downstream may guess.
+        std::vector<bool> restricted(active.size(), false);
         std::vector<std::vector<float>> logits;
         try {
-            logits = pipeline_->schedulerDecodeStep(std::span<const std::uint32_t>(tokens),
-                                                    std::span<sensen::AgentSession* const>(agents));
+            if (any_restricted) {
+                logits = pipeline_->schedulerDecodeStepRestricted(
+                    std::span<const std::uint32_t>(tokens),
+                    std::span<sensen::AgentSession* const>(agents),
+                    std::span<const std::span<const std::uint32_t>>(candidates));
+                if (logits.size() == active.size()) {
+                    for (std::size_t i = 0; i < active.size(); ++i) {
+                        restricted[i] = !candidates[i].empty();
+                    }
+                } else {
+                    logits.clear();  // declined, or malformed: fall back
+                }
+            }
+            if (logits.empty()) {
+                std::fill(restricted.begin(), restricted.end(), false);
+                logits = pipeline_->schedulerDecodeStep(
+                    std::span<const std::uint32_t>(tokens),
+                    std::span<sensen::AgentSession* const>(agents));
+            }
         } catch (const std::exception& e) {
             logger::Logger::getInstance().error(
                 "mortgage assistant: batched decode step threw: {}", e.what());
@@ -863,28 +965,9 @@ class SensenBackend final : public QueuedBackend {
                 seq.agent->getContext().push_back(consumed);
                 seq.generated.push_back(consumed);
 
-                // Advance the constraint by the token actually taken, and only
-                // then look for the activation marker -- in that order, so the
-                // token that COMPLETES the marker arms the grammar rather than
-                // being fed to an automaton that has not been primed with it.
-                if (seq.grammar != nullptr && !seq.grammar->accept(consumed)) {
-                    // A mask/automaton disagreement. sensen's IGrammar contract
-                    // is explicit that a false return must not be ignored: the
-                    // constraint has desynced from the text, so every mask after
-                    // this one describes a state the sequence is not in.
-                    // Dropping the constraint keeps the answer coming and leaves
-                    // the verifier -- which is what actually decides safety -- in
-                    // charge, which is strictly better than masking against a lie.
-                    logger::Logger::getInstance().error(
-                        "mortgage assistant: grammar rejected token {} it had allowed -- "
-                        "constraint DROPPED for this sequence, verifier still gates the answer",
-                        consumed);
-                    release_grammar(seq);
-                }
-                if (!grammar_pool_.empty()) {
-                    seq.emitted += pipeline_->getTokenizer().decodeToken(consumed);
-                    arm_grammar(seq);
-                }
+                // The constraint was advanced and the grammar armed in PHASE A,
+                // BEFORE the projection -- see the comment there for why that
+                // ordering is load-bearing rather than cosmetic.
 
                 if (seq.generated.size() >= params.max_new_tokens) stop = true;
             }
@@ -908,7 +991,9 @@ class SensenBackend final : public QueuedBackend {
             // variant -- and because masking in front of the SAME
             // `schedulerSample` keeps the unconstrained path byte-for-byte what
             // it was, which is what makes an A/B on this meaningful.
-            if (seq.grammar != nullptr) {
+            // A restricted vector needs no mask: the candidate set IS the
+            // admitted set, so every entry in it is already allowed.
+            if (seq.grammar != nullptr && !restricted[i]) {
                 const std::vector<bool>& allowed = seq.grammar->allowedMask();
                 if (allowed.size() == logits[i].size()) {
                     for (std::size_t t = 0; t < allowed.size(); ++t) {
@@ -925,7 +1010,19 @@ class SensenBackend final : public QueuedBackend {
                 }
             }
 
-            seq.next_token = pipeline_->schedulerSample(logits[i], params, seq.agent->getContext());
+            if (restricted[i]) {
+                // logits[i] is POSITIONAL against candidates[i], so the argmax
+                // index maps back through the candidate list. schedulerSample is
+                // deliberately NOT called: its index space is the vocabulary and
+                // this vector's is not, and every transform it would apply was
+                // proven a no-op by `argmax_only` above.
+                const auto best = std::ranges::max_element(logits[i]);
+                const auto at = static_cast<std::size_t>(std::distance(logits[i].begin(), best));
+                seq.next_token = candidate_ids[i][at];
+            } else {
+                seq.next_token =
+                    pipeline_->schedulerSample(logits[i], params, seq.agent->getContext());
+            }
             still_active.push_back(std::move(seq));
         }
         active = std::move(still_active);
@@ -1003,6 +1100,7 @@ class SensenBackend final : public QueuedBackend {
         try {
             const sensen::Tokenizer& tok = pipeline_->getTokenizer();
             const std::size_t vsz = tok.getVocabSize();
+            grammar_vocab_ = vsz;  // a mask of any other width must not name projection rows
             std::vector<std::string> vocab_text(vsz);
             for (std::size_t id = 0; id < vsz; ++id) {
                 vocab_text[id] = tok.decodeToken(static_cast<std::uint32_t>(id));
@@ -1118,6 +1216,15 @@ class SensenBackend final : public QueuedBackend {
     bool grammar_pool_ready_ = false;
     std::optional<mg::Schema> schema_;
     std::vector<std::unique_ptr<mg::MortgageParamsGrammar>> grammar_pool_;
+    /** Width the grammar masks are built against. A mask of any other width must
+     *  not drive a restricted projection: it would name the WRONG rows, which is
+     *  the same class of defect as masking the wrong tokens. */
+    std::size_t grammar_vocab_{0};
+    /** Kill switch for the restricted lm_head projection
+     *  (MORTGAGE_RESTRICTED_PROJECTION=0). Default ON. It exists so the A/B is
+     *  ONE VARIABLE on ONE BINARY -- this project's own standard for a claim --
+     *  and so an operator can switch the fast path off without a redeploy. */
+    bool restricted_projection_{true};
     std::vector<bool> grammar_free_;
 
     // Declared LAST: member destruction order is the reverse of declaration
