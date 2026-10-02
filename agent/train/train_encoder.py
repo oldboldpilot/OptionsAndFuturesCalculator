@@ -28,6 +28,20 @@ DISCIPLINE ABOUT THE HELD-OUT SET.
   * Val is the SAME synthetic generator as train. These are in-distribution
     numbers. Nothing here measures robustness to how a real user phrases things.
 
+THE PROBES EXIST BECAUSE OF THAT LAST BULLET. Each keeps the gold params and
+changes only what the model reads, so a drop is attributable to that change:
+  * NUMBER probe   the numbers a row points at get fresh digits (never seen), or are
+                   resampled from train (seen, recombined).
+  * FORMAT probe   the same numbers typed another way ("495000", "6.5 percent", "$250k",
+                   "495,000 dollars"). Two rewrites are never trained on, so the probe
+                   always contains formats the model has not seen.
+  * ASK probe      a clarification dialogue's FIRST turn alone: can the layer above see
+                   which field is missing and ask for it?
+  * EXTRA sets     `--extra-val`, e.g. the strategy defect holdout, scored under the train
+                   schema (an operation outside it counts as wrong).
+`--augment-digits`, `--augment-format` and `--first-turn-examples` train against the first
+three; each is off by default, and any run that uses one says so in its own header.
+
 SPEED. bf16 autocast is the default because the task specified it, and no
 precision mode is faster than plain fp32 (`--no-bf16`) for this model on this
 host. The expectation came from a fair-looking microbenchmark (the host has AMX:
@@ -83,10 +97,10 @@ import math
 import random
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
 
 import numpy as np
 import torch
@@ -658,6 +672,91 @@ def ask_probe(model: TinyEncoder, dialogues: list[C.Dialogue], sch: C.Schema, to
 
 
 # ===========================================================================
+# FORMAT PROBE: the same request, typed another way
+# ===========================================================================
+# Real users do not write "$495,000". Each rewrite keeps the VALUE of every number (so the
+# gold params are untouched) and changes only the surface the lexer and the tokenizer see.
+# Validation comes from the generator that wrote train, so it contains exactly one way of
+# writing each amount and rate (the word "percent" occurs in 0 of 27,764 mortgage user
+# segments, "250k" in 0, a bare amount without "$" or commas in about 2%) and cannot say how
+# the model copes with the others.
+#
+# TWO SETS, because `--augment-format` trains on the first and a probe of the same rewrites
+# would then measure what was trained, not what generalises: FORMAT_REWRITES are the ones the
+# augmentation applies; HELD_OUT_REWRITES are never trained on, so the model is always unseen
+# on them whatever the flags.
+FORMAT_REWRITES: dict[str, Callable[[str], str]] = {
+    "drop the $ sign": lambda s: s.replace("$", ""),
+    "drop thousands commas": lambda s: re.sub(r"(?<=\d),(?=\d{3}(?!\d))", "", s),
+    "'6.5%' -> '6.5 percent'": lambda s: re.sub(r"(\d)\s*%", r"\1 percent", s),
+    "'$250,000' -> '$250k'": lambda s: re.sub(r"\$(\d{1,3}),000(?![\d,])", r"$\1k", s),
+}
+HELD_OUT_REWRITES: dict[str, Callable[[str], str]] = {
+    "'$495,000' -> '495,000 dollars'": lambda s: re.sub(r"\$(\d[\d,]*(?:\.\d+)?)", r"\1 dollars", s),
+    "'$495,000' -> 'USD 495,000'": lambda s: s.replace("$", "USD "),
+}
+FORMAT_PERTURBATIONS = {**FORMAT_REWRITES, **HELD_OUT_REWRITES}
+
+
+def format_example(d: C.Dialogue, sch: C.Schema, rng: random.Random) -> C.Example | None:
+    """One TRAINING row retyped: each trained-on rewrite is applied with probability 1/2 (at
+    least one is forced), the row is relabelled from scratch by the label builder, and the
+    result is kept ONLY if those labels still reconstruct the gold params. A rewrite can
+    produce a (slot, map) pair the vocabulary dropped as too rare ("6.5 percent" read as a
+    bare number would need `M2' /100`); such a row would teach the model to point at nothing,
+    so it is refused here rather than trained on."""
+    names = [n for n in FORMAT_REWRITES if rng.random() < 0.5] or [rng.choice(list(FORMAT_REWRITES))]
+    d2 = d
+    for n in names:
+        fn = FORMAT_REWRITES[n]
+        d2 = replace(d2, first=fn(d2.first), later=None if d2.later is None else fn(d2.later))
+    if d2 == d:
+        return None
+    ex = C.build_examples([C.make_facts(d2, sch.op_key, sch.question_mode)], sch)[0]
+    if ex.gold is not None:
+        ok, _ = C.params_match(C.reconstruct(sch, ex.op, ex.lits, ex.pairs, ex.conv), ex.gold)
+        if not ok:
+            return None
+    return ex
+
+
+def probe_formats(model: TinyEncoder, dialogues: list[C.Dialogue], sch: C.Schema, tok: EncoderTokenizer,
+                  masks: Masks, max_len: int, bf16: bool) -> dict:
+    """Row accuracy on the rows a rewrite actually changes, before and after it. Only the
+    USER segments are rewritten; the gold params are the original ones, so a model that
+    reads the number correctly in its new spelling still scores. Rewrites that change no
+    row (the strategy corpus has no `$`) are omitted rather than reported as 100%, and a
+    retyped row longer than `max_len` is left out of BOTH sides and counted in `too_long`
+    (a model with a hard position table cannot be asked about it)."""
+    out = {}
+    base = C.build_examples([C.make_facts(d, sch.op_key, sch.question_mode) for d in dialogues], sch)
+    for name, fn in FORMAT_PERTURBATIONS.items():
+        orig, pert, too_long = [], [], 0
+        for d, ex in zip(dialogues, base):
+            d2 = replace(d, first=fn(d.first), later=None if d.later is None else fn(d.later))
+            if d2 == d:
+                continue
+            ex2 = C.build_examples([C.make_facts(d2, sch.op_key, sch.question_mode)], sch)[0]
+            if len(tok.encode(ex2.text).ids) > max_len:
+                too_long += 1                    # a retyped row the position table cannot hold
+                continue
+            orig.append(ex)
+            pert.append(ex2)
+        if not pert:
+            continue
+        try:
+            a = evaluate(model, make_data(orig, tok, sch, max_len), sch, masks, bf16=bf16)
+            b = evaluate(model, make_data(pert, tok, sch, max_len), sch, masks, bf16=bf16)
+        except ValueError as e:
+            out[name] = dict(error=str(e))
+            continue
+        out[name] = dict(n=len(pert), too_long=too_long, original=a["row_acc"], retyped=b["row_acc"],
+                         op_original=a["op_acc"], op_retyped=b["op_acc"],
+                         bad_fields=b["bad_fields"][:6])
+    return out
+
+
+# ===========================================================================
 # CHECKPOINTS
 # ===========================================================================
 def save_checkpoint(path: Path, model: TinyEncoder, cfg: EncoderConfig, sch: C.Schema,
@@ -732,6 +831,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     help="each epoch, give this fraction of train rows fresh digits in the literals "
                          "they point at (labels unchanged). Added after the unseen-number probe "
                          "measured a drop without it; 0 = off, the specified recipe")
+    ap.add_argument("--augment-format", type=float, default=0.0, metavar="P",
+                    help="each epoch, retype this fraction of train rows with the FORMAT_REWRITES "
+                         "(no $, no thousands commas, 'percent', '250k') and relabel them. Added "
+                         "after the format probe measured a collapse without it; 0 = off, the "
+                         "specified recipe")
     ap.add_argument("--first-turn-examples", type=float, default=0.0, metavar="F",
                     help="each epoch, add the first turn ALONE of this fraction of the clarification "
                          "dialogues as extra rows (the reply withheld, its slot left empty). 0 = off, "
@@ -741,6 +845,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     help="skip the unseen-number probe")
     ap.add_argument("--no-probe-ask", dest="probe_ask", action="store_false",
                     help="skip the first-turn abstention probe")
+    ap.add_argument("--no-probe-format", dest="probe_format", action="store_false",
+                    help="skip the retyped-numbers probe")
     add_model_args(ap)
     a = ap.parse_args(argv)
 
@@ -776,11 +882,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         random.Random(a.seed).shuffle(perm)
         k = int(len(xtr) * a.dev_frac)
         xdev = [xtr[i] for i in perm[:k]]
-        xtr = [xtr[i] for i in perm[k:]]
+        xtr_all, dtr_all = xtr, dtr
+        xtr = [xtr_all[i] for i in perm[k:]]
+        dtr = [dtr_all[i] for i in perm[k:]]            # --augment-format retypes the DIALOGUE
         print(f"[data] dev split: {len(xdev)} rows held out of train")
 
     # ---- tokenizer (fit split only)
-    tok = EncoderTokenizer.train([e.text for e in xtr], a.vocab_size, 2, a.digits)
+    tok_texts = [e.text for e in xtr]
+    if a.augment_format > 0:
+        # the retyped rows contain words ("percent") and pieces ("##k") the plain corpus never does
+        r_tok = random.Random(a.seed + 7)
+        tok_texts += [fe.text for fe in (format_example(dtr[i], sch, r_tok)
+                                         for i in r_tok.sample(range(len(xtr)), min(len(xtr), 4000)))
+                      if fe is not None]
+    tok = EncoderTokenizer.train(tok_texts, a.vocab_size, 2, a.digits)
     tok.save(a.out_dir / "tokenizer.json")
     print(f"[tokenizer] vocab {tok.vocab_size}")
     t0 = time.time()
@@ -801,6 +916,13 @@ def main(argv: Sequence[str] | None = None) -> int:
           f"max_len={cfg.max_len} bf16={bf16} threads={a.threads}")
     for k, v in model.breakdown().items():
         print(f"           {k:36s} {v:>10,}")
+    departures = [f"--pos {a.pos}"] if a.pos != "learned" else []
+    departures += [f"--{n.replace('_', '-')} {getattr(a, n)}" for n in
+                   ("augment_digits", "augment_format", "first_turn_examples") if getattr(a, n) > 0]
+    departures += ["--digits single"] if a.digits == "single" else []
+    departures += ["--question-mode placeholder"] if a.question_mode == "placeholder" else []
+    print("[recipe] " + (", ".join(departures) if departures else
+                         "as specified: learned positions, no augmentation, real question text"))
     masks = make_masks(sch)
     opt = torch.optim.AdamW(param_groups(model, a.weight_decay), lr=a.lr, betas=(0.9, 0.98))
     clarify_rows = [e for e in xtr if e.kind == "clarify" and e.gold is not None]
@@ -814,21 +936,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     for epoch in range(1, a.epochs + 1):
         model.train()
         t_ep = time.time()
-        if a.augment_digits > 0 or n_ft > 0:
+        if a.augment_digits > 0 or a.augment_format > 0 or n_ft > 0:
             r_aug = random.Random(a.seed * 1009 + epoch)
             ex_epoch = list(xtr)
-            n_aug = 0
+            n_aug = n_fmt = 0
+            if a.augment_format > 0:                 # first: it rewrites the text the digits then change
+                for i in r_aug.sample(range(len(xtr)), int(a.augment_format * len(xtr))):
+                    fe = format_example(dtr[i], sch, r_aug)
+                    if fe is not None and len(tok.encode(fe.text).ids) <= a.max_len:
+                        ex_epoch[i] = fe
+                        n_fmt += 1
             if a.augment_digits > 0:
                 for i in r_aug.sample(range(len(xtr)), int(a.augment_digits * len(xtr))):
-                    pe = perturb_example(xtr[i], sch, r_aug, r_aug.choice(("one", "all")))
+                    pe = perturb_example(ex_epoch[i], sch, r_aug, r_aug.choice(("one", "all")))
                     if pe is not None:
                         ex_epoch[i] = pe
                         n_aug += 1
             if n_ft:
                 ex_epoch += [first_turn_example(e) for e in r_aug.sample(clarify_rows, n_ft)]
             dtrain = make_data(ex_epoch, tok, sch, a.max_len)
-            print(f"[augment] epoch {epoch}: {n_aug} rows carry fresh digits, {n_ft} first-turn rows added",
-                  flush=True)
+            print(f"[augment] epoch {epoch}: {n_fmt} rows retyped, {n_aug} rows carry fresh digits, "
+                  f"{n_ft} first-turn rows added", flush=True)
         agg = collections.Counter()
         n_tok = 0
         for idx in make_batches(dtrain.t["length"], a.batch_size, True, rng):
@@ -951,6 +1079,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             print("\n==== ASK PROBE: no clarification dialogue in val has a pointer slot in its reply; "
                   "nothing to measure (class heads cannot abstain) ====")
+    fmt = {}
+    if a.probe_format:
+        fmt = probe_formats(model, dva, sch, tok, masks, a.max_len, bf16)
+        if fmt:
+            print("\n==== FORMAT PROBE (the same val rows with their numbers typed another way; "
+                  "values and gold unchanged) ====")
+            for name, r in fmt.items():
+                if "error" in r:
+                    print(f"  {name}: {r['error']}")
+                    continue
+                tag = "trained" if (a.augment_format > 0 and name in FORMAT_REWRITES) else "UNSEEN "
+                print(f"  [{tag}] {name:32s} {r['n']:5d} rows  row acc {100 * r['original']:.2f}% -> "
+                      f"{100 * r['retyped']:.2f}%   (operation {100 * r['op_original']:.2f}% -> "
+                      f"{100 * r['op_retyped']:.2f}%)   breaks: "
+                      + ", ".join(f"{o}.{f} x{c}" for (o, f), c in r["bad_fields"][:3])
+                      + (f"   ({r['too_long']} rows over max_len left out)" if r["too_long"] else ""))
     if a.print_failures:
         for f in res["failures"][: a.print_failures]:
             print("  FAIL", json.dumps(f, default=str)[:600])
@@ -966,7 +1110,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 train_sha256=C.sha256_file(a.train), val_sha256=C.sha256_file(a.val),
                 question_mode=a.question_mode, op_key=a.op_key)
     save_checkpoint(a.out_dir / "encoder_fp32.pt", model, cfg, sch, tok, meta)
-    out = dict(meta=meta, history=history, probe=probe, extra_val=extra, ask_probe=ask,
+    out = dict(meta=meta, history=history, probe=probe, extra_val=extra, ask_probe=ask, format_probe=fmt,
                contamination=overlap,
                final={k: v for k, v in res.items() if k != "failures"})
     (a.out_dir / "metrics.json").write_text(json.dumps(out, indent=1, default=str))

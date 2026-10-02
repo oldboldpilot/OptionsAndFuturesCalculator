@@ -159,11 +159,16 @@ _NUM_LEGACY = re.compile(
 # The fix: the suffix must be ATTACHED to the digits ("250k", "1.2M") and must
 # not begin a word. The legacy form let "304,500 mortgage" / "327 months" /
 # "$750 more" be read as thousands-of-millions.
+# A SECOND, SMALLER CHANGE: the word "percent" / "per cent" counts as "%". Neither
+# corpus contains the word (0 of 27,764 mortgage user segments), so no training label
+# moves; it is here because the format probe in train_encoder.py found that a model
+# whose lexer tags "6.5 percent" as a BARE number has never seen a rate spelled that
+# way, and the lexer is the half of the pipeline that can be fixed without a retrain.
 _NUM = re.compile(
     r"""(?P<dollar>\$)?\s*
         (?P<num>\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)
         (?P<suffix>[kKmM](?![A-Za-z]))?
-        \s*(?P<pct>%)?
+        \s*(?P<pct>%|(?i:percent|per\s?cent)\b)?
     """,
     re.VERBOSE,
 )
