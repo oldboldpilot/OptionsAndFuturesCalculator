@@ -811,6 +811,128 @@ $817,400` with no down payment stated) derive nothing, because no rule maps a
 lone money literal to a loan slot and adding one would turn rows the model
 serves correctly today into refusals.
 
+### The assistant was slow under CONCURRENCY, and the output head was why
+
+Reported 2026-10-01 as "users say the AI mortgage assistant is slow". **Single
+requests were never the problem and prefill was never the problem.** Measured on a
+local engine, identical utterance, N simultaneous `ParseOperation` calls:
+
+| batch | per-seq tok/s | aggregate tok/s | wall | prefill |
+| --- | --- | --- | --- | --- |
+| 1 | 64.8 | 64.8 (1.00x) | 1.04 s | ~110 ms |
+| 4 | 32.1 | 128.3 (1.98x) | 2.20 s | ~110 ms |
+| 8 | 18.0 | 144.2 (2.23x) | 4.36 s | ~110 ms |
+
+**Continuous batching is implemented correctly and is not the defect.** What does
+not amortise is the OUTPUT HEAD. The 28-layer body's weight read is shared across
+the batch; `lm_head` is 1024 x 151,936 and is applied as N separate GEMVs, each
+streaming the whole 158 MB quantised matrix -- 1.26 GB/step at N=8 against the
+body's ~446 MB read once. `perf` put `dotQ8_0_AVX512` at **32.03%** of cycles.
+**This is a small-model-huge-vocab problem specifically**; do not reason about it
+from the layer count. Prefill is flat at ~110 ms because the system prompt is only
+~92 tokens -- there was never much to cache.
+
+**THE FIX IS TO STOP COMPUTING LOGITS NOBODY READS.** A grammar constrains most
+decode steps to a median of **10** admissible tokens out of 151,936, so the full
+projection computes ~151,926 logits per sequence per step in order to mask them.
+`GEMM::matvecQuantizedRows` projects only the admitted rows;
+`LLMPipeline::schedulerDecodeStepRestricted` carries per-sequence candidate lists;
+the service gathers positionally against its own candidate list. lm_head's share of
+cycles fell **32.03% -> 6.19%**, and the body's VNNI kernel is now 39.56% -- already
+the 8x8 multi-register path, so near-optimal.
+
+**IT IS AN IDENTITY, NOT AN APPROXIMATION, and only under an argmax policy.** The
+caller checks all four of `Sampler::sample`'s pre-argmax transforms are no-ops
+(logit bias, repetition, frequency/presence, DRY) before using it. Candidates are
+gathered in ASCENDING id order, which is what makes the tie break identical:
+`std::ranges::max_element` returns the FIRST maximum, so both paths resolve a tie to
+the lowest admitted id. **Exact only while the admitted maximum is FINITE** -- if
+every admitted logit is -inf or NaN the masked full argmax returns token 0, which
+the mask had just disallowed, while the restricted path returns an admitted
+candidate. Where they differ the restricted path is the one honouring the
+constraint; neither state is reachable from a healthy forward pass.
+
+**ORDERING IS LOAD-BEARING AND GOT IT WRONG FIRST.** A mask is only current once
+`accept(consumed)` has advanced the automaton for the token being consumed, so the
+mask must be computed AFTER the accept and BEFORE the projection. The first wiring
+read the mask one step stale; the grammar then rejected the chosen token and dropped
+itself, and the engine returned a refusal. Only the automaton advance was hoisted
+ahead of the forward -- the position and context pushes stay where they were, which
+is what keeps the KV indexing and RoPE positions identical.
+
+**THE FIRST FIGURE WAS THE SYNTHETIC BEST CASE.** 1.58x at N=8 was measured with
+eight copies of ONE utterance, which synchronises every sequence into the same
+grammar state on the same step. Re-measured with eight DISTINCT utterances, two of
+them under-specified so they get a clarifying question and never enter `<params>`
+(25%, deliberately heavier than production's ~7.6%), arms interleaved over three
+rounds:
+
+| arm | median wall | range |
+| --- | --- | --- |
+| restricted OFF | 6.28 s | 6.26 - 6.30 |
+| **restricted ON** | **4.07 s** | 4.03 - 4.12 |
+
+**1.54x at N=8 mixed**, one sha across both arms, 0 of 8 rows differing. So the
+synthetic batch overstated it by 0.04x, not by an order: the lm_head cost is per
+(sequence, step), and six constrained sequences each save their own full projection
+whatever the other two do. The 2.2 s effect is ~25x the run-to-run spread.
+
+**THE HARNESS IS `scripts/measure_restricted_projection.py`, AND ITS FIRST RUN SAID
+0.99x.** A leaked engine was still bound to its port with 5m48s of CPU in 131s
+elapsed; engines bind `SO_REUSEPORT`, so the kernel split requests between it and
+each freshly booted engine and both arms were partly served by the same binary --
+and because the stale engine answered the readiness probe INSTANTLY, timing began
+before any new engine had loaded. Only **one of six boots** logged its own parsed
+switch. **A probe asking "did someone answer this port?" cannot tell your engine
+from any engine.** It now REFUSES: zero engines and a free port before each boot,
+then it waits for THAT engine to log both its parsed arm and `model is LOADED`,
+asserts it is the only engine alive, and waits for the process to be gone on
+teardown rather than sleeping. Hardening it turned 0.99x into 1.54x on identical
+code. **A null result is as easy to believe wrongly as a positive one** -- 0.99x
+agreed with a review's standing objection, which is the hardest kind of
+contamination to catch.
+
+**TWO GUARDS CAME FROM AN ADVERSARIAL REVIEW (Gemini 3.8 Flash High via `agy`), and
+one of them was a latent crash.** `forwardBatchRestricted` had no CUDA check, so a
+GPU batch would return FULL-WIDTH logits, pass the caller's `logits.size() ==
+active.size()` count check, and index a ~10-element candidate list with a vocabulary
+index. sensen refuses a GPU-served batch now; the service additionally checks each
+restricted row's WIDTH against the candidate list it is indexed by, which closes the
+class without enumerating backends. **That width check is UNREACHABLE on this build
+and is marked so in the code** -- kept for the reason the `guess` grounding exemption
+is kept, not as live coverage. The review also found `MORTGAGE_RESTRICTED_PROJECTION`
+compared case-sensitively, so `False` and `OFF` both read as ON; it is
+case-insensitive now and LOGS what it parsed at boot, which is what makes the
+remaining "unrecognised defaults ON" choice defensible.
+
+**`matvecQuantizedRows` WAS A CLIFF AND IS NOW THREADED.** `matvecQuantized`
+spreads the matrix across `threadCount()` workers while the row version looped on
+the calling thread, and its caller loops over sequences serially -- so a wide
+candidate set lost the thread pool outright. The review proposed a threshold; a
+threshold needs a tuned crossover constant, and threading the row set means there is
+none. **The parallel branch is unreachable from this engine's workload** (median 10
+rows is below the 32-row floor), so `test_llq_weight_store` forces the discriminator
+itself via `setThreadCount` and requires bit-identity on both branches.
+Mutation-checked to a single failing check: halving the parallel range fails only
+"parallel (8 threads), wide set", while "parallel, narrow" still passes -- the
+positive control proving the floor really does send a 10-row set down the serial
+path. 97 -> **114 checks**.
+
+**8-BIT KV CACHE WAS ALREADY ON, which is the answer to "use the paged attention kv
+8 bit cache".** `SENSEN_KV_DTYPE` **defaults to Q8**, parsed once per process into a
+function-local static, so it applies to BOTH assistants. An A/B of unset against
+`q8` is therefore Q8 against Q8 -- a vacuous comparison, correctly reported as
+UNMEASURED rather than as a pass. Its control is sound: `raw_exact` reproduced
+**414/560** exactly. A real 8-bit-vs-16-bit accuracy gap needs the control arm
+pinned to `fp16`, and no run here has done that. **Flash attention is likewise
+already present on CPU:** `compute_attention_paged_flat` does the running max,
+`exp(m - m_new)` rescale and online-softmax numerator, tiled over paged KV blocks;
+only `lowbit_flash_attention.cppm` (sub-8-bit q4/q5/q6 KV) is CUDA-gated.
+
+**NOT DEPLOYED.** Everything above is local. `MORTGAGE_ASSISTANT_MAX_CONCURRENT`
+4 -> 8 is free and measured at ~12% (4.36 -> 3.84 s at N=8) and is worth bundling
+with the engine; `numReplicas` 2 -> 4 costs money and is an owner decision.
+
 ### 27 of 27 reachable, verified end to end on 2026-09-05
 
 | operation | production value | independent check |
