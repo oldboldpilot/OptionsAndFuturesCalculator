@@ -109,6 +109,16 @@ class EncoderConfig:
     n_mag: int = 16
     tag_dim: int = 16
     lit_features: bool = True
+    # HEAD MODE. "pair" is the trained-and-measured default: ONE multi-label sigmoid
+    # over (slot, map) pairs, which is what the oracle proves is 100% representable.
+    # "slot_map" is what sensen's text_encoder.cppm loader accepts TODAY -- two
+    # SINGLE-label heads it argmaxes independently (encode() does
+    # p.slot = argmaxIndex(slot_logits), p.map = argmaxIndex(map_logits)). The two are
+    # not interchangeable: a literal carrying two pairs is representable by the first
+    # and not by the second, which is 24.82% of mortgage rows and 0% of strategy rows.
+    heads: str = "pair"           # pair | slot_map
+    n_slots: int = 0              # slot_map only
+    n_maps: int = 0               # slot_map only
     pos: str = "learned"          # learned | rope
     rope_base: float = 10000.0
     # --- the pieces `--servable` switches off (see the SERVABLE paragraph of the docstring)
@@ -240,7 +250,19 @@ class TinyEncoder(nn.Module):
         # Linear reads [pooled | tag | mag] (just `pooled` when the features are off too)
         d_feat = d + (2 * c.tag_dim if c.lit_features else 0)
         self.lit_mlp = nn.Linear(d_feat + d, d) if c.lit_mlp else None
-        self.pair_head = nn.Linear(d if c.lit_mlp else d_feat, c.n_pairs)
+        lit_in = d if c.lit_mlp else d_feat
+        if c.heads == "slot_map":
+            # Two single-label heads, the shape sensen exports to. Biases are KEPT
+            # here even under --servable: the GGUF contract names
+            # encoder.slot.bias and encoder.map.bias, so a bias-free head would
+            # have nothing to write and the loader refuses a missing tensor.
+            self.pair_head = None
+            self.slot_head = nn.Linear(lit_in, c.n_slots)
+            self.map_head = nn.Linear(lit_in, c.n_maps)
+        else:
+            self.pair_head = nn.Linear(lit_in, c.n_pairs)
+            self.slot_head = None
+            self.map_head = None
         self.apply(self._init)
         scale = 0.02 / math.sqrt(2 * c.n_layers)
         for blk in self.blocks:        # residual-branch outputs start small (GPT-2 style)
@@ -292,7 +314,11 @@ class TinyEncoder(nn.Module):
         h = self.drop(torch.cat(feats, dim=-1))
         if self.lit_mlp is not None:
             h = F.gelu(self.lit_mlp(h))
-        out["pair"] = self.pair_head(h)
+        if self.pair_head is not None:
+            out["pair"] = self.pair_head(h)
+        else:
+            out["slot"] = self.slot_head(h)
+            out["map"] = self.map_head(h)
         return out
 
     def n_params(self) -> int:
@@ -309,7 +335,8 @@ class TinyEncoder(nn.Module):
             "final norm + CLS pooler": n(self.ln_f, self.pool),
             "op head": n(self.op_head), "convention heads": n(self.conv_heads),
             "literal features (tag, magnitude)": n(self.tag, self.mag),
-            "literal MLP + pair head": n(self.lit_mlp, self.pair_head),
+            "literal MLP + pair head": n(self.lit_mlp, self.pair_head,
+                                         self.slot_head, self.map_head),
         }
 
 
@@ -319,8 +346,22 @@ def build(cfg: EncoderConfig) -> TinyEncoder:
 
 def config_from_schema(schema_json: dict, vocab_size: int, **kw) -> EncoderConfig:
     conv = {n: len(schema_json["conv_vocab"][n]) for n in schema_json["conv_fields"]}
+    # The slot and map vocabularies are DERIVED from the pair tuples, in sorted order,
+    # so the exporter and the trainer cannot disagree about which index is which: the
+    # same function produces both. Schema.pairs is a list of (slot, map).
+    pairs = [tuple(p) for p in schema_json["pairs"]]
+    slots = sorted({p[0] for p in pairs})
+    maps = sorted({p[1] for p in pairs})
     return EncoderConfig(vocab_size=vocab_size, n_ops=len(schema_json["ops"]),
-                         n_pairs=len(schema_json["pairs"]), conv_sizes=conv, **kw)
+                         n_pairs=len(pairs), conv_sizes=conv,
+                         n_slots=len(slots), n_maps=len(maps), **kw)
+
+
+def slot_map_vocab(schema_json: dict) -> tuple[list[str], list[str]]:
+    """The slot and map vocabularies the slot_map heads and the GGUF exporter share.
+    Sorted, so the index of a name is a function of the schema alone."""
+    pairs = [tuple(p) for p in schema_json["pairs"]]
+    return sorted({p[0] for p in pairs}), sorted({p[1] for p in pairs})
 
 
 def add_model_args(ap: argparse.ArgumentParser) -> None:
@@ -339,6 +380,13 @@ def add_model_args(ap: argparse.ArgumentParser) -> None:
     g.add_argument("--no-pooler", action="store_true", help="op and class heads read CLS directly")
     g.add_argument("--no-lit-mlp", action="store_true",
                    help="the pair head is one Linear over the pooled literal (no MLP, no CLS)")
+    g.add_argument("--heads", choices=["pair", "slot_map"], default="pair",
+                   help="pair (default) is the measured architecture: ONE multi-label head over "
+                        "(slot, map) pairs. slot_map is what sensen's text_encoder.cppm accepts "
+                        "today -- two SINGLE-label heads argmaxed independently -- and it cannot "
+                        "represent a literal carrying two pairs, which is 24.82% of mortgage rows "
+                        "and 0% of strategy rows. Use it to EXPORT, and only where the corpus is "
+                        "single-pair.")
     g.add_argument("--servable", action="store_true",
                    help="the architecture sensen's TransformerBlock can load: RMSNorm + SwiGLU, no "
                         "biases, RoPE, and none of the extra inputs and heads (segments, tag and "
@@ -355,7 +403,8 @@ def cfg_kwargs(a: argparse.Namespace) -> dict:
     kw = dict(d_model=a.d_model, n_layers=a.n_layers, n_heads=a.n_heads, max_len=a.max_len,
               ffn=a.ffn, dropout=a.dropout, lit_features=not a.no_lit_features, pos=a.pos,
               norm=a.norm, bias=not a.no_bias, emb_norm=not a.no_emb_norm,
-              segments=not a.no_segments, pooler=not a.no_pooler, lit_mlp=not a.no_lit_mlp)
+              segments=not a.no_segments, pooler=not a.no_pooler, lit_mlp=not a.no_lit_mlp,
+              heads=getattr(a, "heads", "pair"))
     if a.servable:
         kw.update(norm="rmsnorm", ffn="swiglu", bias=False, pos="rope", emb_norm=False,
                   segments=False, pooler=False, lit_mlp=False, lit_features=False)
