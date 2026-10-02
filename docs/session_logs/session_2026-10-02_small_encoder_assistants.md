@@ -341,3 +341,69 @@ the first run got 0 of 2 declines right. The POINTER slots do abstain properly,
 and training on first turns alone moved the ask probe from 68.7% to 100%. The
 defect holdout's own ceiling is 9/16 because GC, CL and ZB are not in the
 20-symbol class vocabulary -- a corpus limit, not a model one.
+
+
+---
+
+## 13. ctest DID run, and §10's "it never has" is now obsolete
+
+Section 10 recorded that `ctest` had never run because sensen's `external/`
+submodules were empty. That is fixed, and the merge gate is satisfied with real
+test results rather than harness proxies. Four things blocked it, all cheap:
+
+| blocker | resolution |
+| --- | --- |
+| `cmake_minimum_required(VERSION 4.1)`, host had 3.28.3 | `pip install cmake` -> 4.4.3 |
+| no TBB on the host | `pip install tbb-devel` |
+| `external/{cpp23-logger,fastestjsoninthewest}` empty | cloned; SGEE off via `-DSENSEN_USE_SGEE=OFF`, tbqwf and nanobind not needed |
+| 5.0 GB disk free | freed the 2 GB LLVM tarball, already extracted |
+
+**ONE REAL BUILD BREAK, and it is the `kv_lowbit` lesson again.**
+`src/text_encoder.cppm` imports `sensen.llq_weight_store`, and
+`src/llq_weight_store.cppm` was in NEITHER module list -- not the server-only one
+nor the main one. The build stopped at step 906 of 921 with
+`fatal error: module 'sensen.llq_weight_store' not found`. CLAUDE.md states the
+rule exactly: "Every new module that a listed module imports has to be added
+alongside it; nothing derives this."
+
+**It surfaced only on the first REAL configure.** None of the hand-driven
+module-closure builds that preceded it could see it, because a hand-maintained
+list cannot report its own incompleteness. That is the argument for running the
+real build rather than trusting a closure script, and it is worth more than the
+fix.
+
+### Result on the MERGED tree, 215/215 built, 0 failures
+
+```
+100% tests passed, 0 tests failed out of 24
+```
+
+| test | why it is in the set |
+| --- | --- |
+| `test_gguf_exporter`, `test_gguf_requantize`, `test_qwen3_ckpt_export`, `test_diffusiongemma_ckpt_export`, `test_diffusiongemma_bf16_export` | the five fixtures whose shapes were reversed -- the actual regression risk |
+| `test_distill` | the live consumer that had been training against the 3x wrong CE gradient |
+| `test_autograd_cross_entropy` | the new per-row masked CE |
+| `test_tokenizer_bos_default`, `_qwen35`, `_expanded`, `_encoder` | tokenizer regression + the new encoder test |
+| `test_float_types`, `test_precision_128` | precision regression |
+| `test_bf16_conversion_nan` (+ `_noavx512`) | the NaN fix, both with and without the AVX-512 tiers |
+| `test_lossless_quant`, `test_bf16_sixteen_bit_exports`, `test_native_ckpt_converter`, `test_fused_ce` | consumers the audits named |
+
+4 skipped honestly: three Python tests (the `_sensen_core` extension is not
+built, Triton and MLX absent) and `test_tokenizer_bpe_parity` (needs a real
+model). `test_lossless_quant_device` needs a GPU and was excluded.
+
+**THREE OF THOSE SKIPS WERE FAILURES FIRST, AND THE CAUSE WAS MINE.** They
+reported `ModuleNotFoundError: No module named 'numpy'`, which looked like a
+regression in the LLQ Python bindings. It was not: `find_package(Python3)` had
+selected `/tmp/bt/bin/python3.11` -- the venv created for CMake and TBB -- which
+had no numpy. Installing it there turned all three into proper 77 skips.
+Established by removing the cause and re-measuring, not by arguing from the
+error text. The decisive evidence beforehand was that
+`git diff 5a510a3..HEAD` over those three test files and `src/lossless_quant.cppm`
+was EMPTY -- this branch never touched them.
+
+### The pre-merge 24/24 was deliberately discarded
+
+A green run was recorded before merging `gh/master`. It was NOT carried forward:
+7,352 commits of upstream change is exactly the condition under which a prior
+green means nothing. The 24/24 above is measured on the merge commit itself.
