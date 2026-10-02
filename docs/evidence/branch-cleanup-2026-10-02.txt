@@ -1,0 +1,23 @@
+# Branch cleanup 2026-10-02 -- recoverable tips recorded BEFORE deletion
+# A branch that is an ancestor of master is recoverable from master by definition.
+# A SUPERSEDED branch is recorded here by SHA so it can be resurrected if ever needed.
+
+## sensen (master = ac17e7320407d1b6a56476a407e09780750c0fe4)
+local  lane/restricted-projection-row-gemv = 998a907be80163ac93df8cda1869a94d78c02a48  ancestor-of-master=no
+local  lane/llq-levels-real-checkpoint = aee1d573501d25d2b638bdcc7836d0b8b6f284e1  ancestor-of-master=no
+local  llq-on-85f02fdc = bc7112f7becee06143d6594311f04f505a0abd92  ancestor-of-master=no
+remote origin/claude/encoder-infra-cpu-ce = 399af7df138a58c1b27bbcbeb4b975b41926ee40  ancestor-of-master=yes
+remote origin/feat/lossless-quant-compression = 3a6b4293c5b5954e8044313ffb4ce355eebbf924  ancestor-of-master=yes
+remote origin/feat/text-encoder-infrastructure = 3b4812d60afd8b8f8b89197bec8c1f0177804383  ancestor-of-master=yes
+remote origin/lane/llq-on-85f02fdc = bc7112f7becee06143d6594311f04f505a0abd92  ancestor-of-master=no
+remote origin/lane/restricted-projection-row-gemv = 998a907be80163ac93df8cda1869a94d78c02a48  ancestor-of-master=no
+remote gitea/feat/lossless-quant-compression = 3a6b4293c5b5954e8044313ffb4ce355eebbf924  ancestor-of-master=yes
+remote gitea/lane/llq-on-85f02fdc = bc7112f7becee06143d6594311f04f505a0abd92  ancestor-of-master=no
+remote gitea/lane/restricted-projection-row-gemv = 998a907be80163ac93df8cda1869a94d78c02a48  ancestor-of-master=no
+
+## OptionsAndFuturesCalculator (master = 239dfb0346bf34efe15de94a13738a55adb2839e)
+local  claude/finetune-bert-models-quantization-ngwmnd = 659b2728019314cbfd2559dd9ae1a54092f7665c  all 4 commits patch-equivalent in master (git cherry: 0 '+')
+remote origin/claude/finetune-bert-models-quantization-ngwmnd = 787c51a2ae96e99e7f2c77f5f1c93531b146c23b  ancestor-of-master=yes
+remote origin/feat/small-encoder-assistants = 8f4d4ffd0d670bb5af5613a23ab88db187e605cd  ancestor-of-master=yes
+remote gitea/HEAD -> gitea/master = gitea/HEAD -> gitea/master
+remote gitea/master = 806a4f7569d6adb3daa29fc8b124fb3ec1e99d08

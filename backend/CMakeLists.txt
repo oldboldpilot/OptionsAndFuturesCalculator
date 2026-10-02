@@ -876,6 +876,25 @@ target_sources(sensen_slim
             "${SENSEN_SRC}/qwen38_gdn_state.cppm"
             "${SENSEN_SRC}/qwen38_kv_attn.cppm"
             "${SENSEN_SRC}/qwen38_mtp.cppm"
+            # qwen38_prefix_cache.cppm is needed ONLY ON A CUDA BUILD, and that is
+            # exactly why it was missing. qwen38_serving_model.cppm imports it from
+            # INSIDE `#ifdef SENSEN_HAS_CUDA`, so a CPU build never reaches the
+            # import and stays green with the module absent -- while a build on the
+            # GPU server would die with "module 'sensen.qwen38_prefix_cache' not
+            # found". `scripts/sensen_module_closure.py --check` flagged it because
+            # it does not model the preprocessor, so on this host it looks like a
+            # false positive and is not one.
+            #
+            # Added rather than documented as benign, for the reason the
+            # ALLOWED_OPERATIONS sweep records: a dead entry sitting beside a real
+            # one reads exactly like coverage, and the next genuine omission would
+            # have been dismissed as "the known third false positive". The module
+            # imports only `std` (218 lines, no CUDA), so listing it costs a CPU
+            # build nothing. The two REMAINING closure complaints are the
+            # documented ones -- `logger.cppm` MISSING (matched on basename;
+            # src/utils/logger.cppm is listed) and `numa_bind.cpp` EXTRA -- and
+            # must not be "fixed".
+            "${SENSEN_SRC}/qwen38_prefix_cache.cppm"
             "${SENSEN_SRC}/qwen38_serving_model.cppm"
             "${SENSEN_SRC}/speculative_decode.cppm"
             "${SENSEN_SRC}/utils/logger.cppm"

@@ -686,7 +686,8 @@ the other way has already produced a wrong conclusion.** The box this repository
 is developed and deployed from — `oluwasanmi-fedora-server` — has an AMD
 integrated GPU, no `/dev/nvidia*`, no `nvidia-smi` and no CUDA toolkit, so the
 engine correctly builds `ENABLE_CUDA=OFF` and `sensen_slim` correctly excludes
-every `qwen38` module. The MULTI-GPU SERVER is a different machine, and it is
+every `qwen38` module (**no longer true — see the slim-list section below**). The
+MULTI-GPU SERVER is a different machine, and it is
 where the CUDA builds, the QLoRA training runs and the Qwen3.8 work happen. A
 CUDA-only change is therefore **not ungateable — it is gateable somewhere else**,
 and the honest note on one is "needs the GPU server", never "compiled by nobody".
@@ -5493,8 +5494,14 @@ absent.
 
 **This project never saw any of it, and that is the trap.** `backend/` builds
 `sensen_slim`, whose module list is written out by hand in
-`backend/CMakeLists.txt` and excludes every qwen38 module — which is where most
-of the CUDA leakage lives. A defect can therefore make sensen unbuildable
+`backend/CMakeLists.txt`. **IT NO LONGER EXCLUDES EVERY qwen38 MODULE, and this
+sentence said it did until 2026-10-02** — a 90-commit upstream merge pulled the
+qwen38 serving modules into the closure transitively, so `qwen38.cppm`,
+`qwen38_gdn_state.cppm`, `qwen38_kv_attn.cppm`, `qwen38_mtp.cppm`,
+`qwen38_serving_model.cppm` and `qwen38_prefix_cache.cppm` are all listed and
+compiled. `backend/CMakeLists.txt` recorded the correction beside the entries while
+this file kept the old claim, which is the same two-copies-disagreeing defect this
+document records against the four label-space tables. A defect can therefore make sensen unbuildable
 standalone while this repository stays green for weeks.
 
 **The hand-maintained list cuts the other way too.** `kv_cache.cppm` began
@@ -5529,8 +5536,14 @@ is +8,049 lines — and the intersection of the 57 changed `src/` files with the
 `sensen_slim` module list is EMPTY. `financial.cppm`, `bigdecimal.cppm`,
 `options.cppm` and `portfolio.cppm` are byte-identical across the range, so the
 finance surface both websites call could not have moved. The closure check
-reported only its two documented false positives, which is the signal the list
-did not go stale.
+reported only its documented false positives, which is the signal the list
+did not go stale. **THERE ARE THREE OF THEM, NOT TWO, as of 2026-10-02** --
+`logger.cppm` MISSING (matched on basename; `src/utils/logger.cppm` is listed),
+`numa_bind.cpp` EXTRA, and `gguf_exporter.cppm` EXTRA, whose reason is written
+beside it in `backend/CMakeLists.txt` (it is imported by `model_converter.cppm` and
+`encoder_dispatch.cppm`, and the entry is load-bearing before its importer lands).
+Counting them matters: the fourth complaint was a REAL omission, and a reader who
+knew the count as "two" would have had one unexplained entry to dismiss it as.
 
 **Both repositories vendor sensen and only ONE of them deploys it.**
 `mortgage-nest-egg` pins `backend/sensen` as a SOURCE REFERENCE — its own
@@ -5554,7 +5567,7 @@ the same measurement is what made it cheap.** Only **6 files under `src/`** chan
 are byte-identical across the range**, so the finance surface both websites call
 could not have moved -- assert that rather than re-deriving it from the diff size.
 
-Gated: closure check clean of NEW entries (its two documented false positives,
+Gated: closure check clean of NEW entries (its THREE documented false positives,
 `logger.cppm` MISSING by basename and `numa_bind.cpp` EXTRA, are unchanged -- do
 not "fix" them), `ninja` rc=0 with `calculator_engine` relinked, `ninja build_tests`
 rc=0, **ctest 117/117**, `smoke_client ... finance` rc=0 and the full options suite
