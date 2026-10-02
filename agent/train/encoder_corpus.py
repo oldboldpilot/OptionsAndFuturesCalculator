@@ -820,19 +820,27 @@ def build_schema(all_facts: Sequence[Facts], op_key: str, question_mode: str,
     # are the same number on a percent literal, and counting both made every
     # percent field look ambiguous and therefore learned nothing.
     compat_cnt: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
+
+    def _count(name: str, pool: list[Cand], lits: Sequence[Lit]) -> None:
+        best: dict[int, Cand] = {}
+        for c in pool:
+            if c.lits[0] not in best or c.prio < best[c.lits[0]].prio:
+                best[c.lits[0]] = c
+        mechs = {(lits[i].tag, c.roles[0]) for i, c in best.items()}
+        if len(mechs) == 1:
+            compat_cnt[name][next(iter(mechs))] += 1
+
     for f in all_facts:
         lits = f.rendered.lits
         for fd in f.fields:
-            if fd.kind != "num" or canon_num(fd.value) in conv_vals.get(fd.name, ()):
-                continue
-            pool = fd.exact or fd.approx
-            best: dict[int, Cand] = {}
-            for c in pool:
-                if c.lits[0] not in best or c.prio < best[c.lits[0]].prio:
-                    best[c.lits[0]] = c
-            mechs = {(lits[i].tag, c.roles[0]) for i, c in best.items()}
-            if len(mechs) == 1:
-                compat_cnt[fd.name][next(iter(mechs))] += 1
+            if fd.kind == "arr":
+                # An array element is held to the same standard: "$300" x1000 is
+                # not an explanation of a 300,000 loan when "$300,000" is stated.
+                for e in fd.value:
+                    if e != 0:
+                        _count(fd.name, unary_cands(e, lits)[0], lits)
+            elif fd.kind == "num" and canon_num(fd.value) not in conv_vals.get(fd.name, ()):
+                _count(fd.name, fd.exact or fd.approx, lits)
     compat: dict[str, dict[str, float]] = {}
     for name, cnt in compat_cnt.items():
         total = sum(cnt.values())
@@ -1013,63 +1021,66 @@ def label_facts(f: Facts, sch: Schema) -> RawLabels:
     return RawLabels(pair_names, conv_text, route, tied)
 
 
+def _find(e: Decimal, lits: Sequence[Lit], lo: int, hi: int, slot: str, sch: Schema
+          ) -> tuple[int, str] | None:
+    """Earliest literal in [lo, hi) that explains `e` through a mechanism this
+    array slot is known to use; failing that, the earliest through any map.
+
+    TRAP, caught by the self-test: "earliest literal, any map" read
+    "$500,000 ...; $300,000" as `[500000, 300 x1000]` because "$300" (a monthly
+    extra payment, three literals earlier) times 1000 is 300,000. The numbers
+    came out right and the labels were wrong, which is the worse way to be wrong."""
+    fallback = None
+    for j in range(lo, hi):
+        ex, _ = unary_cands(e, [lits[j]])
+        if not ex:
+            continue
+        known = [c for c in ex if _share(sch, slot, lits[j], c.roles[0]) >= COMPAT_MIN_SHARE]
+        if known:
+            return j, min(known, key=lambda c: c.prio).roles[0]
+        if fallback is None:
+            fallback = (j, min(ex, key=lambda c: c.prio).roles[0])
+    return fallback
+
+
 def _label_arrays(f: Facts, arr_facts: list[FieldFact], sch: Schema,
                   pair_names: list[set], route: dict[str, str]) -> None:
     lits = f.rendered.lits
     anchor, rest = arr_facts[0], arr_facts[1:]
     ptr, runs = 0, []                       # runs: [lit index, role, repeat]
-    ok = True
     for i, e in enumerate(anchor.value):
-        found = None
-        if e != 0:
-            for j in range(ptr, len(lits)):
-                ex, _ = unary_cands(e, [lits[j]])
-                if ex:
-                    best = min(ex, key=lambda c: c.prio)
-                    found = (j, best.roles[0])
-                    break
-        if found:
-            runs.append([found[0], found[1], 1])
-            ptr = found[0] + 1
+        hit = _find(e, lits, ptr, len(lits), anchor.name, sch) if e != 0 else None
+        if hit:
+            runs.append([hit[0], hit[1], 1])
+            ptr = hit[0] + 1
         elif i > 0 and runs and e == anchor.value[i - 1]:
             runs[-1][2] += 1
         else:
-            ok = False
-            break
-    if ok:
-        for j, role, rep in runs:
-            pair_names[j].add((anchor.name, role if rep == 1 else f"{role}#rep{rep}"))
-        route[anchor.name] = "array:anchor"
-    else:
-        route[anchor.name] = "UNEXPLAINED"
-        return
-    starts = [r[0] for r in runs]
-    bounds = starts + [len(lits)]
+            route[anchor.name] = "UNEXPLAINED"
+            return
+    for j, role, rep in runs:
+        pair_names[j].add((anchor.name, role if rep == 1 else f"{role}#rep{rep}"))
+    route[anchor.name] = "array:anchor"
+    bounds = [r[0] for r in runs] + [len(lits)]
     for fd in rest:
-        if len(fd.value) != len(starts):
+        if len(fd.value) != len(runs):
             route[fd.name] = "UNEXPLAINED"
             continue
-        good = True
-        found_lits = []
+        found = []
         for k, e in enumerate(fd.value):
             if e == 0:
-                continue
-            hit = None
-            for j in range(bounds[k], bounds[k + 1]):
-                ex, _ = unary_cands(e, [lits[j]])
-                if ex:
-                    hit = (j, min(ex, key=lambda c: c.prio).roles[0])
-                    break
+                continue                    # the fill: no literal states it
+            hit = _find(e, lits, bounds[k], bounds[k + 1], fd.name, sch)
             if hit is None:
-                good = False
+                found = None
                 break
-            found_lits.append(hit)
-        if good:
-            for j, role in found_lits:
-                pair_names[j].add((fd.name, role))
-            route[fd.name] = "array:group"
-        else:
+            found.append(hit)
+        if found is None:
             route[fd.name] = "UNEXPLAINED"
+            continue
+        for j, role in found:
+            pair_names[j].add((fd.name, role))
+        route[fd.name] = "array:group"
 
 
 def finish(f: Facts, lab: RawLabels, sch: Schema) -> Example:
@@ -1514,10 +1525,174 @@ def report(sch: Schema, xtr, xva, st: BuildStats, vst: BuildStats, dtr, dva, op_
     return ctr, cva
 
 
+# ===========================================================================
+# SELF-TEST -- each check is a trap this file records, kept executable
+# ===========================================================================
+def selftest() -> int:
+    """`python encoder_corpus.py --selftest`. No corpus needed; runs in well under a
+    second. A check that cannot fail is not a check, so every block asserts the
+    BAD behaviour too (the legacy lexer, the unguarded rounding) to prove the
+    guard it is testing is the thing that changed the outcome."""
+    import random
+    import tempfile
+
+    state = {"n": 0, "bad": 0}
+
+    def check(cond: bool, what: str) -> None:
+        state["n"] += 1
+        if not cond:
+            state["bad"] += 1
+        print(f"  {'PASS' if cond else 'FAIL'}: {what}")
+
+    # ---- lexer: the suffix bug
+    text = "I owe $304,500 mortgage balance, 327 months left, $750 more a month, $250k or 1.2M"
+    got = [(l.value, l.tag) for l in lex(text)]
+    check(got == [(Decimal(304500), "money"), (Decimal(327), "months"), (Decimal(750), "money"),
+                  (Decimal(250000), "money"), (Decimal(1200000), "bare")], f"lexer reads {got}")
+    legacy = lex(text, legacy=True)
+    check(legacy[0].value == Decimal(304500000000) and legacy[1].tag == "bare",
+          "the LEGACY lexer reads '$304,500 mortgage' as 3.045e11 and loses '327 months' unit "
+          "(the defect this file fixed)")
+    lit = lex("at 6.5% for a while")[0]
+    check("at 6.5% for a while"[lit.start:lit.end] == "6.5%", "a literal's span excludes trailing whitespace")
+
+    # ---- zero is the absence of a statement (Rule Z')
+    ex, ap = unary_cands(Decimal("0.00"), lex("a 100% financed purchase, rate 7.2%"))
+    check(not ex and not ap, "gold 0.00 is not explained by '100%' (1 - 1) nor by 7.2%/365 rounding to 0.00")
+    ex, _ = unary_cands(Decimal("0"), lex("salvage value $0 over 5 years"))
+    check(len(ex) > 0 and all(c.lits == (0,) for c in ex), "gold 0 IS explained by a literal that says $0")
+    check(at_label_precision(Decimal("0.00197"), Decimal("0.00")),
+          "at_label_precision alone accepts 7.2%/365 as '0.00' (why the rule is needed)")
+
+    # ---- rounding may only be assumed where a longer exact value existed
+    check(at_label_precision(Decimal("0.9394"), Decimal(1)),
+          "at_label_precision accepts 1 - 6.06/100 as the integer 1")
+    ex, ap = unary_cands(Decimal(1), lex("compounded annually at 6.06%"))
+    check(not ex and not ap, "...but an integer gold takes no approximate explanation")
+    ex, ap = unary_cands(Decimal("0.006008"), lex("a 7.21% mortgage"))
+    check(not ex and [c.roles[0] for c in ap] == ["M3 annual%->monthly"] or
+          "M3 annual%->monthly" in [c.roles[0] for c in ap], "0.006008 is 7.21%/12 at label precision")
+
+    # ---- two-literal maps keep their operand roles
+    bc = binary_cands(Decimal(400000), lex("a $500,000 home with $100,000 down"))
+    check(any(c.roles == ("M9 a-b#A", "M9 a-b#B") and c.lits == (0, 1) for c in bc),
+          "price minus down payment is a binary candidate with A = price, B = down")
+    check(parse_role("M9 a-b#B") == ("M9 a-b", "B", 1) and parse_role("M1 identity#rep20") == (
+        "M1 identity", "rep", 20) and parse_role("x100") == ("x100", "unary", 1), "role strings round-trip")
+
+    # ---- a synthetic corpus exercising every mechanism
+    rng = random.Random(0)
+
+    def row(users: list[str], golds: list) -> dict:
+        turns = [{"role": "system", "content": "s"}]
+        for u, g in zip(users, golds):
+            turns.append({"role": "user", "content": u})
+            turns.append({"role": "assistant", "content":
+                          g if isinstance(g, str) else "<params>" + json.dumps(g) + "</params>"})
+        return {"conversations": turns}
+
+    rows = []
+    for i in range(60):
+        amt, yrs, r100 = rng.randrange(100, 900) * 1000, rng.choice([10, 15, 20, 30]), rng.choice(
+            [3.5, 4.25, 5.0, 6.0, 7.5])
+        rows.append(row([f"Payment on ${amt:,} at {r100}% over {yrs}-year?"], [dict(
+            operation="Pay", rate=str((Decimal(str(r100)) / 1200).quantize(Decimal("0.000001"))),
+            periods=yrs * 12, present_value=f"{amt}.00", future_value="0.00", timing="END_OF_PERIOD")]))
+        rows.append(row([f"Amortize ${amt:,} at {r100}% over {yrs}-year."], [dict(
+            operation="Amort", loan_amount=f"{amt}.00", annual_rate=str(Decimal(str(r100)) / 100),
+            original_home_value=f"{amt}.00", term_months=yrs * 12)]))
+        a, b = rng.randrange(1, 9) * 1000, rng.randrange(1, 9) * 100
+        rows.append(row([f"I put ${a:,} in and it returns ${b:,} a year. When does it pay back?"], [dict(
+            operation="Payback", values=[-a] + [b] * 20, discounted=False)]))
+        n = rng.choice([2, 3])
+        offers = [(rng.randrange(1, 9) * 100000, rng.choice([3.0, 4.5, 6.0]), rng.choice([15, 30]),
+                   rng.choice([0, 200, 300])) for _ in range(n)]
+        txt = "; ".join(f"${x:,} at {y}% over {z}-year" + (f" with ${e}/month extra" if e else "")
+                        for x, y, z, e in offers)
+        rows.append(row([f"Compare: {txt}."], [dict(
+            operation="Batch", loan_amounts=[o[0] for o in offers],
+            annual_rates=[o[1] / 100 for o in offers], term_months=[o[2] * 12 for o in offers],
+            extra_payments=[o[3] for o in offers])]))
+        rows.append(row([f"Payment on ${amt:,} at {r100}% over {yrs}-year?", "what if 8% instead?"], [dict(
+            operation="Pay", rate="0.006667", periods=yrs * 12, present_value=f"{amt}.00",
+            future_value="0.00", timing="END_OF_PERIOD"), dict(
+            operation="Pay", rate="0.006667", periods=yrs * 12, present_value=f"{amt}.00",
+            future_value="0.00", timing="END_OF_PERIOD")]))
+    rows.append(row(["How much is the meaning of life?"], ["I can only help with loans."]))
+    facts = [make_facts(to_dialogue(r), "operation", "real") for r in rows]
+    sch = build_schema(facts, "operation", "real", min_class_count=3, min_pair_count=2)
+    exs = build_examples(facts, sch)
+    cov = oracle_coverage(exs, sch)
+    check(cov.rows_ok == cov.n_params and cov.n_params == len(rows) - 1,
+          f"oracle reconstructs every synthetic row ({cov.rows_ok}/{cov.n_params})")
+    if cov.rows_ok != cov.n_params:
+        for e in exs:
+            if e.gold is not None:
+                pr = reconstruct(sch, e.op, e.lits, e.pairs, e.conv)
+                ok, bad = params_match(pr, e.gold)
+                if not ok:
+                    print(f"    uncovered: {e.text!r}\n    gold {e.gold}\n    pred {pr}\n    bad {bad}")
+                    print("    pairs", [[sch.pairs[p] for p in ps] for ps in e.pairs])
+                    break
+    check(sch.const_default.get("future_value") == "0" and "future_value" not in sch.conv_fields,
+          "future_value is a constant of the schema, not a head")
+    check(all(sch.pairs[p][0] != "future_value" for e in exs for ps in e.pairs for p in ps),
+          "...and no literal is ever pointed at for it (Rule Z')")
+    amort = [e for e in exs if e.gold and e.gold.get("operation") == "Amort"][0]
+    check(any(len(ps) == 2 for ps in amort.pairs) and
+          {sch.pairs[p][0] for ps in amort.pairs for p in ps} >= {"loan_amount", "original_home_value"},
+          "one stated price fills BOTH loan_amount and original_home_value")
+    pb = [e for e in exs if e.gold and e.gold.get("operation") == "Payback"][0]
+    check([sch.pairs[p][1] for ps in pb.pairs for p in ps] == ["M8 negate", "M1 identity#rep20"],
+          "payback's trailing run of 20 equal flows is a #rep20 role on the one stated figure")
+    bt = [e for e in exs if e.gold and e.gold.get("operation") == "Batch"
+          and 0 in e.gold["extra_payments"]][0]
+    rec = reconstruct(sch, bt.op, bt.lits, bt.pairs, bt.conv)
+    check([str(x) for x in rec["extra_payments"]] == [str(Decimal(x)) for x in bt.gold["extra_payments"]]
+          and 0 in bt.gold["extra_payments"], "an offer with no extra payment gets the fill (0) by text group")
+    rv = [e for e in exs if e.kind == "revise"][0]
+    sup = [i for i, ps in enumerate(rv.pairs) if not ps and rv.lits[i]["seg"] == 0]
+    check(len(sup) >= 1, "a superseded literal from the first turn is labelled NONE on a revision row")
+    check(exs[-1].gold is None and exs[-1].op == 0, "a row with no params is class <NONE>")
+
+    # ---- the schema travels as JSON
+    sch2 = Schema.from_json(json.loads(json.dumps(sch.to_json())))
+    same = all(C_eq(reconstruct(sch, e.op, e.lits, e.pairs, e.conv),
+                    reconstruct(sch2, e.op, e.lits, e.pairs, e.conv)) for e in exs[:50])
+    check(same, "schema -> JSON -> schema reconstructs identically")
+
+    # ---- comparison is at the GOLD's precision, and wrong values are caught
+    g = {"operation": "Pay", "rate": "0.006008"}
+    check(params_match({"operation": "Pay", "rate": Decimal("0.0060083333333")}, g)[0],
+          "0.00600833.. matches the label 0.006008")
+    check(not params_match({"operation": "Pay", "rate": Decimal("0.006009")}, g)[0], "0.006009 does not")
+    check(not params_match({"operation": "Pay"}, g)[0], "a missing field is a mismatch")
+
+    # ---- the coverage gate refuses
+    with tempfile.TemporaryDirectory() as d:
+        f = Path(d) / "c.jsonl"
+        f.write_text("\n".join(json.dumps(r) for r in rows))
+        import contextlib
+        import io as _io
+        with contextlib.redirect_stdout(_io.StringIO()), contextlib.redirect_stderr(_io.StringIO()):
+            hi = main(["--train", str(f), "--val", str(f), "--min-class-count", "3",
+                       "--min-pair-count", "2", "--min-coverage", "1.01"])
+            lo = main(["--train", str(f), "--val", str(f), "--min-class-count", "3",
+                       "--min-pair-count", "2", "--min-coverage", "0.5"])
+    check(hi == 1 and lo == 0, "--min-coverage above the achievable coverage exits 1, below exits 0")
+    print(f"\n{state['n'] - state['bad']}/{state['n']} checks passed")
+    return 1 if state["bad"] else 0
+
+
+def C_eq(a, b) -> bool:
+    return json.dumps(a, default=str, sort_keys=True) == json.dumps(b, default=str, sort_keys=True)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--train", type=Path, required=True)
-    ap.add_argument("--val", type=Path, required=True)
+    ap.add_argument("--train", type=Path)
+    ap.add_argument("--val", type=Path)
+    ap.add_argument("--selftest", action="store_true", help="run the built-in checks and exit")
     ap.add_argument("--op-key", default="operation",
                     help="the params field naming the class of record: 'operation' "
                          "(mortgage) or 'strategy' (options)")
@@ -1532,6 +1707,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--compare-reference", action="store_true")
     ap.add_argument("--out", type=Path, default=None, help="write schema.json here")
     a = ap.parse_args(argv)
+    if a.selftest:
+        return selftest()
+    if not (a.train and a.val):
+        ap.error("--train and --val are required unless --selftest")
 
     dtr, dva, sch, xtr, xva, st, vst = prepare(
         a.train, a.val, a.op_key, a.question_mode, a.min_class_count, a.min_pair_count, a.limit)
