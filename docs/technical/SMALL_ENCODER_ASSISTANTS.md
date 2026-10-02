@@ -131,20 +131,22 @@ is also a transpose statement.
 | `Block.out` | `blk.<i>.ffn_down.weight` | `{ffn, d}` | FFN down projection |
 | `TinyEncoder.norm` | `output_norm.weight` | `{d}` | final norm before the heads |
 | `TinyEncoder.op_head` | `encoder.operation.weight` / `.bias` | `{d, n_ops}` / `{n_ops}` | operation classifier |
-| `TinyEncoder.pair_head` | **`encoder.slot` + `encoder.map`** | `{d, n_slots}`, `{d, n_maps}` | **MISMATCH -- see 2d** |
+| `TinyEncoder.pair_head` | **`encoder.pair.weight` / `.bias`** | `{d, n_pairs}` / `{n_pairs}` | MULTI-LABEL sigmoid; the match is now exact -- see 2d |
+| *(the lossy alternative)* | `encoder.slot` + `encoder.map` | `{d, n_slots}`, `{d, n_maps}` | `--heads slot_map`, single-label, caps mortgage at 76.83% |
 | `TinyEncoder.conv_heads` | *(no tensor)* | — | carried as `operation_count`/`slot_count`/`map_count` metadata and the convention vocab |
 
-Metadata, all under the `sensen-encoder.` prefix and **all fourteen required** --
+Metadata, all under the `sensen-encoder.` prefix and **all fifteen required** --
 the parser's own `getConfig()` silently defaults `context_length` to 4096, eps to
 1e-6 and `rope.freq_base` to 10000, which for a model trained at other values is
 silent corruption, so the encoder loader refuses a missing key instead:
 `context_length`, `embedding_length`, `block_count`, `attention.head_count`,
 `feed_forward_length`, `attention.layer_norm_rms_epsilon` (the ONLY eps key the
 parser reads), `rope.freq_base`, `attention.causal` (**must be false**),
-`operation_count`, `slot_count`, `map_count`, `pooling` (`cls|mean|none`),
+`operation_count`, `slot_count`, `map_count`, `pair_count`, `pooling` (`cls|mean|none`),
 `literal_reduction` (`mean_logits|first_token`), `ffn_activation` (**must be
-`swiglu`**). Optional: `cls_token_id`, and `attention.head_count_kv` only when it
-equals `head_count` -- grouped-query attention is not served.
+`swiglu`**). Required IFF `pair_count > 0` and **refused when it is 0**:
+`pair_threshold`. Optional: `cls_token_id`, and `attention.head_count_kv` only when
+it equals `head_count` -- grouped-query attention is not served.
 
 `general.architecture` is **`sensen-encoder`**, and the name is constrained rather
 than chosen: `GGUFParser` detects architectures by SUBSTRING, so a name containing
@@ -152,70 +154,96 @@ than chosen: `GGUFParser` detects architectures by SUBSTRING, so a name containi
 would be silently classified as that family -- "graphic" contains "phi". A
 `static_assert` in the module pins the chosen name against that list.
 
-### 2d. THE HEAD STRUCTURES DO NOT MATCH, and for mortgage the difference is lossy
+### 2d. THE HEAD STRUCTURES DID NOT MATCH. SENSEN WAS FIXED, and how it hid is the lesson
 
-PyTorch learns ONE multi-label `pair_head` over `n_pairs` (slot, map) pairs.
-sensen's loader expects TWO independent heads, `encoder.slot` and `encoder.map`.
-Those are only interchangeable if the map is a function of the slot. Measured on
-the training corpora:
+PyTorch learns ONE **multi-label** `pair_head` over `n_pairs` (slot, map) pairs --
+a sigmoid per pair, so a literal may select none, one, or several. sensen's loader
+offered only TWO **single-label** softmax heads, `encoder.slot` and `encoder.map`,
+each argmaxed once. A literal that legitimately fills several parameters -- a stated
+price that is both `loan_amount` AND `original_home_value` -- therefore had no
+representation at all.
 
-| corpus | pairs | slots | maps | slots taking MORE THAN ONE map | factorisation |
-| --- | --- | --- | --- | --- | --- |
-| strategy | 2 | 2 | 1 | 0 | **lossless** |
-| mortgage | 109 | 97 | 11 | **5** | **LOSSY** |
+**FIXED on 2026-10-02.** `HeadKind::LiteralPair` in `sensen.encoder_dispatch` and
+`encoder.pair.weight {d, n_pairs}` + `.bias` in `text_encoder.cppm`, decoded as an
+independent sigmoid per pair against a `pair_threshold` carried in the file.
+`export_encoder_gguf.py --heads pair` is the default and **mortgage exports with no
+loss**. The old rewrite survives as `--heads slot_map` for a loader predating the
+tensor, with its bijectivity proof and refusals intact.
 
-The five, and why the first one settles it:
+#### Why it stood so long: strategy's 100% was not evidence
 
-| slot | maps it takes |
-| --- | --- |
-| `rate` | `M2 percent/100` **vs** `M3 annual%->monthly` |
-| `loan_amount` | `M1 identity`, `M9 a-b#A`, `M9 a-b#B`, `M9 a*(1-p)#A`, `M9 a*(1-p)#B` |
-| `present_value` | the same five |
-| `occupancy_rate` | `M10 complement%` vs `M2 percent/100` |
-| `values[]` | `M1 identity`, `M1 identity#rep20`, `M8 negate` |
-
-`rate` is the one that looks worst: percent/100 against annual->monthly is exactly
-the distinction behind the "20% down priced as a 20% interest rate" defect this
-project already caught in production. The loader refuses an unexpected tensor set
-deliberately, "because a tensor the trainer applied and this loader ignores is a
-silent train/serve mismatch".
-
-**BUT THE SCHEMA VIEW OVERSTATES THE COST, AND THE DATA VIEW IS THE ONE TO QUOTE.**
-"5 of 97 slots take several maps" counts the VOCABULARY. What decides the accuracy
-is how often a real literal's pair set fails to be reconstructed from its slot and
-map marginals -- i.e. how often `slots x maps` is bigger than the true set:
-
-| corpus | labelled literals | carry 1 pair | carry 2 pairs | `slots x maps` != the true set |
+| corpus | pairs | slots × maps | literals filling >1 pair | **single-label ceiling** |
 | --- | --- | --- | --- | --- |
-| mortgage | 3,216 | 3,058 (95.1%) | 158 (4.9%) | **13 (0.40%)** |
-| strategy | 972 | 972 (100%) | 0 | **0 (0.00%)** |
+| strategy | 2 | 2 × 1 = 2 ✓ | 0 of 1,060 | **1500/1500 = 100.00%** |
+| mortgage | 109 | 97 × 11 = 1067 ✗ | **158 of 3,381, on 139 rows** | **461/600 = 76.83%** |
 
-So factorising costs **0.40% of mortgage literals**, not 5% of slots. Because a row
-fails if ANY of its literals does, those 13 bound the row-level cost at about
-**2.2% of rows** -- factorised heads would cap mortgage near **97.8%** against the
-pair head's measured **99.83%**. Strategy pays nothing.
+Measured by `agent/train/measure_single_label_ceiling.py` against the corpora the
+trainer builds, train split included (mortgage train: 2,834 of 69,566 literals, 2,335
+of 11,400 rows, ceiling 79.52%).
 
-So **strategy exports today and mortgage does not.** Two ways to close it, and the
-choice is an owner call rather than a detail:
+**Strategy's label space is ACCIDENTALLY single-label** -- one map, and no literal
+that fills two slots -- so the defect was unreachable from it *in principle*, not
+merely unobserved. The two corpora share this trainer, this exporter and this loader;
+the only thing that differed was which could exhibit the hole. **A corpus that cannot
+exhibit a failure is not a control for it**, and reading strategy's 100% as a pass is
+what let the mortgage ceiling be written down as a property of mortgage.
 
-1. **Export strategy NOW with slot and map heads.** Zero measured loss, no decision
-   needed, and it exercises the whole export path end to end against a loader that
-   has never seen a PyTorch-produced GGUF.
-2. **For mortgage, add an `encoder.pair.weight` `{d, n_pairs}` tensor to sensen's
-   loader.** This is the recommendation: it preserves exactly what the trainer
-   learned and what the oracle proves is 100% representable, where factorised heads
-   forfeit a bounded ~2.2% of rows for nothing in return. The cost is a sensen
-   change with its own gate, against a measured 2-point accuracy loss -- and the
-   loader already refuses unknown tensors, so the new one has to be declared
-   rather than tolerated.
-3. The factorised retrain stays available as the cheap fallback if the sensen
-   change is unwelcome: 1.2 min on the GPU, and the 0.40%/2.2% figures above say
-   what it would cost before it is run.
+#### The earlier figures in this document were wrong, in both directions
 
-Recorded also because the loader's own header says what nobody had checked:
-"**NOT checked: a GGUF produced by `src/gguf_exporter.cppm` or by a PyTorch
-trainer**". The exporter is the missing piece, and this mismatch is what it ran
-into first.
+This section previously quoted **0.40% of literals** and a **~2.2% row** cost, and
+separately **75.18%**. All three are superseded:
+
+| figure | what it actually measured | status |
+| --- | --- | --- |
+| 5 of 97 slots take several maps | the VOCABULARY, not the data | an overstatement, correctly flagged as one at the time |
+| 13 literals = 0.40%, ~2.2% of rows | a slot head × map head reconstructing the SET from marginals | **the wrong model of the loader** -- sensen argmaxes each head ONCE, so it is single-label, not multi-label marginals |
+| 75.18% ceiling, 139 of 560 rows | the right model, the wrong denominator (560 params-gold rows, not 600) | **76.83%, 139 of 600** |
+
+The 0.40% error is the instructive one: it was a careful correction of an
+overstatement that replaced it with a *different* wrong number, because it modelled
+a loader that factorises the set rather than one that argmaxes twice. **Re-read the
+consumer before quoting a cost derived from it.**
+
+#### What the fix is gated by
+
+- `tests/test_text_encoder.cpp` **section 15**, 288 passed / 0 failed overall:
+  the pair logits against the double-precision oracle, the selected set and its
+  ascending order, `pair_probabilities` parallel to `pairs`, **at least one literal
+  selecting two or more pairs**, the threshold read and monotone over five values, a
+  NaN logit refused rather than silently dropped, both-heads refused, `pair_threshold`
+  outside (0,1) refused, a GGUF round trip bitwise identical, a pair-head file with no
+  threshold refused by name, and a threshold on a `pair_count 0` file refused as inert.
+- `tests/test_encoder_dispatch.cpp` **107 / 0** over **7,056** cells (3 pooling × **4
+  head** × 14 precision × 3 store × 7 backend × 2 mode), 100 served, 6,956 gaps. The
+  head axis grew with **no rule edit** -- `lookup` tests `head == Classification`
+  rather than enumerating per-literal kinds, and `kHeadKinds` is `enumValues<HeadKind>()`.
+  The one hand-written count (`well_formed == 4`) is now the closed form
+  `(|pooling| − 1) + (|head| − 1)`.
+- **Mutation-checked**, `CCACHE_DISABLE=1` (a module interface changed):
+  replacing the sigmoid selection with an argmax -- i.e. restoring the single-label
+  behaviour -- fails **5** checks including "AT LEAST ONE literal selects TWO OR MORE
+  pairs"; dropping `pair_logits` from the finiteness check fails exactly the NaN check.
+- **PyTorch ↔ sensen, through the real GGUF**, `agent/train/compare_encoder_gguf.py`
+  over a 24-utterance sweep (varying ids, length and literal layout), 56 literals:
+
+  | corpus | operation logits | pair logits | **selected set** | multi-label |
+  | --- | --- | --- | --- | --- |
+  | mortgage | 8.5e-05 rel, argmax agrees | **3.8e-05 rel** | **56/56 identical** | 55 literals select >1 pair |
+  | strategy | 1.6e-04 rel, argmax agrees | **2.7e-05 rel** | **56/56 identical** | 0 (as the corpus predicts) |
+
+  The bound is **relative**, deliberately: sensen's own 1e-3 device-agreement bound is
+  stated on quantities of order 1, and an absolute 1e-3 on a logit of magnitude 32 is a
+  4e-5 bound in disguise -- a tolerance that *tightens* as the model grows confident,
+  which is the wrong direction. The absolute figures (1.2e-03 mortgage) are printed
+  beside the scale they sit on so neither can be quoted without the other.
+
+**NOT proven: a 600-row end-to-end sensen run.** That needs the C++ WordPiece
+tokenizer driven from the same corpus the trainer uses, which is not written. What is
+proven is narrower and sufficient for the design question: sensen's selected sets are
+*identical* to PyTorch's on every literal of the sweep, so the head is no longer the
+limiting factor. The row accuracy PyTorch measures (100.00% on both corpora, 586
+disjoint mortgage rows after contamination accounting) is what sensen will reproduce
+to the extent the tokenizers agree -- and that last clause is the untested step.
 
 ### 2a. Exact configuration (`--servable`)
 

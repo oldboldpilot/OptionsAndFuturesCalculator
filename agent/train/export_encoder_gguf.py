@@ -10,30 +10,38 @@ header says what nobody had produced: "NOT checked: a GGUF produced by
 src/gguf_exporter.cppm or by a PyTorch trainer". This is that producer, and it is
 the last link between a model the trainer measures and a model the engine serves.
 
-THE HEAD STRUCTURES DO NOT MATCH, AND THIS SCRIPT REFUSES RATHER THAN PAPER OVER IT.
-The trainer learns ONE multi-label head over (slot, map) PAIRS. sensen's loader wants
-two SINGLE-label heads it argmaxes independently -- `encode()` does
-`p.slot = argmaxIndex(slot_logits)` and `p.map = argmaxIndex(map_logits)` -- so a
-literal carrying two pairs is representable by the trainer and NOT by the loader.
-Measured on the real holdouts:
+THE HEAD MISMATCH THIS SCRIPT USED TO REFUSE IS FIXED IN THE LOADER, and how it was
+diagnosed is worth more than the fix. The trainer learns ONE MULTI-LABEL head over
+(slot, map) PAIRS. sensen's loader used to offer only two SINGLE-label softmax heads it
+argmaxed independently, so a literal filling several parameters -- a stated price that
+is both `loan_amount` AND `original_home_value` -- had no representation at all.
+Measured on the corpora (agent/dataset, 2026-10-02):
 
-    strategy   1496 gold rows,  0 rows with a multi-pair literal   ceiling 100.00%
-    mortgage    560 gold rows, 139 rows with a multi-pair literal   ceiling  75.18%
+    corpus     pairs  slots x maps     literals filling >1 pair     single-label ceiling
+    strategy       2   2 x  1 =    2   0                            1500/1500 = 100.00%
+    mortgage     109  97 x 11 = 1067   158 of 3,381, on 139 rows     461/600 =  76.83%
 
-75.18% is BELOW the deployed decoder's 77.0% served, so exporting mortgage through
-this contract would ship a regression, not a speedup. The refusal is the point.
+**STRATEGY SCORING 100% WAS NOT EVIDENCE THE DESIGN WORKED.** Its label space is
+ACCIDENTALLY single-label -- one map, and no literal that fills two slots -- so the
+defect was unreachable from it in principle. A corpus that cannot exhibit a failure is
+not a control for it, and reading 100% as a pass is what kept the hole open while the
+mortgage ceiling was written down as a property of mortgage.
 
-WHEN THE CONVERSION IS EXACT, AND HOW THAT IS CHECKED. The pair head can be rewritten
-as a slot head and a map head with no loss exactly when every (slot, map) combination
-is a real pair -- i.e. `n_pairs == n_slots * n_maps` -- because only then is the pair
-index a bijection onto the index grid and each pair's score the sum of its two
-marginals. strategy satisfies it (2 == 2 * 1); mortgage does not (109 != 97 * 11).
-The check is that arithmetic, not a judgement, and `--force` is deliberately NOT
-offered: a file that loads and serves 75% is worse than no file.
+So the fix is `HeadKind::LiteralPair` and `encoder.pair.weight {d, n_pairs}` in
+sensen -- an independent sigmoid per pair against a threshold carried in the file,
+multi-label, mutually exclusive with the slot and map heads. The servable pair head is
+a single `nn.Linear(d, n_pairs)`, the same shape as the slot and map heads, so this
+needed no new input and no MLP. **`--heads pair` is now the default and loses nothing.**
 
-With one map the map head is a single row. It is written as ZEROS plus a zero bias,
-which is the honest encoding: with `n_maps == 1` the argmax is index 0 whatever the
-weights are, so any other value would be noise dressed as information.
+`--heads slot_map` keeps the old lossy rewrite for a loader predating `encoder.pair`,
+with its bijectivity proof and its refusals intact: exact only when
+`n_pairs == n_slots * n_maps` AND `n_maps == 1`, which strategy satisfies (2 == 2 x 1)
+and mortgage does not (109 != 1067). It is never chosen for you.
+
+THE THRESHOLD IS READ FROM THE CHECKPOINT, NEVER GUESSED. `meta.args.threshold` is the
+value the trainer scored row accuracy at, and a serving threshold this script picked
+would be the `layer_norm_rms_epsilon` defect again: nothing fails, a different model
+serves. sensen refuses a pair-head file that carries no threshold.
 
 DIMENSION ORDER. GGUF records `{in, out}` while torch holds `[out, in]`; the gguf
 writer reverses on write, so a torch `weight` goes in verbatim. The fused projections
@@ -82,9 +90,9 @@ def factorisation_is_exact(schema: dict) -> tuple[bool, str]:
                        f"index is not a bijection onto the slot x map grid, so a slot head "
                        f"and a map head cannot reproduce the pair head's scores. sensen's "
                        f"loader also argmaxes each head ONCE, so a literal carrying two "
-                       f"pairs loses one -- 139 of 560 mortgage rows (ceiling 75.18%, BELOW "
-                       f"the deployed decoder's 77.0% served). Give sensen an "
-                       f"`encoder.pair.weight {{d, n_pairs}}` tensor instead.")
+                       f"pairs loses one -- 139 of 600 mortgage rows, a 76.83% ceiling. "
+                       f"sensen HAS an `encoder.pair.weight {{d, n_pairs}}` tensor now: "
+                       f"drop --heads slot_map and the whole rewrite goes away.")
     if len(set(pairs)) != n_p:
         return False, "the schema repeats a (slot, map) pair"
     return True, f"{n_p} pairs == {n_s} slots x {n_m} maps: exact"
@@ -98,6 +106,15 @@ def main() -> int:
     ap.add_argument("--pooling", default="cls", choices=["cls", "mean", "none"])
     ap.add_argument("--literal-reduction", default="mean_logits",
                     choices=["mean_logits", "first_token"])
+    ap.add_argument("--heads", default="pair", choices=["pair", "slot_map"],
+                    help="pair (default): write the MULTI-LABEL encoder.pair head the "
+                         "trainer actually learned -- no rewrite, no loss. slot_map: the "
+                         "lossy single-label rewrite, for a loader predating encoder.pair; "
+                         "exact only when n_pairs == n_slots x n_maps and n_maps == 1.")
+    ap.add_argument("--threshold", type=float, default=None,
+                    help="the pair-selection probability threshold. DEFAULT: the one the "
+                         "checkpoint was scored at (meta.args.threshold). Pass it only to "
+                         "override that deliberately.")
     ap.add_argument("--dtype", default="f32", choices=["f32", "f16"])
     ap.add_argument("--norm-eps", type=float, default=1e-6,
                     help="RMSNorm epsilon. 1e-6 is encoder_model.RMSNorm's constructor "
@@ -149,29 +166,16 @@ def main() -> int:
               "bias-free and the loader's tensor set names no attn/ffn bias. Retrain "
               "with --servable.", file=sys.stderr)
         return 2
-    ok, why = factorisation_is_exact(schema)
-    print(f"[factorisation] {why}")
-    if not ok:
-        print(f"REFUSED: {why}", file=sys.stderr)
-        return 3
-
     slots, maps = slot_map_vocab(schema)
     pairs = [tuple(p) for p in schema["pairs"]]
     s_ix = {s: i for i, s in enumerate(slots)}
-    m_ix = {m: i for i, m in enumerate(maps)}
 
-    # ---- the head rewrite ----------------------------------------------------------
-    # pair p scores w_pair[p] . h + b_pair[p]. Under the bijection each p is exactly one
-    # (slot, map) cell, so putting w_pair[p] on the SLOT row recovers every pair score
-    # when the map head is constant -- which it is whenever n_maps == 1. For n_maps > 1
-    # the sum of two marginals cannot in general reproduce n_s*n_m independent rows, and
-    # factorisation_is_exact has already refused that case.
-    if len(maps) != 1:
-        print(f"REFUSED: {len(maps)} maps. The bijection holds but a slot row plus a map "
-              f"row is a SUM of two marginals, which cannot reproduce "
-              f"{len(pairs)} independent pair scores unless one factor is constant. "
-              f"Only n_maps == 1 is exact here.", file=sys.stderr)
-        return 3
+    # ---- the pair head is read once, whichever path is taken -----------------------
+    if "pair_head.weight" not in sd:
+        print("REFUSED: the checkpoint has no pair_head.weight, so it was trained "
+              "--heads slot_map. Export it by writing its own slot and map heads, or "
+              "retrain with the default (pair) heads.", file=sys.stderr)
+        return 2
     w_pair = sd["pair_head.weight"].float()            # [n_pairs, lit_in]
     b_pair = sd["pair_head.bias"].float()              # [n_pairs]
     lit_in = w_pair.shape[1]
@@ -181,30 +185,83 @@ def main() -> int:
               f"--servable (no literal MLP, no tag/magnitude features) is required.",
               file=sys.stderr)
         return 2
-    w_slot = torch.zeros(len(slots), d)
-    b_slot = torch.zeros(len(slots))
-    for p, (s, m) in enumerate(pairs):
-        w_slot[s_ix[s]] = w_pair[p]
-        b_slot[s_ix[s]] = b_pair[p]
-    w_map = torch.zeros(len(maps), d)                  # one map: argmax is 0 regardless
-    b_map = torch.zeros(len(maps))
+    if w_pair.shape[0] != len(pairs):
+        print(f"REFUSED: the pair head has {w_pair.shape[0]} rows and the schema names "
+              f"{len(pairs)} pairs; the checkpoint and its schema disagree.", file=sys.stderr)
+        return 2
 
-    # ---- verify the rewrite reproduces the pair scores, on random inputs ------------
-    h = torch.randn(256, d)
-    pair_scores = h @ w_pair.T + b_pair                        # [256, n_pairs]
-    slot_scores = h @ w_slot.T + b_slot                        # [256, n_slots]
-    recon = torch.stack([slot_scores[:, s_ix[s]] for s, _ in pairs], dim=1)
-    worst = float((pair_scores - recon).abs().max())
-    print(f"[rewrite] worst |pair score - (slot row) score| over 256 random states: {worst:.3e}")
-    if worst > 1e-6:
-        print("REFUSED: the rewrite does not reproduce the pair head.", file=sys.stderr)
-        return 4
-    # and the ARGMAX agrees, which is what sensen actually uses
-    agree = int((pair_scores.argmax(1) == recon.argmax(1)).sum())
-    print(f"[rewrite] argmax agrees on {agree}/256 random states")
-    if agree != 256:
-        print("REFUSED: the rewrite changes the argmax.", file=sys.stderr)
-        return 4
+    # ---- the THRESHOLD, read from the checkpoint rather than chosen here ------------
+    trained_threshold = args.get("threshold") if isinstance(args, dict) else None
+    threshold = a.threshold if a.threshold is not None else trained_threshold
+    if a.heads == "pair":
+        if threshold is None:
+            print("REFUSED: no pair-selection threshold. The checkpoint records no "
+                  "meta.args.threshold and none was passed, and a threshold this script "
+                  "invented is the layer_norm_rms_epsilon defect -- nothing fails and a "
+                  "different model serves. Pass --threshold explicitly.", file=sys.stderr)
+            return 2
+        if not (0.0 < float(threshold) < 1.0):
+            print(f"REFUSED: threshold {threshold} is not strictly inside (0, 1); sensen "
+                  f"refuses it too (0 selects every pair, 1 selects none).", file=sys.stderr)
+            return 2
+        src = "--threshold" if a.threshold is not None else "the checkpoint's meta.args.threshold"
+        print(f"[threshold] pair_threshold = {float(threshold):g}, from {src}")
+
+    # ---- the LOSSY slot_map rewrite: opt-in only, with its proof intact -------------
+    # pair p scores w_pair[p] . h + b_pair[p]. Under the bijection each p is exactly one
+    # (slot, map) cell, so putting w_pair[p] on the SLOT row recovers every pair score
+    # when the map head is constant -- which it is whenever n_maps == 1. For n_maps > 1
+    # the sum of two marginals cannot in general reproduce n_s*n_m independent rows.
+    #
+    # ALL OF IT IS SKIPPED ON THE DEFAULT PATH. The pair head is written as itself, so
+    # there is no factorisation to be exact and nothing to prove.
+    w_slot = b_slot = w_map = b_map = None
+    if a.heads == "slot_map":
+        ok, why = factorisation_is_exact(schema)
+        print(f"[factorisation] {why}")
+        if not ok:
+            print(f"REFUSED: {why}", file=sys.stderr)
+            return 3
+        if len(maps) != 1:
+            print(f"REFUSED: {len(maps)} maps. The bijection holds but a slot row plus a map "
+                  f"row is a SUM of two marginals, which cannot reproduce "
+                  f"{len(pairs)} independent pair scores unless one factor is constant. "
+                  f"Only n_maps == 1 is exact here.", file=sys.stderr)
+            return 3
+        # A literal filling several pairs loses all but one under sensen's single argmax, and
+        # that loss is INVISIBLE in this script's own arithmetic -- the rewrite below is exact
+        # on the SCORES and the cap is in the DECODE. So it is counted here, from the schema,
+        # rather than left for a holdout run to discover.
+        multi = sum(1 for _, cnt in
+                    [(k, sum(1 for s2, _ in pairs if s2 == k)) for k in {s3 for s3, _ in pairs}]
+                    if cnt > 1)
+        if multi:
+            print(f"[warn] {multi} slot(s) appear in more than one pair; sensen argmaxes the "
+                  f"slot head ONCE, so a literal filling two of them loses one. This is the "
+                  f"76.83% mortgage ceiling, and --heads pair does not have it.")
+        w_slot = torch.zeros(len(slots), d)
+        b_slot = torch.zeros(len(slots))
+        for p, (s, m) in enumerate(pairs):
+            w_slot[s_ix[s]] = w_pair[p]
+            b_slot[s_ix[s]] = b_pair[p]
+        w_map = torch.zeros(len(maps), d)              # one map: argmax is 0 regardless
+        b_map = torch.zeros(len(maps))
+
+        # ---- verify the rewrite reproduces the pair scores, on random inputs ------------
+        h = torch.randn(256, d)
+        pair_scores = h @ w_pair.T + b_pair                    # [256, n_pairs]
+        slot_scores = h @ w_slot.T + b_slot                    # [256, n_slots]
+        recon = torch.stack([slot_scores[:, s_ix[s]] for s, _ in pairs], dim=1)
+        worst = float((pair_scores - recon).abs().max())
+        print(f"[rewrite] worst |pair score - (slot row) score| over 256 random states: {worst:.3e}")
+        if worst > 1e-6:
+            print("REFUSED: the rewrite does not reproduce the pair head.", file=sys.stderr)
+            return 4
+        agree = int((pair_scores.argmax(1) == recon.argmax(1)).sum())
+        print(f"[rewrite] argmax agrees on {agree}/256 random states")
+        if agree != 256:
+            print("REFUSED: the rewrite changes the argmax.", file=sys.stderr)
+            return 4
 
     # ---- write ---------------------------------------------------------------------
     ftype = gguf.GGMLQuantizationType.F32 if a.dtype == "f32" else gguf.GGMLQuantizationType.F16
@@ -219,8 +276,14 @@ def main() -> int:
     kv_u32("attention.head_count", n_heads)
     kv_u32("feed_forward_length", d_ffn)
     kv_u32("operation_count", n_ops)
-    kv_u32("slot_count", len(slots))
-    kv_u32("map_count", len(maps))
+    # EXACTLY ONE per-literal head: sensen refuses a file declaring both, because two
+    # incompatible descriptions of one label space leave which serves to read order.
+    kv_u32("slot_count", len(slots) if a.heads == "slot_map" else 0)
+    kv_u32("map_count", len(maps) if a.heads == "slot_map" else 0)
+    kv_u32("pair_count", len(pairs) if a.heads == "pair" else 0)
+    if a.heads == "pair":
+        # Required by the loader IFF pair_count > 0, and REFUSED when it is 0.
+        w.add_float32(f"{ARCH}.pair_threshold", float(threshold))
     # eps IS NOT A CONFIG FIELD, and asserting a value here is how this went wrong.
     # `RMSNorm.__init__` defaults to 1e-6 and EncoderConfig carries no epsilon, so the
     # trained model's norms ALWAYS use 1e-6; writing 1e-5 put the sensen trunk
@@ -258,10 +321,14 @@ def main() -> int:
     put("output_norm.weight", sd["ln_f.weight"])
     put("encoder.operation.weight", sd["op_head.weight"])
     put("encoder.operation.bias", sd["op_head.bias"])
-    put("encoder.slot.weight", w_slot)
-    put("encoder.slot.bias", b_slot)
-    put("encoder.map.weight", w_map)
-    put("encoder.map.bias", b_map)
+    if a.heads == "pair":
+        put("encoder.pair.weight", w_pair)
+        put("encoder.pair.bias", b_pair)
+    else:
+        put("encoder.slot.weight", w_slot)
+        put("encoder.slot.bias", b_slot)
+        put("encoder.map.weight", w_map)
+        put("encoder.map.bias", b_map)
 
     w.write_header_to_file()
     w.write_kv_data_to_file()
@@ -269,12 +336,17 @@ def main() -> int:
     w.close()
 
     size = a.out.stat().st_size
+    head_desc = (f"pairs={len(pairs)} (MULTI-LABEL, threshold {float(threshold):g})"
+                 if a.heads == "pair" else f"slots={len(slots)} maps={len(maps)} (single-label)")
     print(f"[written] {a.out}  {size:,} bytes  arch={ARCH}  d={d} layers={n_layers} "
-          f"heads={n_heads} ffn={d_ffn} ops={n_ops} slots={len(slots)} maps={len(maps)}")
+          f"heads={n_heads} ffn={d_ffn} ops={n_ops} {head_desc}")
     side = a.out.with_suffix(".slotmap.json")
-    side.write_text(json.dumps({"slots": slots, "maps": maps,
-                                "pairs": [list(p) for p in pairs]}, indent=1))
-    print(f"[written] {side}  the slot/map index order the engine must agree with")
+    side.write_text(json.dumps({"heads": a.heads, "slots": slots, "maps": maps,
+                                "pairs": [list(p) for p in pairs],
+                                "pair_threshold": (float(threshold) if a.heads == "pair" else None)},
+                               indent=1))
+    print(f"[written] {side}  the index order the engine must agree with "
+          f"({'pair' if a.heads == 'pair' else 'slot/map'})")
     return 0
 
 

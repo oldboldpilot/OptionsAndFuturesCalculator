@@ -6420,6 +6420,76 @@ extracted verbatim from the modules; the five fixture results were measured on
 scratch copies. Treat that as the standing gap until a real `ctest` run
 confirms it.
 
+### The MORTGAGE ceiling was sensen's HEAD DESIGN, and strategy's 100% was not a control
+
+Asked on 2026-10-02: *"what do you mean by 75.18 ceiling? I am confused. Fix the
+design issue with the mortgage -- if the strategy is at 100% this points to an
+error."* The inference is right, and the figure I had quoted was wrong twice.
+
+The trainer learns ONE **multi-label** head over (slot, map) PAIRS -- a sigmoid per
+pair, so a literal may select none, one or several. sensen's loader offered only TWO
+**single-label** softmax heads it argmaxed independently, so a literal filling several
+parameters -- a stated price that is both `loan_amount` AND `original_home_value` --
+had **no representation at all**. Measured by
+`agent/train/measure_single_label_ceiling.py` on the corpora the trainer builds:
+
+| corpus | pairs | slots x maps | literals filling >1 pair | single-label ceiling |
+| --- | --- | --- | --- | --- |
+| strategy | 2 | 2 x 1 = 2 | **0** of 1,060 | **1500/1500 = 100.00%** |
+| mortgage | 109 | 97 x 11 = 1067 | **158** of 3,381, on 139 rows | **461/600 = 76.83%** |
+
+**STRATEGY REACHING 100% THROUGH THOSE HEADS WAS NOT EVIDENCE THE DESIGN WORKED, and
+treating it as one is what kept the hole open.** Its label space is ACCIDENTALLY
+single-label -- one map, and no literal that fills two slots -- so the defect was
+unreachable from it *in principle*, not merely unobserved. Both corpora share the same
+trainer, exporter and loader; the only difference was which could exhibit the hole. **A
+corpus that cannot exhibit a failure is not a control for it** -- the same shape as the
+`DerivationCorpusSweepTest` limit and the AMX control that measured nothing.
+
+**Two of my own figures were wrong, and the second is the instructive one.**
+`docs/technical/SMALL_ENCODER_ASSISTANTS.md` first said "5 of 97 slots take several
+maps", correctly flagged that as counting the VOCABULARY, and replaced it with "13
+literals = 0.40%, bounding rows at ~2.2%". That correction modelled a slot head times a
+map head reconstructing the pair SET from marginals -- **which is not what the loader
+does**: it argmaxes each head ONCE. A careful correction of an overstatement can install
+a different wrong number; re-read the consumer before quoting a cost derived from it.
+The 75.18% I then quoted had the right model and the wrong denominator (560 params-gold
+rows instead of 600).
+
+**FIXED, not documented as a limit.** `HeadKind::LiteralPair` plus
+`encoder.pair.weight {d, n_pairs}` / `.bias`, metadata `pair_count` (required, like its
+two siblings) and `pair_threshold` (required IFF `pair_count > 0`, **refused when it is
+0** as a field nothing reads). Decode is an independent sigmoid per pair against that
+threshold, and **an empty selection is a prediction, not a failure** -- 165 of those
+3,381 mortgage literals are labelled with no pair. The two per-literal label spaces are
+**mutually exclusive**: a file declaring both is refused, because two incompatible
+descriptions of one space would leave which serves to read order.
+
+**The cost was small, and the note that said otherwise was describing the wrong
+configuration.** `text_encoder.cppm`'s header had called the pair head unservable,
+needing "a literal tag and magnitude on EncoderInput and a GGUF naming scheme for the
+MLP". That describes the trainer's RESEARCH default; under `--servable` the pair head is
+a single `nn.Linear(d, n_pairs)` over the mean literal state -- the same shape as the
+slot and map heads, differing only in width and in sigmoid-vs-softmax. One HeadKind, one
+tensor pair, two metadata keys and a sigmoid. **A stale note recording why something is
+impossible is worse than no note**, and this is the third time this file records that.
+
+Gated: `test_text_encoder` **288/0** (new section 15), `test_encoder_dispatch` **107/0**
+over 7,056 cells. Mutation-checked with `CCACHE_DISABLE=1` -- restoring the single-label
+argmax fails **5** checks including "AT LEAST ONE literal selects TWO OR MORE pairs",
+and dropping `pair_logits` from the finiteness check fails exactly the NaN check (a NaN
+never clears a threshold, so without it a pair goes quietly missing from a confident
+answer). PyTorch vs sensen through the real GGUF, 24-utterance sweep, 56 literals:
+**selected set identical 56/56 on both corpora**, pair logits 3.8e-05 (mortgage) and
+2.7e-05 (strategy) RELATIVE -- relative deliberately, because an absolute 1e-3 on a
+logit of magnitude 32 is a 4e-5 bound in disguise that tightens as the model grows
+confident. `--heads slot_map` keeps the old lossy rewrite for a loader predating the
+tensor, and still refuses mortgage by name.
+
+**NOT proven: a 600-row end-to-end sensen run** -- that needs the C++ WordPiece
+tokenizer driven from the trainer's corpus, which is not written. The design question is
+settled; the tokenizer-agreement step is not.
+
 ### CORRECTION 2026-10-02: BF16 `llq-fused` is NOT bit-identical to the DENSE kernel
 
 The LLQ section above says of the 16-bit tier that its "`llq-fused` arm is ALSO
@@ -6466,9 +6536,12 @@ absolute sum; a first version of that bound used block totals and was violated
 by 1.36x, so the bound is derived rather than fitted.
 
 Gated by `test_encoder_quant_matrix` (250 checks) and `test_encoder_dispatch`
-(107), both passing under a real `ctest`. The surface is 3 pooling x 3 head x
-**14** precision x 3 weight-store x **7** backend x 2 mode = **5,292 cells**, 80
-served and 5,212 gaps each carrying the fact that decides it. The precision and
+(107), both passing under a real `ctest`. The surface is 3 pooling x **4** head x
+**14** precision x 3 weight-store x **7** backend x 2 mode = **7,056 cells**, 100
+served and 6,956 gaps each carrying the fact that decides it. **It was 3 head /
+5,292 / 80 until 2026-10-02**, when `HeadKind::LiteralPair` landed (see the
+single-label section below); the axis grew with no rule edit, because `lookup`
+tests `head == Classification` rather than enumerating the per-literal kinds. The precision and
 backend axes are DERIVED from `QuantPrecision`, `NnBackend`, `QuantCalibBackend`
 and `GgufEncodeBackend` by enumerator probing -- clang 23.1.2 has no
 `std::meta`, so it reads `__PRETTY_FUNCTION__`. Proven by appending a real
