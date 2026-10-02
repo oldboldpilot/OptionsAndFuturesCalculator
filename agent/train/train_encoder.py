@@ -825,6 +825,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--no-bf16", action="store_true",
                     help="plain fp32, autocast off. Measured FASTER than autocast bf16 on this "
                          "host for this model (see SPEED in the module docstring)")
+    ap.add_argument("--pure-bf16", action="store_true",
+                    help="THE FULL bf16 PATH, not autocast: the model's own weights are bf16 and "
+                         "every GEMM runs in bf16 with no per-op casting. An fp32 MASTER copy is "
+                         "kept for the AdamW update only -- bf16 has 8 mantissa bits, so a "
+                         "weight whose update is smaller than one ulp would be discarded and "
+                         "training silently stops moving. Losses and softmax already reduce in "
+                         "fp32 (compute_loss casts every head), which is the other half of why "
+                         "this converges where a naive all-bf16 run does not. Implies --no-bf16: "
+                         "autocast must be OFF or it would cast bf16 weights per op for nothing.")
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--threshold", type=float, default=0.5)
@@ -871,7 +880,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     np.random.seed(a.seed)
     torch.manual_seed(a.seed)
     a.out_dir.mkdir(parents=True, exist_ok=True)
-    bf16 = not a.no_bf16
+    # --pure-bf16 turns autocast OFF: the weights ARE bf16, so there is nothing for
+    # autocast to cast and wrapping it would only add per-op overhead.
+    bf16 = (not a.no_bf16) and (not a.pure_bf16)
     t_start = time.time()
 
     # ---- labels
@@ -937,6 +948,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     for k, v in model.breakdown().items():
         print(f"           {k:36s} {v:>10,}")
     departures = ["--servable"] if a.servable else []
+    departures += ["--pure-bf16"] if a.pure_bf16 else []
     departures += [f"--pos {a.pos}"] if (a.pos != "learned" and not a.servable) else []
     departures += [f"--{n.replace('_', '-')} {getattr(a, n)}" for n in
                    ("augment_digits", "augment_format", "first_turn_examples") if getattr(a, n) > 0]
@@ -945,7 +957,31 @@ def main(argv: Sequence[str] | None = None) -> int:
     print("[recipe] " + (", ".join(departures) if departures else
                          "as specified: learned positions, no augmentation, real question text"))
     masks = make_masks(sch)
-    opt = torch.optim.AdamW(param_groups(model, a.weight_decay), lr=a.lr, betas=(0.9, 0.98))
+    masters: list[torch.Tensor] | None = None
+    master_pairs: list[tuple[torch.Tensor, torch.Tensor]] = []
+    if a.pure_bf16:
+        model = model.to(torch.bfloat16)
+        # One fp32 master per parameter, in parameter order. AdamW steps the
+        # MASTERS and the bf16 weights are refreshed from them, so the forward is
+        # entirely bf16 while the update keeps the precision bf16 cannot hold.
+        # PAIR THEM AT CONSTRUCTION. param_groups() splits the parameters into
+        # decay / no-decay groups, so its order is NOT model.parameters() order --
+        # zipping the two independently later mismatched a [2412,128] embedding
+        # gradient onto a [384,128] tensor.
+        groups = param_groups(model, a.weight_decay)
+        masters = []
+        master_groups = []
+        for g in groups:
+            ms = [q.detach().clone().float().requires_grad_(True) for q in g["params"]]
+            master_pairs += list(zip(ms, g["params"]))
+            masters += ms
+            master_groups.append({**g, "params": ms})
+        opt = torch.optim.AdamW(master_groups, lr=a.lr, betas=(0.9, 0.98))
+        print("[precision] FULL bf16: weights bf16, every GEMM bf16, no autocast; "
+              f"fp32 master copy for the AdamW update ({len(masters)} tensors); "
+              "losses and softmax reduce in fp32", flush=True)
+    else:
+        opt = torch.optim.AdamW(param_groups(model, a.weight_decay), lr=a.lr, betas=(0.9, 0.98))
     clarify_rows = [e for e in xtr if e.kind == "clarify" and e.gold is not None]
     n_ft = int(a.first_turn_examples * len(clarify_rows))
     steps_per_epoch = math.ceil((len(dtrain) + n_ft) / a.batch_size)
@@ -988,9 +1024,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                 out = model(**model_inputs(b))
             loss, parts = compute_loss(out, b, sch, masks, tuple(a.loss_weights))
             opt.zero_grad(set_to_none=True)
+            if masters is not None:
+                model.zero_grad(set_to_none=True)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            opt.step()
+            if masters is not None:
+                # bf16 grads -> fp32 masters, clip and step in fp32, then refresh the
+                # bf16 weights. Clipping on the MASTERS so the norm is computed at
+                # fp32 precision; a bf16 global norm over ~1 M values loses the small
+                # contributions that decide whether the clip fires at all.
+                for m, q in master_pairs:
+                    m.grad = None if q.grad is None else q.grad.detach().float()
+                torch.nn.utils.clip_grad_norm_([m for m, _ in master_pairs], 1.0)
+                opt.step()
+                with torch.no_grad():
+                    for m, q in master_pairs:
+                        q.copy_(m.to(q.dtype))
+            else:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                opt.step()
             step += 1
             n_tok += int(b["ids"].numel())
             for k, v in parts.items():
@@ -1017,7 +1068,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     # ---- final, once, on val (final-epoch weights; no selection)
     res = evaluate(model, dval, sch, masks, a.threshold, bf16, collect_failures=200)
-    print_eval(res, f"FINAL VALIDATION ({'bf16 autocast' if bf16 else 'fp32'}, final-epoch weights)",
+    _prec = "FULL bf16 (weights bf16, fp32 master update)" if a.pure_bf16 else (
+        "bf16 autocast" if bf16 else "fp32")
+    print_eval(res, f"FINAL VALIDATION ({_prec}, final-epoch weights)",
                cva.row_cov)
     print_by_op(res)
     if ddev is not None:
