@@ -497,8 +497,23 @@ class SensenBackend final : public QueuedBackend {
         // measured optimisation. The switch exists so the A/B is one variable on
         // one binary, and so an operator can fall back without a redeploy.
         if (const char* raw = std::getenv("MORTGAGE_RESTRICTED_PROJECTION")) {
-            const std::string_view v{raw};
+            // CASE-INSENSITIVE, because the off switch is the only way an operator
+            // can retreat from a measured optimisation without a redeploy, and a
+            // switch that silently ignores `False` or `OFF` is not a switch. A
+            // case-sensitive compare read both of those as ON -- the same shape as
+            // FINANCE_REQUIRE_KEY=1 meaning Warn while the security document
+            // called it Enforce. Unrecognised values stay ON deliberately: the
+            // fast path is the measured one, so a typo must not quietly give up
+            // 1.58x. That is only safe because the next line SAYS so.
+            std::string v{raw};
+            std::ranges::transform(v, v.begin(), [](const unsigned char c) {
+                return static_cast<char>(std::tolower(c));
+            });
             restricted_projection_ = !(v == "0" || v == "false" || v == "off" || v == "no");
+            logger::Logger::getInstance().info(
+                "mortgage assistant: MORTGAGE_RESTRICTED_PROJECTION={} -- restricted lm_head "
+                "projection {}",
+                raw, restricted_projection_ ? "ON" : "OFF");
         }
         max_queue_depth_ = queue_depth;
     }
@@ -922,12 +937,46 @@ class SensenBackend final : public QueuedBackend {
                     std::span<const std::uint32_t>(tokens),
                     std::span<sensen::AgentSession* const>(agents),
                     std::span<const std::span<const std::uint32_t>>(candidates));
-                if (logits.size() == active.size()) {
+                // The COUNT matching is not enough, and assuming it was is a
+                // latent out-of-bounds read rather than a wrong answer. A backend
+                // that cannot restrict rows -- sensen's CUDA decode paths are the
+                // live case -- returns one FULL-WIDTH vector per sequence, which
+                // satisfies `logits.size() == active.size()` perfectly. The gather
+                // below then subscripts a ~10-element candidate list with a
+                // vocabulary index. So check the WIDTH of each restricted row
+                // against the candidate list it is supposed to be indexed by:
+                // that closes the class without enumerating the backends, which
+                // is the half a backend check could not cover.
+                //
+                // UNREACHABLE ON THIS BUILD, and marked so rather than left to
+                // read as live coverage: sensen's CPU path returns candidate-width
+                // rows, and 7810f4ec makes its CUDA paths refuse the restricted
+                // call outright, so nothing here can currently return a full-width
+                // vector against a non-empty candidate list. It is kept for the
+                // reason the `guess` grounding exemption is kept -- it states a
+                // property that outlives today's backends, and the next fast path
+                // to grow a full-width return will land exactly here.
+                bool widths_agree = (logits.size() == active.size());
+                if (widths_agree) {
+                    for (std::size_t i = 0; i < active.size(); ++i) {
+                        if (candidates[i].empty()) continue;
+                        if (logits[i].size() != candidates[i].size()) {
+                            logger::Logger::getInstance().warn(
+                                "mortgage assistant: restricted projection returned {} logits for "
+                                "{} candidates on sequence {} -- falling back to the full "
+                                "projection for this step",
+                                logits[i].size(), candidates[i].size(), i);
+                            widths_agree = false;
+                            break;
+                        }
+                    }
+                }
+                if (widths_agree) {
                     for (std::size_t i = 0; i < active.size(); ++i) {
                         restricted[i] = !candidates[i].empty();
                     }
                 } else {
-                    logits.clear();  // declined, or malformed: fall back
+                    logits.clear();  // declined, malformed, or wrong width: fall back
                 }
             }
             if (logits.empty()) {

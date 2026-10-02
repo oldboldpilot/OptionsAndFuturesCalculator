@@ -632,6 +632,101 @@ auto main() -> int {
         ::unsetenv("MORTGAGE_WEIGHT_STORE");
     }
 
+    // ── the row-restricted projection: identity, and BOTH of its branches ──
+    //
+    // matvecQuantizedRows is what makes a grammar-constrained lm_head cheap: it
+    // computes only the admitted rows. Two things have to hold, and only one of
+    // them is about arithmetic.
+    //
+    // IDENTITY: a row it writes must equal the row the FULL projection would have
+    // written, bit for bit. The reference is the same kernel on the same weights
+    // in this same process -- never a figure recorded earlier.
+    //
+    // BOTH BRANCHES: it runs serially below 32 rows and across the thread pool
+    // above, mirroring matvecQuantized's own floor. The constrained case it exists
+    // for admits ~10 rows, so the PARALLEL branch is never reached by any
+    // workload this engine actually serves -- which would leave it shipped and
+    // unexercised. threadCount() returns a reference, so the discriminator is set
+    // HERE rather than inferred from the machine: that is what makes "the parallel
+    // branch ran" a fact instead of a hope.
+    section("row-restricted projection: identical rows, on both branches");
+    {
+        const std::size_t rows = 1024;
+        const std::size_t k = 256;
+        const auto w = make_weight(rows, k, 127, 31);
+        const auto dense = transposed(w);
+        const auto a = make_activation(1, k, 7);
+        GEMM::clearQ8WeightSources();
+
+        std::vector<float> full(rows, 0.0F);
+        GEMM::matvecQuantized(a.data(), dense.data(), full.data(), k, rows, GEMM::QType::Q8_0);
+
+        // 10 rows is the measured median admitted set; 300 is a wide grammar state.
+        const std::vector<std::uint32_t> narrow{0U, 3U, 17U, 64U, 65U, 200U, 511U, 512U, 900U,
+                                                1023U};
+        std::vector<std::uint32_t> wide;
+        for (std::uint32_t r = 0; r < 300U; ++r) {
+            wide.push_back(r * 3U);  // strided, so it is not one contiguous slice
+        }
+        check(narrow.size() < 32 && wide.size() >= 32,
+              std::format("the two row sets straddle the 32-row floor ({} and {})", narrow.size(),
+                          wide.size()));
+
+        // setThreadCount, not the private counter: it also resizes the shared
+        // parallel_for arena, so "8 threads" means eight real workers rather than
+        // a GEMM that merely believes it has them.
+        const std::size_t saved_threads = GEMM::getThreadCount();
+        for (const auto& [label, forced] :
+             std::vector<std::pair<std::string, std::size_t>>{{"serial (1 thread)", 1},
+                                                              {"parallel (8 threads)", 8}}) {
+            GEMM::setThreadCount(forced);
+            for (const auto& [set_name, set] :
+                 std::vector<std::pair<std::string, std::vector<std::uint32_t>>>{
+                     {"narrow", narrow}, {"wide", wide}}) {
+                std::vector<float> got(rows, -7.0F);
+                GEMM::matvecQuantizedRows(a.data(), dense.data(), got.data(), k, rows, set,
+                                          GEMM::QType::Q8_0);
+                bool rows_match = true;
+                for (const std::uint32_t r : set) {
+                    if (std::memcmp(&got[r], &full[r], sizeof(float)) != 0) {
+                        rows_match = false;
+                        break;
+                    }
+                }
+                check(rows_match, std::format("{}, {} set: every requested row is bit-identical "
+                                              "to the full projection",
+                                              label, set_name));
+                // Rows NOT asked for must be left exactly as they were. The caller
+                // gathers by row index out of a shared flat buffer, so a stray
+                // write here would corrupt another sequence's logits rather than
+                // this one's -- a defect that would not show on this sequence.
+                std::vector<bool> asked(rows, false);
+                for (const std::uint32_t r : set) {
+                    asked[r] = true;
+                }
+                bool untouched = true;
+                for (std::size_t r = 0; untouched && r < rows; ++r) {
+                    untouched = asked[r] || got[r] == -7.0F;
+                }
+                check(untouched,
+                      std::format("{}, {} set: unrequested rows are untouched", label, set_name));
+            }
+        }
+        GEMM::setThreadCount(saved_threads);
+
+        // An out-of-range row must be SKIPPED, not read past the matrix. The
+        // caller's own gather already assigns -inf for such a row, so skipping is
+        // the correct division of labour -- but reading row 5000 of a 1024-row
+        // matrix would be an out-of-bounds read rather than a wrong number.
+        const std::vector<std::uint32_t> ranged{5U, 5000U, 9U};
+        std::vector<float> mixed(rows, -7.0F);
+        GEMM::matvecQuantizedRows(a.data(), dense.data(), mixed.data(), k, rows, ranged,
+                                  GEMM::QType::Q8_0);
+        check(std::memcmp(&mixed[5], &full[5], sizeof(float)) == 0 &&
+                  std::memcmp(&mixed[9], &full[9], sizeof(float)) == 0,
+              "an out-of-range row is skipped and its in-range neighbours still compute");
+    }
+
     std::println("\n{} checks, {} failures", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }
