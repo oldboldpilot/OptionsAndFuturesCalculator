@@ -119,6 +119,10 @@ class Rope(nn.Module):
 class Block(nn.Module):
     """Pre-norm, BIDIRECTIONAL. No causal mask anywhere -- that is the point."""
 
+    # Set once from the CLI rather than per instance: every block makes the same
+    # choice, and threading it through each constructor buys nothing.
+    use_sdpa = True
+
     def __init__(self, d: int, h: int, ffn: int, rope: Rope, drop: float):
         super().__init__()
         self.h, self.dh = h, d // h
@@ -128,6 +132,10 @@ class Block(nn.Module):
         self.fc1, self.fc2 = nn.Linear(d, ffn), nn.Linear(ffn, d)
         self.rope = rope
         self.drop = nn.Dropout(drop)
+        # Softmax is reduced in fp32 and cast back: the probabilities are a
+        # normalisation, so carrying them at bf16's 8 mantissa bits buys no
+        # speed (the matmuls dominate) and costs resolution between close keys.
+        self.drop_att = nn.Dropout(drop)
 
     def forward(self, x, pad_mask):
         B, T, D = x.shape
@@ -137,8 +145,28 @@ class Block(nn.Module):
         q, k, v = self.rope(shp(q)), self.rope(shp(k)), shp(v)
         # pad_mask: True where PAD. Only padding is masked; all real tokens see
         # each other in both directions.
-        am = pad_mask[:, None, None, :]
-        y = F.scaled_dot_product_attention(q, k, v, attn_mask=~am)
+        #
+        # ATTENTION IS EXPLICIT MATMULS, NOT `scaled_dot_product_attention`, AND
+        # THAT IS A MEASUREMENT RATHER THAN A PREFERENCE. Measured on this
+        # 4-core Xeon (which does carry avx512_bf16): SDPA under bf16 autocast
+        # ran the identical workload in 202s against fp32's 19s -- 10.6x SLOWER,
+        # because PyTorch's CPU SDPA has no bf16 kernel at these shapes and
+        # autocast wraps an fp32 kernel in casts. A plain `q @ k^T` DOES reach
+        # oneDNN's bf16 GEMM, so writing the four lines out by hand is what
+        # makes bf16 actually bf16 here. Keep them explicit.
+        if Block.use_sdpa:
+            # Fed bf16 tensors DIRECTLY (not via autocast), SDPA can pick its own
+            # kernel and never materialises the T x T matrix. That is why it beats
+            # the hand-written path even though the hand-written one is what makes
+            # autocast-free bf16 possible at all.
+            y = F.scaled_dot_product_attention(
+                q, k, v, attn_mask=~pad_mask[:, None, None, :])
+        else:
+            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(self.dh))
+            att = att.masked_fill(pad_mask[:, None, None, :],
+                                  torch.finfo(att.dtype).min)
+            y = self.drop_att(
+                att.softmax(dim=-1, dtype=torch.float32).to(v.dtype)) @ v
         y = self.proj(y.transpose(1, 2).reshape(B, T, D))
         x = x + self.drop(y)
         return x + self.drop(self.fc2(F.gelu(self.fc1(self.n2(x)))))
@@ -172,7 +200,7 @@ class TinyEncoder(nn.Module):
 # =========================================================================
 # BATCHING
 # =========================================================================
-def make_batch(exs, tok, sch, max_len, max_lits, device):
+def make_batch(exs, tok, sch, max_len, max_lits, device, dtype=torch.float32):
     B = len(exs)
     ids = torch.zeros(B, max_len, dtype=torch.long)
     pad = torch.ones(B, max_len, dtype=torch.bool)
@@ -206,12 +234,21 @@ def make_batch(exs, tok, sch, max_len, max_lits, device):
                 conv_y[i, ci] = ex.conv[f]
 
     to = lambda t: t.to(device)
-    return (to(ids), to(pad), to(pool), to(pair_y), to(lit_ok), to(op_y),
-            to(conv_y), orphan)
+    # `pool` multiplies the hidden states, so it must share their dtype or bmm
+    # refuses; the label tensors stay fp32 because the losses reduce in fp32.
+    return (to(ids), to(pad), to(pool).to(dtype), to(pair_y), to(lit_ok),
+            to(op_y), to(conv_y), orphan)
 
 
 def loss_of(out, pair_y, lit_ok, op_y, conv_y, pair_pos_weight):
     op_logits, pair_logits, conv_logits = out
+    # Losses are always reduced in fp32. Under bf16 weights the logits arrive as
+    # bf16, and a log-sum-exp accumulated at 8 mantissa bits is where a bf16
+    # training run quietly stops converging -- the GEMMs are what bf16 is for,
+    # not the reductions.
+    op_logits = op_logits.float()
+    pair_logits = pair_logits.float()
+    conv_logits = [c.float() for c in conv_logits]
     l_op = F.cross_entropy(op_logits, op_y)
     # Masking by boolean INDEXING would flatten to [n_selected] and `pos_weight`
     # (shape [n_pairs]) could not broadcast against it. Reduce manually instead,
@@ -237,7 +274,8 @@ def loss_of(out, pair_y, lit_ok, op_y, conv_y, pair_pos_weight):
 
 
 @torch.no_grad()
-def evaluate(model, exs, tok, sch, max_len, max_lits, device, bs, thresh=0.5):
+def evaluate(model, exs, tok, sch, max_len, max_lits, device, bs, thresh=0.5,
+             dtype=torch.float32):
     """Reports the number that matters: ROW accuracy, where every head must be
     right at once. Per-head accuracy flatters a multi-head model."""
     model.eval()
@@ -247,8 +285,10 @@ def evaluate(model, exs, tok, sch, max_len, max_lits, device, bs, thresh=0.5):
     for s in range(0, len(exs), bs):
         chunk = exs[s:s + bs]
         ids, pad, pool, pair_y, lit_ok, op_y, conv_y, _ = make_batch(
-            chunk, tok, sch, max_len, max_lits, device)
+            chunk, tok, sch, max_len, max_lits, device, dtype)
         op_l, pair_l, conv_l = model(ids, pad, pool)
+        op_l, pair_l = op_l.float(), pair_l.float()
+        conv_l = [c.float() for c in conv_l]
         op_hat = op_l.argmax(-1)
         op_ok += (op_hat == op_y).sum().item()
         pred = (pair_l.sigmoid() > thresh)
@@ -302,11 +342,21 @@ def main() -> int:
     ap.add_argument("--min-class-count", type=int, default=20)
     ap.add_argument("--min-pair-count", type=int, default=8)
     ap.add_argument("--threads", type=int, default=4)
-    ap.add_argument("--bf16", action="store_true")
+    ap.add_argument("--bf16", action="store_true",
+                    help="torch.autocast bf16. MEASURED 10.6x SLOWER on this "
+                         "CPU than fp32 -- kept only so that stays reproducible.")
+    ap.add_argument("--attn", choices=["sdpa", "explicit"], default="sdpa",
+                    help="sdpa avoids materialising the TxT matrix and is "
+                         "fastest; explicit is the hand-written fallback.")
+    ap.add_argument("--pure-bf16", action="store_true",
+                    help="cast the WEIGHTS to bf16 and run without autocast, so "
+                         "the GEMMs are genuinely bf16 x bf16 and can reach "
+                         "avx512_bf16. Losses still reduce in fp32.")
     ap.add_argument("--seed", type=int, default=20261002)
     ap.add_argument("--out", default="encoder_min.pt")
     args = ap.parse_args()
 
+    Block.use_sdpa = (args.attn == "sdpa")
     torch.set_num_threads(args.threads)
     torch.manual_seed(args.seed)
     random.seed(args.seed)
@@ -336,6 +386,12 @@ def main() -> int:
     n_par = sum(p.numel() for p in model.parameters())
     print(f"  vocab {vocab}  PARAMETERS {n_par:,} ({n_par/1e6:.2f}M)", flush=True)
 
+    dtype = torch.float32
+    if args.pure_bf16:
+        model = model.to(torch.bfloat16)
+        dtype = torch.bfloat16
+        print("  weights cast to bfloat16 (no autocast)", flush=True)
+
     # A pair is positive on roughly one literal in len(pairs), so unweighted BCE
     # would be minimised by predicting all-zero. Weight the positive class.
     pos = torch.full((len(sch.pairs),), 8.0)
@@ -355,7 +411,7 @@ def main() -> int:
         for s in range(0, len(tr) - args.bs + 1, args.bs):
             batch = tr[s:s + args.bs]
             ids, pad, pool, pair_y, lit_ok, op_y, conv_y, orph = make_batch(
-                batch, tok, sch, args.max_len, args.max_lits, device)
+                batch, tok, sch, args.max_len, args.max_lits, device, dtype)
             orphans += orph
             ctx = (torch.autocast("cpu", dtype=torch.bfloat16)
                    if args.bf16 else torch.enable_grad())
@@ -374,7 +430,8 @@ def main() -> int:
                 print(f"  ep{ep} step {step}/{steps} loss {statistics.mean(run[-100:]):.4f} "
                       f"(op {l_op.item():.3f} pair {l_pair.item():.3f} conv {l_conv.item():.3f}) "
                       f"{time.time()-t0:.0f}s", flush=True)
-        m = evaluate(model, va, tok, sch, args.max_len, args.max_lits, device, args.bs)
+        m = evaluate(model, va, tok, sch, args.max_len, args.max_lits, device,
+                     args.bs, dtype=dtype)
         print(f"EPOCH {ep}: train_loss {statistics.mean(run):.4f}  "
               f"op {m['op_acc']:.4f}  literal {m['literal_exact']:.4f}  "
               f"conv {m['conv_acc']:.4f}  ROW {m['ROW_acc']:.4f}  "
