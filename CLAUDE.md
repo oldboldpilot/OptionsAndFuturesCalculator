@@ -6050,7 +6050,8 @@ answers by being read, not by being argued.
   vitest 4 pulls in. The build itself does not require it; the test suite does.
 - **Backend Docker Build:** `docker build -t options-backend backend/`
 - **Backend Tests:** `ninja -C backend/build build_tests && ctest --test-dir backend/build`
-  (ctest is **149/149 with 2 skipped**, re-verified 2026-10-01 against sensen
+  (ctest is **150/150 with 2 skipped** as of 2026-10-03, when
+  `EncoderOperationDecodeTest` landed; it was **149/149 with 2 skipped** against sensen
   master `6aca1b9265e5` with a 149/2 BASELINE taken on the previous pin first, so
   the bump is attributable rather than merely green -- `LlqWeightStoreTest`
   is the one new test; before it the suite was **148/148 with 2 skipped** as of
@@ -6899,6 +6900,180 @@ every turn, so there is nothing left to ask about. Testing ask -> answer -> pars
 harness's two-call protocol with `prior_question` echoed back. The encoder cannot ask a question
 itself -- `refine_unstated` in the serving layer is what asks, and whether it still does on this
 path is UNTESTED.
+
+### BOTH ENCODERS ARE DEPLOYED AND THE DECODERS ARE GONE, and the strategy one was refusing 1 row in 3
+
+Deployed 2026-10-03, deployment `f41229ab`. `/app/model/` now holds EXACTLY the two
+encoders and neither 639 MB decoder:
+
+```
+railway ssh -- sh -c 'for f in /app/model/*.gguf; do sha256sum $f; done'
+40b4e4202761b10628f8bf92ebeed30551d433390a80471eab2a1268dc21f8ae  mortgage-encoder.gguf
+abd40b21e4971c2d27700cf1fd468c4c4934c2b2fdc32edf7b8b5685f74c2f84  strategy-encoder.gguf
+```
+
+Both shas are the files measured at 560/560 and 1427/1427. `MORTGAGE_ASSISTANT_BACKEND`
+and `ASSISTANT_MODEL` are both `encoder`; `MODEL_URL`, `MODEL_SHA256`,
+`MORTGAGE_MODEL_URL` and `MORTGAGE_MODEL_SHA256` are DELETED. Cutover: 4
+`ENCODER assistant ready` (2 replicas x 2 assistants), 4 `model is LOADED`, 2
+`SIMD: runtime tier`, 0 `[ERROR`, 0 `[WARN ]` against a 36-line positive control on
+that pattern family.
+
+**THE RAM SAVING COMES FROM THE BACKEND FLAGS, NOT FROM DELETING THE FILES, and
+that distinction is the whole cost story.** 94% of the Railway bill is RAM. Each
+worker constructor RETURNS before touching the decoder when its backend is
+`encoder` (`mortgage_assistant_service.cpp:1419-1442`, `assistant_service.cpp:1546-1569`),
+so the 2 x 639 MB were never resident once the flags were set -- clearing the URLs
+removes them from the IMAGE and from disk, not from memory. An engine serving both
+encoders measures **60.4 MB RSS** against ~2,942 MB with the two decoders loaded.
+State which one a change buys; they are billed differently.
+
+**`model is LOADED` STILL COUNTS CORRECTLY FOR AN ENCODER, and a first reading of
+this said otherwise.** That banner is keyed on `local_model_loaded()` -- "are the
+weights in THIS process" -- which was deliberately taught about the encoder, so it
+fires 4 times here and the documented cutover check never broke. What it cannot do
+is say WHICH model answered, so `scripts/railway_deploy.sh` now prints a second
+check (`grep 'assistant ready'`) beside it. Do not "fix" the count check.
+
+**`.dockerignore`'s `!backend/models/*.gguf` IS NARROWED TO `*-encoder*.gguf`, and
+its scope is a LOCAL `docker build` only.** Four 639 MB mortgage decoders had
+accumulated in `backend/models/` (v2, v18, v19, v20) = 2.4 GB. A first reading of
+this said every deploy shipped them; it did not. `.railwayignore` carries its own
+`**/*.gguf` at line 115, so the uploaded tar contains NO `.gguf` at all -- measured
+on BOTH of `railway_deploy.sh`'s tar arms, where the only member under
+`backend/models/` is `.gitkeep`. The staged branches in `backend/Dockerfile` have
+therefore never fired on Railway; both encoders arrive from `*_ENCODER_URL`. The
+four files are NOT deleted -- they are the only copies of those GGUFs on this host,
+since `model-archive/` holds the bf16 safetensors rather than the quantised files.
+
+**THE CONVENTION HEADS WERE DECODED UNMASKED, and it cost 45 of 300 served rows.**
+The per-literal pair head got its per-operation mask on 2026-10-02; the per-field
+CONVENTION heads did not, because they are decoded in a different file.
+`encoder_assistant.cpp` referenced `conv_op_mask` **ZERO times** while the schema
+had carried it the whole time, so every convention field was a raw argmax over its
+full class list. Measured through the real `ParseStrategy` RPC:
+
+| | params | refusals | encode errors | clarifications |
+| --- | --- | --- | --- | --- |
+| before, 300 rows | 201 | **45** | **33** | 21 |
+| after, 300 rows | 276 | 0 | 0 | 24 |
+| after, full 1500-row val | **1427, all four fields correct 1427/1427** | 0 | 0 | 73 |
+
+All 45 read `"futures_short" is a futures-only strategy, but asset_class is
+"EQUITY"`. strategy's `asset_class` admits exactly {FUTURES} for the eight
+futures-only operations; the unmasked argmax preferred EQUITY, so GP-ARA correctly
+refused a self-contradictory parse **the model had never made**.
+
+**THE MODEL WAS NEVER THE PROBLEM, and the figure that proves it is the trainer's
+own.** `final.conv_acc.asset_class` is `[1.0, 1496]` on a val sha byte-identical to
+the one on disk, because `train_encoder.py`'s `evaluate` masks conv logits by the
+operation before the argmax and the serving layer did not. PyTorch and C++ agree
+row for row on the failing utterances -- `nq` -> QQQ/EQUITY in both -- so a
+PyTorch/C++ comparison alone would have cleared the serving layer wrongly. The
+aggregate 99.88% probe figure was also read, early and wrongly, as proving a
+serving divergence for this class; it is measured on a different 852-row probe set.
+
+**THE REPAIR IS ONE OBJECT, NOT ONE INSTANCE.** `encoder_reconstruct::OperationDecode`
+is a fluent decode bound to one (schema, operation):
+
+```cpp
+const auto decode = OperationDecode::of(schema_).forOperation(op);
+decode.conventionClasses(out->convention_logits);   // masked argmax per field
+decode.admissiblePairs(selected);                   // set intersection
+```
+
+Both heads go through it, so a third head cannot be added while forgetting the mask
+-- there is nowhere else to add it. That is "sweep the class, not the instance" at
+register level.
+
+**MASKING IS EXACT FOR BOTH HEADS FOR TWO DIFFERENT REASONS**, and neither needs a
+second copy of an activation that could drift from `text_encoder.cppm`'s: the pair
+head is MULTI-LABEL, so mask-then-threshold IS a set intersection; a convention head
+is SINGLE-LABEL and **argmax is invariant to softmax's normalisation**, so an argmax
+over the admissible SUBSET is bit-for-bit the argmax of -inf-masked logits.
+Admissible ids are visited ASCENDING so a tie takes the lowest, which is what
+`torch.argmax`, `std::ranges::max_element` and sensen's `argmaxIndex` all do.
+
+**A FIELD WITH NO MASK ENTRY IS OMITTED, NOT GUESSED**, and that is measured: the
+mortgage schema has 135 (field, operation) pairs with no entry and for **ZERO** of
+them does `op_fields` name the field, so the operation does not take it and
+`reconstruct()` would discard any value decoded for it. Omitting is provably
+identical to the previous behaviour there. An operation the schema does not describe
+is REFUSED, never decoded unmasked.
+
+**WHY MORTGAGE'S 560/560 WAS NOT A CONTROL FOR THIS -- the fifth instance in one day
+of a corpus that cannot exhibit a failure being read as one.** Measured on both
+schemas: strategy's `asset_class` admits 1 class for 8 operations and 2 of 3 for the
+other 39, so the mask ALWAYS constrains; `symbol` admits 2 of 20 for those same 8.
+Every mask the MORTGAGE schema carries is FULL for the single operation that has an
+entry, so applying it or not is provably identical there. Mortgage served 560/560
+through this code with the defect present, and still does after the fix.
+
+Gated by `test_encoder_operation_decode` (20 checks, registered as
+`EncoderOperationDecodeTest`) -- no model, no fixture, no engine, because the rules
+are properties of the schema. Mutation-checked with `CCACHE_DISABLE=1`: restoring
+the unmasked argmax fails 3 checks including the exact production symptom.
+**ctest 149 -> 150 with 2 skipped.**
+
+**A TOKENIZER COARSER THAN THE LEXER IS NOT A BOUNDARY DISAGREEMENT -- the other 33
+rows.** sensen's `tokensInSpan` required a token to lie WHOLLY INSIDE the literal,
+so it refused the case where ONE token contains the whole literal: a subword
+vocabulary that learned `3d`, `10x` and `180d` as units against a lexer that
+correctly marks only the digits. 33 of 300 rows died on
+`token_straddles_literal: literal 0 [41, 42)` for `... russell etf 3d?`.
+
+It is a TRAIN/SERVE DIVERGENCE, which settles which side moves: the trainer's
+`span_to_tokens` selects on pure OVERLAP, so the model was FITTED with that token
+pooled in. Classifying every (literal, token) overlap across train+val:
+
+| corpus | token inside literal | **literal inside token** | genuine crossing |
+| --- | --- | --- | --- |
+| strategy | 18,070 | **3,872** | **0** |
+| mortgage | 205,167 | 0 | **0** |
+
+**Zero crossings in either corpus**, so admitting containment is equivalent to the
+trainer's rule on every row either model was fitted on while staying strictly
+narrower than it. The crossing refusal is retained and is now unreachable from these
+corpora -- kept for the reason the `guess` grounding exemption is kept. And mortgage
+again could not have caught it: zero containment cases anywhere in its corpus.
+`test_text_encoder` 288 -> **295 passed / 0 failed / 3 N/A**; two existing
+encode-level checks asserted the rule that changed and were UPDATED rather than
+deleted, with a real crossing added beside them. Mutation-checked: restoring
+`wholly_inside` fails exactly the four containment checks while both crossing checks
+still pass.
+
+**PRODUCTION, measured rather than probed.** Strategy **141/141 = 100.00%** over 150
+holdout rows through the JSON transcoder, paced at 8 req/s because Envoy's local
+limit is 100 tokens refilling 10/s per replica. The decisive single row:
+
+```
+POST /calculator.assistant.StrategyAssistant/ParseStrategy
+  {"utterance":"show me a sell futures on nq, 60 days"}
+-> {"symbol":"NQ","assetClass":"FUTURES","strategy":"futures_short",
+    "expirationDays":60,"quantity":1}
+```
+
+which is the exact utterance that returned `asset_class is "EQUITY"` before the
+mask fix.
+
+**A THROWAWAY SCORER REPORTED MORTGAGE AT 83.13% AND WAS WRONG, which is worth
+recording because the shape recurs.** Its "mismatches" were `payment: -7899.07`
+against gold `7899.07` -- the deliberate TVM sign flip -- and `values` arriving as
+the string `"[-14500,1400,...]"`, the `map<string,string>` wire flattening. Both are
+documented service behaviour that `scripts/score_encoder_served_rpc.py` models and a
+quick script does not. **Use the scorer; a second comparison written from memory
+measures the harness.** That script now takes `ENCODER_RPC_TARGET` /
+`ENCODER_RPC_TLS` / `ENCODER_RPC_KEY` so the SAME scorer can be pointed at
+production, and it WAITS OUT a `RESOURCE_EXHAUSTED` using the engine's own
+"retry in Ns" hint rather than scoring a quota refusal as a wrong row.
+
+**THE STORED RAILWAY `accessToken` IS A ONE-HOUR TOKEN, and its expiry presents as a
+scope problem.** `~/.railway/config.json` carries `user.tokenExpiresAt`; past it,
+every GraphQL call -- including `query{ me { email } }` -- answers `Not Authorized`,
+which is indistinguishable from the read-scoped-credential story this file already
+warns about. Running ANY `railway` CLI command refreshes it on disk; re-read the file
+afterwards. This cost a confused detour mid-deploy, with the same query succeeding at
+13:5x and failing at 14:01.
 
 ### CORRECTION 2026-10-02: BF16 `llq-fused` is NOT bit-identical to the DENSE kernel
 

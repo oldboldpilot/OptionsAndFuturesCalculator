@@ -11,6 +11,9 @@ import glob, json, sys
 sys.path.insert(0, '/home/muyiwa/Development/OptionsAndFuturesCalculator/scripts')
 sys.path.insert(0, '/home/muyiwa/Development/OptionsAndFuturesCalculator/agent/train')
 sys.path[:0] = glob.glob('/home/muyiwa/Development/OptionsAndFuturesCalculator/agent/**/', recursive=True)
+import os
+import re
+import time
 import grpc
 import mortgage_assistant_pb2 as pb, mortgage_assistant_pb2_grpc as pbg
 import importlib
@@ -81,12 +84,48 @@ ds = ec.load_dialogues(Path('agent/dataset/data_mortgage/val.jsonl'))
 facts = [ec.make_facts(d, sch.op_key, sch.question_mode) for d in ds]
 examples = ec.build_examples(facts, sch)
 
-st = pbg.MortgageAssistantStub(grpc.insecure_channel('localhost:50051'))
+# TARGET. Default localhost, because that is where a pre-deploy baseline is taken.
+# ENCODER_RPC_TARGET points it at PRODUCTION instead -- the apex speaks gRPC-Web and
+# the JSON transcoder but NOT native gRPC (Railway's edge strips the HTTP/2 trailer
+# gRPC carries grpc-status in), so a native-gRPC target must be the TCP proxy, which
+# is TLS with a self-signed certificate. ENCODER_RPC_KEY supplies x-api-key, which the
+# Pro gate requires on this surface in production and does not require locally.
+_target = os.environ.get("ENCODER_RPC_TARGET", "localhost:50051")
+_key = os.environ.get("ENCODER_RPC_KEY", "")
+if os.environ.get("ENCODER_RPC_TLS"):
+    _chan = grpc.secure_channel(_target, grpc.ssl_channel_credentials(
+        root_certificates=open(os.environ["ENCODER_RPC_TLS"], "rb").read()),
+        options=[("grpc.ssl_target_name_override",
+                  os.environ.get("ENCODER_RPC_AUTHORITY", "grpc-native.optionsandfuturescalculator.com"))])
+else:
+    _chan = grpc.insecure_channel(_target)
+_md = [("x-api-key", _key)] if _key else []
+st = pbg.MortgageAssistantStub(_chan)
 agree = differ = none_rows = refused = 0
 shapes = {}
 msgs = []
 for i, ex in enumerate(examples):
-    r = st.ParseOperation(pb.ParseRequest(utterance=ex.text), timeout=30)
+    # A QUOTA REFUSAL IS NOT A MEASUREMENT, so it is waited out rather than scored.
+    # Against production the partner tier has a compute-unit budget per hour, and a
+    # 560-row sweep crosses it: the engine answers RESOURCE_EXHAUSTED with its own
+    # "retry in Ns" hint, which is the right behaviour and would otherwise be counted
+    # as a row the model got wrong. The hint is PARSED rather than guessed, and the
+    # wait is capped so a permanently exhausted budget fails loudly instead of hanging.
+    r = None
+    for _attempt in range(6):
+        try:
+            r = st.ParseOperation(pb.ParseRequest(utterance=ex.text), timeout=60, metadata=_md)
+            break
+        except grpc.RpcError as _e:
+            if _e.code() is not grpc.StatusCode.RESOURCE_EXHAUSTED:
+                raise
+            _m = re.search(r"retry in (\d+)s", _e.details() or "")
+            _wait = min(90, int(_m.group(1)) + 2 if _m else 15 * (_attempt + 1))
+            print(f"  [quota] {_e.details()} -- waiting {_wait}s", flush=True)
+            time.sleep(_wait)
+    if r is None:
+        raise SystemExit("quota refused six consecutive attempts; the budget is exhausted, "
+                         "not the model -- re-run later rather than reading a partial score")
     which = r.WhichOneof('outcome')
     if ex.gold is None:
         # The row's gold is prose: a clarification or refusal is the right answer here.
