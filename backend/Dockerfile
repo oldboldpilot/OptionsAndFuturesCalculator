@@ -30,6 +30,24 @@ ARG MODEL_SHA256=""
 ARG MORTGAGE_MODEL_URL=""
 ARG MORTGAGE_MODEL_SHA256=""
 
+# A THIRD, SEPARATE pair, for the small bidirectional ENCODER that can serve the
+# mortgage surface instead of the Qwen3 decoder
+# (MORTGAGE_ASSISTANT_BACKEND=encoder). Separate for the same reason the mortgage
+# pair is separate from the strategy pair: one model, two, three or none is a
+# supported image, and a shared variable would make "which model is missing"
+# unanswerable. The engine reads MORTGAGE_ENCODER_PATH and deliberately does NOT
+# fall back to MORTGAGE_MODEL_PATH -- that names the DECODER's weights, and
+# handing a 639 MB Qwen3 GGUF to the encoder loader would refuse at best.
+#
+# IT IS ~3.9 MB, not 639, and the difference is worth stating because it changes
+# none of the rules below. A checksum is still mandatory: the hazard a truncated
+# GGUF creates is not proportional to its size. This one carries the label
+# SCHEMA and the TOKENIZER as well as the weights, so a substituted file does not
+# merely compute wrongly -- it would compute against a different label space and
+# a different vocabulary, with the token id being the line number.
+ARG MORTGAGE_ENCODER_URL=""
+ARG MORTGAGE_ENCODER_SHA256=""
+
 # S3-compatible credentials for the Railway bucket the models are fetched from.
 #
 # The weights are the owner's proprietary trade secrets and are deliberately not
@@ -149,6 +167,8 @@ ARG MODEL_URL
 ARG MODEL_SHA256
 ARG MORTGAGE_MODEL_URL
 ARG MORTGAGE_MODEL_SHA256
+ARG MORTGAGE_ENCODER_URL
+ARG MORTGAGE_ENCODER_SHA256
 # Redeclared INSIDE this stage for the same reason MODEL_TOKEN is below: a
 # global ARG is not visible to a stage that does not restate it, so without
 # these two lines the SigV4 branch silently sees empty credentials, falls
@@ -363,6 +383,71 @@ RUN set -eu; \
 # --------------------------------------------------------------------------
 # Builder
 # --------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# The small bidirectional ENCODER for the mortgage surface, ~3.9 MB.
+#
+# A THIRD RUN rather than a branch inside the mortgage one, for the reason this
+# stage's own header gives: declared build arguments reach EVERY RUN in the stage
+# as environment, so separate RUNs buy a readable failure, not independent
+# caching. Swapping one model re-executes the others regardless.
+#
+# THE CHECKSUM IS MANDATORY ON BOTH PATHS, and the small size is not a reason to
+# relax it. This file carries the label SCHEMA and the TOKENIZER as well as the
+# weights, so a substituted one does not merely compute wrongly: it computes
+# against a different label space and a different vocabulary, where the token id
+# IS the line number. A truncated 3.9 MB GGUF is as capable of loading and
+# answering confidently as a truncated 639 MB one.
+#
+# An EMPTY MORTGAGE_ENCODER_URL is a supported build, exactly as an empty
+# MORTGAGE_MODEL_URL is: the encoder is one of two backends for one of four
+# services, and MORTGAGE_ASSISTANT_BACKEND defaults to the decoder.
+RUN set -eu; \
+    mkdir -p /model; \
+    if [ -f /model-staged/mortgage-encoder.gguf ]; then \
+        echo "Using the mortgage ENCODER staged in the build context."; \
+        if [ -z "${MORTGAGE_ENCODER_SHA256}" ]; then \
+            echo "FATAL: a staged mortgage encoder is present but MORTGAGE_ENCODER_SHA256 is not set." >&2; \
+            echo "Supply the sha256 of the exact GGUF you staged -- staging is not verification." >&2; \
+            exit 1; \
+        fi; \
+        echo "${MORTGAGE_ENCODER_SHA256}  /model-staged/mortgage-encoder.gguf" | sha256sum -c -; \
+        cp /model-staged/mortgage-encoder.gguf /model/mortgage-encoder.gguf; \
+        echo "Staged mortgage encoder verified and installed."; \
+    elif [ -z "${MORTGAGE_ENCODER_URL}" ]; then \
+        echo "MORTGAGE_ENCODER_URL not set -- building without the mortgage ENCODER."; \
+        echo "Nothing is degraded: MORTGAGE_ASSISTANT_BACKEND defaults to the Qwen3 decoder, and asking for the encoder in an image that has none makes that ONE service report itself unavailable rather than silently serving the other model."; \
+    else \
+        if [ -z "${MORTGAGE_ENCODER_SHA256}" ]; then \
+            echo "FATAL: MORTGAGE_ENCODER_URL is set but MORTGAGE_ENCODER_SHA256 is not." >&2; \
+            echo "This GGUF carries the label schema and the tokenizer as well as the weights, so an unverified one can load cleanly and then parse against a different label space with a renumbered vocabulary -- wrong, plausible, and silent. Supply the sha256 computed against the exact file MORTGAGE_ENCODER_URL serves." >&2; \
+            exit 1; \
+        fi; \
+        echo "Fetching the mortgage encoder from MORTGAGE_ENCODER_URL (checksum will be verified before it is used for anything)..."; \
+        if [ -n "${BUCKET_ACCESS_KEY_ID}" ] && [ -n "${BUCKET_SECRET_ACCESS_KEY}" ]; then \
+            echo "Fetching the mortgage encoder from the private bucket (SigV4)..."; \
+            curl -sS --fail --retry 3 --retry-delay 2 \
+                 --aws-sigv4 "aws:amz:auto:s3" \
+                 --user "${BUCKET_ACCESS_KEY_ID}:${BUCKET_SECRET_ACCESS_KEY}" \
+                 -o /model/mortgage-encoder.gguf "${MORTGAGE_ENCODER_URL}" || { \
+                echo "FATAL: SigV4 fetch of the mortgage encoder failed." >&2; \
+                exit 1; \
+            }; \
+        else \
+            curl -sS --fail --retry 3 --retry-delay 2 \
+                 -o /model/mortgage-encoder.gguf "${MORTGAGE_ENCODER_URL}" || { \
+                echo "FATAL: fetch of the mortgage encoder failed." >&2; \
+                exit 1; \
+            }; \
+        fi; \
+        echo "${MORTGAGE_ENCODER_SHA256}  /model/mortgage-encoder.gguf" | sha256sum -c - || { \
+            echo "FATAL: the mortgage encoder's sha256 does not match MORTGAGE_ENCODER_SHA256." >&2; \
+            echo "The file is REMOVED rather than shipped: a GGUF that loads and parses against the wrong schema is worse than no encoder, because the service would answer instead of refusing." >&2; \
+            rm -f /model/mortgage-encoder.gguf; \
+            exit 1; \
+        }; \
+        echo "Mortgage encoder fetched and verified ($(stat -c%s /model/mortgage-encoder.gguf) bytes)."; \
+    fi
+
 FROM docker.io/library/ubuntu:24.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -778,6 +863,18 @@ ENV MODEL_PATH=/app/model/strategy-assistant.gguf
 # half-broken image: each assistant reports its own model unavailable and every
 # other service in the container is unaffected.
 ENV MORTGAGE_MODEL_PATH=/app/model/mortgage-assistant.gguf
+
+# The ENCODER's path. Set unconditionally for the same reason the two above are:
+# the engine treats a path naming no file exactly like an unset one, and the
+# basename matches the model stage's encoder step -- if that is renamed, this
+# line moves with it.
+#
+# MORTGAGE_ASSISTANT_BACKEND is deliberately NOT set here. It defaults to qwen3
+# in the service, so an image carrying the encoder changes nothing until an
+# operator asks for it: the capability ships first and the switch is flipped
+# second, each step with its own rollback. An unrecognised value stops the
+# process rather than reading as the default.
+ENV MORTGAGE_ENCODER_PATH=/app/model/mortgage-encoder.gguf
 
 USER root
 RUN chmod +x /app/start.sh /app/calculator_engine /app/smoke_client

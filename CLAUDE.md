@@ -1946,7 +1946,43 @@ sha was pinned and the harness was not. A figure whose harness is unrecorded
 cannot be compared to one whose harness is, which is why these two are retired
 rather than contradicted.
 
-**The figures to quote are 414 / 431 / 64**, reproducible from
+**CORRECTION 2026-10-03: THE FIGURES TO QUOTE ARE 414 / 463 / 64, AND THE 431 WAS THE
+HARNESS.** Re-measured under this same script, one engine asserted on its own port, against
+the recorded per-row evidence with `scripts/diff_eval_rows.py`:
+
+| | baseline `q8_0-dense.json` (2026-09-30) | 2026-10-03 | rows differing |
+| --- | --- | --- | --- |
+| `raw_exact` | 414/560 | 414/560 | **0** |
+| `asked_ok` | 64/86 | 64/86 | 0 |
+| `served_exact` | 431 | **463** | **32, every one False -> True** |
+
+**0 raw rows differing is the control that makes the other two readable**: the model and the
+decode path are bit-identical, so nothing that moved is a capability change. The 32 are
+`ComputePaybackPeriod` 16, `ComputePayment` 5, `ComputeXnpv` 5, `ComputeAmortizationBatch` 3,
+`ComputeXirr` 2, `ComputeNpv` 1.
+
+**They moved because `402b955` FIXED THE HARNESS, not the service.** Its own comment says it:
+*"repr(0.0) is "0.0" and the SERVICE writes "0", so a gold float whose..."* -- a legitimate
+convention zero compared as a STRING against the service's own spelling, and the commit
+message enumerates `ComputeAmortizationBatch`, `ComputeXirr` and `ComputeNpv`, which is the
+same set the row diff finds. The 431 was measured by the harness that predates it.
+
+**THIS IS THE FIFTH TIME A SCORE IN THIS FILE DESCRIBED THE HARNESS RATHER THAN THE MODEL** --
+after the `llama-cli` phantom that triggered an unnecessary retrain, the bf16-vs-Q8_0 gap,
+`phrase_money`'s unrecoverable labels, and the extractor that took the LAST user turn. The
+rule this file already states is the one that keeps catching it: a low or moved score is a
+HYPOTHESIS about the model, and confirming it is not a statement about the measurement comes
+first. Quote the holdout sha AND the harness, because this figure has now been invalidated by
+a harness change twice.
+
+**TWO WRONG EXPLANATIONS WERE ELIMINATED BEFORE THE RIGHT ONE, both by measurement.** The
+first was my own env: re-running under this script, which asserts each variable against
+`/proc/<pid>/environ`, reproduced 463 rather than the 431, so it was not the loader. The
+second was the leading-dot lexer fix of `61eec69`, which lands in exactly this window and
+changes the deployed verifier's lexer -- **0 of the 32 changed rows contain a leading-dot
+decimal**, so it is ruled out rather than assumed innocent.
+
+The older reading is kept below as history. Reproducible from
 `scripts/measure_bit_width_arm.sh`, which forces `INFERENCE_QUEUE=local`, an empty
 `DATABASE_URL`, `PRO_GATE_MODE=off` and `QUOTA_POLICY=` and asserts each against
 `/proc/<pid>/environ` rather than against the command line that asked for them.
