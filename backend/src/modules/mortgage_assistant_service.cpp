@@ -26,6 +26,7 @@ import quota;
 import api_key;
 import assistant_verification;
 import mortgage_verification;
+import encoder_assistant;
 import mortgage_derivation;
 import mortgage_grammar;
 import inference_admission;
@@ -1310,10 +1311,19 @@ class MortgageAssistantWorker {
     /** True iff the backend initialised successfully at process start.
      * Immutable after construction, so no synchronization is needed. */
     [[nodiscard]] auto available() const noexcept -> bool {
-        // Either this replica can execute (backend_), or it can submit to a
-        // shared queue that will (admission_ in submit-only mode). Both are
-        // immutable after construction, so no synchronization is needed.
-        return backend_ != nullptr || admission_ != nullptr;
+        // Either this replica can execute (backend_ for the decoder, encoder_ for the small
+        // encoder), or it can submit to a shared queue that will (admission_ in submit-only
+        // mode). All three are immutable after construction, so no synchronization is needed.
+        //
+        // encoder_ HAD TO BE ADDED HERE SEPARATELY, and forgetting it is what this function's
+        // own comment two paragraphs down predicts: `available()` and
+        // `local_model_loaded()` answer DIFFERENT questions, so a new backend has to be
+        // taught to both. With only `local_model_loaded()` updated, the boot banner printed
+        // "Mortgage assistant model is LOADED" while every single RPC answered "The mortgage
+        // assistant is not available right now" -- a health signal from the wrong layer,
+        // which is the defect class this file records against last_applied, the LIVE badge
+        // and Railway's SUCCESS. Measured on all 600 holdout rows before it was fixed.
+        return backend_ != nullptr || encoder_ != nullptr || admission_ != nullptr;
     }
 
     /**
@@ -1328,7 +1338,21 @@ class MortgageAssistantWorker {
      * health signal this project has been bitten by before.
      */
     [[nodiscard]] auto local_model_loaded() const noexcept -> bool {
-        return backend_ != nullptr;
+        return backend_ != nullptr || encoder_ != nullptr;
+    }
+
+    /**
+     * The small ENCODER assistant, when `MORTGAGE_ASSISTANT_BACKEND=encoder` selected it.
+     *
+     * nullptr on the default Qwen3 path. A caller must test this rather than assume, because
+     * both backends are supported images and neither is a fallback for the other -- the
+     * `ASSISTANT_BACKEND=llamacpp` rule: asked for one engine and unable to provide it, the
+     * assistant is UNAVAILABLE rather than quietly served by the other. Serving Qwen3 when
+     * the operator asked for the encoder would put production on a model no gate in this
+     * session covers, and vice versa.
+     */
+    [[nodiscard]] auto encoder() const noexcept -> const encoder_assistant::EncoderAssistant* {
+        return encoder_.get();
     }
 
     [[nodiscard]] auto submit(std::string prompt) -> std::optional<InferenceOutcome> {
@@ -1359,6 +1383,65 @@ class MortgageAssistantWorker {
 
   private:
     MortgageAssistantWorker() {
+        // ------------------------------------------------------------------------------
+        // WHICH MODEL SERVES THIS SURFACE: the ~0.6B decoder, or the ~1M encoder.
+        //
+        //     MORTGAGE_ASSISTANT_BACKEND = qwen3 (default) | encoder
+        //
+        // DEFAULTS TO qwen3 so that deploying this binary changes nothing until an operator
+        // asks. An unrecognised value STOPS THE PROCESS rather than reading as the default,
+        // which is the `MORTGAGE_WEIGHT_STORE` rule: a typo must not silently serve the path
+        // the operator meant to leave. Compared case-INSENSITIVELY and LOGGED, because
+        // `MORTGAGE_RESTRICTED_PROJECTION` was case-sensitive and read `False` and `OFF` as
+        // ON, and because an operator needs the boot line to confirm what was parsed.
+        //
+        // The encoder reads its own variable, MORTGAGE_ENCODER_PATH, and deliberately does
+        // NOT fall back to MORTGAGE_MODEL_PATH -- that names the DECODER's weights, and
+        // handing them to the encoder loader would refuse at best and load a different
+        // model's tensors at worst. Same reasoning as MORTGAGE_MODEL_PATH not falling back
+        // to MODEL_PATH.
+        auto& log = logger::Logger::getInstance();
+        const auto backend_name = env_string("MORTGAGE_ASSISTANT_BACKEND");
+        std::string wanted = backend_name.value_or("qwen3");
+        std::ranges::transform(wanted, wanted.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (wanted != "qwen3" && wanted != "encoder") {
+            log.error(std::format(
+                "MORTGAGE_ASSISTANT_BACKEND=\"{}\" is not recognised. Use \"qwen3\" (the "
+                "fine-tuned decoder, the default) or \"encoder\" (the small bidirectional "
+                "encoder). Refusing to start rather than defaulting: a typo here would serve "
+                "the model you meant to replace.",
+                *backend_name));
+            std::exit(1);
+        }
+        log.info(std::format("Mortgage assistant backend: MORTGAGE_ASSISTANT_BACKEND={}", wanted));
+
+        if (wanted == "encoder") {
+            const auto enc_path = env_string("MORTGAGE_ENCODER_PATH");
+            if (!enc_path.has_value()) {
+                log.warn("MORTGAGE_ASSISTANT_BACKEND=encoder but MORTGAGE_ENCODER_PATH is not "
+                         "set -- the mortgage assistant will return a Refusal on every call. It "
+                         "is NOT served by the Qwen3 path instead: asked for one engine and "
+                         "unable to provide it, this assistant is unavailable.");
+                return;
+            }
+            auto built = encoder_assistant::EncoderAssistant::fromGguf(*enc_path);
+            if (!built) {
+                log.error(std::format(
+                    "The mortgage ENCODER failed to load from MORTGAGE_ENCODER_PATH ({}): {}. The "
+                    "assistant is unavailable; every other service is unaffected.",
+                    *enc_path, built.error()));
+                return;
+            }
+            encoder_ = std::move(*built);
+            log.info(std::format(
+                "Mortgage ENCODER assistant ready: backend=sensen device=cpu, {} operations, {} "
+                "(slot,map) pairs, {} convention fields, vocab {}",
+                encoder_->operation_count(), encoder_->pair_count(),
+                encoder_->convention_fields(), encoder_->vocab_size()));
+            return;
+        }
+
         const auto path = env_string("MORTGAGE_MODEL_PATH");
         if (!path.has_value()) {
             // No weights here. That is still a supported image -- but it is no
@@ -1651,6 +1734,10 @@ class MortgageAssistantWorker {
     }
 
     std::unique_ptr<QueuedBackend> backend_;
+    /// Non-null only on MORTGAGE_ASSISTANT_BACKEND=encoder. Loaded once and then const, so
+    /// `parse()` is safe from several threads -- unlike the decoder, whose `generate()` cannot
+    /// be called concurrently because FeedForwardNetwork holds mutable scratch per instance.
+    std::unique_ptr<encoder_assistant::EncoderAssistant> encoder_;
     std::shared_ptr<pg::Pool> pool_;
     std::shared_ptr<inference_queue::Queue> queue_;
     std::shared_ptr<inference_admission::LeaseSource> lease_source_;
@@ -3097,6 +3184,95 @@ auto apply_tvm_sign_convention(std::string_view operation,
 }
 
 /**
+ * Render the ENCODER's parsed params as the JSON `validate_and_populate_params` reads.
+ *
+ * WHY THIS LIVES HERE RATHER THAN IN encoder_assistant. The JSON TYPE of a field is a fact
+ * about finance.proto, not about the model: `Kind::Int` requires a JSON NUMBER while
+ * `Kind::Decimal` requires a JSON STRING ("this field is a BigDecimal on the Finance API"),
+ * and this file is where that table lives. The chain hands over values; the proto decides how
+ * they are spelled.
+ *
+ * MEASURED, because the first version emitted every value as a string and got
+ * `"periods: expected a whole number"` on all 547 rows that declare an integer field -- while
+ * the three operations whose fields are all arrays and decimals (ComputeIrr, ComputeXirr,
+ * ComputeAmortizationBatch) passed, 13 of 13. A uniform rendering looked right and was wrong
+ * for everything except the shapes that happened not to need it.
+ *
+ * TRAILING ZEROS ARE TRIMMED, and that is not cosmetic. `BigDecimal::to_string()` emits
+ * exactly 38 fractional places, and the verifier's own fixed-point type is **15** places
+ * (`mv::Decimal::kPlaces`), so a 38-place string is wider than the thing that has to parse it.
+ * Trimming is exact for every terminating value -- money at two places, a rate at four or six
+ * -- and the only values it cannot make short are the non-terminating annual/12 rates, which
+ * are truncated to 15 places: still more than double the SIX the training corpus rounds them
+ * to, so nothing downstream can tell, and stated rather than silent.
+ */
+[[nodiscard]] auto encoder_params_to_json(const encoder_assistant::Parsed& parsed) -> std::string {
+    const auto* op = find_operation(parsed.operation);
+
+    // Trim a 38-place BigDecimal rendering to its shortest exact form, then to the verifier's
+    // own 15-place scale if it is still wider.
+    const auto trim_decimal = [](std::string_view text) -> std::string {
+        std::string out{text};
+        if (const auto dot = out.find('.'); dot != std::string::npos) {
+            if (out.size() - dot - 1 > 15) out.resize(dot + 1 + 15);
+            while (!out.empty() && out.back() == '0') out.pop_back();
+            if (!out.empty() && out.back() == '.') out.pop_back();
+        }
+        return out.empty() ? std::string{"0"} : out;
+    };
+
+    std::string json = "{\"operation\":\"" + parsed.operation + "\"";
+    for (const auto& [key, value] : parsed.params) {
+        const auto* field = op == nullptr ? nullptr : find_field(*op, key);
+        json += ",\"" + key + "\":";
+        // An unknown key is emitted AS THE CHAIN GAVE IT and left for
+        // validate_and_populate_params to refuse by name. Dropping it here would hide a
+        // schema disagreement between the GGUF's label space and finance.proto -- the
+        // four-tables defect -- behind a silently narrower answer.
+        if (field == nullptr) {
+            json += "\"" + value + "\"";
+            continue;
+        }
+        switch (field->kind) {
+            case Kind::Int:
+            case Kind::Double:
+                json += trim_decimal(value);  // a bare JSON number
+                break;
+            case Kind::Bool:
+                json += (value == "true" ? "true" : "false");
+                break;
+            case Kind::RepeatedDouble:
+            case Kind::RepeatedInt: {
+                // The chain hands an array over already bracketed, as the WIRE carries it --
+                // `FinanceParams.params` is a map<string,string>, so a repeated field has
+                // nowhere else to live. Each element still needs trimming.
+                json += "[";
+                std::string_view body{value};
+                if (body.starts_with('[')) body.remove_prefix(1);
+                if (body.ends_with(']')) body.remove_suffix(1);
+                bool first = true;
+                for (const auto part : std::views::split(body, ',')) {
+                    const std::string_view elem{part.begin(), part.end()};
+                    if (elem.empty()) continue;
+                    if (!first) json += ",";
+                    first = false;
+                    json += trim_decimal(elem);
+                }
+                json += "]";
+                break;
+            }
+            case Kind::Enum:
+            case Kind::Decimal:
+            default:
+                json += "\"" + (field->kind == Kind::Decimal ? trim_decimal(value) : value) + "\"";
+                break;
+        }
+    }
+    json += "}";
+    return json;
+}
+
+/**
  * `latest_turn` is the user's MOST RECENT words -- the answer to a clarifying
  * question -- and is empty on every first-turn call. It travels beside
  * `user_text` rather than being recovered from it: `grounding_text` joins the
@@ -3782,8 +3958,42 @@ inline constexpr std::array<std::string_view, 4> kAllActionNames{
 }
 
 /** Builds the prompt and submits it to the worker -- mirrors
- * assistant_service.cpp's action_generate exactly. */
+ * assistant_service.cpp's action_generate exactly.
+ *
+ * ON THE ENCODER BACKEND there is no prompt and no decode: the chain reads the utterance and
+ * produces the params directly. It writes its answer into `ctx->model_text` in the SAME
+ * `<params>...</params>` shape the decoder emits, and then returns -- so
+ * `interpret_model_output` and everything below it is literally the same code on both
+ * backends: the raw-output log line, the unknown-key rejection, the per-operation field
+ * drops, the verifier's five gates, `refine_unstated`'s clarifying questions and the
+ * derivation layer. A second path would have been a second place for all of that to drift,
+ * and this project already carries the label space in four tables for exactly that reason.
+ *
+ * `<NONE>` is rendered as NO params block, deliberately, because that is what the decoder
+ * produces when it will not name a calculation -- and the existing non-params path is what
+ * turns it into a clarification or an honest refusal. The encoder cannot ask a question
+ * itself; it does not need to, because the asking lives in the serving layer, which is where
+ * this project moved it when the weights lost the capability (0/90 -> 49/90). */
 [[nodiscard]] auto action_generate(Ctx& ctx) -> ExecutionResult<> {
+    if (const auto* enc = MortgageAssistantWorker::instance().encoder(); enc != nullptr) {
+        auto parsed = enc->parse(ctx->utterance);
+        if (!parsed.has_value()) {
+            // A refusal from the chain is a REFUSAL, not a crash and not a silent empty
+            // answer: a straddling literal span, an operation the schema cannot name, a
+            // literal that will not convert. Each is a statement about this request.
+            populate_refusal(ctx->response, ::mortgage::assistant::Refusal::INVALID_PARAMETERS,
+                             "The mortgage assistant could not interpret this request: " +
+                                 parsed.error());
+            return std::unexpected(sgee::ExecutionError::ActionFailed);
+        }
+        if (!parsed->has_value()) {
+            ctx->model_text = "The assistant did not identify a calculation for this request.";
+            return {};
+        }
+        ctx->model_text = "<params>" + encoder_params_to_json(**parsed) + "</params>";
+        return {};
+    }
+
     const std::string prompt =
         build_prompt(ctx->utterance, ctx->prior_clarification, ctx->prior_question);
 

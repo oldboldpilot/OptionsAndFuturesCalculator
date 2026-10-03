@@ -14,6 +14,29 @@ namespace encoder_assistant {
 
 namespace {
 
+/// JSON string escaping, shared by `Parsed::to_json` and the chain's array rendering.
+[[nodiscard]] auto escape_json(std::string_view s) -> std::string {
+    std::string out;
+    out.reserve(s.size() + 8);
+    for (const char c : s) {
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    out += std::format("\\u{:04x}",
+                                       static_cast<unsigned int>(static_cast<unsigned char>(c)));
+                } else {
+                    out += c;
+                }
+        }
+    }
+    return out;
+}
+
 constexpr std::string_view kSchemaKey = "sensen-encoder.schema_json";
 
 /// `[offset, end)` per literal, which is the span the trainer labelled: `offset` is the
@@ -147,6 +170,20 @@ constexpr std::string_view kSchemaKey = "sensen-encoder.schema_json";
 
 namespace {
 }  // namespace
+
+auto Parsed::to_json() const -> std::string {
+    std::string out = "{\"operation\":\"" + escape_json(operation) + "\"";
+    for (const auto& [k, v] : params) {
+        out += ",\"" + escape_json(k) + "\":";
+        // A boolean is a JSON boolean and an array is a JSON array: the service's reader
+        // asks `is_string()` / `is_boolean()` per field and refuses a mismatch, so quoting a
+        // convention boolean here would be refused as a type error rather than read as false.
+        const bool bare = (v == "true" || v == "false" || (!v.empty() && v.front() == '['));
+        out += bare ? v : ("\"" + escape_json(v) + "\"");
+    }
+    out += "}";
+    return out;
+}
 
 auto EncoderAssistant::fromGguf(const std::filesystem::path& path)
     -> std::expected<std::unique_ptr<EncoderAssistant>, std::string> {

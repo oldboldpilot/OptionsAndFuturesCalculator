@@ -81,8 +81,25 @@ namespace mv = mortgage_calculator::assistant::verify;
 struct Parsed {
     std::string operation;
     /// Rendered as the wire renders them: decimal strings for numbers, "true"/"false" for a
-    /// boolean convention, a JSON array for an array-valued field.
+    /// boolean convention, and a JSON array FLATTENED INTO A STRING for an array-valued field
+    /// -- which is the wire form, because `FinanceParams.params` is a protobuf
+    /// `map<string, string>` and a `repeated double` has nowhere else to go.
     std::map<std::string, std::string> params;
+
+    /**
+     * The params object as the JSON the SERVICE already knows how to validate.
+     *
+     * ONE renderer, used by the probe and by the service alike. The service feeds this
+     * straight into `validate_and_populate_params`, which is the same function the Qwen3
+     * path feeds -- so the unknown-key rejection, the per-operation field drops, the
+     * verifier's five gates, the clarifying-question refinement and the derivation layer are
+     * all SHARED rather than reimplemented for a second backend. A second renderer would be
+     * the four-tables drift at the wire boundary; this project has that scar already.
+     *
+     * A convention boolean is emitted UNQUOTED because the service's JSON reader expects a
+     * boolean there, and an array arrives already bracketed from the chain.
+     */
+    [[nodiscard]] auto to_json() const -> std::string;
 };
 
 /**

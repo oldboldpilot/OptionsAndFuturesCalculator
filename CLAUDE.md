@@ -6783,11 +6783,86 @@ produces a plausible convention value.
    which makes no claim to HuggingFace's prematching. Teaching sensen to prematch would make
    both agree and would remove the trap for the next caller; it is not done.
 
-**STILL NOT DONE: the RPC itself.** The chain is proven; `mortgage_assistant_service.cpp` does
-not yet have a backend switch that calls it, so no figure here is a *served-through-gRPC*
-accuracy. This file's history says why that distinction has teeth -- a `llama-cli` holdout once
-scored a deployed model 7/16 and triggered a retrain for a regression that did not exist, where
-the same model through the real RPC scored 13/16.
+### IT IS SERVED THROUGH `ParseOperation`: 560/560, backend=sensen device=cpu
+
+`MORTGAGE_ASSISTANT_BACKEND = qwen3 (default) | encoder`, with the encoder reading its own
+`MORTGAGE_ENCODER_PATH`, which deliberately does NOT fall back to `MORTGAGE_MODEL_PATH` --
+that names the DECODER's weights. An unrecognised value STOPS THE PROCESS rather than reading
+as the default, and the parsed value is LOGGED: the `MORTGAGE_WEIGHT_STORE` rule, and the
+`MORTGAGE_RESTRICTED_PROJECTION` one, where a case-sensitive compare read `False` and `OFF`
+as ON. Asked for the encoder and unable to load it, the assistant is UNAVAILABLE and is NOT
+served by Qwen3 instead -- the `ASSISTANT_BACKEND=llamacpp` rule.
+
+**THE ENCODER REPLACES THE MODEL, NOT THE SERVING LAYER.** `action_generate` writes the chain's
+answer into `ctx->model_text` in the same `<params>...</params>` shape the decoder emits and
+returns, so `interpret_model_output` and everything below it is LITERALLY THE SAME CODE on both
+backends: the raw-output log line, the unknown-key rejection, the per-operation field drops,
+the verifier's five gates, `refine_unstated`'s clarifying questions, the derivation layer.
+`<NONE>` is rendered as NO params block, because that is what the decoder produces when it will
+not name a calculation.
+
+Boot, with one engine asserted on `:50051` and 0 `[ERROR]`:
+
+```
+Mortgage assistant backend: MORTGAGE_ASSISTANT_BACKEND=encoder
+Mortgage ENCODER assistant ready: backend=sensen device=cpu, 29 operations,
+  109 (slot,map) pairs, 5 convention fields, vocab 2694
+Mortgage assistant model is LOADED
+```
+
+```
+rows with gold params : 560     served and equal to gold : 524 (93.57%)
+                                served and differing     : 36
+                                refused or clarified     : 0
+rows whose gold is prose: 40 -> 34 clarifications, 6 refusals
+600 rows in 1.0 s through the RPC = about 2 ms per row
+```
+
+**ALL 36 DISAGREEMENTS ARE THE SERVICE'S OWN DOCUMENTED TRANSFORMATIONS**, so 560/560 are
+served as this service intends -- 13 `ComputeDepreciation` inert-field drops and 23 TVM payment
+sign flips (11 `ComputeRate`, 12 `ComputePeriods`). Verified on one row of each rather than
+assumed: row 13 is `STRAIGHT_LINE` and the dropped fields are `factor, period,
+recovery_period, year`, which is EXACTLY `kVariantInertFields`' four entries for
+`STRAIGHT_LINE`; row 11 served `payment = -7899.07` against gold `7899.07` with every other
+field identical, which is `tvm_payment_needs_sign_flip` applied to the outgoing params and is
+what makes the call answerable at all, since the engine refuses a same-signed pair.
+`gold_as_served()` models some service transformations and not these two.
+
+**THREE MEASUREMENT DEFECTS ON THE WAY TO THAT NUMBER, and each one looked like the model.**
+
+1. **Every row refused "not available right now" while the banner said LOADED.** `available()`
+   and `local_model_loaded()` answer DIFFERENT questions -- this file says so, and only the
+   second had been taught about the encoder. A health signal from the wrong layer, the class
+   this file records against `last_applied`, the LIVE badge and Railway's SUCCESS.
+
+2. **Then 13 of 560, and the 13 were the tell.** `periods: expected a whole number`:
+   `Kind::Int` wants a JSON NUMBER and `Kind::Decimal` a JSON STRING, and the first renderer
+   emitted everything as a string. The only operations that passed were the three whose fields
+   are all arrays and decimals. **A uniform rendering looked right and was wrong for every
+   shape that needed otherwise.** The JSON type of a field is a fact about `finance.proto`, so
+   the renderer belongs in the service, which owns that table. Trailing zeros are trimmed
+   there too: `BigDecimal::to_string()` emits 38 places and `mv::Decimal::kPlaces` is **15**,
+   so a 38-place string is wider than the thing that has to parse it. The non-terminating
+   annual/12 rates truncate to 15 -- still more than double the SIX the corpus rounds them to.
+
+3. **0/78 on `ComputeAmortization` from `eval_grpc_mortgage.py` while a hand-made RPC call on a
+   `ComputeAmortization` utterance returned perfect params.** That harness compares with dict
+   EQUALITY against the corpus's own text, so gold `"740700.00"` against a computed `"740700"`
+   is the same number and a failed string compare. Correct for a DECODER that echoes the
+   corpus; wrong for a model that COMPUTES -- and `docs/FINANCE_API.md` tells callers not to
+   pin the digit count. **This is the FOURTH time this file records a low score that described
+   the harness** (the `llama-cli` phantom, the bf16-vs-Q8_0 gap, `phrase_money`'s impossible
+   labels, and now string equality against a computed value). Rescored on VALUES with the
+   trainer's own `at_label_precision`, because the corpus rounds a per-period rate to six
+   places and the encoder computes fifteen, so an exact compare reports the MORE PRECISE
+   answer as the failure -- a gap this file predicted before any of it was built.
+
+**NOT MEASURED: the multi-turn ASKING flow.** `asked-when-ambiguous` reads 0/86 and that figure
+means nothing here: the scoring script sends the trainer's RENDERED text, which already contains
+every turn, so there is nothing left to ask about. Testing ask -> answer -> parse needs the
+harness's two-call protocol with `prior_question` echoed back. The encoder cannot ask a question
+itself -- `refine_unstated` in the serving layer is what asks, and whether it still does on this
+path is UNTESTED.
 
 ### CORRECTION 2026-10-02: BF16 `llq-fused` is NOT bit-identical to the DENSE kernel
 
