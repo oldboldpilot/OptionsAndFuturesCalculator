@@ -1837,6 +1837,18 @@ target_link_libraries(test_encoder_reconstruct_parity PRIVATE sensen_slim fastjs
 add_executable(test_encoder_tokenizer_parity tests/encoder_tokenizer_parity.cpp)
 target_link_libraries(test_encoder_tokenizer_parity PRIVATE sensen_slim fastjson)
 
+# PARITY PROBE for the DEPLOYED numeric lexer against the encoder trainer's lex().
+# The pair head is indexed BY LITERAL POSITION, so the engine's literal list must agree
+# with the trainer's index for index or the model's prediction lands on a different
+# number. Compares order, count, span and value -- see the file's own header for why the
+# TAG is deliberately not load-bearing, and for the two representation differences that
+# are conversions rather than disagreements. Driven by
+# scripts/check_encoder_lexer_parity.py. A probe, not a ctest test: generated input.
+add_executable(test_encoder_lexer_parity tests/encoder_lexer_parity.cpp)
+target_sources(test_encoder_lexer_parity PRIVATE FILE_SET CXX_MODULES FILES
+    sensen/src/gp_ara_interfaces.cppm src/modules/mortgage_verification.cppm)
+target_link_libraries(test_encoder_lexer_parity PRIVATE fastjson)
+
 # Proto-derived CONSTRAINED DECODING for the mortgage assistant
 # (mortgage_grammar.cppm). Same rationale as the verification blocks above:
 # proto- and gRPC-free, and deliberately NOT linked against sensen_slim. It

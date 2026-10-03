@@ -6511,11 +6511,12 @@ half is still true and is now the only thing outstanding; the second half is not
 "Three parity gates stand between the encoder and a served answer" below. What remains
 unproven is the RPC run itself, not the tokenizer.
 
-### Three parity gates stand between the encoder and a served answer
+### FOUR parity gates stand between the encoder and a served answer
 
-Written 2026-10-02. The encoder's serving path is `tokenize -> encode -> mask -> reconstruct`,
-and **every step of it is a place two implementations can disagree while both look healthy.**
-Three of the four are now gated; the fourth is the RPC run.
+Written 2026-10-02. The encoder's serving path is
+`lex -> tokenize -> encode -> mask -> reconstruct`, and **every step of it is a place two
+implementations can disagree while both look healthy.** All four are now gated; what is left
+is the RPC run itself.
 
 **1. `reconstruct()` in C++ -- 600/600 rows.** `backend/src/modules/encoder_reconstruct.cppm`
 (1,438 lines) ports the serving-side arithmetic -- the whole reason the architecture is safe
@@ -6681,11 +6682,39 @@ both sides byte-identical: Python tagged against Python tag-stripped is BYTE-IDE
 C++ on the tag-stripped fixture still matches Python 600/600. So what the engine's lexer must
 reproduce is a literal's **SPAN**, its **VALUE** and its **ORDER** -- not the taxonomy.
 
-**4. STILL NOT PROVEN: the 600-row run through the real `ParseOperation`.** Everything above
-is in-process. Nothing here can state a SERVED accuracy, and this file's own history says why
+**4. The LEXER -- 754/754 utterances, 3,381 literals, and the DEPLOYED one already agrees.**
+`test_encoder_lexer_parity` against `scripts/check_encoder_lexer_parity.py`. The pair head is
+indexed **BY LITERAL POSITION**, so the engine's literal list must agree with the trainer's
+index for index or the model's prediction is applied to a different number. Zero mismatches on
+order, count, span and value.
+
+**This was the gap expected to be the largest and it was already closed**, which is worth
+stating because the reasoning that predicted otherwise looked sound: `LiteralTag` has SIX
+values (`Untagged, Money, Percent, Years, Months, Days`) against the trainer's EIGHT, and
+`NumericLiteral` keeps a k/m suffix in a separate `scale` where the trainer bakes it into the
+value. Both turn out to be CONVERSIONS rather than disagreements -- the comparison multiplies
+by `scale`, and the tag is provably unused at serving time.
+
+**THE ZERO TAG DIVERGENCES ARE A PROPERTY OF THE CORPUS, NOT OF THE TWO LEXERS, and the
+evidence file says so rather than letting the number imply otherwise.** The holdout's tag
+histogram is money 1,708 / percent 939 / years 499 / bare 120 / months 58 / days 57 and
+**weeks 0, quarters 0** -- exactly the two the deployed enum lacks, so the corpus cannot
+exhibit the divergence. On a constructed `"6 weeks ... 3 quarters at 5.5%"` the deployed lexer
+answers `Untagged` where the trainer answers `weeks`/`quarters`, while the spans and values
+still agree. Same lesson this file records against strategy's 100%: **a corpus that cannot
+exhibit a failure is not a control for it.** It is harmless today only because the tag is
+unused; the comparator therefore COUNTS a tag divergence and does not fail on one, and its
+self-test asserts that, so a later reader cannot "tighten" it into a refusal.
+
+Comparator self-test **9/0**, including that a dropped `scale` is caught (250 against
+250,000) -- without which the suffix conversion would be an assumption rather than a check.
+
+**STILL NOT PROVEN: the 600-row run through the real `ParseOperation`.** Everything above is
+in-process. Nothing here can state a SERVED accuracy, and this file's own history says why
 that distinction has teeth -- a `llama-cli` holdout once scored a deployed model 7/16 and
 triggered a retrain for a regression that did not exist, where the same model through the real
-RPC scored 13/16.
+RPC scored 13/16. What remains is the service wiring itself: a backend switch in
+`mortgage_assistant_service.cpp` and an `EncoderAssistant` that chains the four gated pieces.
 
 ### CORRECTION 2026-10-02: BF16 `llq-fused` is NOT bit-identical to the DENSE kernel
 

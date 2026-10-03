@@ -1,0 +1,11 @@
+  ok    an exact C++ reproduction agrees
+  ok    a one-character SPAN shift is caught
+  ok    a wrong VALUE is caught
+  ok    a dropped literal is caught
+  ok    an extra literal is caught
+  ok    value * scale is applied, so $250k agrees across the two representations
+  ok    a DROPPED scale is caught (250 against 250000)
+  ok    a TAG divergence is COUNTED but does not fail the gate
+  ok    a missing row is caught
+
+self-test: 9 passed / 0 failed
