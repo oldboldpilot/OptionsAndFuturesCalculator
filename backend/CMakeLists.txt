@@ -832,6 +832,7 @@ target_sources(sensen_slim
             "${SENSEN_SRC}/dlm.cppm"
             "${SENSEN_SRC}/dual_chunk_attention.cppm"
             "${SENSEN_SRC}/embedding.cppm"
+            "${SENSEN_SRC}/encoder_dispatch.cppm"
             "${SENSEN_SRC}/financial.cppm"
             "${SENSEN_SRC}/float_types.cppm"
             "${SENSEN_SRC}/fp64_reference.cppm"
@@ -941,6 +942,7 @@ target_sources(sensen_slim
             # the missing entry in one command, and it is the FOURTH bump to need one.
             "${SENSEN_SRC}/constrained_decode.cppm"
             "${SENSEN_SRC}/llm_pipeline.cppm"
+            "${SENSEN_SRC}/llq_weight_store.cppm"
             "${SENSEN_SRC}/lora.cppm"
             "${SENSEN_SRC}/memory.cppm"
             "${SENSEN_SRC}/mmap_weight_loader.cppm"
@@ -948,8 +950,10 @@ target_sources(sensen_slim
             "${SENSEN_SRC}/moe_layer.cppm"
             "${SENSEN_SRC}/multi_head_attention.cppm"
             "${SENSEN_SRC}/mxfp4.cppm"
+            "${SENSEN_SRC}/nn_slots.cppm"
             "${SENSEN_SRC}/nvfp4.cppm"
             "${SENSEN_SRC}/onnx_weight_loader.cppm"
+            "${SENSEN_SRC}/quant_dispatch.cppm"
             "${SENSEN_SRC}/options.cppm"
             "${SENSEN_SRC}/parallel.cppm"
             "${SENSEN_SRC}/portfolio.cppm"
@@ -996,6 +1000,9 @@ target_sources(sensen_slim
             "${SENSEN_SRC}/training_rope.cppm"
             "${SENSEN_SRC}/training_transformer.cppm"
             "${SENSEN_SRC}/tensor_observer.cppm"
+            # Needed because the mortgage encoder assistant loads it, and
+            # encoder_dispatch and llq_weight_store are its imports.
+            "${SENSEN_SRC}/text_encoder.cppm"
             "${SENSEN_SRC}/transformer_block.cppm"
             "${SENSEN_SRC}/triton_worker_bridge.cppm"
             "${SENSEN_SRC}/utils/logger.cppm"
@@ -1325,7 +1332,7 @@ endif()
 
 # Core engine binary
 add_executable(calculator_engine src/main.cpp src/issue_key.cpp src/modules/calculator_service.cpp src/modules/finance_service.cpp src/modules/quota.cpp src/modules/api_key.cpp src/modules/assistant_service.cpp src/modules/mortgage_assistant_service.cpp src/modules/inference_queue.cpp src/modules/inference_admission.cpp src/modules/sgee_queue_client.cpp src/modules/strategy_store.cpp src/modules/state_refresh.cpp)
-target_sources(calculator_engine PUBLIC FILE_SET CXX_MODULES FILES src/modules/calculator_service.cppm src/modules/market_data.cppm src/modules/finance_service.cppm src/modules/quota.cppm src/modules/api_key.cppm src/modules/fips_mode.cppm src/modules/state_refresh.cppm src/modules/strategy_catalogue.cppm src/modules/assistant_verification.cppm src/modules/assistant_service.cppm src/modules/mortgage_verification.cppm src/modules/mortgage_explanation.cppm src/modules/mortgage_derivation.cppm src/modules/mortgage_grammar.cppm src/modules/mortgage_assistant_service.cppm src/modules/pg.cppm src/modules/inference_queue.cppm src/modules/sgee_queue_client.cppm src/modules/inference_admission.cppm src/modules/strategy_store.cppm src/modules/llq_weight_store.cppm)
+target_sources(calculator_engine PUBLIC FILE_SET CXX_MODULES FILES src/modules/calculator_service.cppm src/modules/market_data.cppm src/modules/finance_service.cppm src/modules/quota.cppm src/modules/api_key.cppm src/modules/fips_mode.cppm src/modules/state_refresh.cppm src/modules/strategy_catalogue.cppm src/modules/assistant_verification.cppm src/modules/assistant_service.cppm src/modules/mortgage_verification.cppm src/modules/mortgage_explanation.cppm src/modules/mortgage_derivation.cppm src/modules/mortgage_grammar.cppm src/modules/mortgage_assistant_service.cppm src/modules/pg.cppm src/modules/inference_queue.cppm src/modules/sgee_queue_client.cppm src/modules/inference_admission.cppm src/modules/strategy_store.cppm src/modules/llq_weight_store.cppm src/modules/encoder_reconstruct.cppm)
 target_link_libraries(calculator_engine PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto sgee)
 # PostgreSQL::PostgreSQL is linked into calculator_engine further down, right
 # after find_package(PostgreSQL REQUIRED) runs (see that comment block) --
@@ -1781,6 +1788,35 @@ target_compile_definitions(test_mortgage_verification PRIVATE
     MORTGAGE_FINANCE_PROTO_PATH="${CMAKE_CURRENT_SOURCE_DIR}/proto/finance.proto")
 
 add_test(NAME MortgageVerificationTest COMMAND test_mortgage_verification)
+
+# PARITY PROBE for encoder_reconstruct.cppm -- the C++ port of Python's
+# reconstruct() (agent/train/encoder_corpus.py). The small-encoder assistants
+# never generate digits: the model names an operation, points at numeric spans
+# and names a MAP, and every parameter value is then computed on the serving
+# side. So the whole arithmetic surface of those assistants lives in this one
+# module, and a drift between it and the trainer's own reconstruct() is a wrong
+# answer that parses -- the documented dangerous-failure class.
+#
+# It takes a schema JSON and a fixture JSON on the command line and prints one
+# canonical line per row, so it is a PROBE rather than a ctest test for the same
+# reason smoke_client is not one: its inputs are generated artifacts, and a test
+# that fabricates them would be comparing this module against itself. The
+# comparison is driven by scripts/check_encoder_reconstruct_parity.py, which
+# holds the oracle (Python's own reconstruct on the same fixture).
+#
+# Named test_* deliberately: `build_tests` sweeps BUILDSYSTEM_TARGETS matching
+# ^test_, so the probe keeps COMPILING even though nothing runs it in ctest. A
+# probe that stops building is indistinguishable from one that was never written.
+add_executable(test_encoder_reconstruct_parity tests/encoder_reconstruct_parity.cpp)
+target_sources(test_encoder_reconstruct_parity
+    PRIVATE
+    FILE_SET CXX_MODULES FILES
+        src/modules/encoder_reconstruct.cppm
+)
+# sensen_slim carries sensen.bigdecimal (the exact fixed-point type every
+# reconstructed money value is computed in) and PUBLIC-links fastjson, whose
+# BMI both this probe and the module import.
+target_link_libraries(test_encoder_reconstruct_parity PRIVATE sensen_slim fastjson)
 
 # Proto-derived CONSTRAINED DECODING for the mortgage assistant
 # (mortgage_grammar.cppm). Same rationale as the verification blocks above:

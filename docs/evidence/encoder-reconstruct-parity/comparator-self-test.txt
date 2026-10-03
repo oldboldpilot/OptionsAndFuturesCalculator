@@ -1,0 +1,15 @@
+  ok    identical values at 38 places agree (the whole premise)
+  ok    a one-cent wrong money value is caught
+  ok    a dropped field is caught
+  ok    an invented field is caught
+  ok    a wrong operation name is caught
+  ok    a flipped convention boolean is caught
+  ok    a boolean rendered as a string is caught
+  ok    a short array is caught
+  ok    a wrong array element is caught
+  ok    a missing row is caught
+  ok    360 against 360.0 agrees (scale is not pinned)
+  ok    a difference in the 38th place alone is admitted (one ulp)
+  ok    ten ulps (1e-37) still FAILS -- the bound is one ulp, not 'small'
+
+self-test: 13 passed / 0 failed

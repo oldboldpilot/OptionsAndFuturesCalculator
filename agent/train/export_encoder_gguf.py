@@ -299,6 +299,12 @@ def main() -> int:
     w.add_string(f"{ARCH}.pooling", a.pooling)
     w.add_string(f"{ARCH}.literal_reduction", a.literal_reduction)
     w.add_string(f"{ARCH}.ffn_activation", "swiglu")
+    # sort_keys=True and the compact separators are DELIBERATE: the string must be
+    # byte-reproducible for the same schema, so two exports of one checkpoint produce
+    # identical bytes.
+    blob = json.dumps(schema, separators=(',', ':'), sort_keys=True)
+    w.add_string(f"{ARCH}.schema_json", blob)
+    print(f"[schema] schema_json = {len(blob):,} bytes ({len(schema['pairs'])} pairs, {len(schema['ops'])} ops)")
 
     def put(name: str, t: torch.Tensor) -> None:
         arr = t.detach().contiguous().to(torch.float32).numpy().astype(npdt)
@@ -339,7 +345,7 @@ def main() -> int:
     head_desc = (f"pairs={len(pairs)} (MULTI-LABEL, threshold {float(threshold):g})"
                  if a.heads == "pair" else f"slots={len(slots)} maps={len(maps)} (single-label)")
     print(f"[written] {a.out}  {size:,} bytes  arch={ARCH}  d={d} layers={n_layers} "
-          f"heads={n_heads} ffn={d_ffn} ops={n_ops} {head_desc}")
+          f"heads={n_heads} ffn={d_ffn} ops={n_ops} schema={len(blob):,} bytes {head_desc}")
     side = a.out.with_suffix(".slotmap.json")
     side.write_text(json.dumps({"heads": a.heads, "slots": slots, "maps": maps,
                                 "pairs": [list(p) for p in pairs],
