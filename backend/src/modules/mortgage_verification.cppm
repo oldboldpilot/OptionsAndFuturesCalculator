@@ -2904,7 +2904,27 @@ auto lex_numeric_literals(std::string_view text) -> std::vector<NumericLiteral> 
     std::vector<NumericLiteral> out;
 
     for (std::size_t i = 0; i < text.size();) {
-        if (!detail::is_digit(text[i])) {
+        // A LEADING-DOT DECIMAL STARTS A LITERAL, and requiring a digit here did not merely
+        // miss it -- it reported a DIFFERENT NUMBER. ".5%" lexed as 5 PERCENT and ".75%" as
+        // 75, because the scan skipped the '.' and began at the digits after it. That is a
+        // real literal, in a real field, satisfying every bound, with the rate wrong by one
+        // to two orders of magnitude, so only the user's own utterance falsifies it -- the
+        // documented dangerous-failure class, reached by typing a rate the way a spreadsheet
+        // does. Same family as the em dash below: a character the lexer passes over silently
+        // changes the value it reports.
+        //
+        // Found on 2026-10-02 from the PYTHON side (agent/train/encoder_corpus.py had the
+        // identical hole), where a TRAINED format-augmentation scored 100.00% row error on
+        // all three seeds -- a trained case failing deterministically is a lexer bug.
+        //
+        // The two lookbehind clauses are what keep it narrow: a '.' preceded by a digit is
+        // the decimal point of the literal the fractional branch below is already consuming
+        // ("495,000.00"), and a '.' preceded by a '.' cannot begin a number. Together they
+        // leave "3.5.2" as {3.5, 2} rather than inventing a 0.2.
+        const bool leading_dot = text[i] == '.' && i + 1 < text.size() &&
+                                 detail::is_digit(text[i + 1]) &&
+                                 (i == 0 || (!detail::is_digit(text[i - 1]) && text[i - 1] != '.'));
+        if (!detail::is_digit(text[i]) && !leading_dot) {
             ++i;
             continue;
         }
@@ -2923,7 +2943,9 @@ auto lex_numeric_literals(std::string_view text) -> std::vector<NumericLiteral> 
         // Integer part, consuming thousands separators as NOTATION: a comma
         // counts only when it sits between a digit and exactly three more
         // digits, so "1,356,200" is one literal and "2, 3" is two.
-        std::string digits;
+        // SEEDED WITH "0" FOR A LEADING-DOT LITERAL, because parse_strict_decimal below is
+        // strict and refuses ".5": the integer part has to be supplied, not left empty.
+        std::string digits = leading_dot ? std::string{"0"} : std::string{};
         while (i < text.size()) {
             if (detail::is_digit(text[i])) {
                 digits += text[i];

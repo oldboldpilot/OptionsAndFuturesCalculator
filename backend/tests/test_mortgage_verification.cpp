@@ -2115,6 +2115,119 @@ auto main() -> int {
         check(both, "an em dash followed by an explicitly signed -1000 still lexes negative");
     }
 
+
+    // =======================================================================
+    section("A leading-dot decimal is a FRACTION, not the digits after the dot");
+    // =======================================================================
+    // The sibling of the em dash above, and worse in the same way: the lexer
+    // did not MISS these literals, it reported a DIFFERENT NUMBER.
+    //
+    //   ".5% per month"   -> lexed 5    -> five percent, not half a percent
+    //   ".75% per month"  -> lexed 75   -> seventy-five percent
+    //
+    // `lex_numeric_literals` began a literal only at a digit, so the '.' was
+    // skipped and the scan started after it. A real literal, in a real field,
+    // satisfying every bound, with the rate wrong by one to two orders of
+    // magnitude -- so nothing downstream can refuse it and only the user's own
+    // utterance falsifies it. Typing a rate the way a spreadsheet does is not
+    // exotic.
+    //
+    // FOUND FROM THE PYTHON SIDE. agent/train/encoder_corpus.py's `_NUM` had
+    // the identical hole, and its format probe exposed it because
+    // "'0.5%' -> '.5%' (leading dot)" is a TRAINED augmentation that scored
+    // 100.00% row error on all three retrain seeds. A trained case failing
+    // deterministically is a lexer or labelling bug, never a model weakness --
+    // and it also meant that rewrite taught the model nothing while reading
+    // like coverage.
+    //
+    // BOTH DIRECTIONS, because the fix widens an entry condition and a wider
+    // entry can invent literals that are not there.
+    {
+        // 1. the value is the FRACTION, and it is tagged a percent
+        for (const auto& [text, want, why] :
+             std::vector<std::tuple<std::string, std::string, std::string>>{
+                 {"a monthly rate of .5% on the balance", "0.5", ".5% lexes as 0.5, not 5"},
+                 {"a monthly rate of .75% on the balance", "0.75", ".75% lexes as 0.75, not 75"},
+                 {"interest of .125% per month", "0.125", ".125% lexes as 0.125, not 125"}}) {
+            const auto lits = mv::lex_numeric_literals(text);
+            bool saw_fraction = false;
+            bool saw_integer = false;
+            bool tagged_percent = false;
+            for (const auto& l : lits) {
+                const std::string v = l.value.to_string();
+                if (v.rfind(want, 0) == 0) {
+                    saw_fraction = true;
+                    tagged_percent = l.tag == mv::LiteralTag::Percent;
+                }
+                // the defect's own signature: the digits after the dot as a whole number
+                if (v.rfind(want.substr(2), 0) == 0 && v.find('.') == want.substr(2).size()) {
+                    saw_integer = true;
+                }
+            }
+            check(saw_fraction, why);
+            check(!saw_integer, "and the whole-number reading is GONE: " + text);
+            check(tagged_percent, "and it still carries LiteralTag::Percent: " + text);
+        }
+
+        // 2. IT GROUNDS. The point of the fix is not the lexer in isolation: a
+        // model that correctly emits 0.005 for ".5% per month" was REFUSED
+        // before, because 0.005 is not derivable from a literal of 5.
+        {
+            // The PER-PERIOD rate field, because M3 maps annual -> per-period and there
+            // is no monthly -> annual map to carry 0.5%/month up to 6%/year. A first
+            // version of this check asserted that map and failed, which is the check
+            // being wrong about the gate rather than the gate being wrong.
+            const std::string utt =
+                "What is the payment on a $300,000 loan at .5% per month over 360 months?";
+            auto ok = params("ComputePayment", {{"rate", "0.005"},
+                                                {"periods", "360"},
+                                                {"present_value", "300000.00"}});
+            auto v = mv::ground_emitted_values(ok, utt);
+            check(v.outcome == mv::Outcome::Proven,
+                  "a per-period 0.005 grounds against a stated .5%: " + v.message);
+        }
+
+        // 3. THE GUARDS THE FIX MUST NOT HAVE REMOVED. A '.' that is not the
+        // start of a number must still begin nothing, or the lexer invents
+        // literals -- which is the same class of defect in the other
+        // direction.
+        {
+            // a decimal point already owned by the literal before it
+            const auto money = mv::lex_numeric_literals("paid $495,000.00 in total");
+            std::string seen;
+            for (const auto& l : money) { seen += " " + l.value.to_string().substr(0, 14); }
+            // The VALUE, not its spelling: BigDecimal::to_string normalises 495000.00 to
+            // "495000", so an assertion pinning the trailing zeros fails on a correct
+            // literal -- this file's own rule about not pinning a digit count.
+            check(money.size() == 1 && money[0].value.to_string().rfind("495000", 0) == 0,
+                  "$495,000.00 is still ONE literal, not 495,000 plus 0.00 (got" + seen + ")");
+
+            // a dotted triple must not grow a third literal out of the second dot
+            const auto triple = mv::lex_numeric_literals("release 3.5.2 shipped");
+            bool invented = false;
+            for (const auto& l : triple) {
+                if (l.value.to_string().rfind("0.2", 0) == 0) { invented = true; }
+            }
+            check(!invented, "3.5.2 does not invent a 0.2 out of the second dot");
+
+            // a sentence-ending period followed by a space and a digit is not a decimal
+            const auto sentence = mv::lex_numeric_literals("costs 5. 25 years remain");
+            bool joined = false;
+            for (const auto& l : sentence) {
+                if (l.value.to_string().rfind("0.25", 0) == 0) { joined = true; }
+            }
+            check(!joined, "'5. 25' does not become 0.25 (a space is not part of a decimal)");
+
+            // and an ordinary decimal is untouched
+            const auto plain = mv::lex_numeric_literals("a rate of 0.5% per month");
+            bool half = false;
+            for (const auto& l : plain) {
+                if (l.value.to_string().rfind("0.5", 0) == 0) { half = true; }
+            }
+            check(half, "0.5% is unchanged by the fix");
+        }
+    }
+
     // =======================================================================
     section("A field the user never stated is a QUESTION, not a refusal");
     // =======================================================================
