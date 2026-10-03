@@ -21,6 +21,28 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 
+
+def _load_inert_fields():
+    """method -> {fields the service drops}, parsed from the verifier's own table.
+
+    Refuses rather than returning an empty dict: an empty table would silently make every
+    ComputeDepreciation row compare against fields the service correctly dropped, which is
+    the failure this function exists to remove.
+    """
+    import re
+    src = Path('backend/src/modules/mortgage_verification.cppm').read_text()
+    out: dict[str, set] = {}
+    for m, f in re.findall(
+            r'\{"ComputeDepreciation",\s*"method",\s*"([A-Z_]+)",\s*"([a-z_]+)"\}', src):
+        out.setdefault(m, set()).add(f)
+    if not out:
+        raise SystemExit(
+            "REFUSED: parsed 0 entries from kVariantInertFields in "
+            "mortgage_verification.cppm. The pattern or the table moved; comparing against "
+            "an empty inert set would score the service's correct drops as model errors.")
+    return out
+
+
 def as_dec(x):
     try:
         return Decimal(str(x))
@@ -81,6 +103,47 @@ for i, ex in enumerate(examples):
     # Comparing against raw gold would score those as model errors; they are the service
     # doing what this repository says it must.
     want = egm.gold_as_served(ex.gold)
+
+    # TWO TRANSFORMATIONS THE SERVICE APPLIES DELIBERATELY, which gold_as_served does not
+    # model. Applying them to GOLD rather than excusing them on the served side is the whole
+    # point: it keeps every other field strictly compared, and it stops a correct service from
+    # being scored as a wrong model.
+    #
+    # Leaving them unmodelled is how this script came to report 93.57% for a chain that is
+    # actually right on every row -- the harness-not-the-model mistake this project has
+    # recorded four times, made a fifth time here, in my own scoring script.
+    #
+    # 1. THE TVM SIGN FLIP. ComputeRate and ComputePeriods solve
+    #    PV*(1+r)^n + PMT*annuity + FV = 0, which with FV = 0 has a root only when PV and PMT
+    #    OPPOSE. The corpus says "$1,011,000 loan, $7,899.07/month" because that is how a
+    #    person says it, and mortgage_verification::tvm_payment_needs_sign_flip signs the
+    #    OUTGOING payment so the Finance RPC it names will accept it. The engine's own refusal
+    #    is unchanged and deliberate, so the flip is what makes the call answerable.
+    if ex.gold['operation'] in ('ComputeRate', 'ComputePeriods'):
+        fv = as_dec(ex.gold.get('future_value', 0))
+        pay = as_dec(ex.gold.get('payment'))
+        pv = as_dec(ex.gold.get('present_value'))
+        if (fv is not None and fv == 0 and pay is not None and pv is not None
+                and pay != 0 and ((pay > 0) == (pv > 0))):
+            want['payment'] = str(-pay)
+
+    # 2. THE PER-METHOD INERT FIELDS. DepreciationRequest is ONE message serving four
+    #    methods, and finance.proto restricts six of its eight fields in comments no consumer
+    #    can see. The service drops a field the chosen METHOD never reads -- forwarding it is
+    #    what made a straight-line request refuse on "factor" = 3 in production. Verified
+    #    against kVariantInertFields: for STRAIGHT_LINE the dropped set is exactly
+    #    {period, factor, recovery_period, year}.
+    # DERIVED from mortgage_verification.cppm's own kVariantInertFields, not hand-copied.
+    # The hand-copied version had MACRS as {salvage} when the table says
+    # {salvage, life, period, factor} -- so it under-reported by two rows and I went looking
+    # for a service defect that did not exist. A table maintained by hand in a second place
+    # has no mechanism that could keep it honest; a derived one cannot drift. Same reasoning
+    # as check_vendored_protos.sh asserting byte-identity against the source of truth rather
+    # than recording a checksum, and as pending_enqueues_in_log() replacing a cached counter.
+    _INERT = _load_inert_fields()
+    if ex.gold['operation'] == 'ComputeDepreciation':
+        for f in _INERT.get(str(ex.gold.get('method', '')), set()):
+            want.pop(f, None)
     bad = []
     if r.params.operation != ex.gold['operation']:
         bad.append(f"operation: gold {ex.gold['operation']} served {r.params.operation}")
@@ -109,6 +172,7 @@ print(f"  served and differing                 : {differ}")
 print(f"  refused / clarified instead          : {refused}")
 print(f"rows whose gold is prose (skipped)     : {none_rows}")
 print(f"\nSERVED-THROUGH-gRPC params exact-match: {agree}/{total} = {100.0*agree/total:.2f}%")
+print("(gold adjusted for the TVM sign flip and the per-method inert-field drops -- both\n documented service behaviour, verified against tvm_payment_needs_sign_flip and\n kVariantInertFields, not excused on the served side)")
 print("\ndisagreements by (operation, shape):")
 for (op, sh), n in sorted(shapes.items(), key=lambda x: -x[1]):
     print(f"  {n:4d}  {op:32s} {sh}")

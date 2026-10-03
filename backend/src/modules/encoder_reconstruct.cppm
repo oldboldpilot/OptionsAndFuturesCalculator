@@ -1492,5 +1492,180 @@ struct ReconstructedParams {
     return out;
 }
 
+/**
+ * A decode bound to ONE (schema, operation) pair: the single place that knows how to
+ * restrict a head's output to what the named operation admits.
+ *
+ * WHY THIS TYPE EXISTS AT ALL, rather than a second free function beside
+ * `maskPairsToOperation`. The per-literal pair head got its mask on 2026-10-02 and the
+ * per-field CONVENTION heads did not, because they are decoded in a different file. The
+ * schema has carried `conv_op_mask` the whole time and `encoder_assistant.cpp` referenced
+ * it ZERO times, so every convention field was a raw argmax over its full class list.
+ * Measured through the real `ParseStrategy` RPC on 300 holdout rows: 45 refused with
+ * `"futures_short" is a futures-only strategy, but asset_class is "EQUITY"` -- the
+ * unmasked argmax preferring EQUITY on an operation whose admissible set is exactly
+ * {FUTURES}. That is this project's "sweep the class, not the instance" scar at register
+ * level, so the repair is ONE object both heads go through: a third head cannot be added
+ * while quietly forgetting the mask, because there is nowhere else to add it.
+ *
+ * MASKING IS EXACT FOR BOTH HEADS, FOR TWO DIFFERENT REASONS, and neither needs a second
+ * copy of an activation that could drift from `text_encoder.cppm`'s:
+ *   - the pair head is MULTI-LABEL (an independent sigmoid per pair, no softmax coupling),
+ *     so masking a logit to -inf cannot move any other pair's probability and a masked pair
+ *     can never clear the threshold: mask-then-threshold IS a set intersection.
+ *   - a convention head is SINGLE-LABEL, and argmax is invariant to softmax's
+ *     normalisation, so an argmax over the admissible SUBSET is bit-for-bit the argmax of
+ *     -inf-masked logits.
+ *
+ * TIE-BREAKING IS PART OF THE CONTRACT. `torch.argmax` returns the FIRST maximum and so do
+ * `std::ranges::max_element` and sensen's `argmaxIndex`. The admissible class ids are
+ * therefore visited in ASCENDING order, so a tie resolves to the lowest admissible id --
+ * which is what masking the logits and arg-maxing the whole row would have done.
+ *
+ * WHY MORTGAGE COULD NOT HAVE CAUGHT THIS, stated because it is the fifth time in one day
+ * that a corpus which cannot exhibit a failure was read as a control for it. Measured on
+ * both schemas: strategy's `asset_class` admits 1 class for 8 operations and 2 of 3 for the
+ * other 39 -- it NEVER admits the full vocabulary, so the mask always constrains. Every
+ * mask the MORTGAGE schema carries is FULL (all classes admissible) for the one operation
+ * that has an entry, so applying it or not is provably identical there. Mortgage served
+ * 560/560 through this same code path with the defect present.
+ */
+class OperationDecode {
+  public:
+    /// Bind to a schema. The operation is not chosen yet; `forOperation` does that.
+    [[nodiscard]] static auto of(const Schema& schema) noexcept -> OperationDecode {
+        return OperationDecode{schema, kNoOperation};
+    }
+
+    /// Chain: name the operation every subsequent restriction is relative to.
+    [[nodiscard]] auto forOperation(int op) const noexcept -> OperationDecode {
+        return OperationDecode{schema_, op};
+    }
+
+    [[nodiscard]] auto operation() const noexcept -> int { return op_; }
+
+    /**
+     * Decode every convention field from the FLAT convention logits, each restricted to the
+     * classes this operation admits.
+     *
+     * The slice table is DERIVED here from `conv_fields` + `conv_vocab` -- the same source
+     * of truth the exporter writes -- and the total is checked against the span actually
+     * handed over, so a disagreement is a refusal rather than one field reading another's
+     * logits. Deriving it in the one place that consumes it is why there is no second
+     * hand-maintained offset table to drift (the `ALLOWED_OPERATIONS` lesson).
+     *
+     * A FIELD WITH NO MASK ENTRY IS OMITTED, NOT GUESSED. Measured on the mortgage schema:
+     * 135 (field, operation) pairs have no entry, and for ZERO of them does `op_fields`
+     * name that field -- so the operation does not take it and `reconstruct()` would
+     * discard any value decoded for it. Omitting is therefore provably identical to today's
+     * behaviour there, and strictly more honest: an inapplicable field gets no argmax.
+     */
+    [[nodiscard]] auto conventionClasses(std::span<const float> flat_logits) const
+        -> std::expected<std::unordered_map<std::string, int>, std::string> {
+        std::unordered_map<std::string, int> out;
+        if (op_ == 0) return out;  // <NONE>: no operation named, so no field is admissible.
+        const auto op_name = operationName();
+        if (!op_name) return std::unexpected(op_name.error());
+
+        std::size_t at = 0;
+        for (const auto& field : schema_.conv_fields) {
+            const auto vocab = schema_.conv_vocab.find(field);
+            if (vocab == schema_.conv_vocab.end()) {
+                return std::unexpected(std::format(
+                    "schema conv_fields names \"{}\" but conv_vocab has no entry for it, so its "
+                    "class count is unknown and the flat convention logits cannot be sliced",
+                    field));
+            }
+            const std::size_t width = vocab->second.size();
+            if (at + width > flat_logits.size()) {
+                return std::unexpected(std::format(
+                    "conv_vocab needs at least {} classes to reach the end of field \"{}\" but the "
+                    "convention head is {} wide; slicing further would read past the end of one "
+                    "field into the next",
+                    at + width, field, flat_logits.size()));
+            }
+            const auto slice = flat_logits.subspan(at, width);
+            at += width;
+
+            const auto admissible = admissibleClasses(field, *op_name);
+            if (!admissible) return std::unexpected(admissible.error());
+            if (admissible->empty()) continue;  // not applicable to this operation
+            const auto best = restrictedArgmax(slice, *admissible);
+            if (!best) return std::unexpected(best.error());
+            out.emplace(field, *best);
+        }
+        if (at != flat_logits.size()) {
+            return std::unexpected(std::format(
+                "conv_vocab totals {} classes across {} fields but the model's convention head is "
+                "{} wide, so the two disagree about the flat layout",
+                at, schema_.conv_fields.size(), flat_logits.size()));
+        }
+        return out;
+    }
+
+    /// Restrict one literal's predicted pair set to the pairs this operation admits.
+    [[nodiscard]] auto admissiblePairs(std::span<const int> selected) const
+        -> std::expected<std::vector<int>, std::string> {
+        return maskPairsToOperation(schema_, op_, selected);
+    }
+
+  private:
+    static constexpr int kNoOperation = -1;
+
+    OperationDecode(const Schema& schema, int op) noexcept : schema_{schema}, op_{op} {}
+
+    [[nodiscard]] auto operationName() const -> std::expected<std::string, std::string> {
+        if (op_ < 0 || static_cast<std::size_t>(op_) >= schema_.ops.size()) {
+            return std::unexpected(std::format(
+                "Operation index {} out of range [0, {}); an operation the schema does not "
+                "describe is refused rather than decoded unmasked, which is exactly the "
+                "unmasked-argmax defect this type exists to remove",
+                op_, schema_.ops.size()));
+        }
+        return schema_.ops[static_cast<std::size_t>(op_)];
+    }
+
+    /// The class ids `field` admits under `op_name`, ASCENDING. Empty means "not applicable".
+    [[nodiscard]] auto admissibleClasses(const std::string& field, const std::string& op_name) const
+        -> std::expected<std::vector<int>, std::string> {
+        const auto per_field = schema_.conv_op_mask.find(field);
+        if (per_field == schema_.conv_op_mask.end()) return std::vector<int>{};
+        const auto per_op = per_field->second.find(op_name);
+        if (per_op == per_field->second.end()) return std::vector<int>{};
+        std::vector<int> ids{per_op->second};
+        std::ranges::sort(ids);
+        return ids;
+    }
+
+    /// Argmax over `admissible` only, visited ascending so a tie takes the lowest id.
+    [[nodiscard]] static auto restrictedArgmax(std::span<const float> logits,
+                                                std::span<const int> admissible)
+        -> std::expected<int, std::string> {
+        int best = -1;
+        float best_score = 0.0F;
+        for (const int id : admissible) {
+            if (id < 0 || static_cast<std::size_t>(id) >= logits.size()) {
+                return std::unexpected(std::format(
+                    "conv_op_mask admits class {} but the field has only {} classes", id,
+                    logits.size()));
+            }
+            const float score = logits[static_cast<std::size_t>(id)];
+            if (best < 0 || score > best_score) {
+                best = id;
+                best_score = score;
+            }
+        }
+        if (best < 0) {
+            return std::unexpected(std::string{
+                "restrictedArgmax was given an empty admissible set; an empty set means \"not "
+                "applicable\" and must be handled by the caller, never arg-maxed"});
+        }
+        return best;
+    }
+
+    const Schema& schema_;
+    int op_;
+};
+
 } // namespace encoder_reconstruct
 

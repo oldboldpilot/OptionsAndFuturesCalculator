@@ -80,6 +80,19 @@ namespace mv = mortgage_calculator::assistant::verify;
 /** One parsed utterance: the operation the model named and the parameters derived for it. */
 struct Parsed {
     std::string operation;
+    /**
+     * The schema's own name for the operation key -- `operation` on the mortgage surface,
+     * `strategy` on the options one.
+     *
+     * CARRIED RATHER THAN HARDCODED, because hardcoding it worked on one surface and silently
+     * failed on the other. `to_json()` emitted `"operation"` unconditionally; the mortgage
+     * schema's op_key IS `operation`, so it matched by coincidence, while the strategy
+     * service refused every single request with "The assistant did not name a strategy" --
+     * its own pre-existing refusal, firing because the key it looks for was absent. The
+     * params themselves were perfect in the log. A key that is right for one schema and
+     * wrong for another is the four-tables defect at field-name scale.
+     */
+    std::string op_key{"operation"};
     /// Rendered as the wire renders them: decimal strings for numbers, "true"/"false" for a
     /// boolean convention, and a JSON array FLATTENED INTO A STRING for an array-valued field
     /// -- which is the wire form, because `FinanceParams.params` is a protobuf
@@ -149,9 +162,11 @@ class EncoderAssistant {
     std::unique_ptr<sensen::text_encoder::TextEncoder> encoder_;
     encoder_reconstruct::Schema schema_;
     std::size_t vocab_size_{0};
-    /// Parallel to schema_.conv_fields: where each field's classes start in the flat logits.
-    std::vector<std::size_t> conv_offset_;
-    std::vector<std::size_t> conv_width_;
+    // The flat convention layout is DERIVED where it is consumed, by
+    // `encoder_reconstruct::OperationDecode`, from the same conv_fields + conv_vocab the
+    // exporter writes -- so there is no second offset table here to drift from it. `create`
+    // still asserts the total against the model's own head width at LOAD time, which is
+    // earlier than the first parse and is the only check a never-parsed model gets.
 };
 
 }  // namespace encoder_assistant

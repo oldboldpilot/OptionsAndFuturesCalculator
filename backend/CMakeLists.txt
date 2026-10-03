@@ -1819,6 +1819,21 @@ target_sources(test_encoder_reconstruct_parity
 # BMI both this probe and the module import.
 target_link_libraries(test_encoder_reconstruct_parity PRIVATE sensen_slim fastjson)
 
+# GATE for the per-operation mask both model heads are decoded through. Unlike the parity
+# probe above this one needs no fixture, no model and no engine -- the rules are properties
+# of the schema -- so it is REGISTERED with ctest and runs on every build. That matters
+# because the defect it pins (the convention heads decoded unmasked) was invisible to every
+# accuracy number the project had: the mortgage corpus's masks are all no-ops, so it served
+# 560/560 with the bug, and only the strategy corpus could exhibit it.
+add_executable(test_encoder_operation_decode tests/test_encoder_operation_decode.cpp)
+target_sources(test_encoder_operation_decode
+    PRIVATE
+    FILE_SET CXX_MODULES FILES
+        src/modules/encoder_reconstruct.cppm
+)
+target_link_libraries(test_encoder_operation_decode PRIVATE sensen_slim fastjson)
+add_test(NAME EncoderOperationDecodeTest COMMAND test_encoder_operation_decode)
+
 # PARITY PROBE for sensen's WordPiece tokenizer against the encoder trainer's.
 #
 # The encoder's per-literal heads point AT a numeric literal, and a literal is matched
@@ -2195,6 +2210,9 @@ target_link_libraries(calculator_engine PRIVATE PostgreSQL::PostgreSQL)
 add_executable(test_assistant_service
     tests/test_assistant_service.cpp
     src/modules/assistant_service.cpp
+    # The strategy ENCODER backend: assistant_service.cpp imports it unconditionally
+    # (ASSISTANT_MODEL selects at RUNTIME), so this target cannot compile without it.
+    src/modules/encoder_assistant.cpp
     src/modules/quota.cpp
     src/modules/api_key.cpp
     src/modules/inference_queue.cpp
@@ -2219,6 +2237,12 @@ target_sources(test_assistant_service
         # module is not a header and does not come along with the .cpp.
         src/modules/sgee_queue_client.cppm
         src/modules/inference_admission.cppm
+        # Same rule as sgee_queue_client above: encoder_assistant.cppm imports
+        # encoder_reconstruct and mortgage_verification (its lexer), so every target
+        # compiling the service needs all three in its OWN file set.
+        src/modules/encoder_reconstruct.cppm
+        src/modules/mortgage_verification.cppm
+        src/modules/encoder_assistant.cppm
 )
 target_link_libraries(test_assistant_service PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto sgee PostgreSQL::PostgreSQL)
 

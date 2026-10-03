@@ -172,7 +172,7 @@ namespace {
 }  // namespace
 
 auto Parsed::to_json() const -> std::string {
-    std::string out = "{\"operation\":\"" + escape_json(operation) + "\"";
+    std::string out = "{\"" + escape_json(op_key) + "\":\"" + escape_json(operation) + "\"";
     for (const auto& [k, v] : params) {
         out += ",\"" + escape_json(k) + "\":";
         // A boolean is a JSON boolean and an array is a JSON array: the service's reader
@@ -236,8 +236,6 @@ auto EncoderAssistant::fromGguf(const std::filesystem::path& path)
                 "schema conv_fields names '{}' but conv_vocab has no entry for it, so its class "
                 "count is unknown and the flat convention logits cannot be sliced", f));
         }
-        self->conv_offset_.push_back(at);
-        self->conv_width_.push_back(it->second.size());
         at += it->second.size();
     }
     if (at != self->encoder_->config().n_conventions) {
@@ -281,13 +279,18 @@ auto EncoderAssistant::parse(std::string_view utterance) const
     // 4. CONVENTION CLASSES. Slice the flat logits and take an argmax per field. A field
     //    whose argmax the schema cannot name is REFUSED rather than dropped -- dropping it
     //    would silently fall back to const_default and look like a correct answer.
+    //    THE PER-OPERATION MASK IS NOT OPTIONAL HERE. A raw argmax over a field's full
+    //    class list was what this code did until 2026-10-03, and it cost 45 of 300 holdout
+    //    rows through the real RPC: strategy's `asset_class` admits exactly {FUTURES} for
+    //    the eight futures-only operations, and the unmasked argmax preferred EQUITY, so
+    //    GP-ARA refused a self-contradictory parse the model had never actually made. Both
+    //    heads now go through one `OperationDecode`, so neither can be decoded unmasked.
+    const auto decode = encoder_reconstruct::OperationDecode::of(schema_).forOperation(op);
     std::unordered_map<std::string, int> conv;
     if (out->has_conventions) {
-        for (std::size_t f = 0; f < schema_.conv_fields.size(); ++f) {
-            const std::span<const float> slice{out->convention_logits.data() + conv_offset_[f],
-                                               conv_width_[f]};
-            conv[schema_.conv_fields[f]] = static_cast<int>(argmax(slice));
-        }
+        auto classes = decode.conventionClasses(out->convention_logits);
+        if (!classes) return std::unexpected(std::format("conventions: {}", classes.error()));
+        conv = std::move(*classes);
     }
 
     // 5. MASK. sensen decodes the pair head mask-free by design, so restricting each
@@ -298,8 +301,7 @@ auto EncoderAssistant::parse(std::string_view utterance) const
         std::vector<int> selected;
         selected.reserve(lp.pairs.size());
         for (const auto p : lp.pairs) selected.push_back(static_cast<int>(p));
-        auto masked = encoder_reconstruct::maskPairsToOperation(schema_, op,
-                                                               std::span<const int>(selected));
+        auto masked = decode.admissiblePairs(std::span<const int>(selected));
         if (!masked) return std::unexpected(std::format("pair mask: {}", masked.error()));
         lit_pairs.push_back(std::move(*masked));
     }
@@ -339,6 +341,7 @@ auto EncoderAssistant::parse(std::string_view utterance) const
 
     Parsed parsed;
     parsed.operation = (*rec)->operation;
+    parsed.op_key = schema_.op_key;
     for (const auto& [key, fval] : (*rec)->fields) {
         if (fval.is_missing()) continue;
         if (fval.is_string()) {

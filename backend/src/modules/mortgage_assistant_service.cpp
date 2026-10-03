@@ -3221,7 +3221,10 @@ auto apply_tvm_sign_convention(std::string_view operation,
         return out.empty() ? std::string{"0"} : out;
     };
 
-    std::string json = "{\"operation\":\"" + parsed.operation + "\"";
+    // The schema's own op_key, not the literal "operation": it is `operation` on this
+    // surface and `strategy` on the options one, and hardcoding it is what made the strategy
+    // service refuse every request while its params were correct in the log.
+    std::string json = "{\"" + parsed.op_key + "\":\"" + parsed.operation + "\"";
     for (const auto& [key, value] : parsed.params) {
         const auto* field = op == nullptr ? nullptr : find_field(*op, key);
         json += ",\"" + key + "\":";

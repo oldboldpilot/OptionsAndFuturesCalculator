@@ -42,6 +42,7 @@ import api_key;
 import strategy_catalogue;
 import market_data;
 import assistant_verification;
+import encoder_assistant;
 import inference_admission;
 import inference_queue;
 import sgee_queue_client;
@@ -1447,7 +1448,21 @@ class AssistantWorker {
         // Either this replica can execute (backend_), or it can submit to a
         // shared queue that will (admission_ in submit-only mode). Both are
         // immutable after construction, so no synchronization is needed.
-        return backend_ != nullptr || admission_ != nullptr;
+        // encoder_ is listed HERE as well as in local_model_loaded(), and listing it in only
+        // one of them is a defect with a measured cost: on the mortgage service the boot
+        // banner printed "model is LOADED" while every single RPC answered "not available
+        // right now" -- a health signal from the wrong layer, across all 600 holdout rows.
+        return backend_ != nullptr || encoder_ != nullptr || admission_ != nullptr;
+    }
+
+    /**
+     * The small bidirectional ENCODER, when ASSISTANT_MODEL=encoder selected it. nullptr on
+     * the default decoder path. Asked for one engine and unable to provide it, this assistant
+     * is UNAVAILABLE rather than quietly served by the other -- the ASSISTANT_BACKEND=llamacpp
+     * rule, which exists because every gate in this repository is defined on one path.
+     */
+    [[nodiscard]] auto encoder() const noexcept -> const encoder_assistant::EncoderAssistant* {
+        return encoder_.get();
     }
 
     /**
@@ -1462,7 +1477,7 @@ class AssistantWorker {
      * health signal this project has been bitten by before.
      */
     [[nodiscard]] auto local_model_loaded() const noexcept -> bool {
-        return backend_ != nullptr;
+        return backend_ != nullptr || encoder_ != nullptr;
     }
 
     [[nodiscard]] auto submit(std::string prompt) -> std::optional<InferenceOutcome> {
@@ -1493,6 +1508,67 @@ class AssistantWorker {
 
   private:
     AssistantWorker() {
+        // ------------------------------------------------------------------------------
+        // WHICH MODEL SERVES THE STRATEGY SURFACE: the ~0.6B decoder, or the ~0.7M encoder.
+        //
+        //     ASSISTANT_MODEL = qwen3 (default) | encoder
+        //
+        // A SEPARATE VARIABLE FROM `ASSISTANT_BACKEND`, deliberately, and the distinction is
+        // not cosmetic: ASSISTANT_BACKEND chooses the DECODE ENGINE (sensen | llamacpp) for
+        // the decoder, and this chooses the MODEL CLASS. Overloading one variable with both
+        // would make `ASSISTANT_BACKEND=llamacpp` and `=encoder` look like alternatives when
+        // one names an engine for a model the other replaces entirely.
+        //
+        // DEFAULTS TO qwen3, so deploying this binary changes nothing until an operator asks.
+        // An unrecognised value STOPS THE PROCESS rather than reading as the default -- the
+        // MORTGAGE_WEIGHT_STORE rule -- and the parsed value is LOGGED, because
+        // MORTGAGE_RESTRICTED_PROJECTION compared case-sensitively and read `False` and `OFF`
+        // as ON. Compared case-insensitively here for the same reason.
+        //
+        // STRATEGY_ENCODER_PATH does NOT fall back to MODEL_PATH: that names the DECODER's
+        // weights, and handing a 639 MB Qwen3 GGUF to the encoder loader would refuse at best.
+        auto& log = logger::Logger::getInstance();
+        const auto model_choice = env_string("ASSISTANT_MODEL");
+        std::string wanted = model_choice.value_or("qwen3");
+        std::ranges::transform(wanted, wanted.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (wanted != "qwen3" && wanted != "encoder") {
+            log.error(std::format(
+                "ASSISTANT_MODEL=\"{}\" is not recognised. Use \"qwen3\" (the fine-tuned "
+                "decoder, the default) or \"encoder\" (the small bidirectional encoder). "
+                "Refusing to start rather than defaulting: a typo here would serve the model "
+                "you meant to replace.",
+                *model_choice));
+            std::exit(1);
+        }
+        log.info(std::format("Strategy assistant model: ASSISTANT_MODEL={}", wanted));
+
+        if (wanted == "encoder") {
+            const auto enc_path = env_string("STRATEGY_ENCODER_PATH");
+            if (!enc_path.has_value()) {
+                log.warn("ASSISTANT_MODEL=encoder but STRATEGY_ENCODER_PATH is not set -- the "
+                         "strategy assistant will return a Refusal on every call. It is NOT "
+                         "served by the Qwen3 path instead: asked for one engine and unable to "
+                         "provide it, this assistant is unavailable.");
+                return;
+            }
+            auto built = encoder_assistant::EncoderAssistant::fromGguf(*enc_path);
+            if (!built) {
+                log.error(std::format(
+                    "The strategy ENCODER failed to load from STRATEGY_ENCODER_PATH ({}): {}. "
+                    "The assistant is unavailable; every other service is unaffected.",
+                    *enc_path, built.error()));
+                return;
+            }
+            encoder_ = std::move(*built);
+            log.info(std::format(
+                "Strategy ENCODER assistant ready: backend=sensen device=cpu, {} operations, {} "
+                "(slot,map) pairs, {} convention fields, vocab {}",
+                encoder_->operation_count(), encoder_->pair_count(),
+                encoder_->convention_fields(), encoder_->vocab_size()));
+            return;
+        }
+
         const auto path = env_string("MODEL_PATH");
         if (!path.has_value()) {
             // No weights here -- still a supported image, and no longer
@@ -1852,6 +1928,10 @@ class AssistantWorker {
     }
 
     std::unique_ptr<QueuedBackend> backend_;
+    /// Non-null only on ASSISTANT_MODEL=encoder. Loaded once then const, so parse() is safe
+    /// from several threads -- unlike the decoder, whose generate() cannot be called
+    /// concurrently because FeedForwardNetwork holds mutable scratch per instance.
+    std::unique_ptr<encoder_assistant::EncoderAssistant> encoder_;
     std::shared_ptr<pg::Pool> pool_;
     std::shared_ptr<inference_queue::Queue> queue_;
     std::shared_ptr<inference_admission::LeaseSource> lease_source_;
@@ -2276,6 +2356,65 @@ enum class SymbolProbeOutcome { Resolved, Unknown, AssetClassMismatch, ProviderU
  * `probe_symbol` ever see the symbol. Everything else in this function is
  * unaffected by them.
  */
+/**
+ * The strategy fields this validator reads as a JSON NUMBER rather than a string.
+ *
+ * WHY A TABLE AND NOT A GUESS. `validate_and_populate_params` below asks
+ * `obj["expiration_days"].is_number()` and `obj["symbol"].is_string()`, so the JSON TYPE of
+ * each field is a fact about THIS function, and a renderer that emits every value as a string
+ * is refused by it. That is not hypothetical: the encoder's first wiring emitted strings
+ * throughout and every one of 120 holdout rows came back "The assistant did not give an
+ * expiration for this request" while the params in the log were correct.
+ *
+ * IT IS GATED, because a hand-kept list in the same file as the checks it mirrors is still a
+ * second copy -- and a second copy of a table is how this project lost two rows to a MACRS
+ * inert-field set that said {salvage} where the real one says {salvage, life, period, factor}.
+ * scripts/check_strategy_numeric_fields.sh re-derives this set from the `is_number()` calls
+ * below and fails the build when the two disagree.
+ */
+inline constexpr std::array<std::string_view, 3> kStrategyNumericFields{
+    "expiration_days",
+    "far_expiration_days",
+    "quantity",
+};
+
+/**
+ * Render the ENCODER's parsed params as the JSON `validate_and_populate_params` reads.
+ *
+ * The op key comes from the SCHEMA (`strategy` here, `operation` on the mortgage surface) --
+ * hardcoding it is what made this service refuse every request with its own
+ * "did not name a strategy" message while the chain's answer was right.
+ *
+ * Trailing zeros are trimmed: BigDecimal::to_string() emits 38 fractional places, and
+ * `expiration_days` is a day count that must satisfy `is_number()` and then an int64 read.
+ */
+[[nodiscard]] auto encoder_params_to_json(const encoder_assistant::Parsed& parsed) -> std::string {
+    const auto trim = [](std::string_view text) -> std::string {
+        std::string out{text};
+        if (const auto dot = out.find('.'); dot != std::string::npos) {
+            if (out.size() - dot - 1 > 15) out.resize(dot + 1 + 15);
+            while (!out.empty() && out.back() == '0') out.pop_back();
+            if (!out.empty() && out.back() == '.') out.pop_back();
+        }
+        return out.empty() ? std::string{"0"} : out;
+    };
+    std::string json = "{\"" + parsed.op_key + "\":\"" + parsed.operation + "\"";
+    for (const auto& [key, value] : parsed.params) {
+        const bool numeric = std::ranges::find(kStrategyNumericFields, key)
+                             != kStrategyNumericFields.end();
+        json += ",\"" + key + "\":";
+        if (numeric) {
+            json += trim(value);
+        } else if (value == "true" || value == "false") {
+            json += value;
+        } else {
+            json += "\"" + value + "\"";
+        }
+    }
+    json += "}";
+    return json;
+}
+
 auto validate_and_populate_params(std::string_view json_text, std::string_view utterance,
                                    std::string_view prior_clarification,
                                    calculator::assistant::ParseResponse& response)
@@ -2900,6 +3039,48 @@ inline constexpr std::array<std::string_view, 4> kAllActionNames{
  * MODEL_UNAVAILABLE's "the RPC to THIS service completed correctly"
  * reasoning. */
 [[nodiscard]] auto action_generate(Ctx& ctx) -> ExecutionResult<> {
+    // ON THE ENCODER MODEL there is no prompt and no decode: the chain reads the utterance
+    // and produces the params directly. It writes its answer into `ctx->model_text` in the
+    // SAME <params>...</params> shape the decoder emits and returns, so
+    // interpret_model_output and everything below it is literally the same code on both
+    // models -- the raw-output log line, the per-field validation, the mandatory GP-ARA gate,
+    // the futures-directive recovery and the clarification path. A second route would be a
+    // second place for all of that to drift.
+    //
+    // No params block for an unrecognised operation, deliberately: that is what the decoder
+    // produces when it will not name a strategy, and the existing non-params path is what
+    // turns it into a clarification or an honest refusal.
+    if (const auto* enc = AssistantWorker::instance().encoder(); enc != nullptr) {
+        auto parsed = enc->parse(ctx->utterance);
+        if (!parsed.has_value()) {
+            // UNSUPPORTED_STRATEGY, and the choice is deliberate rather than convenient.
+            // assistant.proto has no code meaning "the serving chain refused", and the five
+            // it does have are UNSUPPORTED_STRATEGY, UNKNOWN_SYMBOL, OUT_OF_SCOPE,
+            // MODEL_UNAVAILABLE and DATA_UNAVAILABLE. Everything the chain can refuse is
+            // DETERMINISTIC -- a literal span that straddles a token boundary, an operation
+            // the schema cannot name, a literal that will not convert -- so
+            // MODEL_UNAVAILABLE would be a lie about retryability, and OUT_OF_SCOPE would
+            // claim the utterance was never about a strategy. UNSUPPORTED_STRATEGY says what
+            // is true: this engine cannot express what was described, and its own comment
+            // gives the reason to refuse rather than approximate -- "inventing the nearest
+            // match would misrepresent structures the trader never asked for".
+            //
+            // A dedicated reason would be better and is NOT added here: a new enumerator
+            // reaches the proto, both vendored copies, the client's derived allow-list and
+            // the drift gate, which is a wire change and not a detail to slip in.
+            populate_refusal(ctx->response, calculator::assistant::Refusal::UNSUPPORTED_STRATEGY,
+                             "The strategy assistant could not interpret this request: " +
+                                 parsed.error());
+            return std::unexpected(sgee::ExecutionError::ActionFailed);
+        }
+        if (!parsed->has_value()) {
+            ctx->model_text = "The assistant did not identify a strategy for this request.";
+            return {};
+        }
+        ctx->model_text = "<params>" + encoder_params_to_json(**parsed) + "</params>";
+        return {};
+    }
+
     const std::string prompt = build_prompt(ctx->utterance, ctx->prior_clarification);
 
     auto outcome = AssistantWorker::instance().submit(prompt);

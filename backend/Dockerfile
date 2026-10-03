@@ -47,6 +47,8 @@ ARG MORTGAGE_MODEL_SHA256=""
 # a different vocabulary, with the token id being the line number.
 ARG MORTGAGE_ENCODER_URL=""
 ARG MORTGAGE_ENCODER_SHA256=""
+ARG STRATEGY_ENCODER_URL=""
+ARG STRATEGY_ENCODER_SHA256=""
 
 # S3-compatible credentials for the Railway bucket the models are fetched from.
 #
@@ -169,6 +171,8 @@ ARG MORTGAGE_MODEL_URL
 ARG MORTGAGE_MODEL_SHA256
 ARG MORTGAGE_ENCODER_URL
 ARG MORTGAGE_ENCODER_SHA256
+ARG STRATEGY_ENCODER_URL
+ARG STRATEGY_ENCODER_SHA256
 # Redeclared INSIDE this stage for the same reason MODEL_TOKEN is below: a
 # global ARG is not visible to a stage that does not restate it, so without
 # these two lines the SigV4 branch silently sees empty credentials, falls
@@ -446,6 +450,66 @@ RUN set -eu; \
             exit 1; \
         }; \
         echo "Mortgage encoder fetched and verified ($(stat -c%s /model/mortgage-encoder.gguf) bytes)."; \
+    fi
+
+# THE STRATEGY ENCODER, the fourth model this image can carry and the second
+# encoder. Everything the block above says about an unverified GGUF applies
+# here verbatim and for the same reason -- this file carries the label SCHEMA
+# (48 operations) and the TOKENIZER (vocab 689) as well as the weights, so a
+# substituted one parses against a different label space with renumbered token
+# ids, confidently.
+#
+# IT IS A SEPARATE VARIABLE FROM THE MORTGAGE ENCODER'S AND MUST STAY ONE, for
+# the reason MORTGAGE_MODEL_PATH does not fall back to MODEL_PATH: the two
+# encoders have DIFFERENT label spaces (48 strategies against 29 mortgage
+# operations) and different vocabularies, so loading one behind the other's
+# contract is a model trained on option spreads answering a mortgage question.
+# One encoder, both, or neither is a supported image.
+RUN set -eu; \
+    mkdir -p /model; \
+    if [ -f /model-staged/strategy-encoder.gguf ]; then \
+        echo "Using the strategy ENCODER staged in the build context."; \
+        if [ -z "${STRATEGY_ENCODER_SHA256}" ]; then \
+            echo "FATAL: a staged strategy encoder is present but STRATEGY_ENCODER_SHA256 is not set." >&2; \
+            echo "Supply the sha256 of the exact GGUF you staged -- staging is not verification." >&2; \
+            exit 1; \
+        fi; \
+        echo "${STRATEGY_ENCODER_SHA256}  /model-staged/strategy-encoder.gguf" | sha256sum -c -; \
+        cp /model-staged/strategy-encoder.gguf /model/strategy-encoder.gguf; \
+        echo "Staged strategy encoder verified and installed."; \
+    elif [ -z "${STRATEGY_ENCODER_URL}" ]; then \
+        echo "STRATEGY_ENCODER_URL not set -- building without the strategy ENCODER."; \
+        echo "Nothing is degraded: ASSISTANT_MODEL defaults to the Qwen3 decoder, and asking for the encoder in an image that has none makes that ONE service report itself unavailable rather than silently serving the other model."; \
+    else \
+        if [ -z "${STRATEGY_ENCODER_SHA256}" ]; then \
+            echo "FATAL: STRATEGY_ENCODER_URL is set but STRATEGY_ENCODER_SHA256 is not." >&2; \
+            echo "This GGUF carries the label schema and the tokenizer as well as the weights, so an unverified one can load cleanly and then parse against a different label space with a renumbered vocabulary -- wrong, plausible, and silent. Supply the sha256 computed against the exact file STRATEGY_ENCODER_URL serves." >&2; \
+            exit 1; \
+        fi; \
+        echo "Fetching the strategy encoder from STRATEGY_ENCODER_URL (checksum will be verified before it is used for anything)..."; \
+        if [ -n "${BUCKET_ACCESS_KEY_ID}" ] && [ -n "${BUCKET_SECRET_ACCESS_KEY}" ]; then \
+            echo "Fetching the strategy encoder from the private bucket (SigV4)..."; \
+            curl -sS --fail --retry 3 --retry-delay 2 \
+                 --aws-sigv4 "aws:amz:auto:s3" \
+                 --user "${BUCKET_ACCESS_KEY_ID}:${BUCKET_SECRET_ACCESS_KEY}" \
+                 -o /model/strategy-encoder.gguf "${STRATEGY_ENCODER_URL}" || { \
+                echo "FATAL: SigV4 fetch of the strategy encoder failed." >&2; \
+                exit 1; \
+            }; \
+        else \
+            curl -sS --fail --retry 3 --retry-delay 2 \
+                 -o /model/strategy-encoder.gguf "${STRATEGY_ENCODER_URL}" || { \
+                echo "FATAL: fetch of the strategy encoder failed." >&2; \
+                exit 1; \
+            }; \
+        fi; \
+        echo "${STRATEGY_ENCODER_SHA256}  /model/strategy-encoder.gguf" | sha256sum -c - || { \
+            echo "FATAL: the strategy encoder's sha256 does not match STRATEGY_ENCODER_SHA256." >&2; \
+            echo "The file is REMOVED rather than shipped: a GGUF that loads and parses against the wrong schema is worse than no encoder, because the service would answer instead of refusing." >&2; \
+            rm -f /model/strategy-encoder.gguf; \
+            exit 1; \
+        }; \
+        echo "Strategy encoder fetched and verified ($(stat -c%s /model/strategy-encoder.gguf) bytes)."; \
     fi
 
 FROM docker.io/library/ubuntu:24.04 AS builder
@@ -875,6 +939,7 @@ ENV MORTGAGE_MODEL_PATH=/app/model/mortgage-assistant.gguf
 # second, each step with its own rollback. An unrecognised value stops the
 # process rather than reading as the default.
 ENV MORTGAGE_ENCODER_PATH=/app/model/mortgage-encoder.gguf
+ENV STRATEGY_ENCODER_PATH=/app/model/strategy-encoder.gguf
 
 USER root
 RUN chmod +x /app/start.sh /app/calculator_engine /app/smoke_client
