@@ -115,7 +115,11 @@ class EncoderConfig:
     # SINGLE-label heads it argmaxes independently (encode() does
     # p.slot = argmaxIndex(slot_logits), p.map = argmaxIndex(map_logits)). The two are
     # not interchangeable: a literal carrying two pairs is representable by the first
-    # and not by the second, which is 24.82% of mortgage rows and 0% of strategy rows.
+    # and not by the second. Measured by agent/train/measure_single_label_ceiling.py:
+    # 139 of 600 mortgage val rows (23.17%) and 0 of 1,500 strategy rows. An earlier
+    # figure of 24.82% here was computed on 560 params-gold rows, not all 600.
+    # sensen SERVES the pair head as of 2026-10-02 (encoder.pair.weight, HeadKind::
+    # LiteralPair), so slot_map is now a compatibility path, not the only servable one.
     heads: str = "pair"           # pair | slot_map
     n_slots: int = 0              # slot_map only
     n_maps: int = 0               # slot_map only
@@ -381,12 +385,16 @@ def add_model_args(ap: argparse.ArgumentParser) -> None:
     g.add_argument("--no-lit-mlp", action="store_true",
                    help="the pair head is one Linear over the pooled literal (no MLP, no CLS)")
     g.add_argument("--heads", choices=["pair", "slot_map"], default="pair",
-                   help="pair (default) is the measured architecture: ONE multi-label head over "
-                        "(slot, map) pairs. slot_map is what sensen's text_encoder.cppm accepts "
-                        "today -- two SINGLE-label heads argmaxed independently -- and it cannot "
-                        "represent a literal carrying two pairs, which is 24.82% of mortgage rows "
-                        "and 0% of strategy rows. Use it to EXPORT, and only where the corpus is "
-                        "single-pair.")
+                   # EVERY LITERAL PERCENT IS DOUBLED. argparse %-expands help strings, so a bare
+                   # "24.82% of" is read as the %o format spec and `--help` dies with
+                   # "%o format: an integer is required, not dict" -- which it did, for every
+                   # invocation, until 2026-10-02.
+                   help="pair (default) is the measured architecture and what sensen SERVES as of "
+                        "2026-10-02: ONE multi-label sigmoid over (slot, map) pairs. slot_map is "
+                        "the older contract -- two SINGLE-label heads argmaxed independently -- "
+                        "and it cannot represent a literal carrying two pairs, which is 23.17%% of "
+                        "mortgage val rows and 0%% of strategy rows. Prefer pair; slot_map is for a "
+                        "loader predating encoder.pair, and only where the corpus is single-pair.")
     g.add_argument("--servable", action="store_true",
                    help="the architecture sensen's TransformerBlock can load: RMSNorm + SwiGLU, no "
                         "biases, RoPE, and none of the extra inputs and heads (segments, tag and "

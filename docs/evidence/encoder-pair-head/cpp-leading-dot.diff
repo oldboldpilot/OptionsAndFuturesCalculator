@@ -1,0 +1,25 @@
+--- a/backend/src/modules/mortgage_verification.cppm
++++ b/backend/src/modules/mortgage_verification.cppm
+@@ lex_numeric_literals
+     for (std::size_t i = 0; i < text.size();) {
+-        if (!detail::is_digit(text[i])) {
++        // A LEADING-DOT DECIMAL STARTS A LITERAL. Requiring a digit here read ".5%" as 5
++        // PERCENT and ".75%" as 75 -- a real literal, in a real field, satisfying every
++        // bound, with the rate an order of magnitude wrong. Same family as the em dash
++        // below: a character the lexer skips silently changes the number it reports.
++        // The lookbehind keeps it from starting a second literal inside "3.5.2" or right
++        // after a digit, where the fractional branch below already owns the dot.
++        const bool leading_dot =
++            text[i] == '.' && i + 1 < text.size() && detail::is_digit(text[i + 1]) &&
++            (i == 0 || (!detail::is_digit(text[i - 1]) && text[i - 1] != '.'));
++        if (!detail::is_digit(text[i]) && !leading_dot) {
+             ++i;
+             continue;
+         }
+         const std::size_t start = i;
+@@ integer part
+-        std::string digits;
++        // Seeded with "0" for a leading-dot literal: parse_strict_decimal refuses ".5",
++        // so the integer part has to be supplied rather than left empty.
++        std::string digits = leading_dot ? std::string{"0"} : std::string{};
+         while (i < text.size()) {

@@ -172,11 +172,21 @@ _NUM_LEGACY = re.compile(
 # moves; it is here because the format probe in train_encoder.py found that a model
 # whose lexer tags "6.5 percent" as a BARE number has never seen a rate spelled that
 # way, and the lexer is the half of the pipeline that can be fixed without a retrain.
+# A THIRD CHANGE, and it fixes a SILENT 10x-TO-100x RATE ERROR. Both alternatives above
+# require a LEADING DIGIT, so a leading-dot decimal matched only the digits AFTER the dot:
+# ".5%" lexed as 5 percent and ".75%" as 75 percent -- a real literal, a real field, every
+# bound satisfied, and a rate an order of magnitude wrong. That is the documented dangerous
+# failure class ("20% down priced as a 20% interest rate"), reached by typing a rate the way
+# a spreadsheet does. Found on 2026-10-02 by the format probe: "'0.5%' -> '.5%' (leading
+# dot)" is a TRAINED rewrite and scored 100.00% row error on all three seeds -- a trained
+# case failing completely and deterministically is a lexer bug, not a model weakness, and
+# it also meant that rewrite taught the model NOTHING while reading like coverage.
+# The lookbehind keeps it from starting a new literal inside "3.5.2" or just after a digit.
 _NUM = re.compile(
     r"""(?P<dollar>\$)?\s*
-        (?P<num>\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)
+        (?P<num>\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?|(?<![\d.])\.\d+)
         (?P<suffix>[kKmM](?![A-Za-z]))?
-        \s*(?P<pct>%|(?i:percent|per\s?cent)\b)?
+        \s*(?P<pct>%|(?i:percent|per\s?cent|pct)\b)?
     """,
     re.VERBOSE,
 )

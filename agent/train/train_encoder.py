@@ -760,13 +760,32 @@ FORMAT_REWRITES: dict[str, Callable[[str], str]] = {
     "'0.5%' -> '.5%' (leading dot)": lambda s: re.sub(r"(?<![\d.])0\.(\d)", r".\1", s),
     # --- other ways a person writes an amount ---
     "space after $ ('$ 495,000')": lambda s: re.sub(r"\$(?=\d)", "$ ", s),
+    # PROMOTED FROM HELD_OUT_REWRITES on 2026-10-02, on a measurement rather than a hunch:
+    # it was the ONE probe case the mort_b16 model did badly on -- 11.55% row error against
+    # 0.00-0.86% on every other case, and 1.21% OPERATION error, the only case to move the
+    # operation head at all. A currency CODE before the amount puts an alphabetic token where
+    # every trained row has "$" or nothing, and WordPiece then fragments "USD" next to the
+    # digits. The suffix form stays held out, so the currency-code FAMILY is still a
+    # generalisation question -- promoting the whole family would have measured what was taught.
+    "'$495,000' -> 'USD 495,000'": lambda s: s.replace("$", "USD "),
     # A millions short form ('$1.2M') is DELIBERATELY ABSENT: it is only exact for a
     # round million, and this corpus contains none -- measured, the rewrite changed
     # 0 of 754 user segments. An inexact short form ($1,275,100 -> '$1.28M') would
     # change the VALUE, so the row would stop reconstructing gold and be refused
     # anyway. A rewrite that fires on nothing reads like coverage and is not.
-    "'495,000' -> '495 000' (space separator)": lambda s: re.sub(
-        r"(?<=\d),(?=\d{3}(?!\d))", " ", s),
+    # A SPACE THOUSANDS SEPARATOR IS DELIBERATELY ABSENT, and it used to be here. Removed
+    # 2026-10-02 on the same diagnostic that found the leading-dot bug: it is a TRAINED
+    # rewrite that scored 96.39% row error on all three seeds, because the lexer reads
+    # "495 000" as TWO literals, 495 and 000 (value 0) -- so the rewrite taught nothing
+    # while reading like coverage, exactly what the '$1.2M' note above warns about.
+    #
+    # THE LEXER WAS NOT WIDENED TO ACCEPT IT, and that is a decision rather than an
+    # omission. A comma between a digit and exactly three more is unambiguous NOTATION; a
+    # SPACE is not -- "pay 500 250 times" would merge into 500250, which is a wrong VALUE
+    # that parses and satisfies every bound, the dangerous-failure class this project
+    # refuses to repair by guessing. Supporting the European convention would trade an
+    # honest "two literals" for a plausible wrong one. If it is ever wanted, it needs a
+    # discriminator stronger than a space, not a wider regex.
     "'$250k' uppercase K": lambda s: re.sub(r"\$(\d{1,3}),000(?![\d,])", r"$\1K", s),
     # --- units and shorthand ---
     "'30 years' -> '30 yrs'": lambda s: re.sub(r"\b(\d+)[- ]years?\b", r"\1 yrs", s),
@@ -785,9 +804,14 @@ FORMAT_REWRITES: dict[str, Callable[[str], str]] = {
 # drawn from a different family would measure a different question.
 HELD_OUT_REWRITES: dict[str, Callable[[str], str]] = {
     "'$495,000' -> '495,000 dollars'": lambda s: re.sub(r"\$(\d[\d,]*(?:\.\d+)?)", r"\1 dollars", s),
-    "'$495,000' -> 'USD 495,000'": lambda s: s.replace("$", "USD "),
+    # 'USD 495,000' MOVED to FORMAT_REWRITES (see the note there: 11.55% row error). These three
+    # are its untrained siblings and are what keeps the currency-code family a generalisation
+    # question -- without them, training on the prefix form would have deleted the only probe
+    # that showed the weakness rather than fixing it.
     "'$495,000' -> '495,000 USD' (suffix)": lambda s: re.sub(
         r"\$(\d[\d,]*(?:\.\d+)?)", r"\1 USD", s),
+    "'$495,000' -> 'US$495,000'": lambda s: s.replace("$", "US$"),
+    "'$495,000' -> 'USD495,000' (no space)": lambda s: s.replace("$", "USD"),
     "'495,000' -> '495,000.00' (explicit cents)": lambda s: re.sub(
         r"(?<![\d.])(\d{1,3}(?:,\d{3})+)(?![\d.])", r"\1.00", s),
     "'6.5%' -> '6.5percent' (no space)": lambda s: re.sub(r"(\d)\s*%", r"\1percent", s),
