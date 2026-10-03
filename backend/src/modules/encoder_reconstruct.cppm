@@ -1428,5 +1428,69 @@ struct ReconstructedParams {
         std::optional<std::span<const std::unordered_map<int, double>>>(lit_scores));
 }
 
+/**
+ * Restrict one literal's predicted pair set to the pairs the OPERATION admits.
+ *
+ * WHY THIS IS NOT IN sensen. `text_encoder.cppm` decodes the pair head mask-free, which
+ * matches the trainer: `encoder_model.py` applies no mask and its docstring says masks are
+ * the CALLER's. So the encoder reports what the head said and this layer says what the
+ * schema allows -- the same split as `reconstruct()` doing the arithmetic the model refuses
+ * to do.
+ *
+ * WHY IT IS WORTH DOING. The schema admits a MEDIAN OF 5 pairs of 109 per operation (min 2,
+ * max 16), so the mask removes about 95% of the label space once the operation is known.
+ * Measured on the holdout: 600/600 rows with the mask and 524/600 without it -- a 12.67%
+ * error rate bought back by a set intersection.
+ *
+ * AN INTERSECTION IS EXACTLY MASK-THEN-THRESHOLD, and that is why no sigmoid appears here.
+ * The pair head is MULTI-LABEL: an independent sigmoid per pair, with no softmax coupling
+ * them. Masking a logit to -inf therefore cannot change any OTHER pair's probability, and a
+ * masked pair can never clear the threshold. So intersecting the set sensen already selected
+ * with the admissible set gives bit-for-bit what masking the logits first would have given,
+ * and this module needs no second copy of `sigmoid` to drift from text_encoder's.
+ *
+ * AN EMPTY RESULT IS A PREDICTION, NOT A FAILURE. 165 of the mortgage holdout's 3,381
+ * literals are labelled with no pair at all -- a number the user stated that fills no
+ * parameter of the named operation. Returning an empty vector is the correct answer there.
+ *
+ * An operation the schema does not describe is REFUSED rather than passed through
+ * unmasked: admitting all 109 pairs for an unknown operation would restore exactly the
+ * 12.67% this function exists to remove, and would do it silently.
+ */
+[[nodiscard]] inline auto maskPairsToOperation(const Schema& sch, int op,
+                                               std::span<const int> selected)
+    -> std::expected<std::vector<int>, std::string> {
+    if (op == 0) {
+        // <NONE>: no operation was named, so no pair is admissible and there is nothing
+        // for reconstruct() to build. Not an error -- 40 of 600 holdout rows are this.
+        return std::vector<int>{};
+    }
+    if (op < 0 || static_cast<std::size_t>(op) >= sch.ops.size()) {
+        return std::unexpected(std::format(
+            "Operation index {} out of range [0, {})", op, sch.ops.size()));
+    }
+    const std::string& op_name = sch.ops[static_cast<std::size_t>(op)];
+    const auto it = sch.op_pairs.find(op_name);
+    if (it == sch.op_pairs.end()) {
+        return std::unexpected(std::format(
+            "the schema's op_pairs names no entry for operation \"{}\", so there is no "
+            "admissible pair set to restrict to; refusing rather than admitting all {} "
+            "pairs, which would silently reinstate the 12.67% the mask removes",
+            op_name, sch.pairs.size()));
+    }
+    // Sorted lookup rather than a hash set: the admissible sets are tiny (median 5), so a
+    // flat sorted vector beats a hash and keeps the result in ASCENDING pair order, which
+    // is the order text_encoder emits and the order reconstruct's arbitration expects.
+    std::vector<int> admissible(it->second);
+    std::ranges::sort(admissible);
+    std::vector<int> out;
+    out.reserve(selected.size());
+    for (const int pid : selected) {
+        if (std::ranges::binary_search(admissible, pid)) out.push_back(pid);
+    }
+    std::ranges::sort(out);
+    return out;
+}
+
 } // namespace encoder_reconstruct
 

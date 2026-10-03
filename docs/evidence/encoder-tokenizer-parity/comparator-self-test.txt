@@ -1,0 +1,12 @@
+  ok    an ASCII row agrees, with kNone accepted on the specials
+  ok    a MULTI-BYTE row agrees once char offsets are converted to bytes
+  ok    a C++ side emitting CHARACTER offsets on that row FAILS (the conversion is load-bearing, not decorative)
+  ok    a single wrong token id is caught
+  ok    a dropped [SEP] is caught
+  ok    a wrong span on a content token is caught
+  ok    kNone on a CONTENT token is caught, not waved through
+  ok    (0,0) from C++ on a special FAILS -- sensen must carry kNone, not a zero-width span at character 0
+  ok    a missing row is caught
+  ok    a C++ per-row error is a disagreement
+
+self-test: 10 passed / 0 failed

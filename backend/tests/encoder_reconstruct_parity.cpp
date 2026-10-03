@@ -227,11 +227,42 @@ auto main(int argc, char** argv) -> int {
         std::fprintf(stderr, "Usage: %s <schema.json> <fixture.json>\n", argv[0]);
         std::fprintf(stderr, "  argv[1]: path to schema JSON file (e.g. exported sensen-encoder.schema_json)\n");
         std::fprintf(stderr, "  argv[2]: path to fixture JSON file (array of holdout rows)\n");
+        std::fprintf(stderr, "  --mask                restrict each literal's pairs to the "
+                             "operation's admissible set\n");
+        std::fprintf(stderr, "  --inject-distractors  add one inadmissible pair per literal "
+                             "(the arm the mask must undo)\n");
         return 1;
     }
 
     const std::string schema_path = argv[1];
     const std::string fixture_path = argv[2];
+
+    // Two optional arms, so one binary can produce the whole four-cell table that
+    // makes the per-operation pair mask a MEASUREMENT rather than an assertion:
+    //
+    //                      no --mask        --mask
+    //   plain fixture        600/600        600/600   <- the mask never removes a correct pair
+    //   --inject-distractors  differs       600/600   <- and removes exactly the wrong ones
+    //
+    // The top-right cell is the positive control. Without it, "the mask fixed the
+    // injected rows" is consistent with a mask that simply drops everything.
+    bool apply_mask = false;
+    bool inject = false;
+    // Counted and reported on stderr, because an arm that cannot bite on part of the
+    // corpus has to say which part rather than let a smaller number read as a pass.
+    int injected_rows = 0;
+    int uninjectable_rows = 0;
+    for (int i = 3; i < argc; ++i) {
+        const std::string_view flag{argv[i]};
+        if (flag == "--mask") {
+            apply_mask = true;
+        } else if (flag == "--inject-distractors") {
+            inject = true;
+        } else {
+            std::fprintf(stderr, "Unknown flag: %s\n", argv[i]);
+            return 1;
+        }
+    }
 
     // 1. Load and parse Schema
     auto schema_text = read_file(schema_path);
@@ -332,6 +363,82 @@ auto main(int argc, char** argv) -> int {
             }
         }
 
+        // --inject-distractors: give every literal one pair the operation does NOT admit,
+        // which is what an unmasked head emitting a plausible-but-wrong pair looks like.
+        //
+        // THE CHOICE OF DISTRACTOR IS THE WHOLE ARM, AND THE FIRST ONE MEASURED NOTHING.
+        // It took the lowest GLOBALLY inadmissible pair id, and that arm changed not one
+        // byte of 600 rows -- because `reconstruct` already discards a pair whose SLOT is
+        // not a field of the named operation, so a globally-inadmissible pair is almost
+        // always harmless by construction. Reading that 0 as "the mask is redundant" would
+        // have been wrong.
+        //
+        // What `op_pairs` actually restricts, measured on the schema: it is a strict SUBSET
+        // of "every pair whose slot the operation has", in 19 of 28 operations -- the same
+        // field with a MAP never observed for that operation. ComputeRate admits 3 of the 7
+        // pairs on its own fields; ComputePeriods 3 of 8. THAT is the distractor reconstruct
+        // acts on, because the slot survives the field filter and only the map is wrong.
+        //
+        // The lowest such id is taken, deliberately rather than at random: the arm must be
+        // reproducible, and reconstruct resolves a contested slot by pair order, so a low id
+        // is the HARDEST distractor to ignore rather than the easiest.
+        //
+        // On the other 9 operations `op_pairs` already equals that set, so no such distractor
+        // EXISTS and those rows are unchanged. The probe counts them rather than hiding it:
+        // an arm that cannot bite on a third of the corpus must say so.
+        if (inject) {
+            std::vector<int> admissible;
+            std::vector<std::string> fields;
+            if (op > 0 && static_cast<std::size_t>(op) < sch.ops.size()) {
+                const auto& op_name = sch.ops[static_cast<std::size_t>(op)];
+                if (const auto it = sch.op_pairs.find(op_name); it != sch.op_pairs.end()) {
+                    admissible = it->second;
+                }
+                if (const auto it = sch.op_fields.find(op_name); it != sch.op_fields.end()) {
+                    fields = it->second;
+                }
+            }
+            std::ranges::sort(admissible);
+            // Array fields are spelled "name[]" in op_fields and "name" in a pair's slot.
+            const auto bare = [](std::string_view f) -> std::string_view {
+                return f.ends_with("[]") ? f.substr(0, f.size() - 2) : f;
+            };
+            int distractor = -1;
+            for (int pid = 0; pid < static_cast<int>(sch.pairs.size()); ++pid) {
+                if (std::ranges::binary_search(admissible, pid)) continue;
+                const std::string_view slot = bare(sch.pairs[static_cast<std::size_t>(pid)].first);
+                const bool slot_is_a_field = std::ranges::any_of(
+                    fields, [&](const std::string& f) { return bare(f) == slot; });
+                if (slot_is_a_field) { distractor = pid; break; }
+            }
+            if (distractor >= 0) {
+                ++injected_rows;
+                for (auto& plist : lit_pairs) {
+                    if (!std::ranges::contains(plist, distractor)) plist.push_back(distractor);
+                    std::ranges::sort(plist);
+                }
+            } else {
+                ++uninjectable_rows;
+            }
+        }
+
+        // --mask: restrict every literal's pair set to what this operation admits.
+        if (apply_mask) {
+            bool masked_ok = true;
+            for (auto& plist : lit_pairs) {
+                auto m = encoder_reconstruct::maskPairsToOperation(
+                    sch, op, std::span<const int>(plist));
+                if (!m) {
+                    std::printf("{\"row\":%d,\"error\":\"mask: %s\"}\n",
+                                row_id, escape_json(m.error()).c_str());
+                    masked_ok = false;
+                    break;
+                }
+                plist = std::move(*m);
+            }
+            if (!masked_ok) continue;
+        }
+
         // Execute reconstruct
         auto res = encoder_reconstruct::reconstruct(sch, op, *lits_res, lit_pairs, conv);
         if (!res) {
@@ -352,5 +459,12 @@ auto main(int argc, char** argv) -> int {
     }
 
     std::fflush(stdout);
+    if (inject) {
+        std::fprintf(stderr,
+                     "[inject] a same-slot wrong-map distractor was planted in %d rows; "
+                     "%d rows admit no such pair (their op_pairs already equals every pair "
+                     "on their own fields), so the arm cannot reach them\n",
+                     injected_rows, uninjectable_rows);
+    }
     return 0;
 }

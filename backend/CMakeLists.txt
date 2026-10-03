@@ -1818,6 +1818,25 @@ target_sources(test_encoder_reconstruct_parity
 # BMI both this probe and the module import.
 target_link_libraries(test_encoder_reconstruct_parity PRIVATE sensen_slim fastjson)
 
+# PARITY PROBE for sensen's WordPiece tokenizer against the encoder trainer's.
+#
+# The encoder's per-literal heads point AT a numeric literal, and a literal is matched
+# to tokens by SPAN -- so a tokenizer disagreement is not a graceful degradation. Either
+# the model reads a token sequence it was never trained on, or the literal's span stops
+# lining up with token boundaries. sensen makes the second case loud (`tokensInSpan`
+# refuses with TokenStraddlesLiteral unless every overlapping token lies WHOLLY inside
+# the literal) and the first is silent, which is why it gets a gate.
+#
+# Driven by scripts/check_encoder_tokenizer_parity.py, which holds the one piece of
+# reasoning neither side can: HuggingFace reports CHARACTER offsets and sensen reports
+# UTF-8 BYTE offsets, so the comparator converts rather than relying on this holdout
+# happening to be 100% ASCII.
+#
+# Needs only sensen.tokenizer and fastjson. A probe, not a ctest test, for the same
+# reason as the reconstruct one above.
+add_executable(test_encoder_tokenizer_parity tests/encoder_tokenizer_parity.cpp)
+target_link_libraries(test_encoder_tokenizer_parity PRIVATE sensen_slim fastjson)
+
 # Proto-derived CONSTRAINED DECODING for the mortgage assistant
 # (mortgage_grammar.cppm). Same rationale as the verification blocks above:
 # proto- and gRPC-free, and deliberately NOT linked against sensen_slim. It

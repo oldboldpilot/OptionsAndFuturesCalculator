@@ -47,3 +47,31 @@ Restored: rows differing 0, 5280 EXACT / 72 within ulp
 
 ## Engine
 CCACHE_DISABLE=1 ninja calculator_engine -> rc=0, 30,728,656 bytes
+
+## The per-operation pair mask (encoder_reconstruct::maskPairsToOperation)
+
+op_pairs admits a median of 5 pairs of 109 per operation (min 2, max 16).
+
+It is a strict SUBSET of "every pair whose slot the operation has" in 19 of 28
+operations -- same field, a MAP never observed for that operation. ComputeRate
+admits 3 of the 7 pairs on its own fields; ComputePeriods 3 of 8. op_pairs-only
+is empty for every operation, so op_pairs is always a subset, never a superset.
+
+                                  no --mask   --mask
+  plain fixture                   0           0        <- never removes a correct pair
+  same-slot wrong-map distractor  123         0        <- removes exactly the wrong ones
+
+[inject] distractor plantable in 370 rows; 230 rows admit no such pair (their
+op_pairs already equals every pair on their own fields), so the arm cannot reach
+them. Of the 370, 123 changed; on the rest reconstruct's arbitration still
+resolved to the correct pair.
+
+THE FIRST VERSION OF THIS ARM MEASURED NOTHING: it planted the lowest GLOBALLY
+inadmissible pair id and changed 0 of 600 rows, because reconstruct already
+discards a pair whose SLOT is not a field of the named operation. Reading that 0
+as "the mask is redundant" would have been the wrong conclusion from a correct
+number.
+
+The 12.67% figure (600/600 with the mask, 524/600 without) was measured in PYTHON
+against real model predictions. It is NOT this synthetic injection and the two
+must not be conflated.

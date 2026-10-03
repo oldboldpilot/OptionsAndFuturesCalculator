@@ -306,6 +306,77 @@ def main() -> int:
     w.add_string(f"{ARCH}.schema_json", blob)
     print(f"[schema] schema_json = {len(blob):,} bytes ({len(schema['pairs'])} pairs, {len(schema['ops'])} ops)")
 
+    # ---- the TOKENIZER travels in the same file as the weights -------------------
+    # A `vocab.txt` beside the GGUF is a second artefact with its own path, its own
+    # checksum and nothing binding it to these weights -- and in a BERT vocabulary the
+    # token id IS the line number, so one inserted line renumbers every token after it
+    # and the engine embeds the wrong rows with no error anywhere. Same reasoning as
+    # schema_json above, and as `check_vendored_protos.sh` asserting identity against
+    # the source of truth rather than recording a checksum.
+    #
+    # THE NORMALISER IS WRITTEN TOO, AND THAT IS THE HALF A vocab.txt CANNOT CARRY.
+    # vocab.txt expresses a vocabulary and cannot express a normaliser, so an engine
+    # that defaults these is a DIFFERENT tokenizer that loads cleanly and answers with
+    # plausible ids. Two of sensen's own defaults disagree with this trainer:
+    #
+    #     tokenize_chinese_chars    sensen true   this trainer false
+    #     max_input_chars_per_word  sensen 100    this trainer 64
+    #
+    # Neither can bite on an all-ASCII corpus of short words, which is exactly why it
+    # would have stayed invisible. Every value below is READ FROM the checkpoint's own
+    # tokenizer.json rather than restated here.
+    tok_json = json.loads(ck["tokenizer"]) if isinstance(ck["tokenizer"], str) else ck["tokenizer"]
+    model_block = tok_json["model"]
+    if model_block.get("type") != "WordPiece":
+        raise SystemExit(
+            f"REFUSED: the checkpoint's tokenizer is {model_block.get('type')!r}, not WordPiece. "
+            "Writing it under tokenizer.ggml.model='wordpiece' would make the engine apply a "
+            "WordPiece longest-match walk to a vocabulary built for another algorithm -- it would "
+            "load and answer with plausible wrong ids.")
+
+    vocab_map = model_block["vocab"]
+    # The id IS the index, so the list is materialised BY id and the count is asserted
+    # against the embedding matrix. A vocabulary one row longer than token_embd would
+    # index out of range; one row shorter would leave real tokens unreachable.
+    tokens_by_id = [None] * len(vocab_map)
+    for tok, tid in vocab_map.items():
+        if tid >= len(tokens_by_id) or tokens_by_id[tid] is not None:
+            raise SystemExit(f"REFUSED: tokenizer vocab id {tid} is out of range or duplicated")
+        tokens_by_id[tid] = tok
+    if any(t is None for t in tokens_by_id):
+        missing = [i for i, t in enumerate(tokens_by_id) if t is None]
+        raise SystemExit(f"REFUSED: tokenizer vocab has holes at ids {missing[:10]}")
+    if len(tokens_by_id) != int(sd["tok.weight"].shape[0]):
+        raise SystemExit(
+            f"REFUSED: {len(tokens_by_id)} vocabulary entries against a token_embd of "
+            f"{int(sd['tok.weight'].shape[0])} rows. One of them is not this model's.")
+
+    w.add_string("tokenizer.ggml.model", "wordpiece")
+    w.add_token_list(tokens_by_id)
+    norm = tok_json.get("normalizer") or {}
+    w.add_bool("tokenizer.ggml.lowercase", bool(norm.get("lowercase", True)))
+    w.add_bool("tokenizer.ggml.strip_accents", bool(norm.get("strip_accents", True)))
+    w.add_bool("tokenizer.ggml.tokenize_chinese_chars",
+               bool(norm.get("handle_chinese_chars", True)))
+    w.add_uint32("tokenizer.ggml.max_input_chars_per_word",
+                 int(model_block.get("max_input_chars_per_word", 100)))
+    w.add_string("tokenizer.ggml.continuing_subword_prefix",
+                 str(model_block.get("continuing_subword_prefix", "##")))
+    # The four ids sensen resolves FROM THE VOCABULARY anyway, written so a reader of the
+    # file does not have to search the token list for them. sensen does not trust these
+    # over its own lookup, deliberately: an absent GGUF id key defaults to 0, and 0 is
+    # [PAD] in a BERT vocabulary.
+    for key, tok in (("bos_token_id", "[CLS]"), ("eos_token_id", "[SEP]"),
+                     ("padding_token_id", "[PAD]"), ("unknown_token_id", "[UNK]"),
+                     ("mask_token_id", "[MASK]")):
+        if tok in vocab_map:
+            w.add_uint32(f"tokenizer.ggml.{key}", int(vocab_map[tok]))
+    print(f"[tokenizer] wordpiece, {len(tokens_by_id):,} tokens; "
+          f"lowercase={bool(norm.get('lowercase', True))} "
+          f"strip_accents={bool(norm.get('strip_accents', True))} "
+          f"chinese_chars={bool(norm.get('handle_chinese_chars', True))} "
+          f"max_input_chars_per_word={int(model_block.get('max_input_chars_per_word', 100))}")
+
     def put(name: str, t: torch.Tensor) -> None:
         arr = t.detach().contiguous().to(torch.float32).numpy().astype(npdt)
         w.add_tensor(name, arr, raw_dtype=ftype)

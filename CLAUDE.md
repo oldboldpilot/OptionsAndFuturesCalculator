@@ -6311,6 +6311,24 @@ are in `backend/sensen/docs/HANDOFF_2026-10-02.md` §9.
 | strategy | `strat_f5`, 12 epochs | **692,175** | **1.0** |
 | mortgage | `mort_f5s`, 6 epochs | **1,062,551** | **1.0** |
 
+**THE MORTGAGE MODEL OF RECORD IS NOW `v2s1`, the 3-seed-stability retrain**, and it is the
+one the parity gates below are measured against and the one that would be deployed:
+
+| | value |
+| --- | --- |
+| parameters | **958,103** |
+| vocabulary | **2,694** (`tok.weight (2694, 128)`; the config agrees, so there is no added-token skew) |
+| `row_acc` / `op_acc` on 600 rows | **1.0 / 1.0**, with 40 `<NONE>` rows all correct |
+| pair `exact_set_acc` over 3,335 literals | **0.9994** (f1 0.9994, `map_acc_given_slot` 1.0) |
+| contamination | 14 of 600 val rows byte-identical to train; **`row_acc_on_disjoint_rows` 1.0** |
+| holdout | `val_sha256 1aa3ce94c344217e12f7...` -- the sha this file requires be quoted |
+| flags | `--servable`: `lit_features=False`, `segments=False`, `pooler=False`, `lit_mlp=False` |
+
+The contamination row is the one that makes `row_acc 1.0` quotable at all: this file records
+that **304 of 600** rows in an older holdout were train members of the model being compared
+against, which SUBSIDISED the older model. 14 of 600 with the figure holding on the disjoint
+remainder is a different situation, and it is checked rather than assumed.
+
 against this file's recorded **95.0%** (strategy) and **73.9% raw / 77.0%
 served** (mortgage v20). The parameter count is a RESULT, not a setting — the
 vocabulary and every head width are derived from the corpus.
@@ -6486,9 +6504,188 @@ logit of magnitude 32 is a 4e-5 bound in disguise that tightens as the model gro
 confident. `--heads slot_map` keeps the old lossy rewrite for a loader predating the
 tensor, and still refuses mortgage by name.
 
-**NOT proven: a 600-row end-to-end sensen run** -- that needs the C++ WordPiece
-tokenizer driven from the trainer's corpus, which is not written. The design question is
-settled; the tokenizer-agreement step is not.
+**THE TOKENIZER-AGREEMENT STEP IS NOW WRITTEN AND PASSES, and this paragraph said it was
+not.** It read *"NOT proven: a 600-row end-to-end sensen run -- that needs the C++
+WordPiece tokenizer driven from the trainer's corpus, which is not written."* The first
+half is still true and is now the only thing outstanding; the second half is not -- see
+"Three parity gates stand between the encoder and a served answer" below. What remains
+unproven is the RPC run itself, not the tokenizer.
+
+### Three parity gates stand between the encoder and a served answer
+
+Written 2026-10-02. The encoder's serving path is `tokenize -> encode -> mask -> reconstruct`,
+and **every step of it is a place two implementations can disagree while both look healthy.**
+Three of the four are now gated; the fourth is the RPC run.
+
+**1. `reconstruct()` in C++ -- 600/600 rows.** `backend/src/modules/encoder_reconstruct.cppm`
+(1,438 lines) ports the serving-side arithmetic -- the whole reason the architecture is safe
+is that the model never emits a digit, so this one function IS the numeric surface of both
+assistants. Gate: `test_encoder_reconstruct_parity` prints one canonical line per row and
+`scripts/check_encoder_reconstruct_parity.py` compares it to Python's.
+
+**5,352 decimal values compared: 5,280 EXACT and 72 equal only within one unit in
+BigDecimal's last place.** All 72 are ONE field and ONE cause -- `rate`, from a
+non-terminating annual/12. Python's `reconstruct()` runs at `getcontext().prec = 60`;
+BigDecimal is `Int256`/10^38 and **TRUNCATES**, so the two differ in the tail and nowhere
+else. Max difference **6.67e-39**, below the 38th place, against corpus labels that carry
+**six**. 34 of the 72 differ from the correctly-ROUNDED 38-place form, which is the
+signature of truncation rather than round-to-nearest and is a property of BigDecimal's
+division, not of this module.
+
+**The bound is DERIVED, not fitted:** 10^-38 is the smallest value BigDecimal can represent
+at all. **Ten ulps still FAILS**, asserted -- the smallest defect that could matter here is a
+wrong map, a factor of 12.
+
+**Comparing the decimal TEXT was rejected deliberately**, and the reason is this file's own
+rule: `docs/FINANCE_API.md` tells callers to parse money as decimal strings of UNSPECIFIED
+length and "do not pin the count", and a consumer test that pinned 18 places is what the
+18->38 cutover broke. So the comparison is the same rows, the same KEY SET per row, and per
+key the same VALUE -- numerically for decimals, exactly for operation names and convention
+booleans, elementwise for arrays.
+
+**COVERAGE IS MEASURED, not assumed:** the 600 rows exercise **28 of 28 operations, 109 of
+109 (slot, map) pairs, 116 fields** and all three field kinds (num 4,576 / cat 205 / arr 78),
+plus 40 rows whose op is `<NONE>` and whose null params agree on both sides. No map in the
+schema is silently unexercised.
+
+**The oracle is CONTROLLED before anything is compared.**
+`agent/train/make_reconstruct_parity_fixture.py` asserts Python's `reconstruct()` on the GOLD
+pairs reproduces the GOLD params on all 600 rows and REFUSES otherwise -- a fixture that
+cannot reproduce its own gold would make a correct C++ look broken, or a broken one look
+correct. It also refuses a 0-row run by name, because this session produced a corpus gate
+reporting "0 changed" having lexed **0 segments** (the JSONL key is `conversations`, not
+`messages`).
+
+Mutation-checked with `CCACHE_DISABLE=1`: dividing by 10 instead of 12 in the M3
+annual->per-period map gives **112** differing rows, all `rate`, residuals ~1e-3 -- 35 orders
+above the ulp bound. With /10 the division TERMINATES, so that arm reports 5,240 EXACT and
+**0** within-ulp, independently confirming the 72 are the /12 tail rather than slack in the
+gate. Comparator self-test **13/0**.
+
+**2. The WordPiece tokenizer -- 754/754 utterances, ids AND spans.**
+`test_encoder_tokenizer_parity` against `scripts/check_encoder_tokenizer_parity.py`, on the
+754 user turns of the 600-row holdout (28,303 tokens).
+
+**THE TOKENIZER NOW TRAVELS INSIDE THE GGUF, and `Tokenizer::fromParser` REFUSED to load one
+until this change.** Its own refusal said a WordPiece vocabulary "is loaded from its
+vocab.txt with Tokenizer::fromVocabTxt" -- which was the only route. A `vocab.txt` beside a
+GGUF is a second artefact with its own path, its own checksum and nothing binding it to the
+weights, and **in a BERT vocabulary the token id IS the line number**, so one inserted line
+renumbers every token after it and the engine embeds the wrong rows with nothing erroring.
+Same reasoning as carrying `schema_json` in-file. `fromVocabTxt`'s body was factored into
+`Tokenizer::buildWordPiece` so the two SOURCES share one implementation and every refusal in
+it holds on both paths.
+
+**THE NORMALISER IS THE HALF A `vocab.txt` CANNOT CARRY, and two of sensen's defaults
+disagree with this trainer:**
+
+| | sensen default | the trainer |
+| --- | --- | --- |
+| `tokenize_chinese_chars` | **true** | **false** |
+| `max_input_chars_per_word` | **100** | **64** |
+
+Neither can bite on an all-ASCII corpus of short words, **which is exactly why it would have
+stayed invisible.** A `vocab.txt` expresses a vocabulary and cannot express a normaliser, so
+an engine that defaults these is a DIFFERENT tokenizer that loads cleanly and answers with
+plausible ids.
+
+**BOTH ROUTES ARE RUN, and that is the point rather than belt-and-braces.** vocab.txt (with
+the four values stated in the probe) and the GGUF's own `tokenizer.ggml.*` each score
+754/754, and their outputs are **BYTE-IDENTICAL to each other** -- which is what proves the
+GGUF carried the normaliser rather than falling back. One route alone would have been
+evidence of nothing.
+
+**Mutation arm, and it is the one that proves the new code is live:** a GGUF written from a
+checkpoint whose `normalizer.lowercase` is false makes the two routes DIFFER (so the key is
+read, not ignored) and the gate report **576 of 754 rows differing**, with the C++ ids
+starting `[1, ...]` -- `[UNK]` -- because "Show" with a capital S is absent from an
+all-lowercase vocabulary. **178 rows still MATCH** (the already-lowercase utterances) and
+offsets still match 754/754, so a normaliser defect breaks 76% of rows and leaves spans
+intact: precisely how it would be misread as a model problem.
+
+**CHARACTER OFFSETS AGAINST BYTE OFFSETS, and the gate converts rather than relying on luck.**
+HuggingFace reports per-token UNICODE CHARACTER offsets; sensen's `TokenizeResult::offsets`
+index a `std::string_view`, i.e. UTF-8 BYTES. Probed concretely on `café 100`: HF puts
+`100` at chars 5:8 where the bytes are 6:9. This holdout is **100% ASCII**, so the two
+coincide on it -- a measurement about the corpus, not an identity, and a naive comparator
+would PASS while comparing two coordinate systems. The comparator converts through the
+utterance's own UTF-8 encoding, and its self-test carries a multi-byte row that FAILS without
+the conversion. Note the naming hazard: `text_encoder.cppm` spells the type `CharSpan` while
+the tokenizer produces bytes.
+
+**The no-text sentinel is asymmetric, deliberately.** HuggingFace spells "no text" as
+`(0, 0)`; sensen spells it `TokenSpan::kNone` *specifically because* `(0, 0)` is a zero-width
+span AT character 0 that passes a containment test whenever a literal starts there --
+`tokenizer.cppm` argues exactly this above the struct. So Python saying `(0, 0)` on a special
+is fine and a **C++ `(0, 0)` is a DISAGREEMENT**, and the self-test pins both directions.
+Comparator self-test **10/0**.
+
+**A disagreement here is at least LOUD, which is worth knowing before trusting it.**
+`tokensInSpan` requires every token overlapping a literal to lie WHOLLY inside it and returns
+`TokenStraddlesLiteral` otherwise -- verified in `text_encoder.cppm` rather than taken from a
+comment. So an offset-unit mismatch surfaces as a refusal. A wrong token ID does not.
+
+**3. The per-operation pair mask -- `encoder_reconstruct::maskPairsToOperation`.** The schema
+admits a **median of 5 pairs of 109** per operation (min 2, max 16), so the mask removes about
+95% of the label space once the operation is known. The figure this file records for it --
+**600/600 with the mask and 524/600 without, 12.67%** -- was measured in PYTHON against real
+model predictions, and is kept separate from the C++ gate below, which is a synthetic
+injection. Do not add them together or quote one as the other.
+
+**THE FIRST VERSION OF THE C++ GATE MEASURED NOTHING, and reading its zero as "the mask is
+redundant" would have been the wrong conclusion from a correct number.** It planted the
+lowest GLOBALLY inadmissible pair id in every literal and changed **not one byte of 600
+rows** -- because `reconstruct` already discards a pair whose SLOT is not a field of the named
+operation, so a globally-inadmissible pair is harmless by construction.
+
+What `op_pairs` actually restricts, measured on the schema rather than assumed: it is a strict
+SUBSET of "every pair whose slot the operation has" in **19 of 28** operations -- the same
+field with a MAP never observed for that operation. `ComputeRate` admits 3 of the 7 pairs on
+its own fields; `ComputePeriods` 3 of 8. **That** is the distractor `reconstruct` acts on,
+because the slot survives the field filter and only the map is wrong.
+
+| | no `--mask` | `--mask` |
+| --- | --- | --- |
+| plain fixture | 0 differing | **0 differing** |
+| same-slot wrong-map distractor | **123 differing** | **0 differing** |
+
+**The top-right cell is the positive control**, and without it "the mask fixed the injected
+rows" is equally consistent with a mask that drops everything. The arm reports its own reach
+rather than letting a smaller number read as a pass: the distractor is plantable in **370**
+rows and **230** admit no such pair at all (their `op_pairs` already equals every pair on
+their own fields). Of the 370, 123 changed -- on the rest `reconstruct`'s arbitration still
+resolved to the correct pair.
+
+**IT IS NOT IN sensen, by design.** `text_encoder.cppm` decodes the pair head mask-free,
+matching the trainer -- `encoder_model.py` applies no mask and says masks are the CALLER's.
+
+**AN INTERSECTION IS EXACTLY MASK-THEN-THRESHOLD, which is why no second `sigmoid` appears.**
+The pair head is MULTI-LABEL: an independent sigmoid per pair with no softmax coupling them,
+so masking a logit to -inf cannot change any other pair's probability and a masked pair can
+never clear the threshold. Intersecting the set sensen already selected with the admissible
+set is therefore bit-for-bit what masking first would give, and nothing has to keep a copy of
+`sigmoid` in step with text_encoder's.
+
+An operation the schema does not describe is **REFUSED**, not passed through unmasked:
+admitting all 109 would silently reinstate the 12.67% the function exists to remove.
+
+**THE LITERAL TAG IS UNUSED AT SERVING TIME, measured rather than read, and it retires a gap I
+was about to record as a blocker.** The deployed `LiteralTag` has six values
+(`Untagged, Money, Percent, Years, Months, Days`) against the trainer's eight (`weeks` and
+`quarters` absent), which looks like a model-input mismatch -- `n_tags: 8`. It is not one:
+`--servable` sets `lit_features=False`, so the tag and magnitude embeddings do not exist in
+the shipping model, and `reconstruct()` applies a map **by NAME**
+(`UNARY_FN[name](lit["value"])`) -- the tag predicate in `MAPS` gates CANDIDATE GENERATION
+during training only. Rewriting all **3,381** literal tags in the fixture to `bare` leaves
+both sides byte-identical: Python tagged against Python tag-stripped is BYTE-IDENTICAL, and
+C++ on the tag-stripped fixture still matches Python 600/600. So what the engine's lexer must
+reproduce is a literal's **SPAN**, its **VALUE** and its **ORDER** -- not the taxonomy.
+
+**4. STILL NOT PROVEN: the 600-row run through the real `ParseOperation`.** Everything above
+is in-process. Nothing here can state a SERVED accuracy, and this file's own history says why
+that distinction has teeth -- a `llama-cli` holdout once scored a deployed model 7/16 and
+triggered a retrain for a regression that did not exist, where the same model through the real
+RPC scored 13/16.
 
 ### CORRECTION 2026-10-02: BF16 `llq-fused` is NOT bit-identical to the DENSE kernel
 
