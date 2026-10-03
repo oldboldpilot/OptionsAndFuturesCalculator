@@ -61,6 +61,46 @@ export const AuthUI: React.FC = () => {
     }
   };
 
+  /**
+   * Send a recovery link.
+   *
+   * The message is DELIBERATELY the same whether or not the address has an
+   * account. GoTrue answers 200 either way precisely so a caller cannot use
+   * this endpoint to enumerate who has signed up, and reporting "no account
+   * with that email" here would hand that back.
+   *
+   * `redirectTo` must name a route that EXISTS in the export -- it is
+   * /auth/reset-password -- and that origin must be in GOTRUE_URI_ALLOW_LIST
+   * on the supabase-auth service, or GoTrue silently substitutes SITE_URL and
+   * the link lands on the calculator with nowhere to set a password. The www
+   * alias needs its own entry; the apex pattern does not cover it.
+   */
+  const handleForgot = async () => {
+    if (!email) {
+      setMessage({ kind: 'error', text: 'Enter your email address first.' });
+      return;
+    }
+    setBusy(true);
+    setMessage(null);
+    try {
+      const { error } = await supabase.auth.resetPasswordForEmail(email, {
+        redirectTo: `${window.location.origin}/auth/reset-password`,
+      });
+      if (error) {
+        setMessage({ kind: 'error', text: error.message });
+      } else {
+        setMessage({
+          kind: 'info',
+          text: 'If that email has an account, a reset link is on its way.',
+        });
+      }
+    } catch {
+      setMessage({ kind: 'error', text: 'Could not reach the sign-in service.' });
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleLogout = async () => {
     const { error } = await supabase.auth.signOut();
     if (error) setMessage({ kind: 'error', text: error.message });
@@ -112,16 +152,31 @@ export const AuthUI: React.FC = () => {
                 {busy ? '…' : isSignUp ? 'Sign Up' : 'Sign In'}
               </button>
             </div>
-            <button
-              type="button"
-              className="text-xs text-white/70 hover:text-white"
-              onClick={() => {
-                setIsSignUp(!isSignUp);
-                setMessage(null);
-              }}
-            >
-              {isSignUp ? 'Login instead' : 'Create account'}
-            </button>
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                className="text-xs text-white/70 hover:text-white"
+                onClick={() => {
+                  setIsSignUp(!isSignUp);
+                  setMessage(null);
+                }}
+              >
+                {isSignUp ? 'Login instead' : 'Create account'}
+              </button>
+              {/* Only on the sign-in side: offering "forgot password" while
+                  someone is creating an account is an answer to a question
+                  they have not asked. */}
+              {!isSignUp && (
+                <button
+                  type="button"
+                  className="text-xs text-white/70 hover:text-white"
+                  onClick={handleForgot}
+                  disabled={busy}
+                >
+                  Forgot password?
+                </button>
+              )}
+            </div>
             {message && (
               <span
                 className="text-xs"

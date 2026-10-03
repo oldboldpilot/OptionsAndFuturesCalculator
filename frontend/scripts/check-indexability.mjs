@@ -68,6 +68,16 @@ export const EXCLUDED_PAGES = new Map([
       expectNoindex: true,
     },
   ],
+  [
+    // Reached from a link in the visitor's own email and from nowhere else.
+    // Submitting it would invite a crawler to a one-shot recovery token, and
+    // the page has no publisher content to rank -- it is a password field.
+    'auth/reset-password.html',
+    {
+      reason: 'password recovery landing, reached only from an emailed link, noindex',
+      expectNoindex: true,
+    },
+  ],
 ]);
 
 /**
