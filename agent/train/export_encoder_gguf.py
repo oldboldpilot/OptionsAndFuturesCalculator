@@ -398,6 +398,53 @@ def main() -> int:
     put("output_norm.weight", sd["ln_f.weight"])
     put("encoder.operation.weight", sd["op_head.weight"])
     put("encoder.operation.bias", sd["op_head.bias"])
+
+    # ---- the CONVENTION class heads, as ONE tensor -------------------------------
+    # The trainer holds five of them -- `nn.ModuleDict({n: nn.Linear(d, k)})` -- and each
+    # reads the SAME `cls` vector the operation head reads, so they are structurally one
+    # head of width sum(k) that happens to be stored as five. Concatenating in
+    # `conv_fields` order is lossless and gives sensen ONE tensor pair and ONE head kind
+    # to serve, which is the same argument that made the multi-label pair head one tensor
+    # rather than 97 slots x 11 maps.
+    #
+    # THE SLICE BOUNDARIES ARE NOT WRITTEN HERE, deliberately: they are `conv_vocab` in
+    # schema_json, which this file already embeds. A second copy of the widths is the
+    # four-tables drift this repository records at length, and it would be a copy that
+    # nothing could keep honest -- so sensen emits the FLAT logits and the caller slices
+    # with the schema it already has to parse anyway.
+    #
+    # WITHOUT THESE HEADS the serving path loses 49 of 600 holdout rows (8.17%), measured
+    # -- NOT the 123 rows that carry a conv value, because the schema's `const_default`
+    # already supplies the conventional value for 74 of them. Quoting 123 would have
+    # overstated it by 2.5x.
+    conv_fields = schema.get("conv_fields", [])
+    if conv_fields:
+        missing = [f for f in conv_fields if f"conv_heads.{f}.weight" not in sd]
+        if missing:
+            raise SystemExit(
+                f"REFUSED: schema conv_fields names {missing} but the checkpoint has no "
+                f"conv_heads entry for them. Serving without a conv head is an 8.17% error "
+                f"on the holdout, so this is refused rather than exported silently short.")
+        conv_w = torch.cat([sd[f"conv_heads.{f}.weight"] for f in conv_fields], dim=0)
+        conv_b = torch.cat([sd[f"conv_heads.{f}.bias"] for f in conv_fields], dim=0)
+        widths = [int(sd[f"conv_heads.{f}.weight"].shape[0]) for f in conv_fields]
+        # The width must equal what conv_vocab says, or the caller's slicing walks off the
+        # end of a tensor it was told the shape of. Asserted here because this is the one
+        # place both numbers are in scope.
+        vocab_widths = [len(schema["conv_vocab"][f]) for f in conv_fields]
+        if widths != vocab_widths:
+            raise SystemExit(
+                f"REFUSED: conv head widths {widths} disagree with conv_vocab "
+                f"{vocab_widths} for fields {conv_fields}. The caller slices by conv_vocab, "
+                f"so a disagreement is a silent read past the end of one field into the next.")
+        put("encoder.convention.weight", conv_w)
+        put("encoder.convention.bias", conv_b)
+        kv_u32("convention_count", int(conv_w.shape[0]))
+        print(f"[convention] {len(conv_fields)} heads concatenated to one "
+              f"{tuple(conv_w.shape)} tensor: "
+              + ", ".join(f"{f}={w}" for f, w in zip(conv_fields, widths)))
+    else:
+        kv_u32("convention_count", 0)
     if a.heads == "pair":
         put("encoder.pair.weight", w_pair)
         put("encoder.pair.bias", b_pair)

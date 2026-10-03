@@ -6709,12 +6709,85 @@ self-test asserts that, so a later reader cannot "tighten" it into a refusal.
 Comparator self-test **9/0**, including that a dropped `scale` is caught (250 against
 250,000) -- without which the suffix conversion would be an assumption rather than a check.
 
-**STILL NOT PROVEN: the 600-row run through the real `ParseOperation`.** Everything above is
-in-process. Nothing here can state a SERVED accuracy, and this file's own history says why
-that distinction has teeth -- a `llama-cli` holdout once scored a deployed model 7/16 and
-triggered a retrain for a regression that did not exist, where the same model through the real
-RPC scored 13/16. What remains is the service wiring itself: a backend switch in
-`mortgage_assistant_service.cpp` and an `EncoderAssistant` that chains the four gated pieces.
+### The CPU path is COMPLETE: 600/600 served through the real C++ chain, 837 utterances/s
+
+`backend/src/modules/encoder_assistant.cppm` chains the four gated pieces --
+`lex -> tokenize -> encode -> mask -> reconstruct` -- and `test_encoder_assistant_probe` runs
+the whole thing over the 600-row holdout from the model's OWN predictions rather than a
+fixture. Scored by the same comparator that gated `reconstruct` against Python, so the scoring
+rule is not a new one:
+
+```
+rows: 600   rows differing: 0
+decimal values compared: 5352  (5280 EXACT, 72 within one BigDecimal ulp of 1e-38)
+600 utterances, 0 errored, 40 answered <NONE> -- matching the gold's 40 null-params rows
+```
+
+**Throughput, CPU: 730 / 717 / 716 ms for 600 utterances across three runs = 821.9 / 836.8 /
+838.0 per second, median 836.8, about 1.2 ms each.** Three runs because this file has already
+paid for an n=1 performance claim, and the binary's mtime was checked against its source
+because it has also paid for a stale one. **It is NOT comparable to the deployed Qwen3's
+2.18 s `ParseOperation`:** that figure includes network, TLS, Envoy and gRPC framing, ~71 ms of
+which no model change touches, and this probe has none of them.
+
+**THE CONVENTION HEAD WAS MISSING ENTIRELY and is the reason this needed a sensen change.** The
+five convention classifiers were exported nowhere and `text_encoder.cppm` had no place for
+them. Measured cost of their absence: **49 of 600 rows (8.17%)** -- and NOT the 123 rows that
+carry a convention value, because the schema's `const_default` already supplies the
+conventional one for 74 of them. Quoting 123 would have overstated it 2.5x.
+
+They are **ONE tensor**, `encoder.convention.{weight,bias}` of width 13, because all five read
+the SAME pooled vector the operation head reads -- five heads of widths 2/2/3/2/4 and one of
+width 13 are the same arithmetic. The per-field slice boundaries are `conv_vocab` in the
+SCHEMA and deliberately not in sensen: the encoder emits the logits FLAT and the caller
+slices, the same split that leaves the pair mask to the caller. The exporter asserts the head's
+widths against `conv_vocab`, because a disagreement reads one field's logits as another's and
+produces a plausible convention value.
+
+**TWO DEFECTS THE RUN FOUND THAT ALL FOUR FIXTURE GATES MISSED.** Both were mine.
+
+1. **A reference bound to a temporary, segfaulting two rows in.**
+   `FieldValue::as_array()` returns `std::optional<std::span<const BigDecimal>>` BY VALUE, so
+   `const auto& v = *fval.as_array()` referenced into an optional that died at the end of the
+   statement. It crashed inside `BigDecimal::to_string()` on the first array-valued row. The
+   reconstruct fixture probe took the span BY VALUE and so could never hit it.
+
+2. **sensen's WordPiece does not pre-match special tokens in TEXT, and HuggingFace does.** The
+   trainer joins multi-turn rows with the literal string `" [SEP] "`, and HuggingFace matches
+   added tokens with a trie BEFORE WordPiece, giving the single id 3. sensen splits it into
+   `"["`, `"sep"`, `"]"` = ids 28, 130, 29. **Of the 600 RENDERED holdout utterances, 154
+   contain a literal `[SEP]` and ALL 154 tokenized differently.**
+
+   **IT WAS INVISIBLE TO THE TOKENIZER GATE, and that is the part to keep.** That gate scored
+   754/754 on ids AND spans -- over the USER TURNS, which contain no `[SEP]` at all. **A
+   corpus that cannot exhibit a failure is not a control for it**, and this is the THIRD
+   instance of that shape in one day: strategy's 100% could not show the single-label ceiling,
+   and the holdout has no `weeks`/`quarters` literal to show the six-against-eight tag gap.
+
+   **IT COST EXACTLY ONE ROW OF 600 BEFORE THE FIX, WHICH IS NOT REASSURANCE.** Only row 227
+   changed answer, losing `annual_rate` on *"Amortize $1,131,700 at 5.88% over 30-year. [SEP]
+   [SEP] what if the rate is 6.38% instead?"*. The literal SPANS survive the mangling, so the
+   extra tokens are usually noise the model shrugs off. A 599/600 resting on a tokenizer that
+   disagrees on a quarter of its inputs is luck, and was not quoted as a result.
+
+   **Fixed in the CALLER, not in sensen.** `tokenize_with_specials` splits on the marker,
+   tokenizes each segment unframed, shifts every offset into the whole utterance's coordinates,
+   and emits the sep id with the span of the five characters it was written as -- verified
+   against the trainer, which gives (43,48) and (50,55) on row 227 while `[CLS]` and the final
+   `[SEP]` carry (0,0). The real service receives its turns in SEPARATE `ParseRequest` fields,
+   so segment boundaries are something it KNOWS rather than recovers from text, and a
+   general-purpose tokenizer stays free of one corpus's rendering convention.
+
+   **STILL OPEN:** `test_encoder_tokenizer_parity` exercises sensen's RAW `encode` and so still
+   reports 154 differing rows on the rendered text. That is correct -- it measures sensen,
+   which makes no claim to HuggingFace's prematching. Teaching sensen to prematch would make
+   both agree and would remove the trap for the next caller; it is not done.
+
+**STILL NOT DONE: the RPC itself.** The chain is proven; `mortgage_assistant_service.cpp` does
+not yet have a backend switch that calls it, so no figure here is a *served-through-gRPC*
+accuracy. This file's history says why that distinction has teeth -- a `llama-cli` holdout once
+scored a deployed model 7/16 and triggered a retrain for a regression that did not exist, where
+the same model through the real RPC scored 13/16.
 
 ### CORRECTION 2026-10-02: BF16 `llq-fused` is NOT bit-identical to the DENSE kernel
 

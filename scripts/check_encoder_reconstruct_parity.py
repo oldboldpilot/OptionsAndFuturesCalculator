@@ -73,6 +73,27 @@ def value_eq(a: object, b: object) -> tuple[bool, str]:
             return False, f"boolean against non-boolean: python={a!r} cpp={b!r}"
         return (a == b), "" if a == b else f"python={a!r} cpp={b!r}"
     if isinstance(a, list) or isinstance(b, list):
+        # THE WIRE FLATTENS AN ARRAY TO A STRING, and the two sides legitimately disagree on
+        # shape because of it. `FinanceParams.params` is a protobuf `map<string, string>`, so
+        # a `repeated double` travels as the STRING "[-1000,1000,...]" -- CLAUDE.md records
+        # that four operations were parsed, grounded and dispatched and still never computed
+        # until a client unwrapped exactly this. Python's oracle has no wire to serialise for,
+        # so `json.dumps(..., default=str)` renders the same field as a LIST of strings.
+        # Bridging it here is the counterpart of that client-side unwrap; refusing to bridge
+        # would report 51 rows as wrong answers when nothing about the VALUES differs.
+        if isinstance(a, str) or isinstance(b, str):
+            flat, lst = (a, b) if isinstance(a, str) else (b, a)
+            try:
+                decoded = json.loads(flat)
+            except json.JSONDecodeError:
+                return False, f"array against a string that is not JSON: {flat!r}"
+            if not isinstance(decoded, list):
+                return False, f"array against a string that is not a JSON array: {flat!r}"
+            # Re-enter with both sides as lists, elements compared by the rules below. The
+            # flattened side's elements arrive as JSON numbers; `_as_decimal` is applied to
+            # `str()` of them, which is why the probe must not emit 38-place decimals
+            # UNQUOTED -- a float64 could not carry them.
+            return value_eq(lst, [x if isinstance(x, (str, bool)) else repr(x) for x in decoded])
         if not (isinstance(a, list) and isinstance(b, list)):
             return False, f"array against non-array: python={type(a).__name__} cpp={type(b).__name__}"
         if len(a) != len(b):
@@ -254,6 +275,23 @@ def self_test() -> int:
 
     n, _, _ = compare(base, cpp_from(lambda p: p["values"].__setitem__(0, "-1000.5")))
     check("a wrong array element is caught", n == 1)
+
+    # THE WIRE-FLATTENED ARRAY BRIDGE, both directions. Without these arms the bridge is a
+    # hole: anything shaped like a string would stop being compared at all.
+    n, _, _ = compare(base, cpp_from(lambda p: p.update(values="[-1000,500]")))
+    check("a LIST against the wire's flattened string agrees when the values match", n == 0)
+
+    n, _, _ = compare(base, cpp_from(lambda p: p.update(values="[-1000,501]")))
+    check("a flattened string with a WRONG element is still caught", n == 1)
+
+    n, _, _ = compare(base, cpp_from(lambda p: p.update(values="[-1000]")))
+    check("a flattened string that is SHORT is caught", n == 1)
+
+    n, _, _ = compare(base, cpp_from(lambda p: p.update(values="not json")))
+    check("a non-JSON string where an array belongs is caught", n == 1)
+
+    n, _, _ = compare(base, cpp_from(lambda p: p.update(values="\"-1000\"")))
+    check("valid JSON that is not an ARRAY is caught", n == 1)
 
     n, _, _ = compare(base, {})
     check("a missing row is caught", n == 1)

@@ -1849,6 +1849,20 @@ target_sources(test_encoder_lexer_parity PRIVATE FILE_SET CXX_MODULES FILES
     sensen/src/gp_ara_interfaces.cppm src/modules/mortgage_verification.cppm)
 target_link_libraries(test_encoder_lexer_parity PRIVATE fastjson)
 
+# The small-encoder mortgage assistant, end to end (lex -> tokenize -> encode -> mask ->
+# reconstruct). A probe that runs the WHOLE chain over the 600-row holdout IN PROCESS: it is
+# the first thing that exercises the four gated pieces together rather than one at a time,
+# and it isolates "does the chain work" from "does the RPC plumbing work". Needs the sensen
+# encoder and tokenizer (sensen_slim), the reconstruct port and the deployed lexer.
+add_executable(test_encoder_assistant_probe tests/encoder_assistant_probe.cpp)
+target_sources(test_encoder_assistant_probe PRIVATE FILE_SET CXX_MODULES FILES
+    sensen/src/gp_ara_interfaces.cppm
+    src/modules/mortgage_verification.cppm
+    src/modules/encoder_reconstruct.cppm
+    src/modules/encoder_assistant.cppm)
+target_sources(test_encoder_assistant_probe PRIVATE src/modules/encoder_assistant.cpp)
+target_link_libraries(test_encoder_assistant_probe PRIVATE sensen_slim fastjson)
+
 # Proto-derived CONSTRAINED DECODING for the mortgage assistant
 # (mortgage_grammar.cppm). Same rationale as the verification blocks above:
 # proto- and gRPC-free, and deliberately NOT linked against sensen_slim. It

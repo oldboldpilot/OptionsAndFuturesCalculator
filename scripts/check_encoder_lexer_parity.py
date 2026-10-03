@@ -65,8 +65,15 @@ def compare(texts: list[str], cpp_rows: list[dict]) -> tuple[int, list[str], Cou
             stats["count_ok"] += 1
             for k, (p, q) in enumerate(zip(py, cl)):
                 if p.start != q["offset"]:
-                    row_msgs.append(f"literal {k} SPAN: python {p.start} cpp {q['offset']}")
+                    row_msgs.append(f"literal {k} SPAN start: python {p.start} cpp {q['offset']}")
                     stats["span"] += 1
+                # The END is as load-bearing as the start: tokensInSpan requires every token
+                # overlapping the literal to lie WHOLLY inside [start, end), so a short end
+                # turns a correct parse into a TokenStraddlesLiteral refusal.
+                if "end" in q and p.end != q["end"]:
+                    row_msgs.append(f"literal {k} SPAN end: python {p.end} cpp {q['end']} "
+                                    f"(python span {p.start}:{p.end})")
+                    stats["span_end"] += 1
                 # The suffix multiplier is carried separately on the C++ side.
                 value = Decimal(q["text"].replace(",", "")) * q["scale"]
                 if p.value != value:
@@ -100,8 +107,8 @@ def self_test() -> int:
 
     text = "a $495,000 loan at 6.5% over 30 years"
     py = ec.lex(text)
-    good = [{"text": p.text.lstrip("$").rstrip("%").strip(), "offset": p.start, "scale": 1,
-             "tag": CPP_TAG.index(p.tag)} for p in py]
+    good = [{"text": p.text.lstrip("$").rstrip("%").strip(), "offset": p.start, "end": p.end,
+             "scale": 1, "tag": CPP_TAG.index(p.tag)} for p in py]
     n, msgs, _ = compare([text], [{"row": 0, "lits": good}])
     check("an exact C++ reproduction agrees", n == 0 and not msgs)
 
@@ -118,6 +125,13 @@ def self_test() -> int:
     n, _, _ = compare([text], [{"row": 0, "lits": good[:-1]}])
     check("a dropped literal is caught", n == 1)
 
+    # A short END is the one that turns a correct parse into a TokenStraddlesLiteral
+    # refusal rather than a wrong number, so it gets its own arm.
+    short_end = [dict(x) for x in good]
+    short_end[1]["end"] -= 1
+    n, _, _ = compare([text], [{"row": 0, "lits": short_end}])
+    check("a one-character short span END is caught", n == 1)
+
     n, _, _ = compare([text], [{"row": 0, "lits": good + [dict(good[0])]}])
     check("an extra literal is caught", n == 1)
 
@@ -126,7 +140,8 @@ def self_test() -> int:
     # multiply, this would read as a value mismatch.
     t2 = "a $250k deposit"
     py2 = ec.lex(t2)
-    cl2 = [{"text": "250", "offset": py2[0].start, "scale": 1000, "tag": CPP_TAG.index("money")}]
+    cl2 = [{"text": "250", "offset": py2[0].start, "end": py2[0].end, "scale": 1000,
+            "tag": CPP_TAG.index("money")}]
     n, _, _ = compare([t2], [{"row": 0, "lits": cl2}])
     check("value * scale is applied, so $250k agrees across the two representations", n == 0)
 
@@ -172,7 +187,8 @@ def main() -> int:
     print(f"utterances: {len(texts)}   literals: {total_lits}")
     print(f"rows differing on ORDER/COUNT, SPAN or VALUE: {differing}")
     print(f"  literal counts matching: {stats['count_ok']}   "
-          f"span mismatches: {stats['span']}   value mismatches: {stats['value']}")
+          f"span-start mismatches: {stats['span']}   "
+          f"span-END mismatches: {stats['span_end']}   value mismatches: {stats['value']}")
     print(f"  TAG divergences (counted, NOT a failure -- provably unused at serving "
           f"time): {stats['tag']}")
     for k, v in sorted(stats.items()):

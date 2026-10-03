@@ -1179,6 +1179,34 @@ export struct NumericLiteral {
     std::size_t offset = 0;
 
     /**
+     * One past the last character of this literal, so `[offset, end)` is its SPAN.
+     *
+     * It exists because the small encoder assistant needs it and nothing else did: that
+     * model's per-literal head points AT a span, `sensen::tokensInSpan` maps the span to
+     * tokens and REFUSES (`TokenStraddlesLiteral`) rather than guessing if the span does
+     * not line up with token boundaries. `text` cannot stand in for it -- `text` holds the
+     * NORMALISED digits with separators stripped ("1044800" for "$1,044,800"), so
+     * `offset + text.size()` is simply a different number.
+     *
+     * THE CONVENTION IS THE TRAINER'S, because the trainer is what the model learned from:
+     * `offset` is the first DIGIT (a leading "$" is excluded) while `end` covers a trailing
+     * "%" (so "4.91%" spans five characters, not four). Measured over the 600-row holdout's
+     * 3,381 literals, exactly two shapes occur -- 2,442 digits-only and 939 digits-plus-"%"
+     * -- and `scripts/check_encoder_lexer_parity.py` compares this field against the
+     * trainer's `Lit.end` on every one of them.
+     *
+     * TWO BRANCHES THE HOLDOUT CANNOT EXERCISE, stated rather than left to be discovered.
+     * There is no k/m-suffixed and no spelled-out-unit literal in it at all, so for those
+     * `end` is correct by construction and not by measurement:
+     *   - a "%" or a k/m CHARACTER is consumed, so it is inside the span;
+     *   - a trailing unit WORD is not. "30 years" spans "30", which is the trainer's
+     *     behaviour too -- its `_UNIT_AFTER` is a LOOKAHEAD past the match, so the word
+     *     sets the tag without joining the span. A spelled "percent"/"pct" is the one word
+     *     the trainer's own pattern captures INSIDE the match, so it is included here.
+     */
+    std::size_t end = 0;
+
+    /**
      * The words immediately after this literal name a DOWN PAYMENT
      * ("20% down", "100,000 down payment", "$100k deposit").
      *
@@ -3053,6 +3081,16 @@ auto lex_numeric_literals(std::string_view text) -> std::vector<NumericLiteral> 
             const std::string word = detail::next_word(text, i);
             if (word == "percent" || word == "pct") {
                 lit.tag = LiteralTag::Percent;
+                // A spelled "percent"/"pct" is the ONE unit word the trainer's pattern
+                // captures INSIDE the match -- `(?P<pct>%|(?i:percent|per\s?cent|pct)\b)`
+                // -- so it joins the SPAN, where "years"/"months" (a lookahead past the
+                // match) do not. Scanned rather than taken from `word.size()`, because
+                // next_word() skips leading spaces and a hyphen and lowercases, so its
+                // length is not the extent it consumed.
+                std::size_t w = i;
+                while (w < text.size() && (text[w] == ' ' || text[w] == '-')) ++w;
+                while (w < text.size() && detail::is_alpha(text[w])) ++w;
+                lit.end = w;
             } else if (word == "k" || word == "thousand") {
                 lit.tag = LiteralTag::Money;
                 lit.scale = 1'000;
@@ -3071,6 +3109,12 @@ auto lex_numeric_literals(std::string_view text) -> std::vector<NumericLiteral> 
                 }
             }
         }
+
+        // Every path except the spelled-"percent" one above leaves the span ending where
+        // `i` now sits: past a "%", a "k" or an "m" CHARACTER (those branches advanced it)
+        // and immediately after the digits otherwise. 0 is a safe sentinel for "not yet
+        // set" because a literal always holds at least one digit, so a real `end` is >= 1.
+        if (lit.end == 0) lit.end = i;
 
         // The down-payment adjacency, read AFTER the suffix so that `i` is
         // sitting past "%", "k" or "million". Two words, because the phrase

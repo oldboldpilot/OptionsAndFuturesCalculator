@@ -70,6 +70,7 @@ auto main(int argc, char** argv) -> int {
             out += "{\"text\":\"";
             for (char c : l.text) { if (c=='"'||c=='\\') out += '\\'; out += c; }
             out += "\",\"offset\":" + std::to_string(l.offset)
+                 + ",\"end\":" + std::to_string(l.end)
                  + ",\"scale\":" + std::to_string(l.scale)
                  + ",\"tag\":" + std::to_string(static_cast<int>(l.tag)) + "}";
         }
