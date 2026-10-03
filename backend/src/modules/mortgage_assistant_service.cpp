@@ -3452,6 +3452,8 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
     mv::MortgageParamsInput verifiable;
     verifiable.params_emitted = true;
     verifiable.operation = operation;
+    /// Declared fields the model left out, in `op->fields` order. See the deferral below.
+    std::vector<std::string> absent_fields;
     for (const auto& field : op->fields) {
         const std::string key{field.name};
 
@@ -3499,11 +3501,31 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
         }
 
         if (!obj.contains(key)) {
-            populate_refusal(response, ::mortgage::assistant::Refusal::INVALID_PARAMETERS,
-                             "The assistant left out \"" + key + "\", which " + operation +
-                                 " needs. Filling it in with a default would compute an exact "
-                                 "answer to a question nobody asked.");
-            return ModelOutputOutcome::Refused;
+            // DEFERRED, not refused here, and the deferral is the whole point.
+            //
+            // A FIELD THE USER NEVER STATED IS A QUESTION, NOT A REFUSAL -- this service
+            // already holds that rule and already implements it, for the two shapes the
+            // DECODER produces. G2b forces that model to emit every declared field, so "the
+            // user did not say" reaches the verifier as a WRONG VALUE: G3 ("periods" does not
+            // correspond) or G5 (the rate is outside the band), and `refine_unstated` turns
+            // either into "Over how many years?".
+            //
+            // THE ENCODER CANNOT PRODUCE EITHER SHAPE. It points at literals, so a parameter
+            // no literal supports is simply ABSENT -- a third arrival shape, which refused
+            // here before the asking machinery could see it. Measured on the holdout with the
+            // encoder backend: 98 rows refused `missing-field` and `asked_ok` was 0 of 86,
+            // against the decoder's 49 of 90. That is a user-visible regression on a real
+            // path, not a cosmetic difference.
+            //
+            // It is recorded and the loop CONTINUES so that `verifiable.fields` is complete
+            // before the decision is taken. That matters because the discriminator needs it:
+            // a compatible literal blocks the question only while no OTHER emitted field
+            // grounds against it -- the claimed-literal narrowing, which is why the
+            // three-argument `utterance_states_nothing_for` exists. Deciding inside the loop
+            // would judge against a half-built set and ask about a figure the user had just
+            // given, which this file's own ask-sweep gate exists to prevent.
+            absent_fields.push_back(key);
+            continue;
         }
         std::string encoded;
         if (const auto problem = validate_and_encode(field, obj[key], encoded);
@@ -3521,6 +3543,36 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
             .repeated = repeated});
 
         (*params.mutable_params())[key] = std::move(encoded);
+    }
+
+    // ------------------------------------------------------------------
+    // (5b) A DECLARED FIELD THE MODEL LEFT OUT: ask if the user never stated it, refuse if
+    // they did. Same rule and the same two helpers the verdict branch below uses, applied to
+    // the one arrival shape that could not reach it -- an ABSENT key rather than a wrong
+    // value. See the deferral above for why this is not decided inside the loop.
+    //
+    // The ORIGINAL refusal wording is preserved for the refuse direction, deliberately: the
+    // case it describes is the model dropping a field the user DID state, which is a model
+    // defect and not a conversation to continue. Only the ask direction is new.
+    if (!absent_fields.empty()) {
+        for (const auto& field_name : absent_fields) {
+            if (!mv::utterance_states_nothing_for(field_name, user_text, verifiable)) continue;
+            auto question = mv::clarifying_question(operation, field_name);
+            if (question.empty()) continue;  // no natural wording: a proto field name reads
+                                             // like a stack trace, so keep the refusal
+            logger::Logger::getInstance().debug(
+                "mortgage assistant: {} left out \"{}\" and the utterance states nothing for "
+                "it -- asking instead of refusing",
+                operation, field_name);
+            populate_clarification(response, std::move(question));
+            return ModelOutputOutcome::Clarified;
+        }
+        populate_refusal(response, ::mortgage::assistant::Refusal::INVALID_PARAMETERS,
+                         "The assistant left out \"" + absent_fields.front() + "\", which " +
+                             operation +
+                             " needs. Filling it in with a default would compute an exact "
+                             "answer to a question nobody asked.");
+        return ModelOutputOutcome::Refused;
     }
 
     // ------------------------------------------------------------------
