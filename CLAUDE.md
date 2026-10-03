@@ -4043,20 +4043,42 @@ tbqwf was never the obstacle. What was:
     determinism, is untouched -- and that every v3-class CPU has both. That is why
     they are safe in the floor where `-mavx512f` deliberately is not.
 
-    **DONE on 2026-10-01, as the one-line prerequisite of the master bump this
-    item predicted.** `CANONICAL_FLAGS` carries `-maes -mpclmul`, and the pair is
-    what makes the bump possible at all: with the pin on master, sensen's scope
-    builds the single `std.pcm` with both features and every TU here was refused
-    without them.
+    **BOTH PARAGRAPHS THAT STOOD HERE ARE WITHDRAWN, AND `backend/CMakeLists.txt`
+    IS THE AUTHORITY.** They said `CANONICAL_FLAGS` carries `-maes -mpclmul` as of
+    2026-10-01, and that the pair "emits zero instructions" on the linked engine.
+    Measured 2026-10-03: `CANONICAL_FLAGS` does NOT carry them, and that file says
+    at line 95 in as many words that they "ARE DELIBERATELY *NOT* HERE, AND THIS
+    BLOCK RECORDS A MISTAKE RATHER THAN A RULE". The change was made, found to be
+    wrong, and reverted; this file kept the announcement.
 
-    **THE FLAGS EMIT ZERO INSTRUCTIONS, which turns sensen's claim into a
-    measurement.** Its comment says they are "ABSORBED INTO THE FLOOR, not reached
-    at run time"; on the linked engine `objdump` finds **0**
-    `aesenc`/`aesdec`/`aeskeygenassist` and **0** `pclmul`. The compiler was
-    PERMITTED to use AES-NI and PCLMUL and used neither, because nothing in this
-    engine does AES or carry-less multiplication. So the pair changes what the BMI
-    RECORDS -- the entire fix -- and not one instruction in the binary. The nominal
-    floor rises; the exercised floor does not.
+    **THE "ZERO INSTRUCTIONS" MEASUREMENT WAS A BROKEN GREP, which is the part
+    worth keeping.** It counted `\baesenc\b` and `\bpclmul` -- but under
+    `-mavx/-mavx2` the assembler emits the VEX forms `vaesenc` and
+    `vpclmullqlqdq`, and `\b` cannot match between `v` and `a`. The correct
+    pattern finds **32** and **756**. So the flags were not inert: `-mpclmul`
+    defines `__PCLMUL__` for every dependency built with the floor, abseil's CRC32
+    gates on exactly that, and **abseil's x86 dispatch has no runtime guard** --
+    its `default:` returns the accelerated implementation for any unrecognised
+    CPU, so on a host without PCLMUL the failure is SIGILL rather than a slow
+    path. A negative grep needs a positive control, which this file says elsewhere
+    and which that audit did not do.
+
+    **IT IS FIXED AT THE SOURCE, and the fix is ON MASTER.** sensen gates the
+    append on TBQWF actually being embedded
+    (`NOT SENSEN_TBQWF STREQUAL "OFF" AND EXISTS external/tbqwf/CMakeLists.txt`),
+    and TBQWF is not embedded here -- so the pair is never added and no mismatch
+    arises. Verified byte-identical at that gate on both the pinned lane commit
+    and master `98033199`.
+
+    **SO A `std.pcm` MISMATCH ON A BUMP TODAY IS A HARNESS FAULT, NOT MASTER'S.**
+    Measured 2026-10-03: a bump script that ran `git submodule update --init
+    --recursive` POPULATED `external/tbqwf` (107 entries), which opened that gate,
+    put `+aes`/`+pclmul` into the shared `std.pcm`, and made clang refuse every
+    OFC translation unit -- reproducing the exact diagnostic this item records.
+    `git submodule deinit -f external/tbqwf` and deleting the stale `std.pcm`
+    clears it. **Do not recursively initialise sensen's submodules here**, and read
+    the `SIMD floor:` line the gate prints at configure time before blaming the
+    pin: it says which branch was taken.
 
     **WHY IT WAS INVISIBLE UNTIL THE BUMP, stated because the obvious reading is
     wrong:** sensen is GREEN STANDALONE, and that is consistent with the blocker
