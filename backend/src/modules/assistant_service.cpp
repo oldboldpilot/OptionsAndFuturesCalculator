@@ -3051,7 +3051,29 @@ inline constexpr std::array<std::string_view, 4> kAllActionNames{
     // produces when it will not name a strategy, and the existing non-params path is what
     // turns it into a clarification or an honest refusal.
     if (const auto* enc = AssistantWorker::instance().encoder(); enc != nullptr) {
-        auto parsed = enc->parse(ctx->utterance);
+        // BOTH TURNS, for the same reason `build_prompt` takes both: the reply to this
+        // service's own clarifying question, and a revision ("change the expiry to 7 days"),
+        // arrive ONLY in `prior_clarification`. A model handed just `utterance` re-reads the
+        // first turn, so a revision cannot be applied at all and a reply cannot be used --
+        // 513 of the 1500 holdout rows are one of those two shapes.
+        //
+        // SWEPT FROM THE MORTGAGE SURFACE, where the same one-turn call was measured costing
+        // 120 of 560 rows (two-call served 436 -> 556) and where `asked_ok` was 74/86 in
+        // BOTH arms, so no asking metric could see it. One member of a family fixed and its
+        // sibling missed is the defect this repository records against `guess`, the batch
+        // plurals and `dates_to_seconds` in a single day.
+        //
+        // THE QUESTION SEGMENT IS EMPTY HERE, AND THAT IS A LIMIT RATHER THAN A CHOICE.
+        // `assistant.proto`'s ParseRequest carries no `prior_question` (mortgage_assistant's
+        // does), so there is nothing to put in the middle segment -- which is exactly the
+        // trainer's REVISION rendering, right for the 235 revise rows and a train/serve
+        // mismatch for the 278 clarify ones. Adding the field is a wire change reaching the
+        // proto, both vendored copies, the client's derived allow-list and the drift gate;
+        // the measurement for keeping this as it stands is in the commit that made it.
+        auto parsed = enc->parse(encoder_assistant::Turns{
+            .utterance = ctx->utterance,
+            .prior_question = {},
+            .prior_clarification = ctx->prior_clarification});
         if (!parsed.has_value()) {
             // UNSUPPORTED_STRATEGY, and the choice is deliberate rather than convenient.
             // assistant.proto has no code meaning "the serving chain refused", and the five

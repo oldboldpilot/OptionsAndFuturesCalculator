@@ -116,6 +116,51 @@ struct Parsed {
 };
 
 /**
+ * ONE EXCHANGE, in the three fields `ParseRequest` already carries.
+ *
+ * WHY THIS TYPE EXISTS AT ALL. `parse(utterance)` saw ONE turn, and the two-call protocol
+ * this service documents hands the answer to a clarifying question back on the SECOND call.
+ * The verifier was already given both turns -- `grounding_text()` concatenates them, which
+ * is why a refused second turn could say *"the nearest figure you gave is 6.25"* about a
+ * number the MODEL had never been shown. So the asking layer asked, the user answered, and
+ * the model re-read the original question: measured on 2026-10-04, `"What's the payment on a
+ * $420,000 loan at 6.5%?"` was asked *"Over how many years?"*, answered `"30 years"`, and
+ * refused with *"The assistant left out \"periods\""*. A conversation that cannot finish.
+ *
+ * IT IS NOT A NEW CONTRACT -- IT IS THE TRAINER'S. `encoder_corpus.py`'s `render()` builds
+ * the model's input as `first [SEP] question [SEP] later` and says so in its own banner, so
+ * a multi-turn row is what this model was FITTED on; the service simply never assembled it.
+ * `renderedText()` below reproduces that join byte for byte, including the empty middle
+ * segment a revision turn has, and `tokenize_with_specials` was written for exactly this
+ * shape already.
+ *
+ * ONLY THE USER SEGMENTS ARE LEXED, which is the trainer's rule and also a safety property.
+ * `encoder_corpus.py`: *"Only the two USER segments are lexed ... a \"30\" inside the
+ * assistant's question (\"30, 15, or something else?\") is not a value the user stated."*
+ * On the wire `prior_question` is whatever the CLIENT chose to echo, so lexing it would let
+ * a caller inject literals into a list the pair head is indexed BY POSITION into -- every
+ * prediction would then be applied to a different number. None of
+ * `clarifying_question`'s eight wordings contains a digit today, so this is not reachable
+ * from our own questions; that is a fact about those eight sentences and not about the
+ * contract, which is the distinction this project keeps paying for.
+ */
+struct Turns {
+    /// The user's original request. The only field a single-turn call sets.
+    std::string_view utterance;
+    /// The question THIS service asked on the previous turn, echoed back by the client.
+    /// Empty on a REVISION turn, which is what tells a revision from an answer -- the same
+    /// discriminator `interpret_model_output` already draws on.
+    std::string_view prior_question;
+    /// The user's reply. NON-EMPTY IS WHAT MAKES THIS MULTI-TURN, matching `grounding_text`
+    /// exactly: with no reply there is no second user turn, so the rendering collapses to
+    /// the single-turn one and nothing about today's 560/560 can move.
+    std::string_view prior_clarification;
+
+    /// `first [SEP] question [SEP] later`, or just `first` when there is no reply.
+    [[nodiscard]] auto renderedText() const -> std::string;
+};
+
+/**
  * Loaded once per process and then `const`. `parse()` is therefore safe to call from
  * several threads, UNLIKE the Qwen3 path -- `sensen::LLMPipeline::generate()` cannot be
  * called concurrently because `FeedForwardNetwork` holds mutable scratch per instance. This
@@ -127,14 +172,23 @@ class EncoderAssistant {
         -> std::expected<std::unique_ptr<EncoderAssistant>, std::string>;
 
     /**
-     * Parse one utterance.
+     * Parse one exchange.
      *
      * `nullopt` means the model named `<NONE>` -- it did not recognise an operation. That
      * is a PREDICTION, not a failure, and the caller should render it as a refusal or a
      * clarification rather than as an error.
      */
-    [[nodiscard]] auto parse(std::string_view utterance) const
+    [[nodiscard]] auto parse(const Turns& turns) const
         -> std::expected<std::optional<Parsed>, std::string>;
+
+    /// One utterance, no prior turn. Kept as the common case rather than for compatibility:
+    /// 560 of the 600 holdout rows are single-turn and every probe in the tree is.
+    [[nodiscard]] auto parse(std::string_view utterance) const
+        -> std::expected<std::optional<Parsed>, std::string> {
+        return parse(Turns{.utterance = utterance,
+                           .prior_question = {},
+                           .prior_clarification = {}});
+    }
 
     [[nodiscard]] auto operation_count() const noexcept -> std::size_t { return schema_.ops.size(); }
     [[nodiscard]] auto pair_count() const noexcept -> std::size_t { return schema_.pairs.size(); }

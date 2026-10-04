@@ -6,6 +6,28 @@ right for a decoder that echoes that text and wrong for a model that COMPUTES th
 gold "740700.00" against a computed "740700" is the same number and a failed string compare.
 docs/FINANCE_API.md tells callers to parse money as decimal strings of UNSPECIFIED length and
 "do not pin the count" -- so this scores values, reusing the comparator that gated reconstruct.
+
+TWO WIRE SHAPES, AND ONLY ONE OF THEM IS WHAT A CLIENT SENDS.
+  --one-call (default) sends the trainer's RENDERED text -- `first [SEP] question [SEP] later`
+      -- in the single `utterance` field. That is the TRAINER's input and it is the right
+      control for the model: every turn is present, so nothing is missing and the score is
+      about extraction alone. It is NOT the contract: no client renders a [SEP] join.
+  --two-call sends the three fields the contract carries, on two calls, exactly as
+      `eval_grpc_mortgage.py` and a real client do -- turn one with the utterance, turn two
+      with `prior_question` echoed and `prior_clarification` carrying the reply.
+
+THE GAP BETWEEN THEM IS THE MEASUREMENT. Under --one-call a clarification row has nothing
+left to ask about, which is why this project's own `asked-when-ambiguous 0/86` was recorded
+as meaningless; under --two-call the serving layer asks, the user answers, and the question
+is whether the answer is USED. On 2026-10-04 it was not: the verifier was handed both turns
+by `grounding_text()` and the model was handed one, so the second turn refused on the very
+field the first turn had asked for.
+
+THE SCHEMA IS READ OUT OF THE SERVED GGUF, not out of a /tmp fixture. A fixture written from
+a training checkpoint is a second copy of the label space with nothing binding it to the
+weights the engine loaded, which is the defect behind every four-tables scar in this tree.
+`--schema` still overrides it, for scoring one model's answers against another's label space
+deliberately.
 """
 import glob, json, sys
 sys.path.insert(0, '/home/muyiwa/Development/OptionsAndFuturesCalculator/scripts')
@@ -79,10 +101,50 @@ def eq(gold, got):
         return ec.at_label_precision(dt, dg)
     return str(gold).strip() == str(got).strip()
 
-sch = ec.Schema.from_json(json.load(open('/tmp/parity_regen/schema.json')))
-ds = ec.load_dialogues(Path('agent/dataset/data_mortgage/val.jsonl'))
+import argparse  # noqa: E402
+
+_ap = argparse.ArgumentParser(add_help=True)
+_ap.add_argument("--two-call", action="store_true",
+                 help="send the three ParseRequest fields over two calls, as a client does")
+_ap.add_argument("--model", default="backend/models/mortgage-encoder.gguf",
+                 help="the GGUF whose schema_json is the label space (read, never guessed)")
+_ap.add_argument("--schema", default=None,
+                 help="override the schema with a JSON file instead of reading the GGUF")
+_ap.add_argument("--val", default="agent/dataset/data_mortgage/val.jsonl")
+_ap.add_argument("--n", type=int, default=None)
+_args = _ap.parse_args()
+
+if _args.schema:
+    _schema_obj = json.load(open(_args.schema))
+    _schema_src = _args.schema
+else:
+    sys.path.insert(0, f"{ROOT_DIR}/scripts" if (ROOT_DIR := os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__)))) else "scripts")
+    from encoder_schema_from_gguf import schema_json as _schema_from_gguf
+    _schema_obj = _schema_from_gguf(_args.model)
+    _schema_src = f"{_args.model} (sensen-encoder.schema_json)"
+
+sch = ec.Schema.from_json(_schema_obj)
+_val = Path(_args.val)
+# THE HOLDOUT'S sha256 IS PRINTED, not assumed. This file's own rule, paid for twice: a
+# served/asked pair whose measurement environment was unrecorded had to be RETIRED as
+# unquotable, and a `served` figure was invalidated by a harness change on a second occasion.
+import hashlib  # noqa: E402
+print(f"holdout : {_val.resolve()}")
+print(f"          sha256 {hashlib.sha256(_val.read_bytes()).hexdigest()}")
+print(f"schema  : {_schema_src}")
+print(f"wire    : {'two-call (the contract)' if _args.two_call else 'one-call rendered join (the trainer control)'}")
+ds = ec.load_dialogues(_val, limit=_args.n)
 facts = [ec.make_facts(d, sch.op_key, sch.question_mode) for d in ds]
 examples = ec.build_examples(facts, sch)
+# Index-aligned by construction: build_examples emits one Example per Facts with no drops,
+# so `ds[i]` is the dialogue behind `examples[i]` and its three turns are what --two-call
+# sends. Asserted rather than trusted -- a silent misalignment would score every row against
+# a neighbour's gold, which looks exactly like a model that lost half its capability.
+assert len(ds) == len(examples) == len(facts), (
+    f"REFUSED: {len(ds)} dialogues, {len(facts)} facts, {len(examples)} examples. "
+    f"build_examples dropped or added rows, so the dialogue a row is scored against is "
+    f"not the dialogue it was sent.")
 
 # TARGET. Default localhost, because that is where a pre-deploy baseline is taken.
 # ENCODER_RPC_TARGET points it at PRODUCTION instead -- the apex speaks gRPC-Web and
@@ -104,18 +166,41 @@ st = pbg.MortgageAssistantStub(_chan)
 agree = differ = none_rows = refused = 0
 shapes = {}
 msgs = []
-for i, ex in enumerate(examples):
-    # A QUOTA REFUSAL IS NOT A MEASUREMENT, so it is waited out rather than scored.
-    # Against production the partner tier has a compute-unit budget per hour, and a
-    # 560-row sweep crosses it: the engine answers RESOURCE_EXHAUSTED with its own
-    # "retry in Ns" hint, which is the right behaviour and would otherwise be counted
-    # as a row the model got wrong. The hint is PARSED rather than guessed, and the
-    # wait is capped so a permanently exhausted budget fails loudly instead of hanging.
-    r = None
+# --two-call bookkeeping. `asked_ok` here is NOT eval_grpc_mortgage's: that one scores the
+# FIRST call, and a layer that asks correctly and then refuses forever scores 86/86 on it.
+# This counts the EXCHANGE -- asked on turn one AND completed on turn two -- which is the
+# only number a user's experience is a function of.
+exchange_asked = exchange_completed = exchange_total = 0
+
+
+def _send(dlg, ex):
+    """One row, in whichever wire shape was asked for. Returns the FINAL response."""
+    if not _args.two_call:
+        return _rpc(utterance=ex.text)
+    if dlg.later is None:
+        return _rpc(utterance=dlg.first)
+    # Turn one. Its outcome is the thing --one-call structurally cannot observe.
+    first = _rpc(utterance=dlg.first)
+    q = first.clarification.question if first.WhichOneof("outcome") == "clarification" else ""
+    global exchange_asked, exchange_completed, exchange_total
+    if dlg.kind == "clarify":
+        exchange_total += 1
+        if q:
+            exchange_asked += 1
+    # Turn two, as a real client sends it: THIS SERVICE'S OWN question echoed back. An empty
+    # echo makes the service substitute a placeholder that appears zero times in the training
+    # corpus, and it is also the only thing that tells a REVISION from an ANSWER.
+    second = _rpc(utterance=dlg.first, prior_clarification=dlg.later, prior_question=q)
+    if dlg.kind == "clarify" and q and second.WhichOneof("outcome") == "params":
+        exchange_completed += 1
+    return second
+
+
+def _rpc(**kw):
+    """One ParseOperation, waiting out a quota refusal rather than scoring it."""
     for _attempt in range(6):
         try:
-            r = st.ParseOperation(pb.ParseRequest(utterance=ex.text), timeout=60, metadata=_md)
-            break
+            return st.ParseOperation(pb.ParseRequest(**kw), timeout=60, metadata=_md)
         except grpc.RpcError as _e:
             if _e.code() is not grpc.StatusCode.RESOURCE_EXHAUSTED:
                 raise
@@ -123,9 +208,18 @@ for i, ex in enumerate(examples):
             _wait = min(90, int(_m.group(1)) + 2 if _m else 15 * (_attempt + 1))
             print(f"  [quota] {_e.details()} -- waiting {_wait}s", flush=True)
             time.sleep(_wait)
-    if r is None:
-        raise SystemExit("quota refused six consecutive attempts; the budget is exhausted, "
-                         "not the model -- re-run later rather than reading a partial score")
+    raise SystemExit("quota refused six consecutive attempts; the budget is exhausted, "
+                     "not the model -- re-run later rather than reading a partial score")
+
+
+for i, ex in enumerate(examples):
+    # A QUOTA REFUSAL IS NOT A MEASUREMENT, so it is waited out rather than scored.
+    # Against production the partner tier has a compute-unit budget per hour, and a
+    # 560-row sweep crosses it: the engine answers RESOURCE_EXHAUSTED with its own
+    # "retry in Ns" hint, which is the right behaviour and would otherwise be counted
+    # as a row the model got wrong. The hint is PARSED rather than guessed, and the
+    # wait is capped so a permanently exhausted budget fails loudly instead of hanging.
+    r = _send(ds[i], ex)
     which = r.WhichOneof('outcome')
     if ex.gold is None:
         # The row's gold is prose: a clarification or refusal is the right answer here.
@@ -210,6 +304,13 @@ print(f"  served and NUMERICALLY equal to gold : {agree}")
 print(f"  served and differing                 : {differ}")
 print(f"  refused / clarified instead          : {refused}")
 print(f"rows whose gold is prose (skipped)     : {none_rows}")
+if _args.two_call and exchange_total:
+    # THE EXCHANGE, not the first call. A clarification row is only served if turn one asks
+    # AND turn two completes; counting the ask alone is what let a dead second turn read as
+    # a 74/86 win.
+    print(f"\nclarification rows, as an EXCHANGE     : {exchange_total}")
+    print(f"  turn 1 asked                         : {exchange_asked}")
+    print(f"  turn 2 then returned params          : {exchange_completed}")
 print(f"\nSERVED-THROUGH-gRPC params exact-match: {agree}/{total} = {100.0*agree/total:.2f}%")
 print("(gold adjusted for the TVM sign flip and the per-method inert-field drops -- both\n documented service behaviour, verified against tvm_payment_needs_sign_flip and\n kVariantInertFields, not excused on the served side)")
 print("\ndisagreements by (operation, shape):")

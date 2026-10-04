@@ -4031,7 +4031,24 @@ inline constexpr std::array<std::string_view, 4> kAllActionNames{
  * this project moved it when the weights lost the capability (0/90 -> 49/90). */
 [[nodiscard]] auto action_generate(Ctx& ctx) -> ExecutionResult<> {
     if (const auto* enc = MortgageAssistantWorker::instance().encoder(); enc != nullptr) {
-        auto parsed = enc->parse(ctx->utterance);
+        // ALL THREE FIELDS, for the same reason `build_prompt` takes all three on the
+        // decoder path: a second turn carries the answer to this service's own question, and
+        // a model that cannot see it re-reads the first turn and asks again.
+        //
+        // IT WAS MEASURED BEFORE IT WAS FIXED, because the asking metrics could not show it.
+        // `eval_grpc_mortgage.py`'s `asked_ok` scores the FIRST call only, so an exchange
+        // that asks correctly and then refuses forever reads as a win: the encoder arm
+        // scored asked_ok 74/86 -- better than the decoder's 64/86 -- while
+        // `"What's the payment on a $420,000 loan at 6.5%?"` + `"30 years"` came back
+        // *"The assistant left out \"periods\""*. The sibling case is sharper still:
+        // `"rate" = 0 does not correspond to anything in the request (the nearest figure you
+        // gave is 6.25)` -- the verifier names a number the model was never shown, because
+        // `grounding_text()` concatenated the turns for the verifier and nothing did for the
+        // model. A health signal read off the wrong layer, which is this file's oldest scar.
+        auto parsed = enc->parse(encoder_assistant::Turns{
+            .utterance = ctx->utterance,
+            .prior_question = ctx->prior_question,
+            .prior_clarification = ctx->prior_clarification});
         if (!parsed.has_value()) {
             // A refusal from the chain is a REFUSAL, not a crash and not a silent empty
             // answer: a straddling literal span, an operation the schema cannot name, a

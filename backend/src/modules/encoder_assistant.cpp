@@ -249,13 +249,58 @@ auto EncoderAssistant::fromGguf(const std::filesystem::path& path)
     return self;
 }
 
-auto EncoderAssistant::parse(std::string_view utterance) const
-    -> std::expected<std::optional<Parsed>, std::string> {
-    // 1. LEX. The deployed lexer, gated at 754/754 against the trainer's.
-    const auto lits = mv::lex_numeric_literals(utterance);
+/**
+ * `first [SEP] question [SEP] later`, byte for byte as `encoder_corpus.py::render()` builds
+ * it -- including the DOUBLE SPACE a revision turn leaves between the two markers, because
+ * that function appends `" [SEP] "` and then the (empty) question and then `" [SEP] "` again.
+ * Reproducing the join exactly matters more than tidying it: the model was fitted on these
+ * bytes, and "obviously equivalent" whitespace is a different token sequence.
+ *
+ * A reply is what makes it multi-turn. With none, this is `utterance` and nothing else, so
+ * the single-turn path is byte-identical to what it was before `Turns` existed.
+ */
+auto Turns::renderedText() const -> std::string {
+    static constexpr std::string_view kSepJoin = " [SEP] ";
+    std::string text{utterance};
+    if (prior_clarification.empty()) return text;
+    text += kSepJoin;
+    text += prior_question;
+    text += kSepJoin;
+    text += prior_clarification;
+    return text;
+}
 
-    // 2. TOKENIZE.
-    auto enc = tokenize_with_specials(utterance);
+auto EncoderAssistant::parse(const Turns& turns) const
+    -> std::expected<std::optional<Parsed>, std::string> {
+    const std::string text = turns.renderedText();
+
+    // 1. LEX -- THE USER SEGMENTS ONLY, and in the order the user said them.
+    //
+    // The deployed lexer is gated at 754/754 against the trainer's, but that gate ran over
+    // single USER TURNS; what has to match here is the trainer's SEGMENT RULE, which is that
+    // the assistant's question is context and never a source of literals. So each user
+    // segment is lexed on its own and the later one's span is shifted into the rendered
+    // text's coordinates -- exactly what `render()` does to `Lit.start`/`Lit.end`.
+    //
+    // Lexing the joined string instead would have been one line shorter and wrong twice: it
+    // would admit literals from a question the SERVICE did not write (the field is the
+    // client's echo), and the pair head is indexed BY LITERAL POSITION, so one extra literal
+    // shifts every prediction after it onto a different number.
+    auto lits = mv::lex_numeric_literals(turns.utterance);
+    if (!turns.prior_clarification.empty()) {
+        const std::size_t later_at = text.size() - turns.prior_clarification.size();
+        for (auto lit : mv::lex_numeric_literals(turns.prior_clarification)) {
+            lit.offset += later_at;
+            lit.end += later_at;
+            lits.push_back(std::move(lit));
+        }
+    }
+
+    // 2. TOKENIZE. The WHOLE rendered text, question included: it is context the trainer
+    //    passed through too (it binds an untyped reply such as "$700" to its slot), and
+    //    `tokenize_with_specials` already reproduces HuggingFace's pre-matching of the
+    //    literal "[SEP]" that the join introduces.
+    auto enc = tokenize_with_specials(text);
     if (!enc) return std::unexpected(enc.error());
 
     sensen::text_encoder::EncoderInput in;
