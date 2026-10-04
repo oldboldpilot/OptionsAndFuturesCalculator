@@ -1315,6 +1315,33 @@ set(SGEE_LOGGER_MODULE_DIR
     "${CMAKE_BINARY_DIR}/sensen/external/fastestjsoninthewest/external/cpp23-logger/CMakeFiles/${CPP23_LOGGER_TARGET_NAME}.dir"
     CACHE PATH "Directory containing the logger module BMI for SGEE" FORCE)
 
+# SGEE'S TESTS ARE REGISTERED WITH ctest, SO THEY MUST BE BUILDABLE HERE.
+#
+# Measured 2026-10-04: this build directory's cache carried
+# `SGEE_BUILD_TESTS:BOOL=OFF` while SGEE's own default is ON, so
+# `external/SGEE/tests` was NOT configured -- and a
+# `sgee/tests/CTestTestfile.cmake` from a configure four days earlier SURVIVED.
+# ctest reads that file, so **115 of the 152 tests it ran came from it**, each
+# invoking a binary by absolute path that nothing in the current graph could
+# rebuild: `ninja sgee_queue_node_client` answered "unknown target".
+#
+# The failure mode is the dangerous direction. SGEE's integration tests are
+# SHELL scripts read from the source tree at RUN time, so they tracked the
+# merge immediately, while the C++ client binary they drive stayed at
+# 2026-09-30 -- no `write_hlc`, no `read-after`. A new script meeting an old
+# binary reported `enqueue ack carried no write_hlc -- the node's HLC is not
+# wired`, which reads as a product defect and is a stale object file. The HLC
+# is wired (tools/sgee_queue_node.cpp passes hlc_now/hlc_observe).
+#
+# FORCE is required, not stylistic: `option()` and a plain `set(... CACHE)` BOTH
+# defer to an existing cache entry, so without it the wrong value persists for
+# the directory's life and a fresh configure hides the whole problem.
+#
+# This does cost SGEE's test binaries in this tree. EXCLUDE_FROM_ALL still keeps
+# them off a plain `ninja`; what changes is that `ctest` no longer reports
+# un-rebuildable tests as passes.
+set(SGEE_BUILD_TESTS ON CACHE BOOL "Build SGEE's tests: ctest registers them, so they must be buildable" FORCE)
+
 add_subdirectory(external/SGEE sgee EXCLUDE_FROM_ALL)
 
 # SGEE imports the same BMI as everything else here (SGEE_EXTERNAL_STD_PCM
