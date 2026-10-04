@@ -62,10 +62,59 @@ static_resources:
                       # Platform health check. Routing "/" straight at the gRPC
                       # cluster made every probe a malformed gRPC call, so the
                       # container looked unhealthy and was restarted in a loop.
-                      - match: { path: "/healthz" }
+                      #
+                      # THAT FIX NAMED ONE SPELLING AND THE CLASS WAS NEVER
+                      # SWEPT. Measured against production 2026-10-04, every
+                      # path but "/healthz" fell to the catch-all below, became
+                      # a malformed gRPC call, round-tripped to the engine and
+                      # came back 200 WITH AN EMPTY BODY:
+                      #
+                      #   /healthz              56 ms   200   2 bytes "ok"
+                      #   /health              235 ms   200   0 bytes
+                      #   /ready               949 ms   200   0 bytes
+                      #   /                    228 ms   200   0 bytes
+                      #   /wp-admin            169 ms   200   0 bytes
+                      #   /this-does-not-exist 160 ms   200   0 bytes
+                      #
+                      # Two defects, and the 200 is the worse one: anything
+                      # watching the obvious spelling got a 200 meaning "Envoy
+                      # accepted your malformed gRPC request", not "the engine
+                      # is well" -- a health signal from the wrong layer, the
+                      # same defect as last_applied, the LIVE badge and
+                      # Railway's SUCCESS. The second is that arbitrary GET
+                      # traffic became engine work at 160-950 ms a request,
+                      # against the assistants' own admission queue, with no
+                      # key and no quota consulted.
+                      - match:
+                          safe_regex:
+                            google_re2: {}
+                            regex: "^/(health|healthz|live|livez|ready|readyz)$"
                         direct_response:
                           status: 200
                           body: { inline_string: "ok" }
+                      # A GET IS NEVER A gRPC CALL. gRPC and gRPC-Web are both
+                      # POST, and backend/proto carries no google.api.http
+                      # annotation at all -- auto_mapping maps every RPC to
+                      # POST /<pkg>.<Svc>/<Method> -- so a GET to any other path
+                      # is unrouted by construction.
+                      #
+                      # This is what makes answering it here SAFE in the one way
+                      # the note below demands: the discriminator is the HTTP
+                      # METHOD, not a service name, so no service can be
+                      # stranded by it and a service added tomorrow needs no
+                      # change. Narrowing the catch-all by prefix would strand
+                      # one; this cannot.
+                      - match:
+                          prefix: "/"
+                          headers:
+                            - name: ":method"
+                              string_match:
+                                safe_regex:
+                                  google_re2: {}
+                                  regex: "GET|HEAD"
+                        direct_response:
+                          status: 404
+                          body: { inline_string: "not found" }
                       # Everything else is gRPC, matched by prefix rather than
                       # by service name. That is deliberate and load-bearing:
                       # the engine serves TWO services on this port
