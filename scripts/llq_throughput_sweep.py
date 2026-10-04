@@ -87,6 +87,30 @@ def run(probe, model, arm, threads, extra):
             if arm != "dense" and r.get("qkv_fusion") is not False:
                 sys.exit(f"FATAL: {arm}@{threads} reports qkv_fusion={r.get('qkv_fusion')}; "
                          "every arm comparable to an LLQ arm must have it OFF")
+            # PROPAGATE THE PROBE'S OWN REFUSAL. The probe exits 3 and prints a
+            # FATAL when the dense kernel answered any slice on an LLQ arm --
+            # but it prints its RESULT line first, and this loop used to take
+            # that line and carry on. So a sweep could tabulate three arms, all
+            # reporting `LLQ no`, at rates that are the dense rate three times,
+            # and print them as a comparison.
+            #
+            # That is not hypothetical: it happened on the first Q5_0 sweep of
+            # this work. `ninja build_tests` sweeps only `^test_` targets, so
+            # the probe was never rebuilt after a mutation arm was reverted, and
+            # the sweep ran a binary whose front door never consulted the
+            # registry. 196 weights adopted, 0 source calls, 125,636 dense
+            # calls, and a tidy table of three indistinguishable rates. The
+            # probe had refused correctly; the harness threw the refusal away.
+            if arm != "dense" and arm != "dense-nofusion" and not r.get("llq_used"):
+                sys.exit(
+                    f"FATAL: {arm}@{threads} did NOT measure LLQ -- "
+                    f"{r.get('coverage_dense_calls')} of "
+                    f"{(r.get('coverage_dense_calls') or 0) + (r.get('coverage_source_calls') or 0)}"
+                    " slice calls ran the dense kernel while "
+                    f"{r.get('llq_weights_adopted')} weights were adopted. Its rate is the dense "
+                    "rate. If the adopted count is non-zero the image WAS built, so suspect a "
+                    "STALE BINARY first: `ninja build_tests` does not rebuild this probe.\n"
+                    + p.stderr[-600:])
             return r
     sys.exit(f"FATAL: {arm}@{threads} produced no RESULT\n{p.stderr[-800:]}")
 
