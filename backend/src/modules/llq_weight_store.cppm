@@ -171,6 +171,12 @@ enum class AdoptError : std::uint8_t {
     ShapeMismatch,      ///< rows/cols disagree with the caller's declaration
     ColumnsNotMultiple, ///< cols not a multiple of 64: LLQ cannot hold it
     Encode,             ///< the codec refused the codes
+    // ── the ladder's per-rung refusals ──────────────────────────────────────
+    AffineType,         ///< dequantisation has an additive term LLQ cannot hold
+    ScaleTooFine,       ///< one scale per fewer than 32 elements: below the codec's floor
+    CodeWidthOutOfRange,///< code width outside the codec's 2..8 bits
+    NoRungForType,      ///< the ladder has no rung for this qtype at all
+    CodeWidthMismatch,  ///< panel source bits disagree with the rung's code width
 };
 
 [[nodiscard]] constexpr auto describe(AdoptError e) noexcept -> std::string_view {
@@ -189,8 +195,80 @@ enum class AdoptError : std::uint8_t {
             return "columns are not a multiple of 64: LLQ cannot hold this matrix";
         case AdoptError::Encode:
             return "the LLQ codec refused the codes";
+        case AdoptError::AffineType:
+            return "this quantisation is AFFINE -- it dequantises as code * scale + offset, and "
+                   "an LLQ image is symmetric with nowhere to put the offset";
+        case AdoptError::ScaleTooFine:
+            return "this quantisation carries one scale per fewer elements than the LLQ codec's "
+                   "group floor: rebuilding it would have to merge groups and pick one scale "
+                   "for several, which is a different model rather than the same one";
+        case AdoptError::CodeWidthOutOfRange:
+            return "this quantisation's code width is outside the LLQ codec's 2..8 bits";
+        case AdoptError::NoRungForType:
+            return "the ladder has no rung for this quantisation: its elements are not integer "
+                   "codes against a scale";
+        case AdoptError::CodeWidthMismatch:
+            return "LLQ image code width disagrees with the rung it is being adopted for";
     }
     return "unknown";
+}
+
+// ── The LADDER: which rungs can be held exactly, DERIVED rather than listed ──
+//
+// Four properties decide whether a quantised GGUF type can be re-presented as
+// an LLQ image without changing a single weight, and all four are read from
+// somewhere else rather than restated here:
+//
+//   1. SYMMETRY.    `GEMM::quantIsSymmetric` -- an LLQ image is codes against a
+//                   scale, so an affine type's additive term has nowhere to go.
+//   2. CODE WIDTH.  `GEMM::quantCodeBits` against the codec's own 2..8 range.
+//   3. GRANULARITY. `GEMM::quantScaleGranularity` against the codec's
+//                   `llq::kBlockWeights`, which the codec enforces itself.
+//   4. COLUMNS.     a multiple of `llq::kColumnMultiple`, likewise the codec's.
+//
+// WHY DERIVED AND NOT A TABLE OF VERDICTS. A recorded "Q6_K: no" is a value
+// somebody has to remember to change, and this repository has already paid for
+// a recorded answer going stale beside the thing it described -- a vendored
+// checksum manifest that named a digest the file no longer had, so the CORRECT
+// contract read as corrupt. Here the inputs live in sensen beside the format
+// they describe and the floor lives in the codec, so if either moves the
+// verdicts move with it and there is nothing to forget. It is the same
+// reasoning as asserting byte-identity against the source of truth instead of
+// recording its checksum.
+//
+// THE 6-BIT RUNG IS THE ONE THIS ANSWERS NO FOR, and the measurement is worth
+// stating because the answer is surprising: Q6_K IS symmetric and its code
+// width IS in range -- it is `d * sc * (q - 32)` with q six bits. What refuses
+// it is property 3. It indexes its scale array as `l / 16`, so sixteen
+// elements share a scale, where the codec's group floor is thirty-two. GGUF's
+// only 6-bit weight format is therefore out of reach, and the 6-bit rung is
+// reachable instead through the codebook path (`QuantPrecision::INT6` /
+// `FP6_*`, served by `llq::LlqGemv::runLut`), which is a different entry point
+// with a different scale granularity.
+
+/// Why the ladder has no rung for `qtype`, or nullopt if it has one.
+[[nodiscard]] inline constexpr auto rung_refusal(sensen::GEMM::QType qtype) noexcept
+    -> std::optional<AdoptError> {
+    const std::uint32_t bits = sensen::GEMM::quantCodeBits(qtype);
+    if (bits == 0) {
+        return AdoptError::NoRungForType;
+    }
+    if (!sensen::GEMM::quantIsSymmetric(qtype)) {
+        return AdoptError::AffineType;
+    }
+    if (bits < 2 || bits > 8) {
+        return AdoptError::CodeWidthOutOfRange;
+    }
+    const std::size_t gran = sensen::GEMM::quantScaleGranularity(qtype);
+    if (gran == 0 || gran % llq::kBlockWeights != 0) {
+        return AdoptError::ScaleTooFine;
+    }
+    return std::nullopt;
+}
+
+/// Can the ladder hold a weight of this type exactly?
+[[nodiscard]] inline constexpr auto ladder_holds(sensen::GEMM::QType qtype) noexcept -> bool {
+    return !rung_refusal(qtype).has_value();
 }
 
 inline constexpr std::size_t kQ8BlockValues = 32;
@@ -405,6 +483,294 @@ class LlqQ8Source final : public sensen::GEMM::Q8WeightSource {
     Mode mode_;
 };
 
+// ── The LOW-BIT tier: Q4_0 and Q5_0, the 4- and 5-bit rungs ─────────────────
+//
+// One class for both, because they are one shape at two widths: signed integer
+// codes against one fp16 scale per 32 values, which is `LlqMatrix`'s own shape
+// with `source_bits` 4 or 5 instead of 8. The codes round-trip exactly -- a
+// Q4_0 nibble means `n - 8`, which is precisely int4's two's-complement range,
+// and Q5_0's five bits mean `q - 16`, precisely int5's -- so an image built
+// from them is the same model, not an approximation of it.
+//
+// WHAT THIS TIER IS WORTH, AND IT IS NOT BYTES. The engine's notes record that
+// at 8 bits the image came out 0.07% LARGER than dense with zero outliers,
+// because Q8_0 already spends exactly eight bits on a value whose scale was
+// fitted per 32 weights, leaving no redundancy for an exponent code to find.
+// That argument does not weaken at 4 and 5 bits, it STRENGTHENS: the field is
+// narrower and the scale is still absmax-fitted per 32 values, so at least one
+// code per block sits at the range edge by construction and the byte-minimal
+// base can only be the source width. sensen's own compression evidence reaches
+// the same conclusion from the other direction, reporting 4-bit group-scaled
+// layouts as the case with no residual and therefore no gain. So the expected
+// measurement here is base == source, zero outliers, and an image slightly
+// larger than dense -- and it is MEASURED rather than assumed, because a
+// prediction that agrees with a standing argument is the easiest kind to
+// believe wrongly.
+//
+// That makes this tier's value the identity reference and the ladder's
+// completeness, not a bandwidth win. `llq-fused` is offered because the task of
+// serving it is the same work either way, and its number is reported as what it
+// is.
+
+inline constexpr std::size_t kLowBitBlockValues = 32;
+
+/// GGUF block size in bytes for the two rungs this tier serves. Taken from
+/// sensen's own geometry rather than written twice.
+[[nodiscard]] inline constexpr auto low_bit_block_bytes(sensen::GEMM::QType qtype) noexcept
+    -> std::size_t {
+    return sensen::GEMM::quantBlockBytes(qtype);
+}
+
+/// One Q4_0 or Q5_0 weight held as LLQ panels. Immutable after construction, so
+/// every worker thread may call it concurrently.
+class LlqLowBitSource final : public sensen::GEMM::LowBitWeightSource {
+  public:
+    /// Adopt an already-built LLQ panel set. `panels` must tile `rows` rows of
+    /// `k` columns in order, every panel at the rung's own code width, group
+    /// 32, fp16-exact scales.
+    ///
+    /// The code-width check is against `GEMM::quantCodeBits(qtype)` rather than
+    /// a literal, so the two rungs share one implementation and a third would
+    /// need no new condition here.
+    [[nodiscard]] static auto adopt(std::vector<llq::LlqMatrix> panels, std::size_t rows,
+                                    std::size_t k, sensen::GEMM::QType qtype, Mode mode)
+        -> std::expected<std::shared_ptr<const LlqLowBitSource>, AdoptError> {
+        if (const auto why = rung_refusal(qtype); why.has_value()) {
+            return std::unexpected(*why);
+        }
+        const std::uint32_t want_bits = sensen::GEMM::quantCodeBits(qtype);
+        std::size_t covered = 0;
+        for (const auto& p : panels) {
+            if (p.sourceBits() != want_bits) {
+                return std::unexpected(AdoptError::CodeWidthMismatch);
+            }
+            if (p.groupSize() != kLowBitBlockValues) {
+                return std::unexpected(AdoptError::GroupNotThirtyTwo);
+            }
+            if (p.cols() != k) {
+                return std::unexpected(AdoptError::ShapeMismatch);
+            }
+            for (const float s : p.scales()) {
+                if (half_to_float(half_bits(s)) != s) {
+                    return std::unexpected(AdoptError::ScaleNotHalfExact);
+                }
+            }
+            covered += p.rows();
+        }
+        if (covered != rows || panels.empty()) {
+            return std::unexpected(AdoptError::ShapeMismatch);
+        }
+        return std::shared_ptr<const LlqLowBitSource>(
+            new LlqLowBitSource(std::move(panels), rows, k, qtype, mode));
+    }
+
+    /// Build from GGUF row-major Q4_0 or Q5_0 bytes.
+    ///
+    /// Both formats store a block's 32 values INTERLEAVED -- element i in the
+    /// low nibble of `qs[i]` and element i+16 in the high nibble -- so this
+    /// de-interleaves into the linear code order `LlqMatrix` takes, and
+    /// `materialise` re-interleaves on the way out. The two are inverses and a
+    /// test asserts the round trip rather than inspecting either alone.
+    [[nodiscard]] static auto from_row_major(std::span<const std::uint8_t> blocks,
+                                             std::size_t rows, std::size_t k,
+                                             sensen::GEMM::QType qtype, Mode mode)
+        -> std::expected<std::shared_ptr<const LlqLowBitSource>, AdoptError> {
+        if (const auto why = rung_refusal(qtype); why.has_value()) {
+            return std::unexpected(*why);
+        }
+        if (qtype != sensen::GEMM::QType::Q4_0 && qtype != sensen::GEMM::QType::Q5_0) {
+            // The ladder admits the type but this builder only knows these two
+            // bit layouts. Refusing is the honest answer: a type whose nibble
+            // packing nobody wrote down must not be decoded by guesswork.
+            return std::unexpected(AdoptError::NoRungForType);
+        }
+        if (k == 0 || k % kLowBitBlockValues != 0 || rows == 0) {
+            return std::unexpected(AdoptError::ShapeMismatch);
+        }
+        if (k % llq::kColumnMultiple != 0) {
+            return std::unexpected(AdoptError::ColumnsNotMultiple);
+        }
+        const std::size_t bb = low_bit_block_bytes(qtype);
+        const std::size_t nb = k / kLowBitBlockValues;
+        if (blocks.size() != rows * nb * bb) {
+            return std::unexpected(AdoptError::ShapeMismatch);
+        }
+        const bool five = qtype == sensen::GEMM::QType::Q5_0;
+        const int bias = five ? 16 : 8;
+        std::vector<llq::LlqMatrix> panels;
+        panels.reserve((rows + kPanelRows - 1) / kPanelRows);
+        std::vector<std::int8_t> codes;
+        std::vector<float> scales;
+        for (std::size_t r0 = 0; r0 < rows; r0 += kPanelRows) {
+            const std::size_t pr = std::min(kPanelRows, rows - r0);
+            codes.resize(pr * k);
+            scales.resize(pr * nb);
+            for (std::size_t t = 0; t < pr; ++t) {
+                for (std::size_t b = 0; b < nb; ++b) {
+                    const auto* blk = blocks.data() + (((r0 + t) * nb) + b) * bb;
+                    std::uint16_t dh = 0;
+                    std::memcpy(&dh, blk, sizeof(dh));
+                    scales[(t * nb) + b] = half_to_float(dh);
+                    std::uint32_t qh = 0;
+                    const std::uint8_t* qs = blk + 2;
+                    if (five) {
+                        std::memcpy(&qh, blk + 2, sizeof(qh));
+                        qs = blk + 6;
+                    }
+                    auto* out = codes.data() + (t * k) + (b * kLowBitBlockValues);
+                    for (std::size_t i = 0; i < 16; ++i) {
+                        int lo = qs[i] & 0x0F;
+                        int hi = qs[i] >> 4;
+                        if (five) {
+                            lo |= static_cast<int>((qh >> i) & 1U) << 4;
+                            hi |= static_cast<int>((qh >> (i + 16)) & 1U) << 4;
+                        }
+                        out[i] = static_cast<std::int8_t>(lo - bias);
+                        out[i + 16] = static_cast<std::int8_t>(hi - bias);
+                    }
+                }
+            }
+            auto m = llq::LlqMatrix::fromCodes(
+                codes, scales, pr, k,
+                llq::LlqOptions::bits(sensen::GEMM::quantCodeBits(qtype))
+                    .withGroup(kLowBitBlockValues));
+            if (!m) {
+                return std::unexpected(AdoptError::Encode);
+            }
+            panels.push_back(std::move(*m));
+        }
+        return adopt(std::move(panels), rows, k, qtype, mode);
+    }
+
+    [[nodiscard]] auto qtype() const noexcept -> sensen::GEMM::QType override { return qtype_; }
+    [[nodiscard]] auto rows() const noexcept -> std::size_t { return rows_; }
+    [[nodiscard]] auto cols() const noexcept -> std::size_t { return k_; }
+    [[nodiscard]] auto mode() const noexcept -> Mode { return mode_; }
+
+    /// Bytes this weight occupies as LLQ (payload, scales and headers).
+    [[nodiscard]] auto resident_bytes() const noexcept -> std::size_t {
+        std::size_t total = 0;
+        for (const auto& p : panels_) {
+            total += p.stats().total_bytes;
+        }
+        return total;
+    }
+    [[nodiscard]] auto outlier_count() const noexcept -> std::size_t {
+        std::size_t total = 0;
+        for (const auto& p : panels_) {
+            total += p.outlierCount();
+        }
+        return total;
+    }
+    [[nodiscard]] auto base_bits_range() const noexcept -> std::pair<std::uint32_t, std::uint32_t> {
+        std::uint32_t lo = 8;
+        std::uint32_t hi = 0;
+        for (const auto& p : panels_) {
+            lo = std::min(lo, p.baseBits());
+            hi = std::max(hi, p.baseBits());
+        }
+        return {lo, hi};
+    }
+
+    /// Rebuild the slice's rows as GGUF blocks in the column-major block layout
+    /// the dense kernels read. Byte-identical to the dense path BY
+    /// CONSTRUCTION: the codes and the fp16 scales both round-trip exactly, so
+    /// the kernel receives the bytes it would have read anyway.
+    [[nodiscard]] auto materialise(std::size_t r_start, std::size_t r_end,
+                                   std::span<std::uint8_t> dst) const noexcept -> bool override {
+        const std::size_t w = r_end - r_start;
+        const std::size_t bb = low_bit_block_bytes(qtype_);
+        const std::size_t nb = k_ / kLowBitBlockValues;
+        if (r_start >= r_end || r_end > rows_ || dst.size() < nb * w * bb) {
+            return false;
+        }
+        const bool five = qtype_ == sensen::GEMM::QType::Q5_0;
+        const int bias = five ? 16 : 8;
+        thread_local std::vector<std::int8_t> row_codes;
+        for (std::size_t t = 0; t < w; ++t) {
+            const std::size_t r = r_start + t;
+            const auto& panel = panels_[r / kPanelRows];
+            const std::size_t pr = r % kPanelRows;
+            const auto scales = panel.rowScales(pr);
+            // Unlike the Q8 tier there is no direct-memcpy shortcut: even at
+            // base == source the packed stream is 4- or 5-bit fields in the
+            // codec's own packing, which is not GGUF's interleaved nibbles. The
+            // codec's row decode is the only honest route.
+            row_codes.resize(k_);
+            panel.decodeRow(pr, row_codes);
+            for (std::size_t b = 0; b < nb; ++b) {
+                auto* out = dst.data() + (((b * w) + t) * bb);
+                const std::uint16_t dh = half_bits(scales[b]);
+                std::memcpy(out, &dh, sizeof(dh));
+                const auto* src = row_codes.data() + (b * kLowBitBlockValues);
+                std::uint32_t qh = 0;
+                std::uint8_t* qs = out + 2;
+                if (five) {
+                    qs = out + 6;
+                }
+                for (std::size_t i = 0; i < 16; ++i) {
+                    const int lo = static_cast<int>(src[i]) + bias;
+                    const int hi = static_cast<int>(src[i + 16]) + bias;
+                    qs[i] = static_cast<std::uint8_t>((lo & 0x0F) | ((hi & 0x0F) << 4));
+                    if (five) {
+                        qh |= static_cast<std::uint32_t>((lo >> 4) & 1) << i;
+                        qh |= static_cast<std::uint32_t>((hi >> 4) & 1) << (i + 16);
+                    }
+                }
+                if (five) {
+                    std::memcpy(out + 2, &qh, sizeof(qh));
+                }
+            }
+        }
+        return true;
+    }
+
+    /// Compute the slice straight from the packed image.
+    ///
+    /// NOT bit-identical to the dense kernel, and it cannot be made so: this
+    /// forms `scale_g * sum(code * x)` -- one scale multiply per 32-value group
+    /// -- where every dense low-bit kernel here dequantises each element first
+    /// and accumulates `x * (code * scale)` in its own tile order. Same value
+    /// in exact arithmetic, different floats. The caller's gate is a DERIVED
+    /// bound against the elementwise absolute sum; see the test.
+    [[nodiscard]] auto gemvSlice(std::span<const float> a, std::span<float> c, std::size_t r_start,
+                                 std::size_t r_end) const noexcept -> bool override {
+        if (mode_ != Mode::LlqFused) {
+            return false;
+        }
+        if (a.size() != k_ || c.size() != r_end - r_start || r_end > rows_ || r_start >= r_end) {
+            return false;
+        }
+        llq::LlqGemv gemv;
+        (void)gemv.withSerialExecution(true);  // already inside a worker's slice
+        for (std::size_t p = r_start / kPanelRows; p * kPanelRows < r_end; ++p) {
+            const auto& panel = panels_[p];
+            const std::size_t base = p * kPanelRows;
+            const std::size_t lo = std::max(r_start, base);
+            const std::size_t hi = std::min(r_end, base + panel.rows());
+            if (lo >= hi) {
+                continue;
+            }
+            if (!gemv.runF32Slice(panel, a, c.subspan(lo - r_start, hi - lo), lo - base,
+                                  hi - base)) {
+                return false;  // declined: the caller materialises instead
+            }
+        }
+        return true;
+    }
+
+  private:
+    LlqLowBitSource(std::vector<llq::LlqMatrix> panels, std::size_t rows, std::size_t k,
+                    sensen::GEMM::QType qtype, Mode mode)
+        : panels_(std::move(panels)), rows_(rows), k_(k), qtype_(qtype), mode_(mode) {}
+
+    std::vector<llq::LlqMatrix> panels_;
+    std::size_t rows_;
+    std::size_t k_;
+    sensen::GEMM::QType qtype_;
+    Mode mode_;
+};
+
 // ── The 16-bit tier: bf16, and DELIBERATELY not F16 ─────────────────────────
 //
 // A bf16 word is sign(1) | exponent(8) | mantissa(7). `llq::LlqBf16Matrix`
@@ -596,9 +962,11 @@ class LlqBf16Source final : public sensen::GEMM::Bf16WeightSource {
 /// "LLQ was asked for".
 struct Report {
     Mode mode{Mode::Dense};
-    std::size_t adopted{0};          ///< weights now served from an LLQ image, BOTH types
-    std::size_t adopted_q8{0};       ///< of those, Q8_0
-    std::size_t adopted_bf16{0};     ///< of those, BF16
+    std::size_t adopted{0};          ///< weights now served from an LLQ image, ALL rungs
+    std::size_t adopted_q8{0};       ///< of those, Q8_0 -- the 8-bit rung
+    std::size_t adopted_bf16{0};     ///< of those, BF16 -- the 16-bit rung
+    std::size_t adopted_q5_0{0};     ///< of those, Q5_0 -- the 5-bit rung
+    std::size_t adopted_q4_0{0};     ///< of those, Q4_0 -- the 4-bit rung
     std::size_t left_dense{0};       ///< quantized weights of a type no tier holds, untouched
     std::size_t refused{0};          ///< weights of a served type LLQ could not hold (still dense)
     std::uint64_t adopted_weights{0};
@@ -608,9 +976,34 @@ struct Report {
     std::uint32_t base_bits_min{8};
     std::uint32_t base_bits_max{0};
     std::vector<std::string> refusals;  ///< first few, named
+    /// Why each left-dense TYPE has no rung, once per distinct type. Separate
+    /// from `refusals`, which is "a rung exists and this weight did not fit it"
+    /// -- a different fact, and folding the two together would make a missing
+    /// rung read as a bad weight.
+    std::vector<std::string> no_tier;
 
     [[nodiscard]] auto fully_adopted() const noexcept -> bool {
         return refused == 0 && adopted > 0;
+    }
+
+    /// Stricter than `fully_adopted`, and the difference is a hole the ladder
+    /// opened.
+    ///
+    /// `fully_adopted` asks "did every weight a rung EXISTS for fit it?". With
+    /// one rung that was the same question as "is every weight served from an
+    /// image", because a model whose type had no rung adopted nothing and failed
+    /// on `adopted > 0`. With four rungs a MIXED model can adopt most of its
+    /// weights and leave a few on a type no rung holds -- `refused` stays 0 and
+    /// `adopted` is large, so `fully_adopted` says yes while those weights
+    /// quietly serve dense. That is precisely the outcome an LLQ store must not
+    /// have: a rate measured against a path that is partly the dense one.
+    ///
+    /// This asks the question a caller actually means. It is kept SEPARATE
+    /// rather than folded into `fully_adopted` because the two are genuinely
+    /// different facts and existing callers gate on the first; a caller
+    /// deciding whether to serve should use this one.
+    [[nodiscard]] auto fully_covered() const noexcept -> bool {
+        return fully_adopted() && left_dense == 0;
     }
 
     /// Bits per weight AS LLQ, MEASURED from the byte counts above -- never taken
@@ -628,30 +1021,42 @@ struct Report {
     }
     /// Which source type(s) this run actually adopted, so a figure cannot be
     /// quoted against the wrong format.
+    /// Which source type(s) this run actually adopted, so a figure cannot be
+    /// quoted against the wrong format. Built by JOINING the per-rung counters
+    /// rather than by a chain of special cases: a mixed-rung model names every
+    /// rung it used, and adding a rung needs no new branch.
     [[nodiscard]] auto adopted_kind() const -> std::string {
-        if (adopted_q8 != 0 && adopted_bf16 != 0) {
-            return "Q8_0+BF16";
-        }
-        if (adopted_bf16 != 0) {
-            return "BF16";
-        }
-        if (adopted_q8 != 0) {
-            return "Q8_0";
-        }
-        return "none";
+        std::string s;
+        const auto add = [&s](std::string_view name, std::size_t n) -> void {
+            if (n == 0) {
+                return;
+            }
+            if (!s.empty()) {
+                s += "+";
+            }
+            s += name;
+        };
+        add("BF16", adopted_bf16);
+        add("Q8_0", adopted_q8);
+        add("Q5_0", adopted_q5_0);
+        add("Q4_0", adopted_q4_0);
+        return s.empty() ? std::string{"none"} : s;
     }
 
     [[nodiscard]] auto summary() const -> std::string {
         std::string s = std::format(
-            "weight store {}: {} {} weights served from LLQ ({} Q8_0, {} BF16; {} weights, "
-            "{} B as source -> {} B as LLQ, {:.4f} -> {:.4f} bits/weight, {} outliers, exponent/base "
-            "{}..{} bits), {} refused, {} left dense (other qtype); token embedding and tied "
-            "lm_head are NOT covered",
-            mode_name(mode), adopted, adopted_kind(), adopted_q8, adopted_bf16, adopted_weights,
-            dense_bytes, llq_bytes, source_bits_per_weight(), llq_bits_per_weight(), outliers,
-            base_bits_min, base_bits_max, refused, left_dense);
+            "weight store {}: {} {} weights served from LLQ ({} BF16, {} Q8_0, {} Q5_0, {} Q4_0; "
+            "{} weights, {} B as source -> {} B as LLQ, {:.4f} -> {:.4f} bits/weight, {} outliers, "
+            "exponent/base {}..{} bits), {} refused, {} left dense (other qtype); token embedding "
+            "and tied lm_head are NOT covered",
+            mode_name(mode), adopted, adopted_kind(), adopted_bf16, adopted_q8, adopted_q5_0,
+            adopted_q4_0, adopted_weights, dense_bytes, llq_bytes, source_bits_per_weight(),
+            llq_bits_per_weight(), outliers, base_bits_min, base_bits_max, refused, left_dense);
         for (const auto& r : refusals) {
             s += "\n  refused: " + r;
+        }
+        for (const auto& r : no_tier) {
+            s += "\n  no rung: " + r;
         }
         return s;
     }
@@ -666,19 +1071,36 @@ class Observer final : public sensen::GEMM::QuantTransposeObserver {
     auto onTransposed(const void* src_row_major, const void* dense_key, std::size_t n_rows,
                       std::size_t k, sensen::GEMM::QType qtype) noexcept -> void override {
         std::lock_guard lock(mu_);
-        // Exactly two source types have a tier. Anything else -- F16 included,
-        // for the reason LlqBf16Source's header gives -- is left dense and
-        // counted, which makes an LLQ store REFUSE such a model rather than serve
-        // it quietly from the dense path.
-        if (qtype != sensen::GEMM::QType::Q8_0 && qtype != sensen::GEMM::QType::BF16) {
+        // FOUR source types have a tier: BF16, Q8_0, Q5_0 and Q4_0 -- the
+        // ladder's 16-, 8-, 5- and 4-bit rungs. Anything else is left dense and
+        // counted, which makes an LLQ store REFUSE such a model rather than
+        // serve it quietly from the dense path.
+        //
+        // The reason a type has no tier is recorded per type, because "left
+        // dense" on its own cannot tell a reader whether a rung is missing or
+        // impossible. F16 is the field-width case LlqBf16Source's header gives;
+        // Q6_K is symmetric 6-bit and still refused, on scale granularity; the
+        // affine types have nowhere to put their offset. `rung_refusal` decides
+        // it for every integer-coded type and `note_no_tier` names it.
+        if (qtype == sensen::GEMM::QType::BF16) {
+            try {
+                adopt_bf16(src_row_major, dense_key, n_rows, k);
+            } catch (...) {
+                note_exception(n_rows, k);
+            }
+            return;
+        }
+        if (qtype != sensen::GEMM::QType::Q8_0 && qtype != sensen::GEMM::QType::Q4_0 &&
+            qtype != sensen::GEMM::QType::Q5_0) {
             ++report_.left_dense;
+            note_no_tier(n_rows, k, qtype);
             return;
         }
         try {
-            if (qtype == sensen::GEMM::QType::BF16) {
-                adopt_bf16(src_row_major, dense_key, n_rows, k);
-            } else {
+            if (qtype == sensen::GEMM::QType::Q8_0) {
                 adopt_q8(src_row_major, dense_key, n_rows, k);
+            } else {
+                adopt_low_bit(src_row_major, dense_key, n_rows, k, qtype);
             }
         } catch (...) {
             ++report_.refused;
@@ -700,10 +1122,21 @@ class Observer final : public sensen::GEMM::QuantTransposeObserver {
     auto withdraw() -> void {
         std::lock_guard lock(mu_);
         for (const auto& reg : keys_) {
-            if (reg.kind == sensen::GEMM::QType::BF16) {
-                sensen::GEMM::unregisterBf16WeightSource(reg.key);
-            } else {
-                sensen::GEMM::unregisterQ8WeightSource(reg.key);
+            switch (reg.kind) {
+                case sensen::GEMM::QType::BF16:
+                    sensen::GEMM::unregisterBf16WeightSource(reg.key);
+                    break;
+                case sensen::GEMM::QType::Q8_0:
+                    sensen::GEMM::unregisterQ8WeightSource(reg.key);
+                    break;
+                default:
+                    // Q4_0 / Q5_0 -- the low-bit registry. A switch rather than
+                    // an if-chain so a fourth registry cannot be added while
+                    // leaving this one silently falling through to the wrong
+                    // map, which is a live registration pointing at a freed
+                    // buffer rather than an error.
+                    sensen::GEMM::unregisterLowBitWeightSource(reg.key);
+                    break;
             }
         }
         keys_.clear();
@@ -772,6 +1205,28 @@ class Observer final : public sensen::GEMM::QuantTransposeObserver {
         keys_.push_back({dense_key, bytes, sensen::GEMM::QType::BF16});
     }
 
+    auto adopt_low_bit(const void* src_row_major, const void* dense_key, std::size_t n_rows,
+                       std::size_t k, sensen::GEMM::QType qtype) -> void {
+        const std::size_t bytes =
+            n_rows * (k / kLowBitBlockValues) * low_bit_block_bytes(qtype);
+        const auto blocks = std::span(static_cast<const std::uint8_t*>(src_row_major), bytes);
+        auto src = LlqLowBitSource::from_row_major(blocks, n_rows, k, qtype, mode_);
+        if (!src) {
+            note_refusal(n_rows, k, src.error());
+            return;
+        }
+        const auto& s = **src;
+        ++report_.adopted;
+        if (qtype == sensen::GEMM::QType::Q4_0) {
+            ++report_.adopted_q4_0;
+        } else {
+            ++report_.adopted_q5_0;
+        }
+        account(n_rows, k, bytes, s.resident_bytes(), s.outlier_count(), s.base_bits_range());
+        sensen::GEMM::registerLowBitWeightSource(dense_key, *src);
+        keys_.push_back({dense_key, bytes, qtype});
+    }
+
     auto account(std::size_t n_rows, std::size_t k, std::size_t dense_bytes, std::size_t llq_bytes,
                  std::size_t outliers, std::pair<std::uint32_t, std::uint32_t> base) -> void {
         report_.adopted_weights += static_cast<std::uint64_t>(n_rows) * k;
@@ -789,10 +1244,38 @@ class Observer final : public sensen::GEMM::QuantTransposeObserver {
         }
     }
 
+    auto note_exception(std::size_t n_rows, std::size_t k) -> void {
+        ++report_.refused;
+        if (report_.refusals.size() < 8) {
+            report_.refusals.push_back(std::format("{}x{}: exception while encoding", n_rows, k));
+        }
+    }
+
+    /// Record WHY a left-dense type has no rung, once per distinct type.
+    ///
+    /// Once per TYPE rather than per weight, deliberately: a model has hundreds
+    /// of weights of one type, so per-weight would fill the list with one fact
+    /// repeated and push every other refusal out of it. The hundredth line says
+    /// nothing the first did not -- the same reason the unknown-quota-tier log
+    /// in this engine fires once per distinct name.
+    auto note_no_tier(std::size_t n_rows, std::size_t k, sensen::GEMM::QType qtype) -> void {
+        if (std::ranges::find(no_tier_seen_, qtype) != no_tier_seen_.end()) {
+            return;
+        }
+        no_tier_seen_.push_back(qtype);
+        const auto why = rung_refusal(qtype);
+        report_.no_tier.push_back(std::format(
+            "{}x{} qtype {}: {}", n_rows, k, static_cast<int>(qtype),
+            why.has_value() ? describe(*why)
+                            : std::string_view{"the ladder admits this type but no builder here "
+                                               "knows its bit layout"}));
+    }
+
     Mode mode_;
     mutable std::mutex mu_;
     Report report_;
     std::vector<Registration> keys_;
+    std::vector<sensen::GEMM::QType> no_tier_seen_;
 };
 
 }  // namespace detail
@@ -848,14 +1331,33 @@ class LoadScope {
             return r;
         }
         if (r.adopted == 0) {
+            // The message does NOT list which types have a rung. It said "only
+            // Q8_0 and BF16" until the 4- and 5-bit rungs landed, and was wrong
+            // the moment they did -- a second copy of the covered set, in a
+            // string, disagreeing with the code that decides it. `r.summary()`
+            // already carries the per-type reason `note_no_tier` recorded, which
+            // is derived and cannot go stale.
             return std::unexpected("LLQ was requested but no weight was adopted: this model "
-                                   "would be served entirely from the dense path. Only Q8_0 and "
-                                   "BF16 have a tier -- an F16 model reaches here, by design. " +
+                                   "would be served entirely from the dense path. The per-type "
+                                   "reason is below. " +
                                    r.summary());
         }
         if (r.refused != 0) {
             return std::unexpected("LLQ was requested but some weights of a served type could not "
                                    "be held: serving a mixture would misreport what was measured. " +
+                                   r.summary());
+        }
+        if (r.left_dense != 0) {
+            // A MIXED model: some weights adopted, some of a type no rung
+            // holds. With one rung this was unreachable -- a model whose type
+            // had no rung adopted nothing and failed the check above -- so the
+            // case arrives with the ladder, and it is the one that would serve
+            // a partly-dense path while reporting a rate for an LLQ one.
+            // Refusing is the same call as refusing a mixture of refused
+            // weights, for the same reason.
+            return std::unexpected("LLQ was requested and some weights are of a type no rung "
+                                   "holds: they would serve from the dense path while this run "
+                                   "reported an LLQ rate. " +
                                    r.summary());
         }
         return r;

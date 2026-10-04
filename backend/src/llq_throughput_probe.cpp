@@ -435,28 +435,41 @@ auto main(int argc, char** argv) -> int {
 
     // ── coverage pass (kept out of the timing: counting is a shared atomic) ─
     sensen::GEMM::Q8SourceCounters cov{};
+    std::uint64_t low_bit_type_mismatch = 0;
     // Always measured for an LLQ store: "LLQ was requested" and "LLQ served the
     // slices" are different facts, and the scope's own report only proves the
     // first (it says the image was built and registered, not that a kernel read it).
     if (a.count_coverage || *mode != llq_weight_store::Mode::Dense) {
         sensen::GEMM::resetQ8SourceCounters();
         sensen::GEMM::resetBf16SourceCounters();
+        sensen::GEMM::resetLowBitSourceCounters();
         sensen::GEMM::setQ8SourceCounting(true);
         sensen::GEMM::setBf16SourceCounting(true);
+        sensen::GEMM::setLowBitSourceCounting(true);
         for (std::size_t p = 0; p < std::min<std::size_t>(a.timed, prompts.size()); ++p) {
             (void)run_once(*pipe, prompts[p], cfg);
         }
         sensen::GEMM::setQ8SourceCounting(false);
         sensen::GEMM::setBf16SourceCounting(false);
-        // BOTH registries, summed. The two tiers have separate front doors, so
-        // reading only the Q8 counters would report a bf16 run as having measured
-        // nothing -- and `llq_used` would then be false for a run that did serve
-        // every slice from an image. Summing is safe because a given weight has
-        // exactly one source type, so no slice is counted twice.
+        sensen::GEMM::setLowBitSourceCounting(false);
+        // ALL THREE registries, summed. Each rung has its own front door, so
+        // reading fewer than all of them would report a run on an unread rung
+        // as having measured nothing -- and `llq_used` would then be false for a
+        // run that did serve every slice from an image. Summing is safe because
+        // a given weight has exactly one source type, so no slice is counted
+        // twice. This was TWO registries until the 4- and 5-bit rungs landed;
+        // the count is part of the contract, not an implementation detail.
         const auto q8 = sensen::GEMM::q8SourceCounters();
         const auto bf16 = sensen::GEMM::bf16SourceCounters();
-        cov.source_calls = q8.source_calls + bf16.source_calls;
-        cov.dense_calls = q8.dense_calls + bf16.dense_calls;
+        const auto low = sensen::GEMM::lowBitSourceCounters();
+        cov.source_calls = q8.source_calls + bf16.source_calls + low.source_calls;
+        cov.dense_calls = q8.dense_calls + bf16.dense_calls + low.dense_calls;
+        // A type mismatch means an image of the wrong type was registered for a
+        // buffer. It is counted into dense_calls HERE -- not in the front door,
+        // which keeps it separate -- so that `llq_used` goes FALSE and the run
+        // refuses rather than reporting a rate for a mixed path.
+        cov.dense_calls += low.type_mismatch;
+        low_bit_type_mismatch = low.type_mismatch;
     }
 
     // Measured, not requested: LLQ served this run only if at least one slice was
@@ -479,7 +492,9 @@ auto main(int argc, char** argv) -> int {
         "\"decode_tok_s\":{:.2f},\"decode_tok_s_min\":{:.2f},\"decode_tok_s_max\":{:.2f},"
         "\"prefill_tok_s\":{:.1f},\"token_sha\":\"{}\","
         "\"rss_kib_loaded\":{},\"rss_kib_before_load\":{},\"dense_released_bytes\":{},"
-        "\"rss_kib_after_release\":{},\"coverage_source_calls\":{},\"coverage_dense_calls\":{}}}",
+        "\"rss_kib_after_release\":{},\"coverage_source_calls\":{},\"coverage_dense_calls\":{},"
+        "\"llq_adopted_q5_0\":{},\"llq_adopted_q4_0\":{},\"llq_left_dense\":{},"
+        "\"llq_refused\":{},\"low_bit_type_mismatch\":{}}}",
         a.label, a.model, sha, file_bytes, qname, bpw, tensors_2d, mode_name(*mode),
         llq_measured ? "true" : "false", rep.adopted, rep.adopted_kind(), rep.adopted_q8,
         rep.adopted_bf16, rep.llq_bits_per_weight(), rep.source_bits_per_weight(), rep.llq_bytes,
@@ -487,13 +502,21 @@ auto main(int argc, char** argv) -> int {
         qkv_fusion_on ? "true" : "false", prompts.size(), a.tokens, total_prompt, total_gen,
         std::min(a.timed, prompts.size()), timed_prompt, timed_gen, a.reps, dec, dmin, dmax, pre,
         token_sha, rss_loaded, rss_before, released, rss_after_release, cov.source_calls,
-        cov.dense_calls);
+        cov.dense_calls, rep.adopted_q5_0, rep.adopted_q4_0, rep.left_dense, rep.refused,
+        low_bit_type_mismatch);
     if (*mode != llq_weight_store::Mode::Dense && !llq_measured) {
         std::println(stderr,
                      "FATAL: --store {} was requested but the dense kernel answered {} of {} "
                      "quantized slice calls: this run did NOT measure LLQ, and its rate is the "
                      "dense rate",
                      a.store, cov.dense_calls, cov.dense_calls + cov.source_calls);
+        if (low_bit_type_mismatch != 0) {
+            std::println(stderr,
+                         "       {} of those were a low-bit TYPE MISMATCH: an image of the wrong "
+                         "qtype was registered for a buffer. That is a defect, not a "
+                         "configuration -- do not re-run until it is fixed",
+                         low_bit_type_mismatch);
+        }
         return 3;
     }
     return 0;

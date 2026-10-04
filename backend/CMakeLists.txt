@@ -1910,6 +1910,23 @@ target_sources(test_llq_weight_store
 target_link_libraries(test_llq_weight_store PRIVATE sensen_slim)
 add_test(NAME LlqWeightStoreTest COMMAND test_llq_weight_store)
 
+# THE LADDER: which quantised types an LLQ image can hold exactly, which cannot,
+# and why -- per type, DERIVED from sensen's own per-QType algebra
+# (GEMM::quantIsSymmetric / quantCodeBits / quantScaleGranularity) and the
+# codec's own floors, never from a recorded table of verdicts. Prints the table
+# as well as asserting its properties, because the table is the useful artefact
+# and a printed one that nothing checks is a recorded answer waiting to go
+# stale. Also gates the 4- and 5-bit rungs' GGUF round trip and the derived
+# bound on their fused arm. Same link shape as the store's own test: sensen_slim
+# and nothing else.
+add_executable(test_llq_ladder tests/test_llq_ladder.cpp)
+target_sources(test_llq_ladder
+    PRIVATE
+    FILE_SET CXX_MODULES FILES
+        src/modules/llq_weight_store.cppm)
+target_link_libraries(test_llq_ladder PRIVATE sensen_slim)
+add_test(NAME LlqLadderTest COMMAND test_llq_ladder)
+
 add_executable(test_vendored_proto_drift tests/test_vendored_proto_drift.cpp)
 target_compile_definitions(test_vendored_proto_drift PRIVATE
     kBackendDir="${CMAKE_CURRENT_SOURCE_DIR}"
