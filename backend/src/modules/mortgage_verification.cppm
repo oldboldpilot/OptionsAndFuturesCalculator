@@ -1307,6 +1307,51 @@ export struct NumericLiteral {
      * this is the same shape wearing a different word.
      */
     bool names_vacancy = false;
+
+    /**
+     * The words around this literal call it an HOA / condo / association fee.
+     *
+     * CARRIED SEPARATELY FROM `names_upkeep` RATHER THAN ADDED TO ITS WORD
+     * LIST, and the reason is that `names_upkeep` does two jobs. It removes a
+     * repairs figure from the overpayment slots AND it is how a repairs or
+     * insurance figure reaches `annual_repairs` / `annual_insurance`. An HOA
+     * fee is NEITHER of those -- it is its own cost line -- so folding "hoa"
+     * into that list would stop the loan being overpaid (right) and start the
+     * HOA being billed as repairs (wrong, just quieter).
+     *
+     * WHY IT EXISTS AT ALL. Reported from production 2026-10-04: "the mortgage
+     * AI assistant is always explicitly wrong when I specify the HOA payment".
+     * Measured against the live ingress,
+     *
+     *     "amortize 500000 at 6% over 30 years with 275 per month HOA dues"
+     *     -> ComputeAmortization{monthly_overpayment: 275, ...}   200 OK
+     *
+     * The HOA fee was billed as EXTRA PRINCIPAL, which retires the loan years
+     * early and moves every figure in the schedule, with nothing in the
+     * response saying where the 275 came from. `AmortizationRequest` has no
+     * HOA field, so `monthly_overpayment` is the only monthly-money slot on
+     * the message and the literal was drawn to it; M1 grounded it because 275
+     * genuinely is in the sentence, and grounding is per field, so nothing
+     * asked WHICH monthly amount it was.
+     *
+     * THE RULE THAT SHOULD HAVE CAUGHT IT WAS ALREADY THERE, one word short.
+     * `names_upkeep` already removes a repairs figure from exactly these
+     * fields, and its comment already describes this failure ("an overpayment
+     * the user never asked for retires the loan years early"). Its word list
+     * had repairs / maintenance / upkeep / insurance / budget and not HOA. So
+     * this is the sweep-the-class lesson at its purest: the rule, the field
+     * list, the reasoning and the gate all existed for one member of the
+     * class and were never carried to the rest.
+     *
+     * The owner's framing is the one to keep: *"the HOA and PMI are not really
+     * part of the amortization but part of the costs."* A carrying cost is
+     * never principal, and no arithmetic makes it principal.
+     *
+     * SUBTRACTIVE, like every M0 rule: it only REMOVES candidates, so the
+     * worst a false positive can do is refuse a parse. That is the right
+     * direction, because the failure it replaces is SILENT.
+     */
+    bool names_hoa = false;
 };
 
 /**
@@ -1869,7 +1914,7 @@ constexpr std::array<VariantInertField, 13> kVariantInertFields{{
     return false;
 }
 
-constexpr std::array<ConventionValue, 52> kConventionValues{{
+constexpr std::array<ConventionValue, 57> kConventionValues{{
     // WHAT THE HOUSE COSTS TO KEEP, at the convention zero. Added 2026-09-16
     // with the corpus that teaches them on ComputeDetailedAmortization.
     //
@@ -2017,6 +2062,62 @@ constexpr std::array<ConventionValue, 52> kConventionValues{{
     {.field = "heloc_drawn_amount", .value = "0"},
     {.field = "heloc_annual_rate", .value = "0"},
     {.field = "heloc_term_years", .value = "0"},
+
+    // FIVE SPELLINGS THIS TABLE HAD ALREADY ACCEPTED UNDER A DIFFERENT NAME,
+    // added 2026-10-04. Three of them sit beside a sibling that was exempt all
+    // along, which is what makes this the sweep-the-class defect rather than a
+    // policy change:
+    //
+    //   exempt already                      | missing until now
+    //   ------------------------------------+------------------------------
+    //   annual_appreciation                 | annual_appreciation_rate,
+    //                                       | annual_home_appreciation
+    //   monthly_taxes_ins_maintenance       | monthly_taxes_ins_hoa
+    //   monthly_overpayment,                | (none -- all three spellings
+    //   extra_monthly_payment, extra_payments| of that family were swept)
+    //
+    // The extra-payment family HAS all three of its spellings here; the
+    // appreciation family had one of three. Measured against production
+    // 2026-10-04, that gap is a user-visible refusal:
+    //
+    //     "what is the cash flow on a 450000 rental with 300 monthly HOA
+    //      renting at 3100, 6.25% for 30 years"
+    //     -> The assistant left out "annual_home_appreciation", which
+    //        ComputeRentVsBuy needs.
+    //
+    // WHY ZERO IS SAFE HERE AND IS NOT SAFE FOR `rate`, which is the question
+    // this table's own ComputePaybackPeriod note says to ask every time. A
+    // fabricated `rate = 0` prices a 0% loan -- a different question, answered
+    // exactly, which is the corrupted-value failure the gate exists to catch.
+    // Every field below is a COMPONENT whose zero means "none of this part",
+    // and the arithmetic is correct for that reading:
+    //
+    //   * `down_payment` -- 0 is 100% financing, an ordinary real structure
+    //     (VA, and any no-money-down purchase). Owner decision, 2026-10-04:
+    //     *"if a downpayment is not stated, it should be assumed as 0"* and
+    //     *"you should not need to state a downpayment when it can be assumed
+    //     as 0."* It is also the field whose absence did the most damage,
+    //     because an operation that REQUIRES it and cannot ground it pushes
+    //     the model to reach for whatever money literal is in the sentence --
+    //     which is how a stated HOA fee ended up as a down payment.
+    //   * `down_payment_percent` -- the same statement on ComputeClosingCosts.
+    //     That handler already admits exactly 1.0 (an all-cash purchase with
+    //     no loan, where title, appraisal, recording and transfer tax are
+    //     still owed), so 0 is the other end of a range it already handles.
+    //   * `annual_home_appreciation`, `annual_appreciation_rate` -- 0 is "do
+    //     not model appreciation", which is precisely what the already-exempt
+    //     `annual_appreciation` has meant on ComputeRentalCashFlow throughout.
+    //   * `monthly_taxes_ins_hoa` -- 0 is "do not model carrying costs", the
+    //     same statement `monthly_taxes_ins_maintenance` already carries.
+    //
+    // Exempt at ZERO ONLY, as every entry above is, so a STATED down payment
+    // or appreciation rate must still appear in the text and is still refused
+    // if the model invents one.
+    {.field = "down_payment", .value = "0"},
+    {.field = "down_payment_percent", .value = "0"},
+    {.field = "annual_home_appreciation", .value = "0"},
+    {.field = "annual_appreciation_rate", .value = "0"},
+    {.field = "monthly_taxes_ins_hoa", .value = "0"},
 }};
 
 // --- product-scope bounds (G5); see the file banner on non-duplication ----
@@ -2454,6 +2555,28 @@ namespace detail {
     if (lit.names_upkeep &&
         (field_name == "monthly_overpayment" || field_name == "extra_monthly_payment" ||
          field_name == "extra_payments")) {
+        return out;
+    }
+
+    // THE SAME RULE FOR AN HOA FEE, which is the defect above in the field it
+    // was actually reported in. Two groups, and they are separate on purpose:
+    //
+    //   * the PRINCIPAL slots -- an HOA fee is not an overpayment and not a
+    //     down payment and not the loan itself. "The HOA and PMI are not
+    //     really part of the amortization but part of the costs."
+    //   * `annual_repairs` / `annual_insurance` -- an HOA fee is not repairs
+    //     and not insurance either. Without this, routing the literal away
+    //     from the overpayment would simply bill it as upkeep instead: a
+    //     smaller wrong number, still with nothing saying where it came from.
+    //
+    // `monthly_hoa` and `monthly_taxes_ins_hoa` are deliberately ABSENT from
+    // both groups -- those are the slots an HOA fee belongs in, and this rule
+    // must not stop it reaching them.
+    if (lit.names_hoa &&
+        (field_name == "monthly_overpayment" || field_name == "extra_monthly_payment" ||
+         field_name == "extra_payments" || field_name == "down_payment" ||
+         field_name == "loan_amount" || field_name == "present_value" ||
+         field_name == "annual_repairs" || field_name == "annual_insurance")) {
         return out;
     }
 
@@ -3228,6 +3351,76 @@ auto lex_numeric_literals(std::string_view text) -> std::vector<NumericLiteral> 
                     }
                     // Step back over this word and the run before it, stopping
                     // at a boundary for the reason above.
+                    while (back > 0 && !detail::is_alpha(text[back - 1])) {
+                        if (text[back - 1] == '.' || text[back - 1] == ';') { back = 0; break; }
+                        --back;
+                    }
+                    while (back > 0 && detail::is_alpha(text[back - 1])) --back;
+                    if (back == 0) break;
+                }
+            }
+        }
+
+        // The HOA adjacency. Same window, same both-directions scan and the
+        // same sentence boundaries as upkeep above, because the phrasings put
+        // the word on either side and several words away:
+        //   "275 per month HOA dues"        -> three words AFTER the figure
+        //   "350 a month HOA"               -> three words after
+        //   "300 monthly HOA"               -> two words after
+        //   "HOA is 400 per month"          -> two words BEFORE
+        //   "$275/month condo dues"         -> after, across a '/'
+        //
+        // `fee` ALONE IS DELIBERATELY NOT A WORD HERE. This file already has
+        // `origination_fee_percent`, `other_lender_fees`, `appraisal_fee`,
+        // `inspection_fee` and `recording_fees`, so a bare "fee" would tag a
+        // closing-cost figure as an HOA charge and then remove it from the
+        // only slots it belongs in. The words are the ones that name the
+        // CHARGER, not the charge.
+        //
+        // "homeowners" is likewise absent, because "homeowners insurance" and
+        // "homeowners association" share it and the upkeep scan above already
+        // owns the insurance reading. "association" is what disambiguates.
+        // MONEY **OR UNTAGGED**, and that is not a widening for its own sake --
+        // it is the condition the money SLOT itself uses. `classify_slot`'s
+        // money test is `tag == Money || tag == Untagged` (a bare number is
+        // admissible money), and `lit.tag` is only `Money` when a CURRENCY
+        // PREFIX was seen. The reported utterance writes no "$":
+        //
+        //     "amortize 500000 at 6% over 30 years with 275 per month HOA dues"
+        //
+        // so the 275 is Untagged, and a Money-only guard here would leave the
+        // exact production defect unfixed while every test that used a "$"
+        // passed. Measured: with the guard at Money only, this section failed
+        // 4 of its checks and the overpayment parse still came back Proven.
+        //
+        // NOTE FOR THE UPKEEP RULE ABOVE, which is Money-only: it therefore has
+        // the SAME blind spot for a bare figure ("...with 3600 a year for
+        // repairs" tags nothing). Not changed here, because that rule is live
+        // against 2,911 corpus rows and widening it is its own measurement.
+        if ((lit.tag == LiteralTag::Money || lit.tag == LiteralTag::Untagged) &&
+            !lit.names_increment && !lit.names_down_payment) {
+            const auto is_hoa_word = [](std::string_view w) {
+                return w == "hoa" || w == "hoas" || w == "dues" || w == "condo" ||
+                       w == "coa" || w == "association";
+            };
+            std::size_t j = i;
+            for (int step = 0; step < 4 && !lit.names_hoa; ++step) {
+                while (j < text.size() && (text[j] == '/' || text[j] == ' ' ||
+                                           text[j] == '-' || text[j] == ',')) {
+                    ++j;
+                }
+                if (j < text.size() && (text[j] == '.' || text[j] == ';')) break;
+                const std::string w = detail::next_word(text, j);
+                if (w.empty()) break;
+                if (is_hoa_word(w)) lit.names_hoa = true;
+                while (j < text.size() && detail::is_alpha(text[j])) ++j;
+            }
+            if (!lit.names_hoa) {
+                std::size_t back = lit.offset;
+                for (int step = 0; step < 3 && !lit.names_hoa; ++step) {
+                    const std::string wp = detail::prev_word(text, back);
+                    if (wp.empty()) break;
+                    if (is_hoa_word(wp)) { lit.names_hoa = true; break; }
                     while (back > 0 && !detail::is_alpha(text[back - 1])) {
                         if (text[back - 1] == '.' || text[back - 1] == ';') { back = 0; break; }
                         --back;

@@ -2612,6 +2612,162 @@ auto main() -> int {
                     "an utterance with no upkeep words is unaffected");
     }
 
+
+    {
+        // Section 32. AN HOA FEE IS A COST, NEVER PRINCIPAL -- and an unstated
+        // down payment is ZERO.
+        //
+        // Reported from production 2026-10-04: "the mortgage AI assistant is
+        // always explicitly wrong when I specify the HOA payment without
+        // specifying the amount put down", and "even when i specify the hoa
+        // cost is per month it somehow records the wrong number". Measured
+        // against the live ingress with the partner key:
+        //
+        //   "amortize 500000 at 6% over 30 years with 275 per month HOA dues"
+        //   -> ComputeAmortization{monthly_overpayment: 275, ...}   200 OK
+        //
+        // The HOA fee was billed as EXTRA PRINCIPAL. That retires the loan
+        // years early and moves every figure in the schedule, and nothing in
+        // the response says where the 275 came from -- the documented
+        // dangerous failure, in a new field.
+        //
+        // THE RULE THAT SHOULD HAVE CAUGHT IT WAS ALREADY HERE, one word
+        // short: section 31's upkeep rule removes a repairs figure from
+        // exactly these fields and its word list had no HOA in it.
+        const std::string hoa_prod =
+            "amortize 500000 at 6% over 30 years with 275 per month HOA dues";
+
+        {
+            const auto lits = mv::lex_numeric_literals(hoa_prod);
+            int hoa_tagged = 0;
+            bool loan_tagged = false;
+            for (const auto& l : lits) {
+                if (!l.names_hoa) continue;
+                ++hoa_tagged;
+                if (l.value.units() == mv::parse_strict_decimal("500000")->units()) {
+                    loan_tagged = true;
+                }
+            }
+            check(hoa_tagged == 1, "the HOA fee is tagged names_hoa (three words before 'HOA')");
+            check(!loan_tagged, "the LOAN is NOT tagged HOA -- the window does not reach it");
+        }
+
+        // The production reproduction, now refused instead of served.
+        expect(params("ComputeAmortization",
+                      {{"loan_amount", "500000.00"}, {"annual_rate", "0.0600"},
+                       {"term_months", "360"}, {"monthly_overpayment", "275.00"},
+                       {"pmi_annual_rate", "0.0000"},
+                       {"original_home_value", "500000.00"},
+                       {"annual_repairs", "0.00"}, {"annual_insurance", "0.00"},
+                       {"annual_cost_growth", "0.0000"}}),
+               hoa_prod, mv::Outcome::Unsafe, mv::ReasonCode::UngroundedValue,
+               "an HOA fee cannot ground monthly_overpayment (the production defect)");
+
+        // NOR can it become repairs or insurance. Without this, routing the
+        // literal away from the overpayment would simply bill it as upkeep --
+        // a smaller wrong number, still with nothing saying where it came from.
+        expect(params("ComputeAmortization",
+                      {{"loan_amount", "500000.00"}, {"annual_rate", "0.0600"},
+                       {"term_months", "360"}, {"monthly_overpayment", "0.00"},
+                       {"pmi_annual_rate", "0.0000"},
+                       {"original_home_value", "500000.00"},
+                       {"annual_repairs", "275.00"}, {"annual_insurance", "0.00"},
+                       {"annual_cost_growth", "0.0000"}}),
+               hoa_prod, mv::Outcome::Unsafe, mv::ReasonCode::UngroundedValue,
+               "... and an HOA fee is not repairs either");
+
+        // THE WORD BEFORE THE FIGURE, which is how people actually say it.
+        {
+            const auto lits = mv::lex_numeric_literals("HOA is 400 per month on a 700000 home");
+            int tagged = 0;
+            for (const auto& l : lits) {
+                if (l.names_hoa && l.value.units() == mv::parse_strict_decimal("400")->units()) {
+                    ++tagged;
+                }
+            }
+            check(tagged == 1, "\"HOA is 400\" tags the 400 (the backward scan)");
+        }
+
+        // A BARE "fee" MUST NOT TAG, and this is the false-positive direction
+        // that keeps the rule shippable. This file already carries
+        // origination_fee_percent, other_lender_fees, appraisal_fee,
+        // inspection_fee and recording_fees -- if "fee" tagged, a closing-cost
+        // figure would be removed from the only slots it belongs in.
+        {
+            const auto lits = mv::lex_numeric_literals("appraisal fee of 650 and a 900 inspection fee");
+            int tagged = 0;
+            for (const auto& l : lits) { if (l.names_hoa) ++tagged; }
+            check(tagged == 0, "a bare \"fee\" does NOT tag as HOA (closing costs stay groundable)");
+        }
+
+        // THE SENTENCE BOUNDARY, as section 31 needs it: an HOA mentioned in a
+        // different sentence must not reach back and disarm a real overpayment.
+        {
+            const std::string two =
+                "Amortize 500000 at 6% over 30 years paying an extra 250 a month. "
+                "The HOA is 275 a month.";
+            const auto lits = mv::lex_numeric_literals(two);
+            bool inc_tagged = false;
+            for (const auto& l : lits) {
+                if (l.names_hoa && l.value.units() == mv::parse_strict_decimal("250")->units()) {
+                    inc_tagged = true;
+                }
+            }
+            check(!inc_tagged, "an HOA in the NEXT sentence does not tag the overpayment");
+            expect_pass(params("ComputeAmortization",
+                               {{"loan_amount", "500000.00"}, {"annual_rate", "0.0600"},
+                                {"term_months", "360"}, {"monthly_overpayment", "250.00"},
+                                {"pmi_annual_rate", "0.0000"},
+                                {"original_home_value", "500000.00"},
+                                {"annual_repairs", "0.00"}, {"annual_insurance", "0.00"},
+                                {"annual_cost_growth", "0.0000"}}),
+                        two, "a REAL overpayment beside an HOA fee still grounds");
+        }
+
+        // AN UNSTATED DOWN PAYMENT IS ZERO. Owner decision 2026-10-04: "if a
+        // downpayment is not stated, it should be assumed as 0" / "you should
+        // not need to state a downpayment when it can be assumed as 0." Zero
+        // is 100% financing, an ordinary real structure, and the arithmetic is
+        // correct for it -- unlike a fabricated `rate = 0`, which prices a
+        // different loan and is why that field is NOT exempt.
+        //
+        // This is also the field whose absence did the most damage: an
+        // operation that REQUIRES it and cannot ground it pushes the model to
+        // reach for whatever money literal is in the sentence, which is how a
+        // stated HOA fee became a down payment.
+        const std::string rental =
+            "rental cash flow on a 450000 rental, closing costs 9000, 6.25% over 30 years, "
+            "rents for 3100 a month, 95% occupancy, property tax 5400 a year, "
+            "300 a month HOA, over 10 years";
+        const std::vector<KV> rental_fields{
+            {"property_price", "450000.00"},      {"down_payment", "0"},
+            {"closing_costs", "9000.00"},         {"loan_annual_rate", "0.0625"},
+            {"loan_term_years", "30"},            {"monthly_gross_rent", "3100.00"},
+            {"annual_rent_increase", "0"},        {"occupancy_rate", "0.95"},
+            {"annual_property_tax", "5400.00"},   {"annual_insurance", "0.00"},
+            {"annual_repairs", "0.00"},           {"annual_capex_reserve", "0"},
+            {"monthly_hoa", "300.00"},            {"management_fee_rate", "0"},
+            {"annual_other_expenses", "0"},       {"annual_expense_increase", "0"},
+            {"annual_appreciation", "0"},         {"selling_cost_percent", "0"},
+            {"years", "10"},                      {"heloc_drawn_amount", "0"},
+            {"heloc_annual_rate", "0"},           {"heloc_term_years", "0"}};
+        expect_pass(params("ComputeRentalCashFlow", rental_fields), rental,
+                    "down_payment = 0 grounds with NO down payment stated, and the HOA "
+                    "fee still reaches monthly_hoa -- the slot it belongs in");
+
+        // EXEMPT AT ZERO ONLY, which is what stops it becoming a licence to
+        // invent. A fabricated 20%-of-price down payment is still refused.
+        {
+            auto invented = rental_fields;
+            for (auto& kv : invented) {
+                if (kv.first == "down_payment") kv.second = "90000.00";
+            }
+            expect(params("ComputeRentalCashFlow", invented), rental,
+                   mv::Outcome::Unsafe, mv::ReasonCode::UngroundedValue,
+                   "an INVENTED down payment is still refused -- the exemption is zero-only");
+        }
+    }
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }
