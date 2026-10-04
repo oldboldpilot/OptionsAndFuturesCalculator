@@ -38,8 +38,26 @@ routes = [
   { pattern = "www.optionsandfuturescalculator.com", custom_domain = true },
 ]
 
+# The `/auth/v1/*` reverse proxy. See worker.ts for why it is required:
+# supabase-js hardcodes that prefix and the self-hosted GoTrue serves its routes
+# at the root, so without this every browser auth call 404s.
+#
+# The header above used to say there was "deliberately no `main` script" because
+# one would sit in front of every asset request. That is no longer true of the
+# assets binding: with both `main` and `assets`, an asset request is served by
+# the asset layer WITHOUT invoking the script, and only non-asset paths reach
+# it. The script hands those straight to env.ASSETS.fetch, so html_handling and
+# not_found_handling behave exactly as before.
+main = "worker.ts"
+
+[vars]
+GOTRUE_ORIGIN = "https://supabase-auth-production-c656.up.railway.app"
+
 [assets]
 directory = "./out"
+# Named so worker.ts can fall back to the asset layer for everything that is
+# not an auth path.
+binding = "ASSETS"
 
 # The export writes 404.html; without this a missing path returns Workers' own
 # bare 404 instead of the site's.

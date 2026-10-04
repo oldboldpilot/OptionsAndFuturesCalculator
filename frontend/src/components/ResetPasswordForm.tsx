@@ -76,6 +76,46 @@ export const ResetPasswordForm: React.FC = () => {
         return;
       }
 
+      // THE IMPLICIT FRAGMENT, AND THE REASON THIS IS DONE BY HAND.
+      //
+      // GoTrue's /verify endpoint 303s to this page with the session in the URL
+      // FRAGMENT: `#access_token=...&refresh_token=...&type=recovery`. A client
+      // built by supabase-js's own `createClient` consumes that itself under
+      // `detectSessionInUrl`. `createBrowserClient` from @supabase/ssr -- which
+      // is what this app uses, and must, because the rest of the site reads the
+      // session from cookies -- is the PKCE/cookie client and DOES NOT. So
+      // `getSession()` stays null, there is no `?code` or `?token_hash` to
+      // exchange, PASSWORD_RECOVERY never fires, and a perfectly valid link
+      // renders "this link is no longer valid".
+      //
+      // Measured in a real browser against production before this was added:
+      // the page carried a valid recovery JWT in the fragment and still showed
+      // the expired message. Every HTTP-level check passed -- the 303, the
+      // redirect target, the token -- because the failure is entirely inside the
+      // client library's choice of flow.
+      const hash = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+      const hashAccess = hash.get('access_token');
+      const hashRefresh = hash.get('refresh_token');
+      if (hashAccess && hashRefresh) {
+        const { error } = await supabase.auth.setSession({
+          access_token: hashAccess,
+          refresh_token: hashRefresh,
+        });
+        if (cancelled) return;
+        if (!error) {
+          // Drop the tokens from the address bar. They are single-use and
+          // already spent, and leaving them there puts a credential in history
+          // and in anything the browser syncs.
+          window.history.replaceState(null, '', window.location.pathname);
+          setReady(true);
+          setChecking(false);
+          return;
+        }
+        setChecking(false);
+        setMessage({ kind: 'error', text: error.message });
+        return;
+      }
+
       const params = new URLSearchParams(window.location.search);
       const code = params.get('code');
       const tokenHash = params.get('token_hash');
