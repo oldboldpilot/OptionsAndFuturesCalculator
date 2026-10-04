@@ -42,6 +42,9 @@ export const ResetPasswordForm: React.FC = () => {
   const [confirm, setConfirm] = useState('');
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState(false);
+  // For the request half, reached when no recovery session is established.
+  const [email, setEmail] = useState('');
+  const [sending, setSending] = useState(false);
   // Supabase returns failures in the RESOLVED value rather than throwing, so an
   // `await` that never reads `.error` discards every one. AuthUI.tsx carries the
   // same note: until it was added there, a wrong password did nothing at all.
@@ -117,6 +120,40 @@ export const ResetPasswordForm: React.FC = () => {
     };
   }, [supabase]);
 
+  const requestLink = useCallback(
+    async (e: React.FormEvent) => {
+      e.preventDefault();
+      setMessage(null);
+      setSending(true);
+      try {
+        const { error } = await supabase.auth.resetPasswordForEmail(email, {
+          redirectTo: `${window.location.origin}/auth/reset-password`,
+        });
+        if (error) {
+          // GoTrue rate-limits one email per address per minute, and its own
+          // message says so. Surfaced as INFO rather than as an error, because
+          // "you can only request this once every 60 seconds" means the first
+          // request worked -- reporting it in loss red reads as a failure to
+          // send, which is the opposite of what happened.
+          const limited = /once every|rate limit/i.test(error.message);
+          setMessage({ kind: limited ? 'info' : 'error', text: error.message });
+        } else {
+          // Identical whether or not the address has an account: GoTrue answers
+          // 200 either way so this endpoint cannot enumerate who signed up.
+          setMessage({
+            kind: 'info',
+            text: 'If that email has an account, a reset link is on its way. It expires, and each link works once.',
+          });
+        }
+      } catch {
+        setMessage({ kind: 'error', text: 'Could not reach the sign-in service.' });
+      } finally {
+        setSending(false);
+      }
+    },
+    [email, supabase],
+  );
+
   const submit = useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault();
@@ -163,17 +200,43 @@ export const ResetPasswordForm: React.FC = () => {
   }
 
   if (!ready) {
+    // NOT a dead end. This branch is reached two ways -- an expired or
+    // already-used link, and someone who simply navigated here -- and in both
+    // cases the next thing they need is a new link. Telling them to "request
+    // one from the sign-in form" sent them hunting for a form nested two
+    // components deep inside the calculator, which is how the reset ended up
+    // unreachable in the first place. So the request lives here too.
     return (
-      <div className="flex flex-col gap-3">
+      <form onSubmit={requestLink} className="flex flex-col gap-3">
         {message && (
-          <p className="text-sm" style={{ color: 'var(--color-loss)' }} role="alert">
+          <p
+            className="text-sm"
+            style={{
+              color: message.kind === 'error' ? 'var(--color-loss)' : 'var(--color-ink-300)',
+            }}
+            role={message.kind === 'error' ? 'alert' : 'status'}
+          >
             {message.text}
           </p>
         )}
-        <a href="/" className="btn w-fit">
+        <label className="flex flex-col gap-1 text-sm">
+          Your email
+          <input
+            type="email"
+            autoComplete="email"
+            className="p-2 rounded bg-transparent border border-white/20 text-sm"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            required
+          />
+        </label>
+        <button type="submit" className="btn w-fit" disabled={sending}>
+          {sending ? 'Sending…' : 'Email me a reset link'}
+        </button>
+        <a href="/" className="text-xs underline text-[var(--color-ink-400)]">
           Back to the calculator
         </a>
-      </div>
+      </form>
     );
   }
 

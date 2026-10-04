@@ -69,6 +69,14 @@ export const EXCLUDED_PAGES = new Map([
     },
   ],
   [
+    // A sign-in form is not publisher content and nothing should rank it.
+    'auth/sign-in.html',
+    {
+      reason: 'sign-in form, no publisher content, noindex',
+      expectNoindex: true,
+    },
+  ],
+  [
     // Reached from a link in the visitor's own email and from nowhere else.
     // Submitting it would invite a crawler to a one-shot recovery token, and
     // the page has no publisher content to rank -- it is a password field.

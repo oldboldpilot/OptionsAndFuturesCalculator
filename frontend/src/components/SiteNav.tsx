@@ -120,6 +120,37 @@ export function SiteNav() {
       </span>
 
       {/*
+        Sign in, with an ADDRESS.
+
+        `AuthUI` was reachable only from inside ProPanel, inside
+        StrategySelector -- so signing in, signing up and resetting a password
+        all required finding a form nested two components deep in the
+        calculator, and the header offered none of them. A reset that exists
+        and cannot be found is indistinguishable from one that does not exist,
+        which is how it was reported.
+
+        Placed after the `marginLeft: auto` spacer so it sits as account chrome
+        on the right rather than as a third content tab beside Calculator and
+        Guides. Carries no height of its own, so `--nav-h` is unchanged and the
+        workspace's `calc(100vh - var(--nav-h))` still agrees with it.
+      */}
+      <Link
+        href="/auth/sign-in"
+        aria-current={isActive('/auth/sign-in') ? 'page' : undefined}
+        style={{
+          fontSize: 'var(--text-2xs)',
+          padding: '0.25rem 0.5rem',
+          borderRadius: 'var(--radius-sm)',
+          textDecoration: 'none',
+          whiteSpace: 'nowrap',
+          color: isActive('/auth/sign-in') ? 'var(--color-ink-100)' : 'var(--color-ink-300)',
+          background: isActive('/auth/sign-in') ? 'var(--color-base-600)' : 'transparent',
+        }}
+      >
+        Sign in
+      </Link>
+
+      {/*
         The display-currency picker. Formatting only -- see CurrencySelect for
         why that limit is stated in the tooltip rather than left implied.
       */}
