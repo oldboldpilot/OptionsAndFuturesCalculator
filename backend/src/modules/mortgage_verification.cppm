@@ -3877,10 +3877,30 @@ auto ground_emitted_values(const MortgageParamsInput& input, std::string_view us
                 std::string nearest;
                 __int128 best = 0;
                 bool have_nearest = false;
+                // AN EXACT MATCH MEANS SOMETHING DIFFERENT FROM A NEAR ONE, and
+                // conflating them produced a refusal that contradicted itself.
+                // Measured on a local engine 2026-10-04, after the HOA rule landed:
+                //
+                //   "monthly_overpayment" = 275 does not correspond to anything in
+                //   the request (the nearest figure you gave is 275)
+                //
+                // -- it says the figure corresponds to nothing and then quotes it.
+                // That is the same shape as the documented false refusal
+                // (`"periods" = 10 ... the nearest figure you gave is 10`), and it
+                // is unreadable even though the VERDICT is right.
+                //
+                // When a literal matches EXACTLY, the figure is in the request and
+                // the objection is to the ROLE, not to the number: an adjacency
+                // rule above removed it as a candidate for THIS field. So name the
+                // role the user's own words gave it. This covers the whole class --
+                // upkeep, HOA, a down payment and a vacancy rate all produced the
+                // self-contradicting sentence before this.
+                const NumericLiteral* exact = nullptr;
                 for (const auto& lit : literals) {
                     const __int128 a = parsed->units();
                     const __int128 b = lit.value.units();
                     const __int128 diff = a > b ? a - b : b - a;
+                    if (diff == 0 && exact == nullptr) { exact = &lit; }
                     if (!have_nearest || diff < best) {
                         best = diff;
                         nearest = lit.text;
@@ -3890,10 +3910,40 @@ auto ground_emitted_values(const MortgageParamsInput& input, std::string_view us
                 verdict.outcome = Outcome::Unsafe;
                 verdict.reason = ReasonCode::UngroundedValue;
                 verdict.field = emitted.name;
-                verdict.message =
-                    "\"" + emitted.name + "\" = " + raw +
-                    " does not correspond to anything in the request" +
-                    (have_nearest ? (" (the nearest figure you gave is " + nearest + ")") : "");
+                const char* role = nullptr;
+                if (exact != nullptr) {
+                    if (exact->names_hoa) {
+                        role = "an HOA or association fee, which is a carrying cost rather "
+                               "than a payment against the loan";
+                    } else if (exact->names_upkeep) {
+                        role = exact->names_insurance
+                                   ? "an insurance figure, not a payment against the loan"
+                                   : "an upkeep or repairs figure, not a payment against the loan";
+                    } else if (exact->names_down_payment) {
+                        role = "a down payment";
+                    } else if (exact->names_vacancy) {
+                        role = "a vacancy allowance";
+                    } else if (exact->names_increment) {
+                        role = "an increase on an existing amount";
+                    }
+                }
+                if (role != nullptr) {
+                    verdict.message = "\"" + emitted.name + "\" = " + raw +
+                                      " is a figure you gave, but your wording makes it " +
+                                      role + ", so it cannot fill this field";
+                } else if (exact != nullptr) {
+                    // In the request, exact, and still not admissible here -- the
+                    // honest statement without inventing a reason we do not have.
+                    verdict.message = "\"" + emitted.name + "\" = " + raw +
+                                      " appears in the request, but not as a value this field "
+                                      "can take";
+                } else {
+                    verdict.message =
+                        "\"" + emitted.name + "\" = " + raw +
+                        " does not correspond to anything in the request" +
+                        (have_nearest ? (" (the nearest figure you gave is " + nearest + ")")
+                                      : "");
+                }
                 return verdict;
             }
         }
