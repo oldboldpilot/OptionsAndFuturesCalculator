@@ -1927,6 +1927,19 @@ target_sources(test_llq_ladder
 target_link_libraries(test_llq_ladder PRIVATE sensen_slim)
 add_test(NAME LlqLadderTest COMMAND test_llq_ladder)
 
+# THE TRAINING LADDER, which is where the 6-bit rung actually lives. The serving
+# ladder refuses 6-bit because GGUF's only 6-bit weight format is Q6_K and its
+# scale granularity is 16, below the codec's floor of 32 -- a fact about Q6_K,
+# not about six bits. sensen's OTHER low-bit ladder (QuantPrecision, eleven
+# rungs including INT6 and both FP6s) is what a frozen QLoRA base is held in,
+# its scale granularity is 64, and it clears the floor. This measures whether an
+# LLQ image pays at each rung and asserts the route is BIT-IDENTICAL to
+# CpuFrozenLowBitWeight::dequantiseInto -- the one function the QLoRA forward
+# and backward both go through. Needs no model, no GPU and no engine.
+add_executable(test_llq_training_ladder tests/test_llq_training_ladder.cpp)
+target_link_libraries(test_llq_training_ladder PRIVATE sensen_slim)
+add_test(NAME LlqTrainingLadderTest COMMAND test_llq_training_ladder)
+
 add_executable(test_vendored_proto_drift tests/test_vendored_proto_drift.cpp)
 target_compile_definitions(test_vendored_proto_drift PRIVATE
     kBackendDir="${CMAKE_CURRENT_SOURCE_DIR}"
@@ -2716,6 +2729,29 @@ if(ENABLE_LLAMACPP_BACKEND)
     add_executable(layer_parity_probe src/layer_parity_probe.cpp)
     target_link_libraries(layer_parity_probe PRIVATE llama ggml sensen_slim)
 
+endif()  # ENABLE_LLAMACPP_BACKEND -- everything above here needs llama or ggml
+
+# ── probes that do NOT need llama.cpp, and must not be gated on it ──────────
+#
+# These link `sensen_slim` and nothing else. They sat inside the
+# `if(ENABLE_LLAMACPP_BACKEND)` block above until 2026-10-04, and three of them
+# say in their own comments that they deliberately do not link llama.cpp -- so
+# the guard contradicted the targets it contained.
+#
+# THE CONSEQUENCE WAS NOT COSMETIC: the production image is built
+# `-DENABLE_LLAMACPP_BACKEND=OFF`, so in the configuration that actually ships,
+# `llq_throughput_probe` -- the harness every LLQ weight-store figure in this
+# repository comes from -- COULD NOT BE BUILT AT ALL. A target does not fail in
+# that state, it VANISHES, which is indistinguishable from one that was never
+# written and is the same defect class as a ctest target that disappears
+# instead of skipping. Worse, a sweep script pointed at a build directory
+# configured that way would run whatever older binary happened to be on disk.
+#
+# The guard above is still right for what remains inside it, and its own
+# comment gives the reason: every llama.cpp-CONDITIONAL line belongs in one
+# place so the OFF configuration is provably complete. That argument is about
+# conditional lines. These targets are not conditional on llama.cpp; they were
+# only sitting next to lines that are.
     # Cost of the tensor-observer hook. Deliberately does NOT link llama.cpp:
     # it measures sensen alone, so reference-engine work cannot dilute the
     # number. Used to justify shipping the hook always-on.
@@ -2806,8 +2842,10 @@ if(ENABLE_LLAMACPP_BACKEND)
     # the actual dynamic range of the tensors that enter the cache, and separately
     # checks our f32->f16 narrowing against ggml's round-to-nearest-even bit for
     # bit. Links ggml for that second comparison.
-    add_executable(kv_range_probe src/kv_range_probe.cpp)
-    target_link_libraries(kv_range_probe PRIVATE ggml sensen_slim)
+    if(ENABLE_LLAMACPP_BACKEND)  # ggml comes from the llama.cpp fetch
+        add_executable(kv_range_probe src/kv_range_probe.cpp)
+        target_link_libraries(kv_range_probe PRIVATE ggml sensen_slim)
+    endif()
 
     # 8-bit KV design measurement: per-channel vs per-token absmax structure of
     # Kcur_rope / Vcur, outlier-channel persistence, skew, and simulated int8
@@ -2823,6 +2861,7 @@ if(ENABLE_LLAMACPP_BACKEND)
     add_executable(kv_q8_real_probe src/kv_q8_real_probe.cpp)
     target_link_libraries(kv_q8_real_probe PRIVATE sensen_slim)
 
+if(ENABLE_LLAMACPP_BACKEND)
     # The engine itself. `calculator_engine` is declared far above this block,
     # which is fine and is why the wiring is here rather than there: CMake
     # resolves target_link_libraries/target_compile_definitions against a
