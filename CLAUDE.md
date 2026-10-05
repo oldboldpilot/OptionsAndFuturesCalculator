@@ -6276,8 +6276,36 @@ answers by being read, not by being argued.
   Needs Node `^20.19.0 || >=22.12.0` — a floor introduced by vite 8, which
   vitest 4 pulls in. The build itself does not require it; the test suite does.
 - **Backend Docker Build:** `docker build -t options-backend backend/`
+
+  **sensen master DOES NOT CONFIGURE ON A WARM BUILD DIRECTORY, and the gate that
+  stops it is its own.** `backend/sensen/CMakeLists.txt:3159` runs clang-tidy at
+  CONFIGURE time and `message(FATAL_ERROR "clang-tidy validation failed!")` on any
+  finding. The reason it is not a permanent outage upstream is the guard above it:
+  it runs only when `compile_commands.json` EXISTS **and** `*.modmap` module BMIs
+  are already built, so a FRESH clone skips it and the configuration that catches
+  it is the one nobody upstream runs. Measured 2026-10-05 against sensen master
+  `a8366f76`: **346 files flagged across 59 "warnings treated as errors" groups**
+  (`optimizer_dispatch.cppm` 1681, `rope_dispatch.cppm` 961, `quant_dispatch.cppm`
+  730), every one an excessive-padding or signed-bitwise lint in sensen's OWN
+  sources. Set `SKIP_CLANG_TIDY=1` -- the env form, which is what
+  `CMakeLists.txt:3115` reads via `DEFINED ENV{...}`, so `-DSKIP_CLANG_TIDY=ON`
+  also works. **It is NOT this project's debt and must not be absorbed as one:** 0
+  of those 346 files intersect the 16 that the gateway merge changed, checked with
+  SORTED `comm` plus a positive control, after a first attempt on unsorted input
+  reported 0 vacuously.
+
+  **A grep lesson from the same session, because it fired in the opposite
+  direction.** The authorship gate reported two policy VIOLATIONS that were both
+  the string `CLAUDE.md` in a commit body. `grep -i claude` cannot separate an
+  attribution from a citation; match the attribution SHAPES instead
+  (`^\s*(Co-Authored-By|Signed-off-by|Claude-Session):`, `@author`, `generated
+  with`) and carry a positive control proving the pattern still fires on a planted
+  trailer. Same defect family as the `[WARN ]` padding that made a zero look clean.
 - **Backend Tests:** `ninja -C backend/build build_tests && ctest --test-dir backend/build`
-  (ctest is **213 TESTS WITH 7 SKIPPED as of 2026-10-05**, and this line said
+  (ctest is **213 TESTS, 206 PASSED, 0 FAILED, 7 SKIPPED as of 2026-10-05**, re-measured on the sensen bump to
+  `37da7409` with the 213/7 figure below taken as the PRE-BUMP baseline in the
+  same session -- so +0 gained and +0 lost is attributable rather than merely
+  green. Skips: `SanitizerOverlayCoversEveryObject`, `AmqpTransportTests`, `KafkaTransportTests`, `TransportConformanceKafkaTests`, `TransportConformanceAmqpTests`, `NcclCollectiveGate`, `CausalHookMissingFailsByName` -- absent brokers, no GPU, and the sanitizer overlay. Note `TbbInstrumentationMatchesSanitizer` is NOT among them any more: it PASSES, so the skip set has the same SIZE as the 2026-10-05 baseline and a different COMPOSITION, which a count alone cannot see. This line said
   **150/150 with 2 skipped** until then -- stale by 63 tests and by five skips.
   The count moved because the SGEE submodule brought its own suites, which is
   the same reason it went stale for eleven days at 117: *most of the new tests
