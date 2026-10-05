@@ -810,6 +810,25 @@ def make_amortization_extraction(rng: random.Random) -> dict:
             f" with {phrase_money(hoa)} per month HOA dues",
             f" with {phrase_money(hoa)} a month in HOA dues",
             f", plus {phrase_money(hoa)} per month in association dues",
+            # THE ADJECTIVE-BEFORE-THE-ROLE-WORD SHAPE, and its absence was a
+            # measured defect rather than a gap in taste. Every spelling above
+            # puts the cadence AFTER the figure ("$275 a month", "$275 per
+            # month") or the role word before it ("The HOA charges $275
+            # monthly"); none writes the adjective between them. Measured on a
+            # local engine with the 2026-10-05 retrain:
+            #
+            #   "...with 275 monthly HOA dues"  -> annual_insurance = 275, REFUSED
+            #   "...with 275 a month HOA dues"  -> monthly_hoa = 275, served
+            #
+            # Both spellings are correct English and only one was taught, so the
+            # model put the figure in the nearest annual cost it did know. Note
+            # the refusal is the verifier's `names_hoa` rule working -- a dues
+            # figure may not fill `annual_insurance` -- so the cost was a refused
+            # answer rather than a wrong one. Teaching the spelling is what turns
+            # it into a served one.
+            f" with {phrase_money(hoa)} monthly HOA dues",
+            f" with {phrase_money(hoa)} monthly association dues",
+            f", {phrase_money(hoa)} monthly in HOA dues",
         ])
         if overpay_trails:
             base += rng.choice([
@@ -1951,9 +1970,30 @@ def make_down_payment_extraction(rng: random.Random) -> dict:
         ])
     else:
         op = "ComputeAmortization"
+        # PMI IS STATED ON EXACTLY THE ROWS WHERE IT APPLIES, and its absence
+        # here was a measured production defect. Every one of the 715
+        # percentage-down rows carried `pmi_annual_rate` at the convention
+        # ZERO, so the model had never seen a down payment and a PMI rate in
+        # one utterance and learned to zero the field in that context:
+        #
+        #   "amortize a 600000 house with 10% down at 6.5% for 30 years, PMI 0.8%"
+        #   -> loan 540000, value 600000, pmi_annual_rate 0
+        #
+        # The loan and the value are right and the mortgage insurance the user
+        # ASKED ABOUT is gone -- at 90% LTV that is roughly $360 a month
+        # missing from the schedule, understating the cost with nothing saying
+        # so. A stated figure silently discarded is the class this corpus
+        # exists to make impossible.
+        #
+        # SCOPED TO LTV ABOVE 80%, which is the real rule rather than a
+        # sampling convenience: a borrower putting 20% or more down owes no
+        # PMI, so stating a rate there would teach a relationship that does not
+        # hold. The 80% threshold is the same one `pmi_drop_off_ltv` uses.
+        states_pmi = (loan / price) > 0.80 and rng.random() < 0.55
+        pmi_rate = round(rng.uniform(0.003, 0.015), 4) if states_pmi else 0.0
         obj = {"loan_amount": money_str(loan), "annual_rate": rate_str(annual_rate, 4),
                "term_months": term, "monthly_overpayment": money_str(0),
-               "pmi_annual_rate": rate_str(0, 4),
+               "pmi_annual_rate": rate_str(pmi_rate, 4),
                # The home VALUE is the price, not the loan -- PMI drops off
                # against it. This is the one field where the gross figure is
                # correct, and getting it wrong is invisible without PMI.
@@ -1969,11 +2009,22 @@ def make_down_payment_extraction(rng: random.Random) -> dict:
                # dues, and a field the model sometimes OMITS is the
                # prepaid_interest_days defect.
                "monthly_hoa": money_str(0)}
+        # The PMI clause is appended rather than woven into each template, so
+        # the figure sits beside an unambiguous "PMI" token wherever it lands
+        # -- the lexer's own word list is what routes it, and a phrasing that
+        # buried it would teach the model to guess.
+        pmi_clause = ""
+        if states_pmi:
+            pmi_clause = rng.choice([
+                f" PMI is {phrase_pct(pmi_rate)}.",
+                f" With {phrase_pct(pmi_rate)} PMI.",
+                f" Mortgage insurance runs {phrase_pct(pmi_rate)}.",
+            ])
         user = rng.choice([
             f"Amortization schedule for a {phrase_money(price)} home with {down_phrase} "
-            f"at {phrase_pct(annual_rate)} for {phrase_years(term)}.",
+            f"at {phrase_pct(annual_rate)} for {phrase_years(term)}.{pmi_clause}",
             f"Amortize the loan on a {phrase_money(price)} property, {down_phrase}, "
-            f"{phrase_pct(annual_rate)}, {phrase_years(term)}.",
+            f"{phrase_pct(annual_rate)}, {phrase_years(term)}.{pmi_clause}",
         ])
 
     return convo(("system", SYSTEM), ("user", user), ("assistant", params_block(op, obj)))

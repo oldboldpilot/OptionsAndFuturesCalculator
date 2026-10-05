@@ -747,6 +747,74 @@ def ask_probe(model: TinyEncoder, dialogues: list[C.Dialogue], sch: C.Schema, to
 # row cannot be labelled and `format_example` refuses it rather than teaching the model
 # to point at nothing -- which also means SPELLED-OUT NUMBERS ARE NOT LEARNABLE THROUGH
 # THIS MECHANISM AT ALL. Stated here so it is not mistaken for coverage.
+# ── role-word typos ─────────────────────────────────────────────────────────
+# THE ERROR MODEL IS ONE ADJACENT TRANSPOSITION, AND IT IS NOT A GUESS. A
+# misspelled ROLE WORD (not a misspelled number) is what took production to a
+# wrong answer on 2026-10-05:
+#
+#   "amortize 480000 at 6.5% for 30 years with 275 monthly HAO duse"
+#   -> original_home_value = 275, monthly_hoa = 0            200 OK
+#
+# Counted over /usr/share/dict/words (415,830 words) against the verifier's ten
+# concept lists, one adjacent transposition collides with 7 English words while
+# Levenshtein <= 1 misses every real typo (a transposition is distance TWO) and
+# <= 2 collides with 51, including `takes`~`taxes`. So the serving lexer
+# tolerates exactly one adjacent transposition -- and this augmentation
+# generates exactly that, which is the point: THE CORPUS AND THE LEXER SHARE ONE
+# ERROR MODEL BY CONSTRUCTION rather than by two people remembering the same
+# rule. Widen one and the other must move with it.
+#
+# A role-word typo PRESERVES EVERY NUMERIC LITERAL, which is this table's
+# governing rule: the pair head points AT a literal by position, so a rewrite
+# that touched a digit would leave the labels pointing at the wrong thing.
+# Nothing here touches a digit.
+_TYPO_ROLE_WORDS = (
+    "association", "maintenance", "appreciation", "downpayment", "inflation",
+    "insurance", "repairs", "deposit", "escrow", "upkeep", "condo", "extra",
+    "additional", "taxes", "dues", "heloc", "down", "repair", "hoa", "pmi",
+)
+_TYPO_RE = re.compile(r"\b(" + "|".join(_TYPO_ROLE_WORDS) + r")\b", re.IGNORECASE)
+
+
+def _typo_role_word(s: str, where: str) -> str:
+    """Transpose ONE adjacent pair of letters in the FIRST role word of `s`.
+
+    `where` picks which adjacent pair swaps:
+
+      "end"    hoa->hao, dues->duse, extra->extar -- what production produced
+      "start"  hoa->oha, dues->udes, extra->xetra
+      "middle" dues->deus, extra->exrta, insurance->insruance
+
+    BOTH ENDS ARE TRAINED AND THE MIDDLE IS HELD OUT, and that split is a
+    measurement rather than a preference. Training only "end" scored the
+    held-out "start" probe at **62.11% row accuracy against 99.22% clean** --
+    so typo POSITION did not generalise at all, and a user who transposes the
+    first two letters of "down" got a materially worse answer than one who
+    transposed the last two. Promoting it is the same call this file already
+    records for `USD 495,000`: promote the case the probe measured as bad, and
+    keep a SIBLING held out so the family stays a generalisation question
+    instead of becoming something the training set has answered.
+
+    A word shorter than four letters has no distinct middle pair, so "middle"
+    falls back to the end swap for those -- stated because it means the middle
+    probe is weaker on `hoa`/`pmi`/`tax` than on the long words.
+    """
+    m = _TYPO_RE.search(s)
+    if m is None:
+        return s                      # nothing to misspell; row is unchanged
+    w = m.group(1)
+    if len(w) < 3:
+        return s
+    if where == "start":
+        i = 0
+    elif where == "middle":
+        i = (len(w) - 2) // 2 if len(w) >= 4 else len(w) - 2
+    else:
+        i = len(w) - 2
+    typo = w[:i] + w[i + 1] + w[i] + w[i + 2:]
+    return s[: m.start(1)] + typo + s[m.end(1) :]
+
+
 FORMAT_REWRITES: dict[str, Callable[[str], str]] = {
     # --- the four original rewrites, measured worth 27%->trained on mortgage ---
     "drop the $ sign": lambda s: s.replace("$", ""),
@@ -797,6 +865,20 @@ FORMAT_REWRITES: dict[str, Callable[[str], str]] = {
     "UPPERCASE the request": lambda s: s.upper(),
     "lowercase the request": lambda s: s.lower(),
     "no space after a comma": lambda s: re.sub(r",\s+(?=[A-Za-z])", ",", s),
+    # --- sloppy typing: a MISSPELLED ROLE WORD, which cost a wrong answer ---
+    # See `_typo_role_word`: one adjacent transposition of the last two letters
+    # of one role word, the family production produced (HAO, duse, extar).
+    "role-word typo (last two letters)": lambda s: _typo_role_word(s, "end"),
+    # PROMOTED 2026-10-05 on a measurement: held out, it scored 62.11% row
+    # accuracy against 99.22% clean -- the worst probe of the twenty-seven.
+    "role-word typo (first two letters)": lambda s: _typo_role_word(s, "start"),
+    # PROMOTED 2026-10-05, 42.91% held out -- the worst case in the whole
+    # probe set, and "$495,000.00" is how a person pastes a figure out of a
+    # statement. The one-decimal sibling below stays held out.
+    "'495,000' -> '495,000.00' (explicit cents)": lambda s: re.sub(
+        r"(?<![\d.])(\d{1,3}(?:,\d{3})+)(?![\d.])", r"\1.00", s),
+    # PROMOTED 2026-10-05, 68.55% held out. The 'pct' sibling stays held out.
+    "'6.5%' -> '6.5percent' (no space)": lambda s: re.sub(r"(\d)\s*%", r"\1percent", s),
 }
 # NEVER TRAINED ON. The probe applies these too, so the reported number for them is
 # always a statement about GENERALISATION rather than about what was taught. Keep this
@@ -812,9 +894,14 @@ HELD_OUT_REWRITES: dict[str, Callable[[str], str]] = {
         r"\$(\d[\d,]*(?:\.\d+)?)", r"\1 USD", s),
     "'$495,000' -> 'US$495,000'": lambda s: s.replace("$", "US$"),
     "'$495,000' -> 'USD495,000' (no space)": lambda s: s.replace("$", "USD"),
-    "'495,000' -> '495,000.00' (explicit cents)": lambda s: re.sub(
-        r"(?<![\d.])(\d{1,3}(?:,\d{3})+)(?![\d.])", r"\1.00", s),
-    "'6.5%' -> '6.5percent' (no space)": lambda s: re.sub(r"(\d)\s*%", r"\1percent", s),
+    # The untrained SIBLINGS of the three rewrites promoted on 2026-10-05.
+    # Each family keeps exactly one probe so "did it generalise" stays
+    # answerable: a promotion that left no sibling would delete the instrument
+    # that justified it.
+    "'495,000' -> '495,000.0' (one decimal)": lambda s: re.sub(
+        r"(?<![\d.])(\d{1,3}(?:,\d{3})+)(?![\d.])", r"\1.0", s),
+    "'6.5%' -> '6.5pct' (no space)": lambda s: re.sub(r"(\d)\s*%", r"\1pct", s),
+    "role-word typo (middle letters)": lambda s: _typo_role_word(s, "middle"),
 }
 FORMAT_PERTURBATIONS = {**FORMAT_REWRITES, **HELD_OUT_REWRITES}
 
