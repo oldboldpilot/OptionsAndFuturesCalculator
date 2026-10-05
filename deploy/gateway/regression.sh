@@ -44,26 +44,39 @@ body -X POST "$H/v1/chat/completions" -H "Authorization: Bearer $GK" -H "$J" -d 
 
 echo "— request validation —"
 chk "no max_tokens is 400"                  400 "$(code -X POST "$H/v1/chat/completions" -H "Authorization: Bearer $GK" -H "$J" -d '{"model":"qwen3_mortgage","messages":[{"role":"user","content":"x"}]}')"
-# An unknown model and an unknown route are asserted on the property that is
-# unambiguous -- they must NOT be admitted -- because both currently answer with
-# a status this suite would otherwise have to bake in as correct. See the two
-# KNOWN DEFECTS below.
+# THESE TWO WERE `NOTE`s AND ARE NOW ASSERTIONS. They were reported rather than
+# failed because the gateway answered a status this suite would have had to bake
+# in as correct; both are fixed upstream, so the honest thing is to pin the right
+# answer and let a regression fail here.
+#
+#   unknown model: candidate selection discarded each candidate's reason and
+#     concluded "nothing was permitted", so an absent model came back
+#     `no_permitted_placement` (403) where kHttpStatusTable says `model_unknown`
+#     (404). GateTable::reach now answers the machine-invariant half first.
+#   unknown route: gateway_router answered EVERY /v1/<any> with 503 `not_wired`,
+#     which is right for a listener-only gateway and false for this one -- it had
+#     just served a completion. ReadyState::admission_wired tells them apart.
+#
+# The STATUS and the REASON STRING are both asserted. A status alone would pass
+# against any 404, and the reason is what sends an operator to the right place.
 um=$(code -X POST "$H/v1/chat/completions" -H "Authorization: Bearer $GK" -H "$J" -d '{"model":"no_such_model","max_tokens":8,"messages":[{"role":"user","content":"x"}]}')
-[ "$um" != "200" ] && chk "an unknown model is NOT admitted" y y || chk "an unknown model is NOT admitted" y n
+chk "an unknown model is 404"               404 "$um"
+body -X POST "$H/v1/chat/completions" -H "Authorization: Bearer $GK" -H "$J" -d '{"model":"no_such_model","max_tokens":8,"messages":[{"role":"user","content":"x"}]}' \
+  | grep -q 'model_unknown' \
+  && chk "and names model_unknown, not no_permitted_placement" y y \
+  || chk "and names model_unknown, not no_permitted_placement" y n
 chk "a malformed body is 400"               400 "$(code -X POST "$H/v1/chat/completions" -H "Authorization: Bearer $GK" -H "$J" -d 'not json')"
 ur=$(code "$H/v1/nonsense" -H "Authorization: Bearer $GK")
-[ "$ur" != "200" ] && chk "an unknown route is NOT admitted" y y || chk "an unknown route is NOT admitted" y n
-
-echo "— KNOWN DEFECTS (reported, not failed; fix upstream) —"
-# 1. `GateTable::decide` tests `known_models_` BEFORE placement and the enum
-#    documents ModelUnknown for it, but candidate selection refuses first, so an
-#    absent model is reported as a PLACEMENT problem. Fails safe (it discloses
-#    less) and still sends an operator to the wrong place.
-printf '  NOTE  %-52s %s (enum documents model_unknown)\n' "unknown model reports no_permitted_placement" "$um"
-# 2. An unknown route answers 503 "no admission path is wired behind it yet",
-#    which is false whenever the admit check above returned 200 -- and a monitor
-#    reads 503 as the gateway being down rather than the path not existing.
-printf '  NOTE  %-52s %s (should be 404)\n' "unknown route reports not_wired" "$ur"
+chk "an unknown /v1 route is 404"           404 "$ur"
+urb=$(body "$H/v1/nonsense" -H "Authorization: Bearer $GK")
+printf '%s' "$urb" | grep -q 'not_found' \
+  && chk "and says not_found" y y || chk "and says not_found" y n
+# The DIRECTION matters as much as the code: `not_wired` carries a Retry-After,
+# so a client told that polls for a route that is never going to appear. Asserted
+# as the absence of the old answer, which is what actually regressed.
+printf '%s' "$urb" | grep -q 'not_wired' \
+  && chk "and does NOT claim the gateway is unwired" y n \
+  || chk "and does NOT claim the gateway is unwired" y y
 
 echo
 echo "  $pass passed, $fail failed"

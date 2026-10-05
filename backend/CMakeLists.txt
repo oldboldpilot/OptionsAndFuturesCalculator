@@ -1311,9 +1311,33 @@ if(NOT CPP23_LOGGER_TARGET_NAME)
         "CPP23_LOGGER_TARGET_NAME is unset -- sensen's cpp23-logger did not configure. "
         "SGEE's logger BMI path is derived from it and would otherwise be guessed.")
 endif()
+
+# THE DIRECTORY IS NOW DERIVED TOO, not just its last component. The version
+# above fixed the TARGET NAME half -- correct, and recorded for the right
+# reason -- while still hardcoding the PARENT path as
+#   ${CMAKE_BINARY_DIR}/sensen/external/fastestjsoninthewest/external/cpp23-logger/...
+# which is one of several places sensen may build `logger`, and is not the one
+# it uses once sensen prefers its OWN external/cpp23-logger submodule (the
+# latest pin, c60d3c95, and the only copy carrying the EXTERNAL_STD_PCM branch;
+# fastjson vendors an older one as checked-in files). Half-derived is the worst
+# of both: it reads as settled and still encodes which call ran.
+#
+# `BINARY_DIR` is the target's own answer, so there is nothing left to go stale
+# whichever source sensen chose. Same reasoning as deriving the target name
+# from CPP23_LOGGER_TARGET_NAME, carried one level up -- and the same reasoning
+# as `pending_enqueues_in_log()` replacing a cached counter.
+if(NOT TARGET ${CPP23_LOGGER_TARGET_NAME})
+    message(FATAL_ERROR
+        "CPP23_LOGGER_TARGET_NAME is `${CPP23_LOGGER_TARGET_NAME}` but no such target exists, "
+        "so its BINARY_DIR cannot be read and SGEE's logger BMI path would have to be guessed.")
+endif()
+get_target_property(_ofc_logger_bindir ${CPP23_LOGGER_TARGET_NAME} BINARY_DIR)
 set(SGEE_LOGGER_MODULE_DIR
-    "${CMAKE_BINARY_DIR}/sensen/external/fastestjsoninthewest/external/cpp23-logger/CMakeFiles/${CPP23_LOGGER_TARGET_NAME}.dir"
+    "${_ofc_logger_bindir}/CMakeFiles/${CPP23_LOGGER_TARGET_NAME}.dir"
     CACHE PATH "Directory containing the logger module BMI for SGEE" FORCE)
+message(STATUS "SGEE: logger BMIs -> ${SGEE_LOGGER_MODULE_DIR} "
+               "(target ${CPP23_LOGGER_TARGET_NAME}, derived from its BINARY_DIR)")
+unset(_ofc_logger_bindir)
 
 # SGEE'S TESTS ARE REGISTERED WITH ctest, SO THEY MUST BE BUILDABLE HERE.
 #
