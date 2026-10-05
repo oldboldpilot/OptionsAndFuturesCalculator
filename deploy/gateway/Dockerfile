@@ -43,6 +43,35 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libnghttp2-14 libsqlite3-0 libtbb12 liburing2 zlib1g libzstd1 \
     && rm -rf /var/lib/apt/lists/*
 
+# A MINIMAL openssl.cnf, BECAUSE UBUNTU'S CRASHES THIS BINARY.
+#
+# The gateway links TBQWF's statically vendored LibreSSL. ubuntu:24.04 ships an
+# OpenSSL 3 style /etc/ssl/openssl.cnf carrying a `providers` section, which
+# LibreSSL does not implement, so its auto-configuration fails at startup:
+#
+#   Auto configuration failed
+#   error:0EFFF071:configuration file routines:CRYPTO_internal:unknown module
+#   name:.../crypto/conf/conf_mod.c:196:module=providers
+#
+# Note the path in that message is LibreSSL's own SOURCE FILE, not a config it
+# was looking for -- misreading it as a missing build-host path sent this
+# diagnosis the wrong way once. The content is `module=providers`.
+#
+# `OPENSSL_CONF=/dev/null` does NOT suppress it, measured, so the file itself is
+# replaced. Reproduced in podman: with ubuntu's file the container exits 1 right
+# after `HTTP/2 TLS: Initialized`.
+RUN printf '%s\n' \
+    '# Minimal config for LibreSSL. Deliberately no `providers` section.' \
+    'openssl_conf = default_conf' \
+    '' \
+    '[default_conf]' \
+    '' \
+    '[req]' \
+    'distinguished_name = req_dn' \
+    '' \
+    '[req_dn]' \
+    > /etc/ssl/openssl.cnf
+
 COPY runtime/ /opt/sensen-runtime/
 COPY sensen-gateway /usr/local/bin/sensen-gateway
 ENV LD_LIBRARY_PATH=/opt/sensen-runtime

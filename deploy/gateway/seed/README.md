@@ -59,3 +59,44 @@ sufficient: `gateway_derive_probe` shows it deriving
 `deploy/gateway/regression.sh <base-url> <bearer> [--cacert <pem>]` — 17 checks,
 both directions, and the admit arm first because a gateway that refuses
 everything passes a refuse-only suite.
+
+## 5. The container needs its own `openssl.cnf`
+
+Not a seed field, but it belongs beside them because it presents as a seeding
+problem: the gateway came up healthy, `/healthz`, `/readyz` and `/v1/models` all
+passed, and then the process DIED the moment a leaf became trackable.
+
+The binary links TBQWF's statically vendored LibreSSL. `ubuntu:24.04` ships an
+OpenSSL-3-style `/etc/ssl/openssl.cnf` with a `providers` section that LibreSSL
+does not implement, so auto-configuration fails at startup and the first
+OUTBOUND TLS call aborts the process:
+
+```
+Auto configuration failed
+error:0EFFF071:...CRYPTO_internal:unknown module name:...conf_mod.c:196:module=providers
+```
+
+Two things made it hard to see:
+
+* **the path in that message is LibreSSL's own SOURCE FILE**, not a config it
+  was looking for. Reading it as a missing build-host path sent the diagnosis
+  the wrong way for a while; the payload is `module=providers`.
+* **the fleet prober is the trigger, not the cause.** The gateway makes no
+  outbound call until a leaf is tracked, so with `reachable_from` wrong the
+  fatal path was never reached — the control plane was green over a process that
+  could not have served a request. Measured: the gateway survives both a
+  DNS-failing and a connection-refusing leaf, so the prober is not at fault.
+
+`OPENSSL_CONF=/dev/null` does **not** suppress it (measured). `deploy/gateway/
+Dockerfile` writes a minimal config with no `providers` section instead.
+Reproduced and fixed in podman before deploying: with ubuntu's file the
+container exits 1 right after `HTTP/2 TLS: Initialized`; with the minimal one it
+reaches `Server started`, admits, and passes 17/17.
+
+## A note on where to test
+
+Every one of the errors above was first chased against the SHARED PRODUCTION
+store, which turned a diagnosis into an outage. `admin init <path>` makes a
+SQLite store in one command and the gateway runs against it with
+`SENSEN_GATEWAY_STORE=<path>`; the whole chain then reproduces locally in
+minutes. Do that first.
