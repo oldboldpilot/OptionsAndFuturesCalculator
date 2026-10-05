@@ -1372,10 +1372,48 @@ refusals with their live message text.
 `make_down_payment_extraction`, weight 0.045, both spellings, and six checks
 pinning every spelling it emits against the lexer's word list (two lists, two
 languages, two directories, nothing else connecting them). Until the retrain
-runs on the GPU server the model still emits the gross price, so the live
-outcome for "500k with 20% down" is an honest refusal naming the rate the user
-actually stated — the direction to fail in, and better than a silent 20%
-mortgage, but not the answer.
+runs on the GPU server the model still emits the gross price.
+
+**THE "HONEST REFUSAL" HALF OF THAT CLAIM IS NO LONGER TRUE, AND IT FAILS IN THE
+WRONG DIRECTION NOW.** This sentence read *"the live outcome for '500k with 20%
+down' is an honest refusal naming the rate the user actually stated — the
+direction to fail in"*. Measured against production on 2026-10-05:
+
+```
+"amortize a 600000 house with 20% down at 6.5% for 30 years with 0.8% PMI"
+-> loan_amount = 600000, original_home_value = 600000, pmi_annual_rate = 0
+                                                                   200 OK
+```
+
+**The down payment is not applied and the stated PMI is silently zeroed.** A
+borrower who put 20% down is shown a schedule for a loan 25% LARGER than
+theirs, and the mortgage insurance they asked about is dropped rather than
+refused. Nothing in the response says either thing happened. That is a wrong
+answer, not the refusal this paragraph promised.
+
+It is the same per-field blindness, with M9 now making it worse rather than
+better: 600000 grounds `loan_amount` by M1 identity because the user DID say
+600000, so the gate has no basis to object, while the M9 candidate 480000 that
+exists for exactly this shape simply goes unused — the model never names it.
+`original_home_value` taking the same 600000 is a second, quieter error, since
+`finance.proto` says of that field *"PMI drops off against this, not the loan"*,
+so the schedule starts at 100% LTV where the borrower is at 80%.
+
+**The control that says it is the MODEL and not the serving layer:** stating the
+two figures separately is answered correctly —
+
+```
+"amortize 480000 at 6.5% for 30 years, house is worth 600000, PMI 0.8%"
+-> loan_amount = 480000, original_home_value = 600000, pmi 0.008   LTV 80%
+```
+
+and `"600000 home, 120000 down"` is an honest refusal on `loan_amount`. So the
+defect is confined to a down payment expressed as a PERCENTAGE of a stated
+price, which is precisely what `make_down_payment_extraction` was written to
+teach and what has not been trained. **Do not reach for a new verifier rule
+here:** the gross figure is genuinely stated, so any rule tight enough to
+refuse it would have to refuse a legitimately stated loan beside an unrelated
+percentage. The retrain is the fix, and it is a GPU-server task.
 
 **`ComputeXnpv`/`ComputeXirr` DATES: DAYS ON THE WIRE, SECONDS IN THE ENGINE,
 and until 2026-09-03 nothing bridged the two.** `financial.cppm`'s
