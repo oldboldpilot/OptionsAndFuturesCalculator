@@ -55,6 +55,26 @@ chmod 644 "$RUN_DIR/tls.crt"
 # `/proc/<pid>/environ` would otherwise carry for the life of the process.
 unset SENSEN_GATEWAY_KEY_PEM SENSEN_GATEWAY_CERT_PEM SENSEN_GATEWAY_TICKET_KEY_HEX
 
+# OPENSSL_CONF MUST BE NEUTRALISED, AND LEAVING IT UNSET CRASHED PRODUCTION.
+# The binary links TBQWF's STATICALLY VENDORED LibreSSL, which auto-loads a
+# config file from the path it was BUILT with -- a path on the build host that
+# does not exist in this image. The failure is not a warning: the first
+# outbound TLS call aborts the process with
+#
+#   Auto configuration failed
+#   error:0EFFF071:configuration file routines:CRYPTO_internal:unknown module
+#   name:/home/muyiwa/.cache/sensen-gw-build/.../_deps/...
+#
+# It stayed hidden because the gateway makes NO outbound call until the fleet
+# prober has a leaf to dial, and a misconfigured `reachable_from` meant no
+# machine was ever tracked. So the crash appeared the moment the gateway was
+# first able to work -- the control plane had been green over a process that
+# could not have served a request.
+#
+# `/dev/null` is a valid empty config: it disables auto-loading without
+# shipping a file this image would then have to keep correct.
+export OPENSSL_CONF="${OPENSSL_CONF:-/dev/null}"
+
 export SENSEN_GATEWAY_CERT="$RUN_DIR/tls.crt"
 export SENSEN_GATEWAY_KEY="$RUN_DIR/tls.key"
 export SENSEN_GATEWAY_TICKET_KEY_FILE="$RUN_DIR/ticket.key"

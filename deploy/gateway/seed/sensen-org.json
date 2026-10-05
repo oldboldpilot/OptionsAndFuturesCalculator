@@ -9,29 +9,40 @@
   "groups": ["operators"],
   "memberships": [["olumuyiwa", "operators"]],
 
-  "clusters": ["edge"],
+  "clusters": ["edge_cluster"],
 
   "machines": [
     {
-      "id": "serve-edge-1",
+      "id": "serve_edge_1",
       "base_url": "http://sensen-serve.railway.internal:8080",
       "network": "wan",
-      "cluster": "edge",
+      "cluster": "edge_cluster",
       "auth_scheme": "leaf_key",
-      "reachable_from": ["wan", "vpn", "lan"]
+      "reachable_from": ["sensen-gateway"]
     }
   ],
 
-  "group_clusters": [["operators", "edge"]],
+  "group_clusters": [["operators", "edge_cluster"]],
 
   "group_models": [
-    ["operators", "qwen3-0.6b-mortgage"],
-    ["operators", "qwen3-0.6b-strategy"]
+    ["operators", "qwen3_mortgage"],
+    ["operators", "qwen3_strategy"]
   ],
 
   "model_placements": [
-    ["qwen3-0.6b-mortgage", "serve-edge-1"],
-    ["qwen3-0.6b-strategy", "serve-edge-1"]
+    ["qwen3_mortgage", "serve_edge_1"],
+    ["qwen3_strategy", "serve_edge_1"]
+  ],
+
+  "budgets": [
+    {
+      "id": "operators_annual",
+      "subject_kind": "group",
+      "subject_id": "operators",
+      "window_start": 1791218376,
+      "window_end": 1822754376,
+      "cap_tokens": 100000000
+    }
   ],
 
   "keys": [
