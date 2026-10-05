@@ -3557,6 +3557,83 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
     // The ORIGINAL refusal wording is preserved for the refuse direction, deliberately: the
     // case it describes is the model dropping a field the user DID state, which is a model
     // defect and not a conversation to continue. Only the ask direction is new.
+    // AN OPTIONAL MODELLING INPUT NOBODY MENTIONED IS NOT A GAP -- IT IS A ZERO.
+    //
+    // "you should be able to compute without a downpayment, hoa or pmi, this should not
+    // be a problem." Before this pass, all three failed, and they failed in two
+    // DIFFERENT ways, which is why one fix covers both:
+    //
+    //   down_payment   -- has a clarifying wording, so the loop below ASKED
+    //                     "How much are you putting down?" of someone who had
+    //                     already given the price, the rate and the term.
+    //   monthly_hoa,   -- have no natural wording, so they fell through to the
+    //   pmi_annual_rate   refusal: "The assistant left out X, which <op> needs."
+    //                     A flat refusal on a request that was complete.
+    //
+    // Both are the same mistake. The service already KNOWS what an unstated down
+    // payment, HOA fee or PMI rate is -- `kConventionValues` has carried those exact
+    // values the whole time -- and was using that knowledge in one direction only:
+    // "the model may EMIT this zero without a literal" but not "if nobody said
+    // anything, it IS this zero". `mv::optional_modelling_default` is the second
+    // direction, and it is a separate, smaller table rather than that one because
+    // `loan_amount` is also convention-zero and defaulting IT would answer a
+    // mortgage question with a zero-dollar loan. That module says so at length.
+    //
+    // THREE GUARDS, and the first is the one that keeps the dangerous failure
+    // dangerous:
+    //
+    //   - `utterance_states_nothing_for` must hold. If the user DID state dues the
+    //     model then dropped, a compatible unclaimed literal exists, nothing is
+    //     substituted, and the refusal stands -- because silently zeroing a figure
+    //     the user gave is strictly worse than refusing to answer. This is the same
+    //     discriminator, with the same claimed-literal narrowing, that the ask paths
+    //     use; it is not a second copy of the rule.
+    //   - `Kind::Decimal` only. A repeated field's default is one zero PER OFFER and
+    //     the offer count is in a sibling array, so `pmi_rates` is deliberately not
+    //     in the table and this check is what makes that absence enforced rather
+    //     than merely intended.
+    //   - the substituted value is verified like any other. It is pushed into
+    //     `verifiable.fields` BEFORE G5/G3 run, so a default that was out of range
+    //     or ungrounded would be refused rather than served -- there is no bypass
+    //     here, only a value to check.
+    //
+    // DECIDED AGAINST THE FULLY-BUILT SET, THEN APPLIED. Same reason the deferral
+    // above exists: `utterance_states_nothing_for` reads the other emitted fields to
+    // ask whether a literal is already spoken for, so filling as we iterate would
+    // judge later fields against a set that already contains earlier substitutions.
+    std::vector<std::string> defaulted_fields;
+    for (const auto& field_name : absent_fields) {
+        const auto fallback = mv::optional_modelling_default(field_name);
+        if (fallback.empty()) { continue; }
+        // THE DEFAULT TURNS ON WHETHER THE USER MENTIONED THE THING, not on
+        // whether some number could have been it. `utterance_states_nothing_for`
+        // -- the predicate the ask paths below use -- is INERT here: a claim only
+        // counts across slot kinds, so on any utterance carrying a second money
+        // figure a Money slot always looks stated. Measured: with that predicate
+        // this pass fired on nothing. See the verifier's declaration.
+        if (!mv::utterance_names_nothing_for(field_name, user_text)) { continue; }
+        const auto desc = std::ranges::find_if(
+            op->fields, [&](const auto& f) { return f.name == field_name; });
+        if (desc == std::ranges::end(op->fields) || desc->kind != Kind::Decimal) { continue; }
+        defaulted_fields.push_back(field_name);
+    }
+    if (!defaulted_fields.empty()) {
+        for (const auto& field_name : defaulted_fields) {
+            const std::string fallback{mv::optional_modelling_default(field_name)};
+            verifiable.fields.push_back(mv::EmittedField{
+                .name = field_name, .values = {fallback}, .repeated = false});
+            (*params.mutable_params())[field_name] = fallback;
+            logger::Logger::getInstance().debug(
+                "mortgage assistant: {} left out \"{}\" and the utterance states nothing for "
+                "it -- it is an optional modelling input, so it defaults to {} rather than "
+                "becoming a question",
+                operation, field_name, fallback);
+        }
+        std::erase_if(absent_fields, [&](const std::string& name) {
+            return std::ranges::find(defaulted_fields, name) != std::ranges::end(defaulted_fields);
+        });
+    }
+
     if (!absent_fields.empty()) {
         for (const auto& field_name : absent_fields) {
             if (!mv::utterance_states_nothing_for(field_name, user_text, verifiable)) continue;

@@ -2768,6 +2768,242 @@ auto main() -> int {
         }
     }
 
+    // ------------------------------------------------------------------
+    // Section 33. AN OPTIONAL MODELLING INPUT NOBODY MENTIONED IS A ZERO,
+    // NOT A QUESTION -- "you should be able to compute without a
+    // downpayment, hoa or pmi, this should not be a problem."
+    //
+    // All three failed before this, and in TWO different ways, which is why
+    // one fix covers both: `down_payment` has a clarifying wording so the
+    // service ASKED "How much are you putting down?" of someone who had
+    // already given price, rate and term, while `monthly_hoa` and
+    // `pmi_annual_rate` have none and so fell through to a flat refusal --
+    // "The assistant left out X, which <op> needs" -- on a request that was
+    // complete. Both are the same mistake: the service already knew what an
+    // unstated one is and was using that knowledge in one direction only.
+    //
+    // This section pins both halves of the fix: the fields that MUST
+    // default, and -- the half that keeps the table honest -- those that
+    // must NOT.
+    {
+        section("33. unstated down payment / HOA / PMI default rather than asking");
+
+        check(mv::optional_modelling_default("down_payment") == "0",
+              "an unstated down payment defaults to 0");
+        check(mv::optional_modelling_default("down_payment_percent") == "0",
+              "an unstated down-payment PERCENT defaults to 0");
+        check(mv::optional_modelling_default("monthly_hoa") == "0",
+              "unstated HOA dues default to 0");
+        check(mv::optional_modelling_default("monthly_taxes_ins_hoa") == "0",
+              "the unstated composite taxes/insurance/HOA figure defaults to 0");
+        check(mv::optional_modelling_default("pmi_annual_rate") == "0",
+              "an unstated PMI rate defaults to 0");
+        check(mv::optional_modelling_default("current_pmi_monthly") == "0",
+              "unstated CURRENT PMI defaults to 0 (ComputeRefinance)");
+        check(mv::optional_modelling_default("new_pmi_monthly") == "0",
+              "unstated NEW PMI defaults to 0 (ComputeRefinance)");
+
+        // The one entry that is not "none of this" but a statutory answer.
+        check(mv::optional_modelling_default("pmi_drop_off_ltv") == "0.80",
+              "an unstated PMI drop-off LTV defaults to the statutory 80%, not to 0");
+
+        // THE DENYLIST, AND IT IS THE POINT OF THE SECTION. Every one of these
+        // is a TERM OF THE LOAN: absent means the user has not said what they
+        // are asking about, so it must stay a question or a refusal. The first
+        // four are what make this reachable rather than theoretical -- they are
+        // convention-ZERO in kConventionValues, because a zero loan is how a
+        // ComputeRentVsBuy request selects the legacy composite shape, so a
+        // fix that read THAT table as a table of defaults would have answered
+        // "what's the payment at 6.5% over 30 years?" with a zero-dollar loan.
+        for (const auto* term : {"loan_amount", "loan_annual_rate", "loan_term_years",
+                                 "monthly_piti_and_maintenance", "present_value",
+                                 "annual_rate", "rate", "periods", "term_months",
+                                 "monthly_gross_rent", "periodic_gross_rent",
+                                 "property_price", "home_value"}) {
+            check(mv::optional_modelling_default(term).empty(),
+                  std::string{"a TERM of the loan is never defaulted: "} + term);
+        }
+
+        // AMBIGUOUS CONVENTIONS ARE NOT DEFAULTS. Both carry TWO convention
+        // values, so there is no single answer to substitute: proto3 explicit
+        // presence makes an absent prepaid_interest_days mean the 15-day
+        // convention and an explicit 0 mean zero days, a distinction a default
+        // would destroy.
+        check(mv::optional_modelling_default("prepaid_interest_days").empty(),
+              "prepaid_interest_days has TWO conventions (15 and 0) and is not defaulted");
+        check(mv::optional_modelling_default("selling_cost_percent").empty(),
+              "selling_cost_percent has TWO conventions (0.06 and 0) and is not defaulted");
+
+        // NO REPEATED FIELD. The right default for a parallel-array request is
+        // one zero PER OFFER and the offer count lives in a sibling array, so a
+        // scalar substituted here would be a shape error wearing a default's
+        // clothes. The service additionally refuses any non-Decimal kind.
+        check(mv::optional_modelling_default("pmi_rates").empty(),
+              "pmi_rates is REPEATED, so it is not defaulted (one zero per offer)");
+        check(mv::optional_modelling_default("extra_payments").empty(),
+              "extra_payments is REPEATED, so it is not defaulted");
+
+        // THE SUBSTITUTED VALUE MUST SURVIVE THE GATES IT IS HANDED TO, which
+        // is what makes the whole pass safe: the service pushes the default
+        // into `verifiable.fields` BEFORE G5 and G3 run, so a default that was
+        // out of range or ungrounded would turn a needless question into a
+        // needless refusal. Asserted end to end rather than by re-reading the
+        // convention table. The FULL declared set is supplied because G2b
+        // requires every field -- an under-populated input refuses on the first
+        // one missing and would prove nothing about the default.
+        {
+            const std::string_view amort = "amortize 500000 at 6% over 30 years";
+            std::vector<KV> fields{{"loan_amount", "500000.00"},
+                                   {"annual_rate", "0.0600"},
+                                   {"term_months", "360"},
+                                   {"monthly_overpayment", "0"},
+                                   {"pmi_annual_rate", "0"},
+                                   {"original_home_value", "500000.00"},  // the corpus's own no-PMI
+                                   // convention: equal to the loan, which
+                                   // GROUNDS, rather than a 0 that does not
+                                   {"annual_repairs", "0"},
+                                   {"annual_insurance", "0"},
+                                   {"annual_cost_growth", "0"},
+                                   {"heloc_drawn_amount", "0"},
+                                   {"heloc_annual_rate", "0"},
+                                   {"heloc_term_years", "0"}};
+            expect_pass(params("ComputeAmortization", fields), amort,
+                        "a defaulted PMI rate of 0 is PROVEN against an utterance that "
+                        "mentions no PMI -- the default is verified, not waved through");
+        }
+        {
+            const std::string_view refi =
+                "refinance my 400000 balance paying 2271 a month at 5.5% with 360 months "
+                "left on a 500000 home into a 30 year at 4.75%, closing costs 6000";
+            std::vector<KV> fields{{"current_loan_balance", "400000.00"},
+                                   {"current_monthly_payment", "2271.00"},
+                                   {"current_annual_rate", "0.0550"},
+                                   {"current_remaining_months", "360"},
+                                   {"property_value", "500000.00"},
+                                   {"new_annual_rate", "0.0475"},
+                                   {"new_term_years", "30"},
+                                   {"closing_costs", "6000.00"},
+                                   {"closing_cost_type", "PAID_IN_CASH"},
+                                   {"cash_out_amount", "0"},
+                                   {"current_pmi_monthly", "0"},
+                                   {"new_pmi_monthly", "0"},
+                                   {"pmi_drop_off_ltv", "0.80"},
+                                   {"payments_per_year", "12"}};
+            expect_pass(params("ComputeRefinance", fields), refi,
+                        "both PMI spellings AND the statutory 0.80 drop-off LTV are PROVEN "
+                        "against a refinance utterance that mentions no mortgage insurance");
+        }
+
+        // AND THE DIRECTION THAT MUST NOT MOVE. A figure the user DID state and
+        // the model then dropped keeps its refusal, because the default fires
+        // only while the utterance does not MENTION the concept. Silently
+        // zeroing a number the user gave is strictly worse than declining to
+        // answer.
+        //
+        // THE PREDICATE HERE IS THE ONE THE SERVICE GATES ON, and the first
+        // draft of this pass gated on the other one -- `utterance_states_nothing_for`,
+        // which the ask paths use. That version was INERT and this check is
+        // what proved it: a claim only counts ACROSS slot kinds, so with the
+        // price, the down payment and the rent all emitted, a Money slot like
+        // `monthly_hoa` still sees unclaimed Money literals and always looks
+        // "stated". The default could never have fired on any utterance with a
+        // second money figure in it, which is every mortgage utterance. Kept as
+        // an explicit pair of checks so a later reader cannot "simplify" the
+        // service back onto the inert predicate.
+        {
+            const std::string_view no_dues = "a 480000 condo with 96000 down renting at 2400 a month";
+            const std::string_view with_dues =
+                "a 480000 condo with 96000 down renting at 2400 a month with 275 per month "
+                "HOA dues";
+
+            check(mv::utterance_names_nothing_for("monthly_hoa", no_dues),
+                  "a CONDO with no dues mentioned names nothing for monthly_hoa -- so the "
+                  "default fires. \"condo\" is an HOA word for the LEXER, where it sits "
+                  "beside a figure, and a property type here");
+            check(!mv::utterance_names_nothing_for(
+                      "monthly_hoa", "a 480000 unit with 310 a month in association fees"),
+                  "\"association\" IS a dues mention even without the word HOA");
+            check(!mv::utterance_names_nothing_for("monthly_hoa", with_dues),
+                  "the SAME request NAMING the dues does name something, so the default "
+                  "cannot fire and a dropped figure still refuses");
+
+            // THE INERTNESS, pinned. This is the predicate the pass must NOT use.
+            std::vector<KV> rental{{"property_price", "480000.00"},
+                                   {"down_payment", "96000.00"},
+                                   {"monthly_gross_rent", "2400.00"},
+                                   {"monthly_hoa", "0"}};
+            check(!mv::utterance_states_nothing_for("monthly_hoa", no_dues,
+                                                    params("ComputeRentalCashFlow", rental)),
+                  "the ASK predicate reports monthly_hoa as STATED on the no-dues "
+                  "utterance (same-kind money literals) -- which is why defaulting "
+                  "cannot be gated on it");
+
+            // The down-payment family, both directions.
+            check(mv::utterance_names_nothing_for("down_payment",
+                                                  "amortize 500000 at 6% over 30 years"),
+                  "an utterance with no down payment names nothing for down_payment");
+            check(!mv::utterance_names_nothing_for(
+                      "down_payment", "a 500000 home with 20% down at 6.5% for 30 years"),
+                  "\"20% down\" names the down payment, so it is never defaulted away");
+
+            // PMI, including the two-word spelling that `is_pmi_word` cannot see.
+            check(mv::utterance_names_nothing_for("pmi_annual_rate",
+                                                  "amortize 500000 at 6% over 30 years"),
+                  "an utterance with no PMI names nothing for pmi_annual_rate");
+            check(!mv::utterance_names_nothing_for(
+                      "pmi_annual_rate", "amortize 500000 at 6% with PMI at 0.55%"),
+                  "\"PMI\" names it");
+            check(!mv::utterance_names_nothing_for(
+                      "pmi_annual_rate", "amortize 500000 at 6% with mortgage insurance of 180"),
+                  "the two-word \"mortgage insurance\" names it too -- matched as a PHRASE, "
+                  "because bare \"insurance\" is the homeowner's policy");
+            check(mv::utterance_names_nothing_for(
+                      "pmi_annual_rate", "amortize 500000 at 6% with 1800 a year insurance"),
+                  "bare \"insurance\" is NOT a PMI mention (the control for the phrase "
+                  "rule) -- otherwise the PMI default would fire almost never");
+
+            // THE REST OF THE CLASS, which the live probe forced into the
+            // table: with only the three families the report named, a rental
+            // utterance still refused on `annual_home_appreciation`.
+            check(mv::utterance_names_nothing_for(
+                      "annual_home_appreciation",
+                      "a 480000 condo renting at 2400 a month over 10 years"),
+                  "a request that models no appreciation names nothing for it");
+            check(!mv::utterance_names_nothing_for(
+                      "annual_home_appreciation",
+                      "a 480000 condo appreciating 3% a year renting at 2400"),
+                  "\"appreciating 3%\" names it, so it is never defaulted away");
+
+            // Appreciation and escalation are kept APART on purpose: a request
+            // that says rent GROWS has said nothing about the property
+            // appreciating, so sharing one word list would discard a figure.
+            check(mv::utterance_names_nothing_for(
+                      "annual_home_appreciation", "rent grows 3% a year on a 480000 condo"),
+                  "rent GROWTH is not an appreciation mention (the lists are separate)");
+            check(!mv::utterance_names_nothing_for(
+                      "annual_rent_increase", "rent grows 3% a year on a 480000 condo"),
+                  "...and it IS a rent-increase mention");
+
+            check(mv::utterance_names_nothing_for(
+                      "heloc_drawn_amount", "amortize 500000 at 6% over 30 years"),
+                  "a loan with no HELOC leg names nothing for heloc_drawn_amount");
+            check(!mv::utterance_names_nothing_for(
+                      "heloc_drawn_amount",
+                      "amortize 500000 at 6% and draw 50000 on a home equity line"),
+                  "\"home equity line\" names the HELOC leg -- matched as a PHRASE");
+            check(!mv::utterance_names_nothing_for(
+                      "cash_out_amount", "refinance 400000 at 4.75% and cash out 50000"),
+                  "\"cash out\" names the cash-out leg");
+            check(mv::utterance_names_nothing_for(
+                      "cash_out_amount", "refinance 400000 into a 30 year at 4.75%"),
+                  "a rate-and-term refinance names nothing for cash_out_amount");
+
+            // FAILS CLOSED for anything without a concept list.
+            check(!mv::utterance_names_nothing_for("loan_amount", "pay off the house"),
+                  "a field with no concept list is never reported unstated -- fails closed");
+        }
+    }
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

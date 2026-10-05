@@ -266,6 +266,32 @@ message AmortizationRequest {
   string heloc_drawn_amount = 10;
   string heloc_annual_rate = 11;
   int32 heloc_term_years = 12;
+
+  // ASSOCIATION DUES, PER MONTH. "0"/empty means NOT MODELLED, like every
+  // other carrying cost on this message.
+  //
+  // WHY IT IS HERE AND NOT A PAYMENT. Reported 2026-10-04: "the HOA and PMI
+  // are not really part of the amortization but part of the costs." Dues do
+  // not amortise anything -- they buy the association's services -- so they
+  // belong beside the schedule with repairs and insurance, never inside the
+  // payment, where adding them would corrupt the interest/principal split and
+  // every figure derived from it. Before this field existed the assistant had
+  // nowhere to put a stated HOA on an amortization request and put it in
+  // `monthly_overpayment`, which paid the loan off years early:
+  //
+  //   "amortize 500000 at 6% over 30 years with 275 per month HOA dues"
+  //   -> {monthly_overpayment: 275, ...}   200 OK, and wrong
+  //
+  // MONTHLY, not annual, and the unit is in the NAME. The two annual fields
+  // above are budgets met a twelfth at a time; dues are quoted per month, and
+  // `monthly_hoa` is already the spelling on ComputeHeloc and
+  // ComputeRentalCashFlow. Annualising here would store a figure the caller
+  // never stated -- the defect this file records against `xnpv`, whose engine
+  // read SECONDS while this contract spoke DAYS.
+  //
+  // It escalates with `annual_cost_growth` exactly as repairs and insurance
+  // do, because dues rise.
+  string monthly_hoa = 13;
 }
 
 message AmortizationRow {
@@ -285,6 +311,8 @@ message AmortizationRow {
   // The HELOC's payment this month, or zero once its own term ends. Separate
   // from `scheduled_payment`, which is THIS loan's.
   string heloc_payment = 11;
+  // The month's association dues. Zero when not modelled.
+  string hoa_paid = 12;
 }
 
 message MortgageSummary {
@@ -304,6 +332,10 @@ message MortgageSummary {
   string total_cost_of_ownership = 8;
   string total_heloc_interest_paid = 9;
   string total_heloc_paid = 10;
+  // Dues over the whole term. INCLUDED in total_cost_of_ownership above --
+  // an itemisation whose parts do not reach the total they sit under is not
+  // an explanation.
+  string total_hoa_paid = 11;
 }
 
 message AmortizationResponse {
@@ -366,6 +398,11 @@ message DetailedAmortizationRequest {
   string heloc_drawn_amount = 11;
   string heloc_annual_rate = 12;
   int32 heloc_term_years = 13;
+
+  // Association dues, per month. See AmortizationRequest.monthly_hoa for why
+  // this is a carrying cost rather than a payment, and why it is monthly
+  // while its two neighbours are annual.
+  string monthly_hoa = 14;
 }
 
 message DetailedAmortizationRow {
@@ -385,6 +422,8 @@ message DetailedAmortizationRow {
   // The HELOC's payment this month, or zero once its own term ends. Separate
   // from `scheduled_payment`, which is THIS loan's.
   string heloc_payment = 12;
+  // The month's association dues. Zero when not modelled.
+  string hoa_paid = 13;
 }
 
 message DetailedMortgageSummary {
@@ -403,6 +442,10 @@ message DetailedMortgageSummary {
   string total_cost_of_ownership = 9;
   string total_heloc_interest_paid = 10;
   string total_heloc_paid = 11;
+  // Dues over the whole term. INCLUDED in total_cost_of_ownership above --
+  // an itemisation whose parts do not reach the total they sit under is not
+  // an explanation.
+  string total_hoa_paid = 12;
 }
 
 message DetailedAmortizationResponse {

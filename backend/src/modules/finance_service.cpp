@@ -1480,9 +1480,14 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         READ_DECIMAL_SAFE(a_repairs, request->annual_repairs(), "annual_repairs");
         READ_DECIMAL_SAFE(a_ins, request->annual_insurance(), "annual_insurance");
         READ_DECIMAL_SAFE(a_growth, request->annual_cost_growth(), "annual_cost_growth");
+        // MONTHLY, unlike the two above. Association dues are quoted per month
+        // and the field name says so; see the proto for why they are not
+        // annualised here.
+        READ_DECIMAL_SAFE(a_hoa, request->monthly_hoa(), "monthly_hoa");
         for (const auto& [v, name] : {std::pair{a_repairs, "annual_repairs"},
                                       std::pair{a_ins, "annual_insurance"},
-                                      std::pair{a_growth, "annual_cost_growth"}}) {
+                                      std::pair{a_growth, "annual_cost_growth"},
+                                      std::pair{a_hoa, "monthly_hoa"}}) {
             if (v.is_negative()) {
                 return Status(grpc::StatusCode::INVALID_ARGUMENT,
                               std::string{name} + " cannot be negative");
@@ -1504,8 +1509,8 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
                           "repayment term costs nothing, which makes borrowing look free");
         }
 
-        const bool has_carrying =
-            a_repairs.is_positive() || a_ins.is_positive() || a_growth.is_positive();
+        const bool has_carrying = a_repairs.is_positive() || a_ins.is_positive() ||
+                                  a_growth.is_positive() || a_hoa.is_positive();
 
         // BYTE-IDENTICAL FOR AN EXISTING CALLER, BY CONSTRUCTION RATHER THAN BY
         // ASSERTION. Without carrying costs this still calls the function it
@@ -1522,7 +1527,8 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         if (has_carrying) {
             const sensen::CarryingCosts carrying{.annual_repairs = a_repairs,
                                                  .annual_insurance = a_ins,
-                                                 .annual_growth = a_growth};
+                                                 .annual_growth = a_growth,
+                                                 .monthly_hoa = a_hoa};
             // annual_tax_rate is ZERO here and that is the contract, not an
             // omission: the standard schedule reports what is paid, and the
             // tax deduction is the one thing ComputeDetailedAmortization adds.
@@ -1558,6 +1564,7 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
 
         sensen::BigDecimal repairs_total{0};
         sensen::BigDecimal insurance_total{0};
+        sensen::BigDecimal hoa_total{0};
         sensen::BigDecimal payments_total{0};
         if (has_carrying) {
             for (std::size_t i = 0; i < carried.size(); ++i) {
@@ -1573,10 +1580,12 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
                 r.set_end_balance(row.end_balance.to_string());
                 r.set_repairs_paid(row.repairs_paid.to_string());
                 r.set_insurance_paid(row.insurance_paid.to_string());
+                r.set_hoa_paid(row.hoa_paid.to_string());
                 r.set_heloc_payment(heloc_payment_for(i));
             }
             repairs_total = carried_summary.total_repairs_paid;
             insurance_total = carried_summary.total_insurance_paid;
+            hoa_total = carried_summary.total_hoa_paid;
             payments_total = carried_summary.total_payments_paid;
             auto& s = *response->mutable_summary();
             s.set_total_principal_paid(carried_summary.total_principal_paid.to_string());
@@ -1598,6 +1607,7 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
                 r.set_end_balance(row.end_balance.to_string());
                 r.set_repairs_paid(sensen::BigDecimal(0).to_string());
                 r.set_insurance_paid(sensen::BigDecimal(0).to_string());
+                r.set_hoa_paid(sensen::BigDecimal(0).to_string());
                 r.set_heloc_payment(heloc_payment_for(i));
             }
             payments_total = summary.total_payments_paid;
@@ -1612,6 +1622,7 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         auto& s = *response->mutable_summary();
         s.set_total_repairs_paid(repairs_total.to_string());
         s.set_total_insurance_paid(insurance_total.to_string());
+        s.set_total_hoa_paid(hoa_total.to_string());
         s.set_total_heloc_interest_paid(heloc_interest_total.to_string());
         s.set_total_heloc_paid(heloc_paid_total.to_string());
         // Debt service PLUS what the house costs to keep PLUS the second lien.
@@ -1619,6 +1630,7 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         // not an explanation, which is the rule ExplainMortgage already follows.
         s.set_total_cost_of_ownership(payments_total.add(repairs_total)
                                           .add(insurance_total)
+                                          .add(hoa_total)
                                           .add(heloc_paid_total)
                                           .to_string());
         return Status::OK;
@@ -1653,9 +1665,11 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         READ_DECIMAL_SAFE(d_repairs, request->annual_repairs(), "annual_repairs");
         READ_DECIMAL_SAFE(d_ins, request->annual_insurance(), "annual_insurance");
         READ_DECIMAL_SAFE(d_growth, request->annual_cost_growth(), "annual_cost_growth");
+        READ_DECIMAL_SAFE(d_hoa, request->monthly_hoa(), "monthly_hoa");
         for (const auto& [v, name] : {std::pair{d_repairs, "annual_repairs"},
                                       std::pair{d_ins, "annual_insurance"},
-                                      std::pair{d_growth, "annual_cost_growth"}}) {
+                                      std::pair{d_growth, "annual_cost_growth"},
+                                      std::pair{d_hoa, "monthly_hoa"}}) {
             if (v.is_negative()) {
                 return Status(grpc::StatusCode::INVALID_ARGUMENT,
                               std::string{name} + " cannot be negative");
@@ -1663,7 +1677,8 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         }
         const sensen::CarryingCosts carrying{.annual_repairs = d_repairs,
                                              .annual_insurance = d_ins,
-                                             .annual_growth = d_growth};
+                                             .annual_growth = d_growth,
+                                             .monthly_hoa = d_hoa};
 
         // A HELOC carried ALONGSIDE this mortgage. Amortised independently --
         // it is secured elsewhere, so it never touches this loan's balance,
@@ -1711,6 +1726,7 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
             r.set_end_balance(row.end_balance.to_string());
             r.set_repairs_paid(row.repairs_paid.to_string());
             r.set_insurance_paid(row.insurance_paid.to_string());
+            r.set_hoa_paid(row.hoa_paid.to_string());
             // Positional: row.period is 1-based and the HELOC may be shorter
             // than the mortgage, so it simply stops rather than being padded.
             const std::size_t hi = static_cast<std::size_t>(row.period) - 1;
@@ -1726,6 +1742,9 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         s.set_total_tax_savings(summary.total_tax_savings.to_string());
         s.set_total_repairs_paid(summary.total_repairs_paid.to_string());
         s.set_total_insurance_paid(summary.total_insurance_paid.to_string());
+        s.set_total_hoa_paid(summary.total_hoa_paid.to_string());
+        // sensen's own total ALREADY includes the dues, so only the HELOC is
+        // added here. Adding HOA again would double-count it.
         s.set_total_cost_of_ownership(
             summary.total_cost_of_ownership.add(heloc_paid_total).to_string());
         s.set_total_heloc_interest_paid(heloc_interest_total.to_string());

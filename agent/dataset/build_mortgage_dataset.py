@@ -325,16 +325,45 @@ OP_EXCLUDED_FIELDS: dict[str, set[str]] = {
     # deploys. Removing this side first is harmless -- it only lets the corpus
     # teach a field the service is still dropping.
     #
-    # `test_corpus_exclusion_phase` pins exactly which fields may differ, so the
+    # `test_corpus_invariants.py` (ctest `CorpusInvariantsTest`) pins exactly
+    # which fields may differ via its `TEACHING_AHEAD_OF_SERVICE` declaration --
+    # it parses `kOperationExcludedFields` out of the .cppm and compares. This
+    # line named `test_corpus_exclusion_phase`, which does not exist under that
+    # name anywhere in the tree, and a comment pointing at a gate nobody can
+    # find reads as a missing gate. So the
     # gap is a declared state with an end condition rather than drift.
     "ComputeAmortization": {
         # Same reason as the detailed operation just below: on the wire and
         # read by the engine so the app can model a second lien, never asked
         # of the model because no utterance states one.
         "heloc_drawn_amount", "heloc_annual_rate", "heloc_term_years",
+        # monthly_hoa, added 2026-10-04 WITH its C++ twin, so the two tables
+        # agree from the start rather than being reconciled afterwards.
+        #
+        # Association dues reached finance.proto today because they had nowhere
+        # to go: dues are a CARRYING COST, they do not amortise anything, and
+        # before the field existed the assistant put a stated HOA in
+        # `monthly_overpayment` and paid the loan off years early -- 200 OK,
+        # every bound satisfied, nothing saying where the number came from.
+        #
+        # ON THE WIRE AND READ BY THE ENGINE TODAY; not taught here YET, and
+        # the two facts belong together exactly as the ComputeRentVsBuy entry
+        # above says. This one is the easier half of that procedure, because
+        # unlike repairs/insurance the corpus has no amortization utterance
+        # mentioning dues at all -- so there is nothing to teach until the
+        # templates grow one.
+        #
+        # TO FINISH: add an HOA phrasing to the amortization templates, drop
+        # `monthly_hoa` from these two sets, regenerate, retrain, prove the new
+        # model emits it on a disjoint holdout, THEN delete the matching C++
+        # rows. Removing the C++ rows first refuses every amortization request
+        # the moment it deploys; removing THIS side first is harmless, which is
+        # the asymmetry the block above spells out.
+        "monthly_hoa",
     },
     "ComputeDetailedAmortization": {
         "heloc_drawn_amount", "heloc_annual_rate", "heloc_term_years",
+        "monthly_hoa",
     },
 }
 

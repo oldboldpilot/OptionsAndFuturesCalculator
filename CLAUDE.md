@@ -5603,6 +5603,29 @@ beside it in `backend/CMakeLists.txt` (it is imported by `model_converter.cppm` 
 Counting them matters: the fourth complaint was a REAL omission, and a reader who
 knew the count as "two" would have had one unexplained entry to dismiss it as.
 
+**THE SET IS FOUR AS OF 2026-10-04, AND ITS COMPOSITION MOVED RATHER THAN JUST
+ITS SIZE** -- which is why the count alone is not the thing to memorise. Measured
+on the bump to `25747a5c`:
+
+```
+MISSING from sensen_slim : ['logger.cppm', 'text_encoder_cuda.cpp', 'text_encoder_triton.cpp']
+EXTRA in sensen_slim     : ['numa_bind.cpp']
+```
+
+So `gguf_exporter.cppm` is no longer EXTRA -- its importer landed, exactly as the
+paragraph above predicted -- and **two NEW complaints appeared that are NOT from
+this bump**: both files exist at the previous pin `b06e25f8` and arrived in
+`444a5275`, which predates it. They are the CUDA and Triton backends of
+`text_encoder.cppm`, so a CPU-only `sensen_slim` omits them correctly and the
+engine links and serves the encoder without them.
+
+**That was established by asking WHEN each file appeared, not by reading the
+list.** `git cat-file -e <old-pin>:<path>` answers "was this already here?" in one
+command, and it is the difference between a bump that has to be investigated and
+one that inherited a standing complaint. A new entry in this checker's output is a
+HYPOTHESIS that the bump broke something -- the same rule this file states for a
+moved score.
+
 **Both repositories vendor sensen and only ONE of them deploys it.**
 `mortgage-nest-egg` pins `backend/sensen` as a SOURCE REFERENCE — its own
 `backend/README.md` says "Nothing in this repository's build compiles them", and

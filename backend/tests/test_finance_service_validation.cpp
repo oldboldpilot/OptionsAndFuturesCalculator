@@ -3432,6 +3432,113 @@ auto main() -> int {
                   "28x. total_cost_of_ownership exceeds debt service once the house costs "
                   "something to keep -- an itemisation whose parts do not reach the total "
                   "they sit under is not an explanation");
+
+            // ---- monthly_hoa: a CARRYING COST, never a payment -------------
+            //
+            // "The HOA and PMI are not really part of the amortization but part
+            // of the costs" (owner, 2026-10-04). Before this field existed the
+            // assistant had nowhere to put a stated HOA on an amortization
+            // request and put it in `monthly_overpayment`, which paid the loan
+            // off years early and moved every figure in the schedule:
+            //
+            //   "amortize 500000 at 6% over 30 years with 275 per month HOA dues"
+            //   -> {monthly_overpayment: 275, ...}   200 OK, and wrong
+            //
+            // 28ab is that sentence as an assertion: dues must leave the LOAN
+            // untouched. It is the check the defect would have failed.
+            auto only_hoa = bare;
+            only_hoa.set_monthly_hoa("275.00");
+            sensen::finance::AmortizationResponse hoa_out;
+            {
+                auto ctx = make_context();
+                auto st = stub.ComputeAmortization(ctx.get(), only_hoa, &hoa_out);
+                check(st.ok(), "28y. a request carrying ONLY monthly_hoa is served");
+            }
+            check(bare_out.summary().total_hoa_paid().find_first_not_of("0.-+") ==
+                      std::string::npos,
+                  "28z. an absent HOA stays zero rather than becoming a default");
+            check(bare_out.summary().total_principal_paid() ==
+                          hoa_out.summary().total_principal_paid() &&
+                      bare_out.summary().total_interest_paid() ==
+                          hoa_out.summary().total_interest_paid() &&
+                      bare_out.summary().total_pmi_paid() ==
+                          hoa_out.summary().total_pmi_paid() &&
+                      bare_out.summary().total_payments_paid() ==
+                          hoa_out.summary().total_payments_paid() &&
+                      bare_out.summary().actual_term_months() ==
+                          hoa_out.summary().actual_term_months(),
+                  "28ab. HOA DUES CHANGE NOTHING ABOUT THE LOAN -- principal, interest, PMI, "
+                  "payments and term are identical to a request with no dues. Dues do not "
+                  "amortise anything; this is the assertion the production defect failed");
+            {
+                // MONTHLY, so the closed form is the monthly figure times the
+                // term -- NOT divided by twelve the way an annual budget is.
+                // Getting that wrong by a factor of 12 is the whole hazard of a
+                // field whose unit differs from its two neighbours, so it is
+                // pinned to its arithmetic rather than to a direction.
+                const double h = std::stod(hoa_out.summary().total_hoa_paid());
+                // DERIVED FROM THE REPORTED TERM, NOT FROM 360. The first cut
+                // of this check asserted 275 x 360 = 99000 and failed at
+                // 82500 -- because this section's baseline carries a 150/month
+                // OVERPAYMENT, so the loan retires in 300 months and 275 x 300
+                // is 82500. The code was right and the expectation was a
+                // hypothesis about the baseline, which is the mistake section
+                // 28 already records against `current_pmi_monthly`.
+                //
+                // Deriving it is also the stronger assertion: it ties the dues
+                // to the schedule's own length, so it keeps holding if the
+                // baseline's overpayment, rate or term ever changes, where a
+                // literal would have to be re-derived by hand each time.
+                const double months =
+                    static_cast<double>(hoa_out.summary().actual_term_months());
+                check(months > 0.0 && std::fabs(h - 275.0 * months) < 1.0,
+                      "28ac. flat HOA is 275/mo x the ACTUAL term (" +
+                          std::to_string(hoa_out.summary().actual_term_months()) +
+                          " months) = " + std::to_string(275.0 * months) + ", got " +
+                          std::to_string(h));
+                // AND THE TERM REALLY IS SHORTER THAN THE SCHEDULED ONE here,
+                // so the line above is not quietly asserting 275 x 360 under
+                // another name. Without this, a regression that ignored the
+                // overpayment would satisfy both checks at once.
+                check(hoa_out.summary().actual_term_months() < 360,
+                      "28ac2. ... and that term is SHORTER than 360 because the baseline "
+                      "overpays, which is what makes the derivation meaningful rather "
+                      "than a restatement of the scheduled term");
+                // WORTH STATING RATHER THAN HIDING: dues are charged per
+                // SCHEDULE ROW, so an early payoff shortens the reported total.
+                // Real dues do not stop when the loan does -- this struct's own
+                // comment says carrying costs "do not stop when the loan does"
+                // -- but the schedule has no rows past payoff, so this figure
+                // is "dues paid while the loan ran" and not "dues for 30 years".
+                // Repairs and insurance have behaved exactly this way since
+                // they landed; it is a product question, not an arithmetic one.
+                // THE ITEMISATION IDENTITY, exactly rather than as an
+                // inequality: with dues the only carrying cost, the gap between
+                // what the house cost and what went to the lender IS the dues.
+                // An inequality would be satisfied by any positive number.
+                const double own = std::stod(hoa_out.summary().total_cost_of_ownership());
+                const double paid = std::stod(hoa_out.summary().total_payments_paid());
+                check(std::fabs((own - paid) - h) < 1.0,
+                      "28ad. total_cost_of_ownership - total_payments_paid IS the dues "
+                      "(" + std::to_string(own - paid) + " vs " + std::to_string(h) +
+                      ") -- the parts reach the total they sit under");
+            }
+            {
+                // Dues RISE, and they rise by the same rate as the other two --
+                // so the growth field is not a repairs-and-insurance-only
+                // multiplier. A field read into the wrong member would leave
+                // this equal while still moving every digest.
+                auto grow = only_hoa;
+                grow.set_annual_cost_growth("0.0300");
+                sensen::finance::AmortizationResponse grown;
+                auto ctx = make_context();
+                auto st = stub.ComputeAmortization(ctx.get(), grow, &grown);
+                check(st.ok() && std::stod(grown.summary().total_hoa_paid()) >
+                                     std::stod(hoa_out.summary().total_hoa_paid()) * 1.3,
+                      "28ae. annual_cost_growth compounds the DUES too, flat " +
+                          hoa_out.summary().total_hoa_paid() + " -> rising " +
+                          grown.summary().total_hoa_paid());
+            }
         }
 
         // ---- RefinanceRequest: pmi_drop_off_ltv had no assertion at all ----
