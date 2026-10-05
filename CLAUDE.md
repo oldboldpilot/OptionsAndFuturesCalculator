@@ -726,6 +726,113 @@ model — score `[assistant] raw model output`, which is logged before it runs.
 
 ## Mortgage assistant
 
+### A MISSPELLED ROLE WORD priced a $275 house, and both halves were latent
+
+Found 2026-10-05 by sweeping misspellings against PRODUCTION rather than by
+reading. Ten of eleven typo shapes were already correct -- British `amortise`,
+`mortage`, `yeras`, `zero dowm` all parse -- which is exactly why the eleventh
+needed a sweep to find:
+
+```
+"amortize 480000 at 6.5% for 30 years with 275 monthly HAO duse"
+-> original_home_value = 275, monthly_hoa = 0                    200 OK
+```
+
+**A $480,000 loan against a $275 house.** That is an LTV of 174,545%, and it
+drives PMI and every equity-derived figure in the schedule. Nothing in the gate
+could object, and the reason is the one this file states everywhere: 275 IS a
+literal of the utterance so M1 grounds it by identity, the money band admits
+it, and **grounding is per FIELD** -- so no rule was ever asked whether 275 was
+the dues. This is the documented dangerous failure (`present_value = 304000.00`
+on a 495,000 utterance) reached through a new door.
+
+**THE BASELINE IS WHAT MADE IT DIAGNOSABLE, and it isolated the discriminator
+to one word.** Six phrasings against production before any change:
+
+| utterance | `monthly_hoa` | `original_home_value` | |
+| --- | --- | --- | --- |
+| `275 monthly HAO duse` | 0 | **275** | wrong |
+| `275 monthly hao dues` | 0 | **275** | wrong |
+| `275 per month hoa duse` | 275 | 480000 | right |
+| `275 a month HOA dues` | 275 | 480000 | right |
+| `275 condo fee a month` | 275 | 480000 | right |
+| `150 extar a month` | 0 (over = 150) | 480000 | right |
+
+So `hoa duse` is FINE and `hao dues` is not: the lexer's scan only has to find
+ONE hoa-word, so misspelling `dues` is harmless while misspelling `hoa` itself
+leaves the figure ungoverned. **2 of 6 wrong**, which is the number the deploy
+had to move to zero without touching the other four.
+
+**TWO INDEPENDENT DEFECTS, AND NEITHER MOVES THE ANSWER ALONE.**
+
+1. `is_hoa_word` and its nine siblings were EXACT lists, so `HAO` left
+   `names_hoa` false and the subtractive rule that exists for precisely this
+   never fired.
+2. That rule's field list did not contain `original_home_value`. **Even
+   correctly spelled, "HOA dues" would have left the 275 free to price the
+   property** -- the half no accuracy number could ever see, because the model
+   spells it right, so the hole sat in shipped code with no way to observe it.
+
+**THE FUZZY THRESHOLD IS MEASURED, AND THE MEASUREMENT REJECTED THE PRIMITIVE
+THIS TREE ALREADY HAD.** `sensen::ocr_math::token_levenshtein` is PLAIN
+Levenshtein -- insert, delete, substitute, no transposition -- and every live
+failure is a transposition, which it scores as **two**: `hoa/hao`, `dues/duse`,
+`extra/extar`, `years/yeras`. So a Levenshtein threshold of 1 misses all of
+them and 2 is the only one that reaches them. Counted over
+`/usr/share/dict/words`, 415,830 distinct words, against all ten concept lists:
+
+| rule | English words that collide |
+| --- | --- |
+| **one adjacent transposition** | **7**, across every list |
+| Levenshtein <= 1, gold >= 5, same initial | **51**, on ONE list alone |
+
+The 51 include `takes`~`taxes` -- which occurs **22 times in our own corpus** --
+plus `overlay`~`overpay`, `congo`~`condo` and `condom`~`condo`. The 7 are `hao`
+and `duse`, the two this exists to catch, plus `deus`, `oca`, `imp`, `riess`
+and `helco`, none of which occurs beside a figure in a mortgage utterance. Over
+our OWN corpus vocabulary (772 distinct words, 1,315,851 tokens) a
+transposition collides with **nothing**.
+
+The looser rule's one extra catch was `exta`~`extra`, and production already
+answers that utterance correctly -- so it buys nothing measured and costs a word
+that appears 22 times. Hence transposition only.
+
+**A SINGLE DIFFERING POSITION IS DELIBERATELY NOT A MATCH.** That is a
+substitution, and the substitution neighbourhood is where the real words live:
+at three letters `hoa` would admit `how`, `hot` and `hoe`, and `how` opens every
+second mortgage question. A swap of two adjacent letters is the typing error
+people actually make and is almost never another word.
+
+**APPLIED TO ALL TEN CONCEPT LISTS, not the one that was reported** -- the
+sweep-the-class rule, and the increment list needed its own argument because
+this file records that a false positive THERE is a wrong answer rather than a
+refusal (it MOVES a literal). It is the tightest list of the ten: nothing in
+415,830 words collides with `{more, extra, additional, another}`.
+`is_hoa_mention_word`'s `condo` exclusion is fuzzy too, or the typo tolerance
+would quietly undo it and send every condo request back to refusing.
+
+**Mutation-checked with `CCACHE_DISABLE=1`, and the matrix is the finding:**
+
+| arm | failures | which checks |
+| --- | --- | --- |
+| both halves present | 0 | -- |
+| fuzzy matching removed | 2 | the two TYPO checks only |
+| `original_home_value` removed | 2 | both PRICE-THE-PROPERTY checks only |
+
+Gated: `test_mortgage_verification` **318 -> 331 checks / 0 failures**,
+`test_mortgage_grammar` 139/0, the grounding sweep **4,819 rows / 0 refused**,
+the ask sweep **13,143 probes / 0 asked wrongly** -- the over-matching
+direction, which has no alarm -- and the derivation sweep **0 rows corrupted**.
+
+**STILL OPEN, and it is a MODEL gap rather than a serving one.**
+`"with 150 extar each month"` returns `monthly_overpayment = 0`: the 150 is
+dropped. `"paying 150 extar a month"` returns 150, so the misspelling is not
+the cause -- the phrasing is. The serving layer cannot close this: a figure the
+model declined to claim cannot be invented by a gate whose whole job is to
+refuse figures the utterance does not support. It needs a corpus row and a
+retrain. Also unfixed and unmeasured: plural concept spellings (`condos`,
+`extras`) are insertions, not transpositions, so this rule does not reach them.
+
 ### The solver layer: recency in the graph, and two logical defects in `reconcile`
 
 `mortgage_derivation.cppm` lets the model stop doing arithmetic -- it names the
@@ -6095,8 +6202,33 @@ answers by being read, not by being argued.
   vitest 4 pulls in. The build itself does not require it; the test suite does.
 - **Backend Docker Build:** `docker build -t options-backend backend/`
 - **Backend Tests:** `ninja -C backend/build build_tests && ctest --test-dir backend/build`
-  (ctest is **150/150 with 2 skipped** as of 2026-10-03, when
-  `EncoderOperationDecodeTest` landed; it was **149/149 with 2 skipped** against sensen
+  (ctest is **213 TESTS WITH 7 SKIPPED as of 2026-10-05**, and this line said
+  **150/150 with 2 skipped** until then -- stale by 63 tests and by five skips.
+  The count moved because the SGEE submodule brought its own suites, which is
+  the same reason it went stale for eleven days at 117: *most of the new tests
+  are SGEE's, and no gate here counts them*. The five further skips are
+  `AmqpTransportTests`, `KafkaTransportTests`, `TransportConformanceKafkaTests`,
+  `TransportConformanceAmqpTests`, `NcclCollectiveGate` and
+  `CausalHookMissingFailsByName` -- brokers and a GPU collective that are absent
+  on this host, so they are honest skips rather than tests that stopped running.
+  Note the skip LIST is what makes that judgement possible; the skip COUNT alone
+  cannot tell an absent broker from a test that quietly stopped being built.
+
+  **RUN EXACTLY ONE ctest PER BUILD DIRECTORY, AND START IT AFTER THE REBUILD.**
+  Two overlapping background runs on 2026-10-05 produced
+  `QueueNodeConcurrentRunsTest` **Failed**, which then **passed in 10.76 s alone**
+  -- pure contention over the real ports these suites bind. The first of the two
+  had also been started BEFORE a rebuild and ran straight through two
+  mutation-check arms, so it was executing mutated binaries for part of its
+  sweep and its result described neither the mutation nor the fix. And
+  `ctest ... | tail -N` BUFFERS, so the `% tests passed` line is lost when the
+  tail is truncated: redirect ctest's stdout to a file instead. An isolated
+  re-run also overwrites `Testing/Temporary/LastTest.log`, destroying the
+  summary of the run you were trying to confirm.
+
+  The older figures, kept because the ratchet is the point: it was
+  **150/150 with 2 skipped** as of 2026-10-03, when
+  `EncoderOperationDecodeTest` landed; **149/149 with 2 skipped** against sensen
   master `6aca1b9265e5` with a 149/2 BASELINE taken on the previous pin first, so
   the bump is attributable rather than merely green -- `LlqWeightStoreTest`
   is the one new test; before it the suite was **148/148 with 2 skipped** as of

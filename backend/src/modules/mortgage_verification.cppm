@@ -2844,10 +2844,34 @@ namespace detail {
     // `monthly_hoa` and `monthly_taxes_ins_hoa` are deliberately ABSENT from
     // both groups -- those are the slots an HOA fee belongs in, and this rule
     // must not stop it reaching them.
+    //
+    // THE PROPERTY-VALUE FAMILY AND `loan_amounts` WERE MISSING, AND THAT WAS
+    // THE OTHER HALF OF A PRODUCTION WRONG ANSWER. Measured 2026-10-05:
+    //
+    //   "amortize 480000 at 6.5% for 30 years with 275 monthly HAO duse"
+    //   -> original_home_value = 275                            200 OK
+    //
+    // `original_home_value` is the slot a stray money literal reaches on both
+    // amortization operations, and it was in neither group -- so even once the
+    // lexer recognised the misspelled dues (the transposition rule above), the
+    // 275 would still have priced a $275 house. NEITHER HALF MOVES THE ANSWER
+    // ALONE, which is the same shape as the `names_increment` widening that
+    // needed its reciprocal rule, recorded twenty lines down.
+    //
+    // A monthly HOA fee is not what a property is WORTH, on any operation, so
+    // the whole family goes in rather than the one field that was reported.
+    // `loan_amounts` is the ComputeAmortizationBatch spelling of a field whose
+    // singular was already here -- the batch-plural miss this file records
+    // against `extra_payments` and `pmi_rates`, found by sweeping the class.
     if (lit.names_hoa &&
         (field_name == "monthly_overpayment" || field_name == "extra_monthly_payment" ||
          field_name == "extra_payments" || field_name == "down_payment" ||
-         field_name == "loan_amount" || field_name == "present_value" ||
+         field_name == "loan_amount" || field_name == "loan_amounts" ||
+         field_name == "present_value" ||
+         field_name == "original_home_value" || field_name == "home_value" ||
+         field_name == "home_values" || field_name == "property_value" ||
+         field_name == "current_property_value" || field_name == "home_price" ||
+         field_name == "property_price" ||
          field_name == "annual_repairs" || field_name == "annual_insurance")) {
         return out;
     }
@@ -3295,6 +3319,102 @@ inline constexpr std::array<std::string_view, 2> kNettedLoanFields{"present_valu
 }
 
 /**
+ * ONE ADJACENT TRANSPOSITION of `gold`, and nothing looser.
+ *
+ * A MISSPELLED ROLE WORD LEAVES A STATED FIGURE UNGOVERNED, and the figure then
+ * fills whichever money slot the model happened to name. Measured against
+ * PRODUCTION on 2026-10-05:
+ *
+ *   "amortize 480000 at 6.5% for 30 years with 275 monthly HAO duse"
+ *   -> original_home_value = 275, monthly_hoa = 0            200 OK
+ *
+ * A $480,000 loan against a $275 house, which is an LTV of 174,545% and drives
+ * PMI and every equity-derived figure in the schedule. Nothing in the gate
+ * could object: 275 IS a literal of the utterance so M1 grounds it by
+ * identity, the money band admits it, and grounding is PER FIELD -- so no rule
+ * was ever asked whether 275 was the dues. `is_hoa_word` was an EXACT list, so
+ * `hao` and `duse` left `names_hoa` false and the subtractive rule that exists
+ * for precisely this never fired.
+ *
+ * THE THRESHOLD IS MEASURED, NOT CHOSEN, and the measurement rejected the
+ * primitive this tree already had. sensen's `ocr_math::token_levenshtein` is
+ * PLAIN Levenshtein -- insert, delete, substitute, no transposition -- and
+ * every live failure is a transposition, which it scores as TWO:
+ *
+ *   hoa/hao   dues/duse   extra/extar   years/yeras   -> Levenshtein 2, OSA 1
+ *
+ * So a Levenshtein threshold of 1 misses all of them and 2 is the only one
+ * that reaches them. Counted over /usr/share/dict/words, 415,830 distinct
+ * lowercase words, against all ten concept lists:
+ *
+ *   | rule                                     | English words that collide |
+ *   | one adjacent transposition               | 7, across every list       |
+ *   | Levenshtein <= 1, gold >= 5, same initial | 51, on ONE list alone     |
+ *
+ * The 51 include `takes`~`taxes`, `overlay`~`overpay`, `congo`~`condo` and
+ * `condom`~`condo`; `takes` occurs 22 times in our own corpus. The 7 are
+ * `hao` and `duse` -- the two this exists to catch -- plus `deus`, `oca`,
+ * `imp`, `riess` and `helco`, none of which occurs beside a figure in a
+ * mortgage utterance. Over our OWN corpus vocabulary (772 distinct words,
+ * 1,315,851 tokens) a transposition collides with NOTHING.
+ *
+ * The looser rule's one extra catch was `exta`~`extra`, and production already
+ * answers that utterance correctly -- so it buys nothing measured and costs a
+ * word that appears 22 times. Hence transposition only.
+ *
+ * A SINGLE DIFFERING POSITION IS DELIBERATELY NOT A MATCH. That is a
+ * substitution, and substitutions are what the dense neighbourhood is made of:
+ * at three letters `hoa` would admit `how`, `hot` and `hoe`, and `how` is a
+ * word every second mortgage question contains. A swap of two adjacent letters
+ * is the typing error people actually make and is almost never another word.
+ *
+ * Length 3 is the floor because `hoa` and `coa` are three letters and are the
+ * reported defect; below three a swap is half the word.
+ */
+[[nodiscard]] constexpr auto one_transposition_of(std::string_view w,
+                                                  std::string_view gold) noexcept -> bool {
+    if (w.size() != gold.size() || w.size() < 3) { return false; }
+    auto first = std::string_view::npos;
+    auto second = std::string_view::npos;
+    for (std::size_t i = 0; i < w.size(); ++i) {
+        if (w[i] == gold[i]) { continue; }
+        if (first == std::string_view::npos) {
+            first = i;
+        } else if (second == std::string_view::npos) {
+            second = i;
+        } else {
+            return false;  // three or more positions differ
+        }
+    }
+    // Both ends must exist and be ADJACENT. `second == npos` is the
+    // one-differing-position case and falls out here rather than needing its
+    // own arm, because npos is never `first + 1`.
+    if (first == std::string_view::npos || second != first + 1) { return false; }
+    return w[first] == gold[second] && w[second] == gold[first];
+}
+
+/**
+ * Exact match against any member of `set`, or one adjacent transposition of one.
+ *
+ * EVERY CONCEPT LIST GOES THROUGH HERE, which is this file's own
+ * sweep-the-class rule. Teaching only the HOA list to tolerate a typo would
+ * fix the reported utterance and leave the identical hole on the nine others,
+ * and the next misspelling nobody has typed yet would land in whichever list
+ * was not swept. `is_one_of` stays beside it for the sets that are NOT concept
+ * words -- field names, enum constants, operation ids -- where a typo is a
+ * defect in our own tables rather than in a person's typing, and tolerating
+ * one would hide it.
+ */
+template <std::size_t N>
+[[nodiscard]] constexpr auto names_concept(const std::array<std::string_view, N>& set,
+                                           std::string_view w) noexcept -> bool {
+    for (const auto entry : set) {
+        if (entry == w || one_transposition_of(w, entry)) { return true; }
+    }
+    return false;
+}
+
+/**
  * THE CONCEPT WORD LISTS, hoisted so each exists exactly once.
  *
  * The lexer uses them to decide which SLOT a figure belongs in; the
@@ -3303,8 +3423,9 @@ inline constexpr std::array<std::string_view, 2> kNettedLoanFields{"present_valu
  * it was written and drift on the first phrasing anyone adds.
  */
 [[nodiscard]] inline auto is_hoa_word(std::string_view w) -> bool {
-    return w == "hoa" || w == "hoas" || w == "dues" || w == "condo" || w == "coa" ||
-           w == "association";
+    static constexpr std::array<std::string_view, 6> kWords{"hoa",   "hoas", "dues",
+                                                            "condo", "coa",  "association"};
+    return names_concept(kWords, w);
 }
 
 /**
@@ -3323,12 +3444,19 @@ inline constexpr std::array<std::string_view, 2> kNettedLoanFields{"present_valu
  * first phrasing anyone adds to either.
  */
 [[nodiscard]] inline auto is_hoa_mention_word(std::string_view w) -> bool {
-    return is_hoa_word(w) && w != "condo";
+    // THE EXCLUSION HAS TO BE FUZZY TOO, or the typo tolerance would quietly
+    // undo it: `codno` matches `condo` and is therefore an HOA word, and a
+    // bare `w != "condo"` would then let a misspelled PROPERTY TYPE count as a
+    // mention of dues -- restoring the refusal on exactly the properties that
+    // have them. One spelling, named once, used by both halves.
+    static constexpr std::string_view kPropertyType{"condo"};
+    return is_hoa_word(w) && w != kPropertyType && !one_transposition_of(w, kPropertyType);
 }
 
 /** Mirrors the down-payment adjacency's own list; see `names_down_payment`. */
 [[nodiscard]] inline auto is_down_payment_word(std::string_view w) -> bool {
-    return w == "down" || w == "downpayment" || w == "deposit";
+    static constexpr std::array<std::string_view, 3> kWords{"down", "downpayment", "deposit"};
+    return names_concept(kWords, w);
 }
 
 /** `insurance` and `escrow` are here because `monthly_taxes_ins_hoa` is a
@@ -3336,8 +3464,9 @@ inline constexpr std::array<std::string_view, 2> kNettedLoanFields{"present_valu
  * mentioning the field. Blocking on a superset is the safe direction: it costs
  * a default and never costs a figure. */
 [[nodiscard]] inline auto is_escrow_word(std::string_view w) -> bool {
-    return is_hoa_mention_word(w) || w == "tax" || w == "taxes" || w == "insurance" ||
-           w == "escrow";
+    static constexpr std::array<std::string_view, 4> kWords{"tax", "taxes", "insurance",
+                                                            "escrow"};
+    return is_hoa_mention_word(w) || names_concept(kWords, w);
 }
 
 /** PMI, in the spellings that are single words. The two-word "mortgage
@@ -3346,11 +3475,13 @@ inline constexpr std::array<std::string_view, 2> kNettedLoanFields{"present_valu
  * utterances state constantly, and treating it as a PMI mention would make the
  * PMI default fire almost never. */
 [[nodiscard]] inline auto is_pmi_word(std::string_view w) -> bool {
-    return w == "pmi" || w == "mip";
+    static constexpr std::array<std::string_view, 2> kWords{"pmi", "mip"};
+    return names_concept(kWords, w);
 }
 
 [[nodiscard]] inline auto is_inflation_word(std::string_view w) -> bool {
-    return w == "inflation" || w == "inflationary";
+    static constexpr std::array<std::string_view, 2> kWords{"inflation", "inflationary"};
+    return names_concept(kWords, w);
 }
 
 /** Appreciation, which a request may legitimately decline to model. Kept
@@ -3359,22 +3490,24 @@ inline constexpr std::array<std::string_view, 2> kNettedLoanFields{"present_valu
  * property APPRECIATING, and defaulting the wrong one of the two to zero
  * would discard a figure. */
 [[nodiscard]] inline auto is_appreciation_word(std::string_view w) -> bool {
-    return w == "appreciation" || w == "appreciate" || w == "appreciates" ||
-           w == "appreciating" || w == "appreciated";
+    static constexpr std::array<std::string_view, 5> kWords{
+        "appreciation", "appreciate", "appreciates", "appreciating", "appreciated"};
+    return names_concept(kWords, w);
 }
 
 /** Escalation of a recurring amount: rent, expenses, carrying costs. */
 [[nodiscard]] inline auto is_growth_word(std::string_view w) -> bool {
-    return w == "growth" || w == "grow" || w == "grows" || w == "growing" ||
-           w == "increase" || w == "increases" || w == "increasing" ||
-           w == "escalate" || w == "escalates" || w == "escalation" ||
-           w == "rising" || w == "rises";
+    static constexpr std::array<std::string_view, 12> kWords{
+        "growth",   "grow",      "grows",     "growing", "increase", "increases",
+        "increasing", "escalate", "escalates", "escalation", "rising", "rises"};
+    return names_concept(kWords, w);
 }
 
 /** A HELOC leg the request may simply not have. The spelled-out forms are
  * phrases and are matched as such by `utterance_names_nothing_for`. */
 [[nodiscard]] inline auto is_heloc_word(std::string_view w) -> bool {
-    return w == "heloc" || w == "helocs";
+    static constexpr std::array<std::string_view, 2> kWords{"heloc", "helocs"};
+    return names_concept(kWords, w);
 }
 
 /** ASCII lower-case, written out rather than reaching for `std::tolower`,
@@ -3899,7 +4032,16 @@ auto lex_numeric_literals(std::string_view text) -> std::vector<NumericLiteral> 
             for (int step = 0; step < 2; ++step) {
                 while (j < text.size() && text[j] == '/') ++j;
                 const std::string w = detail::next_word(text, j);
-                if (w == "more" || w == "extra" || w == "additional") {
+                // TYPO-TOLERANT, and this is the one list where that needed
+                // its own argument, because the comment above says a false
+                // positive HERE is a wrong answer rather than a refusal.
+                // `names_concept` admits one adjacent transposition only, and
+                // over 415,830 English words NOTHING collides with {more,
+                // extra, additional, another} -- the tightest list of the ten.
+                // `extar` is the live spelling it recovers.
+                static constexpr std::array<std::string_view, 3> kAfter{"more", "extra",
+                                                                        "additional"};
+                if (detail::names_concept(kAfter, w)) {
                     lit.names_increment = true;
                     break;
                 }
@@ -3909,7 +4051,9 @@ auto lex_numeric_literals(std::string_view text) -> std::vector<NumericLiteral> 
             }
             if (!lit.names_increment) {
                 const std::string wp = detail::prev_word(text, lit.offset);
-                if (wp == "extra" || wp == "additional" || wp == "another") {
+                static constexpr std::array<std::string_view, 3> kBefore{
+                    "extra", "additional", "another"};
+                if (detail::names_concept(kBefore, wp)) {
                     lit.names_increment = true;
                 }
             }
@@ -3934,10 +4078,14 @@ auto lex_numeric_literals(std::string_view text) -> std::vector<NumericLiteral> 
         // it being an overpayment.
         if (lit.tag == LiteralTag::Money && !lit.names_increment && !lit.names_down_payment) {
             const auto is_upkeep_word = [](std::string_view w) {
-                return w == "repairs" || w == "repair" || w == "maintenance" ||
-                       w == "upkeep" || w == "insurance" || w == "budget";
+                static constexpr std::array<std::string_view, 6> kWords{
+                    "repairs", "repair", "maintenance", "upkeep", "insurance", "budget"};
+                return detail::names_concept(kWords, w);
             };
-            const auto is_insurance_word = [](std::string_view w) { return w == "insurance"; };
+            const auto is_insurance_word = [](std::string_view w) {
+                static constexpr std::array<std::string_view, 1> kWords{"insurance"};
+                return detail::names_concept(kWords, w);
+            };
             std::size_t j = i;
             for (int step = 0; step < 4 && !lit.names_upkeep; ++step) {
                 while (j < text.size() && (text[j] == '/' || text[j] == ' ' ||

@@ -3051,6 +3051,119 @@ auto main() -> int {
         }
     }
 
+    // =======================================================================
+    // 34. A MISSPELLED ROLE WORD, which left a stated figure ungoverned and
+    //     priced a $275 house against a $480,000 loan in PRODUCTION.
+    //
+    //   "amortize 480000 at 6.5% for 30 years with 275 monthly HAO duse"
+    //   -> original_home_value = 275, monthly_hoa = 0           200 OK
+    //
+    // TWO INDEPENDENT HALVES, AND NEITHER MOVES THE ANSWER ALONE -- which is
+    // why both arms below exist and why the mutation check names which half it
+    // removed:
+    //
+    //   * the LEXER did not recognise `HAO` or `duse`, so `names_hoa` was
+    //     false and the subtractive rule that exists for this never ran;
+    //   * the rule's field list did not contain `original_home_value`, so even
+    //     a correctly-spelled "HOA dues" would have left the 275 free to price
+    //     the property. That half was LATENT in shipped code and no accuracy
+    //     number could see it, because the model spells it right.
+    // =======================================================================
+    {
+        const auto hoa_fields = [](const char* value_field, const char* value) {
+            // Every declared field of ComputeAmortization, because G2b refuses
+            // a missing key -- the figure under test is placed in ONE of them.
+            auto in = params("ComputeAmortization", {{"loan_amount", "480000.00"},
+                                                     {"annual_rate", "0.0650"},
+                                                     {"term_months", "360"},
+                                                     {"monthly_overpayment", "0.00"},
+                                                     {"pmi_annual_rate", "0.0000"},
+                                                     {"original_home_value", "480000.00"},
+                                                     {"annual_repairs", "0.00"},
+                                                     {"annual_insurance", "0.00"},
+                                                     {"annual_cost_growth", "0.0000"},
+                                                     {"monthly_hoa", "0.00"}});
+            for (auto& f : in.fields) {
+                if (f.name == value_field) { f.values = {std::string{value}}; }
+            }
+            return in;
+        };
+        const std::string typo =
+            "amortize 480000 at 6.5% for 30 years with 275 monthly HAO duse";
+        const std::string spelled =
+            "amortize 480000 at 6.5% for 30 years with 275 monthly HOA dues";
+
+        // THE PRODUCTION SYMPTOM, on the misspelling that produced it.
+        {
+            const auto v = mv::verify_mortgage_output(hoa_fields("original_home_value", "275.00"),
+                                                      typo);
+            check(v.outcome != mv::Outcome::Proven,
+                  "a figure beside MISSPELLED dues may not price the property "
+                  "(the production wrong answer)");
+        }
+        // The same, spelled correctly -- the latent half, which has nothing to
+        // do with typing and was wrong the whole time.
+        {
+            const auto v = mv::verify_mortgage_output(hoa_fields("original_home_value", "275.00"),
+                                                      spelled);
+            check(v.outcome != mv::Outcome::Proven,
+                  "a figure beside CORRECTLY-SPELLED dues may not price the "
+                  "property either -- the half no accuracy number could see");
+        }
+        // AND THE ADMIT DIRECTION, which is the half a refuse-only test cannot
+        // see: the rule must not keep dues out of the dues slot. A rule that
+        // refused everything would pass both checks above.
+        expect_pass(hoa_fields("monthly_hoa", "275.00"), spelled,
+                    "stated dues still reach monthly_hoa (correct spelling)");
+        expect_pass(hoa_fields("monthly_hoa", "275.00"), typo,
+                    "stated dues still reach monthly_hoa THROUGH the typo");
+
+        // --- the mention question, both directions --------------------------
+        check(!mv::utterance_names_nothing_for("monthly_hoa", "275 a month in HAO duse"),
+              "a misspelled dues word is still a MENTION of dues");
+        check(!mv::utterance_names_nothing_for("monthly_hoa", "275 a month in HOA dues"),
+              "a correctly-spelled dues word is a mention (regression)");
+
+        // ONE SUBSTITUTION IS DELIBERATELY NOT A MATCH, and `how` is the word
+        // that forced it: at three letters a Levenshtein-1 rule admits `how`,
+        // `hot` and `hoe`, and `how` opens every second mortgage question.
+        // This is the over-matching direction, which has no alarm -- a wrong
+        // match here silently SUPPRESSES the HOA default.
+        check(mv::utterance_names_nothing_for("monthly_hoa",
+                                              "how much is the payment on 480000 at 6.5%"),
+              "\"how\" is not a misspelling of \"hoa\" -- a substitution is not "
+              "a transposition");
+        check(mv::utterance_names_nothing_for("monthly_hoa",
+                                              "its a hot market, amortize 480000 at 6.5%"),
+              "\"hot\" is not a misspelling of \"hoa\"");
+        check(mv::utterance_names_nothing_for("monthly_taxes_ins_hoa",
+                                              "it takes 30 years to pay off 480000 at 6.5%"),
+              "\"takes\" is not a misspelling of \"taxes\" -- the collision the "
+              "looser Levenshtein rule would have had, on a word that occurs 22 "
+              "times in our own corpus");
+
+        // THE `condo` ASYMMETRY SURVIVES THE TYPO TOLERANCE. `condo` is an HOA
+        // word beside a figure and a PROPERTY TYPE for the existence question;
+        // a misspelled condo must stay on the property-type side, or the
+        // default would go back to refusing on exactly the homes that have dues.
+        check(mv::utterance_names_nothing_for("monthly_hoa",
+                                              "a 480000 codno renting at 2400 a month"),
+              "a MISSPELLED condo is still the property type, not a mention of dues");
+        check(mv::utterance_names_nothing_for("monthly_hoa",
+                                              "a 480000 condo renting at 2400 a month"),
+              "a correctly-spelled condo is the property type (regression)");
+
+        // AN IDENTICAL WORD IS AN EXACT MATCH, NOT A TRANSPOSITION, and a word
+        // of a different LENGTH is neither -- the two ways the predicate could
+        // have been written to accept too much.
+        check(mv::utterance_names_nothing_for("monthly_hoa",
+                                              "amortize 480000 at 6.5% over 30 years"),
+              "an utterance naming no concept word at all still reports unstated");
+        check(mv::utterance_names_nothing_for("heloc_drawn_amount",
+                                              "amortize 480000 at 6.5% over 30 years"),
+              "the same, on a list whose words are longer");
+    }
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

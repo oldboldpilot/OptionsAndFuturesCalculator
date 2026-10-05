@@ -1,0 +1,40 @@
+{
+  "org": "sensen",
+  "org_name": "Sensen",
+
+  "principals": [
+    { "id": "olumuyiwa", "name": "Olumuyiwa Oluwasanmi" }
+  ],
+
+  "groups": ["operators"],
+  "memberships": [["olumuyiwa", "operators"]],
+
+  "clusters": ["edge"],
+
+  "machines": [
+    {
+      "id": "serve-edge-1",
+      "base_url": "http://sensen-serve.railway.internal:8080",
+      "network": "wan",
+      "cluster": "edge",
+      "auth_scheme": "leaf_key",
+      "reachable_from": ["wan", "vpn", "lan"]
+    }
+  ],
+
+  "group_clusters": [["operators", "edge"]],
+
+  "group_models": [
+    ["operators", "qwen3-0.6b-mortgage"],
+    ["operators", "qwen3-0.6b-strategy"]
+  ],
+
+  "model_placements": [
+    ["qwen3-0.6b-mortgage", "serve-edge-1"],
+    ["qwen3-0.6b-strategy", "serve-edge-1"]
+  ],
+
+  "keys": [
+    { "id": "operator-cli", "principal": "olumuyiwa" }
+  ]
+}
