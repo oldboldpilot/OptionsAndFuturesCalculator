@@ -1813,7 +1813,7 @@ constexpr std::array<std::string_view, 2> kClosingCostTypeValues{{"PAID_IN_CASH"
 constexpr std::array<std::string_view, 2> kComponentValues{{"INTEREST", "PRINCIPAL"}};
 constexpr std::array<std::string_view, 4> kMethodValues{{"STRAIGHT_LINE", "SUM_OF_YEARS_DIGITS", "DECLINING_BALANCE", "MACRS"}};
 
-constexpr std::array<Field, 12> kFields_ComputeAmortization{{
+constexpr std::array<Field, 13> kFields_ComputeAmortization{{
     {"loan_amount", Kind::Decimal, {}},
     {"annual_rate", Kind::Decimal, {}},
     {"term_months", Kind::Int, {}},
@@ -1828,6 +1828,13 @@ constexpr std::array<Field, 12> kFields_ComputeAmortization{{
     {"annual_repairs", Kind::Decimal, {}},
     {"annual_insurance", Kind::Decimal, {}},
     {"annual_cost_growth", Kind::Decimal, {}},
+    // monthly_hoa, 2026-10-04. THIS IS THE FIFTH TABLE AN OPERATION'S FIELD HAS
+    // TO REACH, and it is the one that refuses AFTER the verifier has admitted
+    // the parse -- so an omission here reads as a model failure rather than as a
+    // missing row. `CorpusInvariantsTest` named it the moment the exclusion
+    // lifted ("missing-from-service=['monthly_hoa']"), which is what the comment
+    // above asked for: a test instead of a deploy.
+    {"monthly_hoa", Kind::Decimal, {}},
     {"heloc_drawn_amount", Kind::Decimal, {}},
     {"heloc_annual_rate", Kind::Decimal, {}},
     {"heloc_term_years", Kind::Int, {}},
@@ -1882,7 +1889,7 @@ constexpr std::array<Field, 8> kFields_ComputeDepreciation{{
     {"year", Kind::Int, {}},
 }};
 
-constexpr std::array<Field, 10> kFields_ComputeDetailedAmortization{{
+constexpr std::array<Field, 11> kFields_ComputeDetailedAmortization{{
     {"loan_amount", Kind::Decimal, {}},
     {"annual_rate", Kind::Decimal, {}},
     {"term_months", Kind::Int, {}},
@@ -1908,6 +1915,13 @@ constexpr std::array<Field, 10> kFields_ComputeDetailedAmortization{{
     {"annual_repairs", Kind::Decimal, {}},
     {"annual_insurance", Kind::Decimal, {}},
     {"annual_cost_growth", Kind::Decimal, {}},
+    // monthly_hoa, 2026-10-04. THIS IS THE FIFTH TABLE AN OPERATION'S FIELD HAS
+    // TO REACH, and it is the one that refuses AFTER the verifier has admitted
+    // the parse -- so an omission here reads as a model failure rather than as a
+    // missing row. `CorpusInvariantsTest` named it the moment the exclusion
+    // lifted ("missing-from-service=['monthly_hoa']"), which is what the comment
+    // above asked for: a test instead of a deploy.
+    {"monthly_hoa", Kind::Decimal, {}},
 }};
 
 constexpr std::array<Field, 5> kFields_ComputeFutureValue{{
@@ -3611,7 +3625,14 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
         // counts across slot kinds, so on any utterance carrying a second money
         // figure a Money slot always looks stated. Measured: with that predicate
         // this pass fired on nothing. See the verifier's declaration.
-        if (!mv::utterance_names_nothing_for(field_name, user_text)) { continue; }
+        // EITHER the utterance never mentions the thing, OR it says in words
+        // that there is none of it. The second arm is not a convenience: "zero
+        // down" NAMES the down payment, so the first arm alone refused to
+        // default the very zero the sentence was stating, and production
+        // answered "The assistant left out down_payment" to a request that said
+        // zero down. A worded zero is a statement, not an omission.
+        if (!mv::utterance_names_nothing_for(field_name, user_text) &&
+            !mv::utterance_states_none_for(field_name, user_text)) { continue; }
         const auto desc = std::ranges::find_if(
             op->fields, [&](const auto& f) { return f.name == field_name; });
         if (desc == std::ranges::end(op->fields) || desc->kind != Kind::Decimal) { continue; }

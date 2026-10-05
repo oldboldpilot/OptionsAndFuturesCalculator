@@ -558,7 +558,16 @@ auto main() -> int {
         // the constant said 204 -- a failure that reports the wrong expected
         // value sends the reader looking for three fields that were never
         // missing.
-        constexpr int kExpectedFields = 207;
+        //
+        // 207 -> 209 on 2026-10-04: BOTH amortization operations gained
+        // `monthly_hoa`. Dues are a CARRYING COST -- they do not amortise
+        // anything -- and before the field existed a stated HOA went into
+        // `monthly_overpayment` and retired the loan years early at 200 OK.
+        // The field left `kOperationExcludedFields` in the same change that
+        // taught it to the corpus and retrained the encoder, which is why the
+        // count moves by two rather than staying put: an excluded field is not
+        // in the label space, and a taught one is.
+        constexpr int kExpectedFields = 209;
         check(schema.field_count() == kExpectedFields,
               std::to_string(kExpectedFields) + " fields (schema has " +
                   std::to_string(schema.field_count()) + ")");

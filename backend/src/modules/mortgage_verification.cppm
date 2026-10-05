@@ -194,7 +194,7 @@ namespace detail {
 // its own OPERATIONS dict (parse_finance_proto + build_operations, the
 // same IN_SCOPE_SECTIONS and EXCLUDE_RPCS). The test re-parses the .proto
 // and fails if this table has drifted from it in either direction.
-constexpr std::array<FieldSpec, 230> kLabelSpace{{
+constexpr std::array<FieldSpec, 232> kLabelSpace{{
     {.operation = "ComputeAmortization", .field = "loan_amount", .proto_type = "string", .repeated = false},
     {.operation = "ComputeAmortization", .field = "annual_rate", .proto_type = "string", .repeated = false},
     {.operation = "ComputeAmortization", .field = "term_months", .proto_type = "int32", .repeated = false},
@@ -204,6 +204,7 @@ constexpr std::array<FieldSpec, 230> kLabelSpace{{
     {.operation = "ComputeAmortization", .field = "annual_repairs", .proto_type = "string", .repeated = false},
     {.operation = "ComputeAmortization", .field = "annual_insurance", .proto_type = "string", .repeated = false},
     {.operation = "ComputeAmortization", .field = "annual_cost_growth", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeAmortization", .field = "monthly_hoa", .proto_type = "string", .repeated = false},
     {.operation = "ComputeAmortization", .field = "heloc_drawn_amount", .proto_type = "string", .repeated = false},
     {.operation = "ComputeAmortization", .field = "heloc_annual_rate", .proto_type = "string", .repeated = false},
     {.operation = "ComputeAmortization", .field = "heloc_term_years", .proto_type = "int32", .repeated = false},
@@ -257,6 +258,7 @@ constexpr std::array<FieldSpec, 230> kLabelSpace{{
     {.operation = "ComputeDetailedAmortization", .field = "annual_repairs", .proto_type = "string", .repeated = false},
     {.operation = "ComputeDetailedAmortization", .field = "annual_insurance", .proto_type = "string", .repeated = false},
     {.operation = "ComputeDetailedAmortization", .field = "annual_cost_growth", .proto_type = "string", .repeated = false},
+    {.operation = "ComputeDetailedAmortization", .field = "monthly_hoa", .proto_type = "string", .repeated = false},
     {.operation = "ComputeDetailedAmortization", .field = "heloc_drawn_amount", .proto_type = "string", .repeated = false},
     {.operation = "ComputeDetailedAmortization", .field = "heloc_annual_rate", .proto_type = "string", .repeated = false},
     {.operation = "ComputeDetailedAmortization", .field = "heloc_term_years", .proto_type = "int32", .repeated = false},
@@ -853,6 +855,37 @@ export [[nodiscard]] auto optional_modelling_default(std::string_view field) -> 
  */
 export [[nodiscard]] auto utterance_names_nothing_for(std::string_view field,
                                                       std::string_view user_text) -> bool;
+
+/**
+ * True when the utterance says IN WORDS that there is none of this -- "zero
+ * down", "no HOA", "without PMI".
+ *
+ * A WORDED ZERO IS A STATEMENT, NOT AN OMISSION, and conflating the two was a
+ * live defect with an almost perverse shape. `utterance_names_nothing_for`
+ * refuses to default a field the user NAMED, which is right when they named a
+ * figure the model then dropped. But "zero down" names the down payment and
+ * supplies its value as a WORD, so no numeric literal exists for anything to
+ * point at -- and the naming then blocked the very zero it was stating.
+ * Measured against production:
+ *
+ *   "480000 rental, zero down, 2400 a month rent, 10 years"
+ *   -> The assistant left out "down_payment", which ComputeRentVsBuy needs.
+ *
+ * The user said zero twice over -- once in the word and once by giving no
+ * figure -- and was told they had not said it at all.
+ *
+ * PHRASES, NOT A WORD WINDOW, deliberately. "no" and "zero" are among the
+ * commonest words in English and a proximity rule over them would fire on "no
+ * more than 20% down" and on "zero-coupon", both of which state something
+ * else. A short closed list of the ways people actually write "none of this"
+ * is checkable by eye, and every entry pins its own test.
+ *
+ * It licenses the CONVENTION ZERO and nothing else: the value substituted is
+ * the one `kOptionalModellingDefaults` already carries, so it is verified by
+ * G5 and G3 exactly as a stated figure is.
+ */
+export [[nodiscard]] auto utterance_states_none_for(std::string_view field,
+                                                    std::string_view user_text) -> bool;
 
 /** True when `operation` solves the annuity balance and the params put both
  * money legs on the same side of it, so no answer exists. See the definition
@@ -1725,7 +1758,7 @@ struct ExcludedField {
     std::string_view operation;
     std::string_view field;
 };
-constexpr std::array<ExcludedField, 25> kOperationExcludedFields{{
+constexpr std::array<ExcludedField, 23> kOperationExcludedFields{{
     // monthly_hoa ON THE TWO AMORTIZATION OPERATIONS -- A SEQUENCING EXCLUSION,
     // NOT A DESIGN STATEMENT, and the difference matters because every other
     // entry in this table is permanent.
@@ -1754,13 +1787,33 @@ constexpr std::array<ExcludedField, 25> kOperationExcludedFields{{
     // module side alike, and its own comment records that adding a field the
     // service drops "failed here while the system was entirely consistent".
     //
-    // TO FINISH THIS: teach `monthly_hoa` in the amortization templates of
-    // `build_mortgage_dataset.py`, retrain on the GPU server, then REMOVE these
-    // two rows and add the matching `kOperationFields` entries in the SAME
-    // deploy as the new weights. Removing them without the model, or shipping
-    // the model without removing them, each leaves one half of the path dead.
-    {.operation = "ComputeAmortization", .field = "monthly_hoa"},
-    {.operation = "ComputeDetailedAmortization", .field = "monthly_hoa"},
+    // DONE, 2026-10-04, AND THE TWO ROWS ARE GONE. The procedure this paragraph
+    // used to prescribe was carried out in the order it insisted on, and the
+    // order is the part worth keeping because one direction breaks production
+    // and the other breaks nothing:
+    //
+    //   1. the amortization templates in `build_mortgage_dataset.py` grew an
+    //      HOA phrasing -- four spellings, each putting a word from the lexer's
+    //      own HOA list beside the figure, because a clause the lexer cannot
+    //      tag teaches a pointer the serving layer then refuses;
+    //   2. EVERY template naming these two operations learned to emit the
+    //      field, at the convention zero where no dues are stated. The
+    //      generator refused the build until they all did -- three further
+    //      templates produce ComputeAmortization rows, which is the
+    //      sweep-the-class lesson enforced mechanically rather than remembered;
+    //   3. the corpus was regenerated at the same seed, and the grounding sweep
+    //      proved every new label grounds against its own utterance;
+    //   4. the ENCODER was retrained from scratch on that corpus -- not a GPU
+    //      QLoRA run, which is what the old note assumed: production serves a
+    //      ~1M-parameter encoder, so the retrain is minutes on this host;
+    //   5. only then did these rows come out, in the SAME deploy as the weights.
+    //
+    // Removing them before the model refuses every amortization request the
+    // moment it deploys, because G2b requires every declared field and a model
+    // that has never seen one leaves it out. Shipping the model without
+    // removing them leaves the field unreachable from the assistant while the
+    // engine reads it happily from every other caller. Each leaves one half of
+    // the path dead.
     {.operation = "ComputeXirr", .field = "rate"},   // "ignored by XIRR"
     {.operation = "ComputeXnpv", .field = "guess"},  // "XIRR only"
     {.operation = "ComputeRate", .field = "guess"},  // "omit for the engine's own starting guess"
@@ -1995,7 +2048,7 @@ constexpr std::array<VariantInertField, 13> kVariantInertFields{{
     return false;
 }
 
-constexpr std::array<ConventionValue, 57> kConventionValues{{
+constexpr std::array<ConventionValue, 53> kConventionValues{{
     // WHAT THE HOUSE COSTS TO KEEP, at the convention zero. Added 2026-09-16
     // with the corpus that teaches them on ComputeDetailedAmortization.
     //
@@ -2032,10 +2085,24 @@ constexpr std::array<ConventionValue, 57> kConventionValues{{
     // The legacy composite is exempt at 0 for the mirror-image reason: a
     // full-shape request states the P&I split instead and has nothing to put
     // here, yet G2 still demands the field.
-    {.field = "monthly_piti_and_maintenance", .value = "0"},
-    {.field = "loan_annual_rate", .value = "0"},
-    {.field = "loan_term_years", .value = "0"},
-    {.field = "loan_amount", .value = "0"},
+    // THESE FOUR LEFT THIS TABLE ON 2026-10-04 AND ARE NOW SCOPED, because a
+    // GLOBAL zero here is the `{"rate", "0"}` hazard this file warns about two
+    // screens up, and it was live rather than theoretical.
+    //
+    // `loan_amount` is declared by FOUR operations -- ComputeAmortization,
+    // ComputeDetailedAmortization, ComputeHomeNpv and ComputeRentVsBuy -- and
+    // the zero is meaningful on exactly ONE of them, where it says "I am using
+    // the legacy composite shape". On the other three a fabricated zero is a
+    // ZERO-DOLLAR LOAN, and this table was licensing it. Measured on a local
+    // engine: `amortize 500000 at 6% over 30 years with 275 per month HOA dues`
+    // came back as PARAMS with `loan_amount = 0` and a 360-month term -- a
+    // schedule for no loan at all, served 200 OK with every bound satisfied.
+    // That is the documented corrupted-value failure, licensed by a convention
+    // row meant for a different operation.
+    //
+    // See `zero_shape_signal_licensed_by_rent_vs_buy`: same three-way scoping
+    // as `zero_rate_licensed_by_undiscounted` -- the operation, the exact zero,
+    // and nothing else.
     {.field = "monthly_taxes_ins_maintenance", .value = "0"},
     {.field = "closing_costs_buy", .value = "0"},
     {.field = "selling_cost_percent", .value = "0.06"},
@@ -2785,6 +2852,49 @@ namespace detail {
         return out;
     }
 
+    // THE RECIPROCAL, AND ITS ABSENCE WAS A WRONG ANSWER. The rule above keeps a
+    // stated HOA fee out of the slots it is not; it says nothing about keeping
+    // everything ELSE out of the HOA slot, and a one-way rule is half a rule.
+    //
+    // Measured on a local engine with the retrained encoder:
+    //
+    //   "amortize 500000 at 6% over 30 years with 275 per month HOA dues
+    //    and 150 extra a month"
+    //   -> monthly_hoa = 150, monthly_overpayment = 0
+    //
+    // The 150 is an OVERPAYMENT -- the word "extra" sits one word after it -- and
+    // it was filling the dues slot while the dues figure filled nothing. Widening
+    // `names_increment` to admit a bare figure (the commit above) made the flag
+    // SET on that literal and changed nothing on its own, because no rule
+    // consulted it here. Both halves were needed; neither alone moved the answer.
+    //
+    // SUBTRACTIVE, like every rule in this function: it only removes candidates,
+    // so the worst a false positive can do is refuse a parse. That is the right
+    // direction, because the failure it replaces is a wrong answer served 200 OK.
+    //
+    // NARROWED TO THE TWO ROLES THAT MEASURABLY ARE NOT DUES, after a wider
+    // version refused 65 rows of its own gold. The first draft also blocked
+    // `names_upkeep`, `names_insurance` and `names_vacancy`, and the sweep
+    // named the cost immediately:
+    //
+    //   63 ComputeHomeNpv  "monthly_taxes_ins_hoa" = 1100.00 ... cannot fill
+    //    1 ComputeAmortization          "monthly_hoa" = 230.00 ... cannot fill
+    //    1 ComputeDetailedAmortization  "monthly_hoa" = 405.00 ... cannot fill
+    //
+    // `monthly_taxes_ins_hoa` IS A COMPOSITE of taxes, insurance and dues -- a
+    // figure the user attached to insurance is exactly what that field takes, so
+    // blocking an insurance-named literal there refused the field's own purpose.
+    // And on the amortization operations the repairs/insurance clause sits beside
+    // the dues clause, so those flags reached a genuine dues figure.
+    //
+    // An increment and a down payment are different: neither word can describe a
+    // carrying cost, and the measured defect is exactly an increment ("150 extra
+    // a month") filling the dues slot. A rule as narrow as its evidence.
+    if ((lit.names_increment || lit.names_down_payment) &&
+        (field_name == "monthly_hoa" || field_name == "monthly_taxes_ins_hoa")) {
+        return out;
+    }
+
     const auto push = [&out](std::optional<Decimal> d) {
         if (d.has_value()) out.push_back(*d);
     };
@@ -3293,6 +3403,44 @@ template <typename Pred>
     return false;
 }
 
+/**
+ * The same search, but the match must begin and end on a WORD BOUNDARY.
+ *
+ * `mentions_phrase` is a plain substring test and that is wrong for a phrase
+ * that starts with a digit: "0 down" occurs inside "96000 down", so a stated
+ * down payment of 96,000 read as a worded ZERO. Caught by the check that exists
+ * to hold that direction -- "a STATED down payment is not a worded zero" -- and
+ * it is the only reason the bug did not ship.
+ */
+[[nodiscard]] inline auto mentions_phrase_bounded(std::string_view text,
+                                                  std::string_view phrase) -> bool {
+    std::string flat;
+    flat.reserve(text.size());
+    bool space = false;
+    for (const char c : text) {
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+            if (!space && !flat.empty()) { flat.push_back(' '); }
+            space = true;
+            continue;
+        }
+        space = false;
+        flat.push_back(ascii_lower(c));
+    }
+    const auto word_char = [](char c) {
+        return is_alpha(c) || (c >= '0' && c <= '9');
+    };
+    std::size_t from = 0;
+    while (true) {
+        const auto at = flat.find(phrase, from);
+        if (at == std::string::npos) { return false; }
+        const bool left_ok = (at == 0) || !word_char(flat[at - 1]);
+        const std::size_t end = at + phrase.size();
+        const bool right_ok = (end >= flat.size()) || !word_char(flat[end]);
+        if (left_ok && right_ok) { return true; }
+        from = at + 1;
+    }
+}
+
 /** Case-insensitive phrase search, for the one concept whose name is two
  * words. Collapses runs of whitespace so "mortgage  insurance" matches. */
 [[nodiscard]] inline auto mentions_phrase(std::string_view text, std::string_view phrase)
@@ -3312,6 +3460,35 @@ template <typename Pred>
     return flat.find(phrase) != std::string::npos;
 }
 
+/**
+ * A zero that selects ComputeRentVsBuy's LEGACY REQUEST SHAPE, and nothing else.
+ *
+ * `ComputeRentVsBuy` carries two mutually exclusive shapes in one message: the
+ * legacy composite `monthly_piti_and_maintenance`, and the granular loan fields.
+ * A caller using one says "not this shape" about the other with a zero, and G2b
+ * requires every declared field, so the model MUST be able to emit that zero.
+ *
+ * WHY IT IS NOT A ROW IN `kConventionValues`. That table is (field, value) and
+ * GLOBAL. `loan_amount` is declared by four operations and the zero means
+ * "other shape" on exactly one of them; on ComputeAmortization it means a
+ * zero-dollar loan, which the engine will happily amortize for 360 months. The
+ * global row licensed precisely that, and it was reached in practice rather
+ * than in theory -- see the comment in that table for the measured utterance.
+ *
+ * SCOPED THREE WAYS, the same shape as `zero_rate_licensed_by_undiscounted`:
+ *   - the operation must be ComputeRentVsBuy;
+ *   - the field must be one of the four shape signals;
+ *   - the value must be EXACTLY zero, so a stated figure still grounds or is
+ *     refused on its own merits.
+ */
+[[nodiscard]] inline auto zero_shape_signal_licensed_by_rent_vs_buy(
+    const MortgageParamsInput& input, std::string_view field, const Decimal& value) -> bool {
+    if (input.operation != "ComputeRentVsBuy") { return false; }
+    if (!value.is_zero()) { return false; }
+    return field == "loan_amount" || field == "loan_annual_rate" ||
+           field == "loan_term_years" || field == "monthly_piti_and_maintenance";
+}
+
 [[nodiscard]] inline auto is_convention_value(std::string_view field, const Decimal& value) -> bool {
     for (const auto& c : kConventionValues) {
         if (c.field != field) continue;
@@ -3322,6 +3499,38 @@ template <typename Pred>
 }
 
 }  // namespace detail
+
+auto utterance_states_none_for(std::string_view field, std::string_view user_text) -> bool {
+    const auto any = [&](std::initializer_list<std::string_view> phrases) {
+        for (const auto ph : phrases) {
+            if (detail::mentions_phrase_bounded(user_text, ph)) { return true; }
+        }
+        return false;
+    };
+    if (field == "down_payment" || field == "down_payment_percent") {
+        return any({"zero down", "0 down", "nothing down", "no down", "no money down",
+                    "without a down payment", "without any down payment", "no deposit",
+                    "zero deposit", "none down", "no downpayment", "zero downpayment"});
+    }
+    if (field == "monthly_hoa" || field == "monthly_taxes_ins_hoa") {
+        return any({"no hoa", "zero hoa", "without hoa", "no dues", "no association",
+                    "no condo fee", "no hoa dues", "none hoa"});
+    }
+    if (field == "pmi_annual_rate" || field == "current_pmi_monthly" ||
+        field == "new_pmi_monthly") {
+        return any({"no pmi", "zero pmi", "without pmi", "no mortgage insurance",
+                    "without mortgage insurance", "no mip"});
+    }
+    if (field == "cash_out_amount") {
+        return any({"no cash out", "without cash out", "rate and term"});
+    }
+    if (field == "heloc_drawn_amount" || field == "heloc_annual_rate" ||
+        field == "heloc_term_years") {
+        return any({"no heloc", "without a heloc", "no second lien",
+                    "no home equity"});
+    }
+    return false;
+}
 
 auto utterance_names_nothing_for(std::string_view field, std::string_view user_text) -> bool {
     if (field == "down_payment" || field == "down_payment_percent") {
@@ -3656,7 +3865,36 @@ auto lex_numeric_literals(std::string_view text) -> std::vector<NumericLiteral> 
         // matching an increment mentioned in a different clause, and this flag
         // MOVES a literal to another slot, so a false positive is a wrong
         // answer rather than a refused one.
-        if (lit.tag == LiteralTag::Money && !lit.names_down_payment) {
+        // MONEY *OR* UNTAGGED, 2026-10-04, AND THE SIBLING RULE IS WHY.
+        //
+        // `lit.tag` is only `Money` when a CURRENCY PREFIX was seen, so this was
+        // blind to every bare figure -- and the HOA rule below guards on
+        // `!lit.names_increment`, which therefore never fired on one. Measured
+        // on a local engine with the retrained encoder:
+        //
+        //   "amortize 500000 at 6% over 30 years with 275 per month HOA dues
+        //    and 150 extra a month"
+        //   -> monthly_hoa = 150, monthly_overpayment = 0
+        //
+        // The 150 is the OVERPAYMENT. With no "$" it stayed Untagged, so this
+        // rule did not claim it, and the HOA back-scan then found "dues" two
+        // words behind it across the "and". A wrong answer, 200 OK, every bound
+        // satisfied -- the exact failure the HOA work set out to remove, moved
+        // one clause to the right.
+        //
+        // THIS IS THE SWEEP-THE-CLASS LESSON AGAIN AND IT BIT WITHIN HOURS.
+        // `names_hoa` was widened to `Money || Untagged` earlier the same day
+        // for precisely this reason, and the note left beside it said its two
+        // Money-only siblings had "the SAME blind spot for a bare figure" and
+        // that widening them was "its own measurement". This is that
+        // measurement: `test_mortgage_verification` 305 checks and the full
+        // corpus sweep (4,783 rows, 13,081 ask probes) both hold.
+        //
+        // The flag MOVES a literal rather than removing candidates, so a false
+        // positive here is a wrong answer and not a refusal -- which is why the
+        // window stays at TWO words forward and is not widened with the tag.
+        if ((lit.tag == LiteralTag::Money || lit.tag == LiteralTag::Untagged) &&
+            !lit.names_down_payment) {
             std::size_t j = i;
             for (int step = 0; step < 2; ++step) {
                 while (j < text.size() && text[j] == '/') ++j;
@@ -4213,6 +4451,11 @@ auto ground_emitted_values(const MortgageParamsInput& input, std::string_view us
             if (detail::zero_rate_licensed_by_undiscounted(input, emitted.name, *parsed)) {
                 continue;
             }
+            // The four ComputeRentVsBuy shape signals at exactly zero. Scoped to
+            // that operation, so a zero loan on an amortization is refused.
+            if (detail::zero_shape_signal_licensed_by_rent_vs_buy(input, emitted.name, *parsed)) {
+                continue;
+            }
             // A cadence stated as a WORD ("compounded quarterly") grounds its
             // count. See cadence_word_grounds for why this is not folded into
             // kConventionValues.
@@ -4454,6 +4697,9 @@ namespace detail {
             if (!parsed.has_value()) { continue; }
             if (is_ungrounded_field(emitted.name)) { continue; }
             if (is_convention_value(emitted.name, *parsed)) { continue; }
+            if (zero_shape_signal_licensed_by_rent_vs_buy(input, emitted.name, *parsed)) {
+                continue;
+            }
 
             for (std::size_t i = 0; i < literals.size(); ++i) {
                 bool hit = false;

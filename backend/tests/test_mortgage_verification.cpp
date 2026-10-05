@@ -187,7 +187,7 @@ auto control_amortization() -> Control {
                                            {"original_home_value", "350000.00"},
                                            {"annual_repairs", "0.00"},
                                            {"annual_insurance", "0.00"},
-                                           {"annual_cost_growth", "0.0000"}})};
+                                           {"annual_cost_growth", "0.0000"}, {"monthly_hoa", "0.00"}})};
 }
 
 auto control_home_future_value() -> Control {
@@ -317,7 +317,7 @@ auto control_suffixes() -> Control {
                                            {"original_home_value", "1356200.00"},
                                            {"annual_repairs", "0.00"},
                                            {"annual_insurance", "0.00"},
-                                           {"annual_cost_growth", "0.0000"}})};
+                                           {"annual_cost_growth", "0.0000"}, {"monthly_hoa", "0.00"}})};
 }
 
 auto all_controls() -> std::vector<Control> {
@@ -963,7 +963,7 @@ auto main() -> int {
                                               {"original_home_value", "350000.00"},
                                               {"annual_repairs", "0.00"},
                                               {"annual_insurance", "0.00"},
-                                              {"annual_cost_growth", "0.0000"}}),
+                                              {"annual_cost_growth", "0.0000"}, {"monthly_hoa", "0.00"}}),
                "Amortize a $350,000 loan at 45% over 30 years.", mv::Outcome::Unsafe,
                mv::ReasonCode::OutOfRange, "bounds: a grounded 45% rate is still out of scope");
 
@@ -1029,7 +1029,7 @@ auto main() -> int {
                                               {"original_home_value", "350000.00"},
                                               {"annual_repairs", "0.00"},
                                               {"annual_insurance", "0.00"},
-                                              {"annual_cost_growth", "0.0000"}}),
+                                              {"annual_cost_growth", "0.0000"}, {"monthly_hoa", "0.00"}}),
                "Amortize a $350,000 loan at 5.75% over 1800 months.", mv::Outcome::Unsafe,
                mv::ReasonCode::OutOfRange, "bounds: a grounded 1800-month term is still out of scope");
     }
@@ -1502,7 +1502,7 @@ auto main() -> int {
                                                       {"original_home_value", "500000.00"},
                                                       {"annual_repairs", "0.00"},
                                                       {"annual_insurance", "0.00"},
-                                                      {"annual_cost_growth", "0.0000"}});
+                                                      {"annual_cost_growth", "0.0000"}, {"monthly_hoa", "0.00"}});
         expect(as_rate, text, mv::Outcome::Unsafe, mv::ReasonCode::UngroundedValue,
                "the DOWN PAYMENT percent is refused as an interest rate -- this exact output "
                "was returned as Proven in production and priced a 20% mortgage");
@@ -1518,7 +1518,7 @@ auto main() -> int {
                                                            {"original_home_value", "500000.00"},
                                                            {"annual_repairs", "0.00"},
                                                            {"annual_insurance", "0.00"},
-                                                           {"annual_cost_growth", "0.0000"}});
+                                                           {"annual_cost_growth", "0.0000"}, {"monthly_hoa", "0.00"}});
         expect_pass(correct_rate, text,
                     "the STATED 6.5% still grounds as the rate in the same sentence");
 
@@ -1531,7 +1531,7 @@ auto main() -> int {
                                                      {"original_home_value", "500000.00"},
                                                      {"annual_repairs", "0.00"},
                                                      {"annual_insurance", "0.00"},
-                                                     {"annual_cost_growth", "0.0000"}});
+                                                     {"annual_cost_growth", "0.0000"}, {"monthly_hoa", "0.00"}});
         expect_pass(netted, text,
                     "loan_amount = 500000 - 20% = 400000 is GROUNDED, though 400000 appears "
                     "nowhere in the utterance");
@@ -1888,7 +1888,7 @@ auto main() -> int {
                            // fixture caught up.
                            {"annual_repairs", "0.00"},
                            {"annual_insurance", "0.00"},
-                           {"annual_cost_growth", "0.0000"}});
+                           {"annual_cost_growth", "0.0000"}, {"monthly_hoa", "0.00"}});
         };
 
         expect_pass(detailed("0.3400"),
@@ -1914,7 +1914,7 @@ auto main() -> int {
                        // sloppier assertion for entirely the wrong reason.
                        {"annual_repairs", "0.00"},
                        {"annual_insurance", "0.00"},
-                       {"annual_cost_growth", "0.0000"}}),
+                       {"annual_cost_growth", "0.0000"}, {"monthly_hoa", "0.00"}}),
                usury, mv::Outcome::Unsafe, mv::ReasonCode::OutOfRange,
                "while a 34% MORTGAGE is still refused -- the field was "
                "reclassified, the interest band was not widened");
@@ -2280,7 +2280,7 @@ auto main() -> int {
                                                        {"original_home_value", "350000.00"},
                                                        {"annual_repairs", "0.00"},
                                                        {"annual_insurance", "0.00"},
-                                                       {"annual_cost_growth", "0.0000"}});
+                                                       {"annual_cost_growth", "0.0000"}, {"monthly_hoa", "0.00"}});
         auto v2 = mv::verify_mortgage_output(bad_rate, no_rate);
         check(v2.reason == mv::ReasonCode::UnstatedField,
               "an out-of-range rate on an utterance with no percent is UnstatedField too");
@@ -2408,7 +2408,7 @@ auto main() -> int {
                                     {"original_home_value", "350000.00"},
                                     {"annual_repairs", "0.00"},
                                     {"annual_insurance", "0.00"},
-                                    {"annual_cost_growth", "0.0000"}});
+                                    {"annual_cost_growth", "0.0000"}, {"monthly_hoa", "0.00"}});
         check(!mv::utterance_states_nothing_for("annual_rate", rate_stated, mangled_rate),
               "a convention zero does not consume the 6.5% the user actually stated");
         check(mv::verify_mortgage_output(mangled_rate, rate_stated).reason ==
@@ -2430,7 +2430,7 @@ auto main() -> int {
                                      {"annual_tax_rate", "0.2677"},
                                      {"annual_repairs", "0.00"},
                                      {"annual_insurance", "0.00"},
-                                     {"annual_cost_growth", "0.0000"}});
+                                     {"annual_cost_growth", "0.0000"}, {"monthly_hoa", "0.00"}});
         check(mv::utterance_states_nothing_for("annual_rate", bracket_only, no_rate_given),
               "the tax bracket is spoken for, so the interest rate was never stated");
         check(mv::verify_mortgage_output(no_rate_given, bracket_only).reason ==
@@ -2489,7 +2489,7 @@ auto main() -> int {
                                  {"annual_tax_rate", "0.2246"},
                                  {"annual_repairs", "0.00"},
                                  {"annual_insurance", "0.00"},
-                                 {"annual_cost_growth", "0.0000"}});
+                                 {"annual_cost_growth", "0.0000"}, {"monthly_hoa", "0.00"}});
         check(!mv::utterance_states_nothing_for("loan_amount", amort, same_kind),
               "another MONEY field holding the same figure does not consume it");
         check(mv::verify_mortgage_output(same_kind, amort).reason ==
@@ -2509,7 +2509,7 @@ auto main() -> int {
                                   {"annual_tax_rate", "0.2246"},
                                   {"annual_repairs", "0.00"},
                                   {"annual_insurance", "0.00"},
-                                  {"annual_cost_growth", "0.0000"}});
+                                  {"annual_cost_growth", "0.0000"}, {"monthly_hoa", "0.00"}});
         const std::string no_rate_amort =
             "Amortize $467,500 over 15-year. I'm in the 22.46% tax bracket.";
         check(mv::verify_mortgage_output(cross_kind, no_rate_amort).reason ==
@@ -2562,7 +2562,7 @@ auto main() -> int {
                        {"pmi_annual_rate", "0.0000"},
                        {"original_home_value", "420000.00"},
                        {"annual_repairs", "1700.00"}, {"annual_insurance", "1700.00"},
-                       {"annual_cost_growth", "0.0000"}}),
+                       {"annual_cost_growth", "0.0000"}, {"monthly_hoa", "0.00"}}),
                upkeep, mv::Outcome::Unsafe, mv::ReasonCode::UngroundedValue,
                "a repair budget cannot ground monthly_overpayment");
 
@@ -2582,7 +2582,7 @@ auto main() -> int {
                             {"pmi_annual_rate", "0.0000"},
                             {"original_home_value", "420000.00"},
                             {"annual_repairs", "3600.00"}, {"annual_insurance", "1700.00"},
-                            {"annual_cost_growth", "0.0000"}}),
+                            {"annual_cost_growth", "0.0000"}, {"monthly_hoa", "0.00"}}),
                     both, "a REAL overpayment beside a repair budget still grounds");
 
         // And the repairs figure still cannot take the overpayment slot even
@@ -2595,7 +2595,7 @@ auto main() -> int {
                        {"pmi_annual_rate", "0.0000"},
                        {"original_home_value", "420000.00"},
                        {"annual_repairs", "0.00"}, {"annual_insurance", "1700.00"},
-                       {"annual_cost_growth", "0.0000"}}),
+                       {"annual_cost_growth", "0.0000"}, {"monthly_hoa", "0.00"}}),
                both, mv::Outcome::Unsafe, mv::ReasonCode::UngroundedValue,
                "... while the repair budget still cannot become the overpayment");
 
@@ -2607,7 +2607,7 @@ auto main() -> int {
                             {"pmi_annual_rate", "0.0000"},
                             {"original_home_value", "420000.00"},
                             {"annual_repairs", "0.00"}, {"annual_insurance", "0.00"},
-                            {"annual_cost_growth", "0.0000"}}),
+                            {"annual_cost_growth", "0.0000"}, {"monthly_hoa", "0.00"}}),
                     "Amortize $420,000 at 6.25% over 30 years, paying an extra $250 a month.",
                     "an utterance with no upkeep words is unaffected");
     }
@@ -2659,7 +2659,7 @@ auto main() -> int {
                        {"pmi_annual_rate", "0.0000"},
                        {"original_home_value", "500000.00"},
                        {"annual_repairs", "0.00"}, {"annual_insurance", "0.00"},
-                       {"annual_cost_growth", "0.0000"}}),
+                       {"annual_cost_growth", "0.0000"}, {"monthly_hoa", "0.00"}}),
                hoa_prod, mv::Outcome::Unsafe, mv::ReasonCode::UngroundedValue,
                "an HOA fee cannot ground monthly_overpayment (the production defect)");
 
@@ -2672,7 +2672,7 @@ auto main() -> int {
                        {"pmi_annual_rate", "0.0000"},
                        {"original_home_value", "500000.00"},
                        {"annual_repairs", "275.00"}, {"annual_insurance", "0.00"},
-                       {"annual_cost_growth", "0.0000"}}),
+                       {"annual_cost_growth", "0.0000"}, {"monthly_hoa", "0.00"}}),
                hoa_prod, mv::Outcome::Unsafe, mv::ReasonCode::UngroundedValue,
                "... and an HOA fee is not repairs either");
 
@@ -2720,7 +2720,7 @@ auto main() -> int {
                                 {"pmi_annual_rate", "0.0000"},
                                 {"original_home_value", "500000.00"},
                                 {"annual_repairs", "0.00"}, {"annual_insurance", "0.00"},
-                                {"annual_cost_growth", "0.0000"}}),
+                                {"annual_cost_growth", "0.0000"}, {"monthly_hoa", "0.00"}}),
                         two, "a REAL overpayment beside an HOA fee still grounds");
         }
 
@@ -2866,7 +2866,8 @@ auto main() -> int {
                                    {"annual_cost_growth", "0"},
                                    {"heloc_drawn_amount", "0"},
                                    {"heloc_annual_rate", "0"},
-                                   {"heloc_term_years", "0"}};
+                                   {"heloc_term_years", "0"},
+                                   {"monthly_hoa", "0"}};
             expect_pass(params("ComputeAmortization", fields), amort,
                         "a defaulted PMI rate of 0 is PROVEN against an utterance that "
                         "mentions no PMI -- the default is verified, not waved through");
@@ -2997,6 +2998,52 @@ auto main() -> int {
             check(mv::utterance_names_nothing_for(
                       "cash_out_amount", "refinance 400000 into a 30 year at 4.75%"),
                   "a rate-and-term refinance names nothing for cash_out_amount");
+
+            // A WORDED ZERO IS A STATEMENT, NOT AN OMISSION, and the first
+            // version of this pass got that exactly backwards. "zero down"
+            // NAMES the down payment, so `utterance_names_nothing_for` is
+            // FALSE and the default was blocked -- by the very sentence that
+            // was stating the zero. Measured against production:
+            //
+            //   "480000 rental, zero down, 2400 a month rent, 10 years"
+            //   -> The assistant left out "down_payment", which
+            //      ComputeRentVsBuy needs.
+            //
+            // The user said zero twice over -- in the word, and by giving no
+            // figure -- and was told they had not said it at all.
+            check(!mv::utterance_names_nothing_for(
+                      "down_payment", "480000 rental, zero down, 2400 a month rent"),
+                  "\"zero down\" NAMES the down payment (so the names-nothing arm "
+                  "alone cannot default it -- this is the defect)");
+            check(mv::utterance_states_none_for(
+                      "down_payment", "480000 rental, zero down, 2400 a month rent"),
+                  "...and the states-none arm recognises it, which is what makes "
+                  "the zero fire");
+            for (const auto* phr : {"zero down", "0 down", "nothing down", "no money down",
+                                    "without a down payment", "no deposit"}) {
+                check(mv::utterance_states_none_for(
+                          "down_payment", std::string{"a 480000 rental, "} + phr + ", 2400 rent"),
+                      std::string{"a worded zero down payment: \""} + phr + "\"");
+            }
+            check(mv::utterance_states_none_for("monthly_hoa", "a 480000 condo with no HOA dues"),
+                  "\"no HOA dues\" states that there are none");
+            check(mv::utterance_states_none_for("pmi_annual_rate",
+                                                "amortize 500000 at 6% with no mortgage insurance"),
+                  "\"no mortgage insurance\" states that there is none");
+
+            // AND IT MUST NOT FIRE ON A STATED FIGURE. This is the direction
+            // that keeps the dangerous failure dangerous: a phrase rule over
+            // words as common as "no" and "zero" would otherwise reach a
+            // sentence that states an amount.
+            check(!mv::utterance_states_none_for(
+                      "down_payment", "a 480000 rental with 96000 down, 2400 rent"),
+                  "a STATED down payment is not a worded zero");
+            check(!mv::utterance_states_none_for(
+                      "down_payment", "no more than 20% down on a 480000 rental"),
+                  "\"no more than 20% down\" states a CAP, not an absence -- the "
+                  "case a proximity rule over \"no\" would have got wrong");
+            check(!mv::utterance_states_none_for("monthly_hoa", "275 a month in HOA dues"),
+                  "stated dues are not an absence");
 
             // FAILS CLOSED for anything without a concept list.
             check(!mv::utterance_names_nothing_for("loan_amount", "pay off the house"),

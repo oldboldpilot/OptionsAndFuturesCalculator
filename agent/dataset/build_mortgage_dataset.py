@@ -337,33 +337,27 @@ OP_EXCLUDED_FIELDS: dict[str, set[str]] = {
         # read by the engine so the app can model a second lien, never asked
         # of the model because no utterance states one.
         "heloc_drawn_amount", "heloc_annual_rate", "heloc_term_years",
-        # monthly_hoa, added 2026-10-04 WITH its C++ twin, so the two tables
-        # agree from the start rather than being reconciled afterwards.
+        # `monthly_hoa` WAS HERE, 2026-10-04, AND IS NOW TAUGHT. It is removed
+        # rather than commented out, and the history is kept because the ORDER
+        # is the part worth keeping: the field reached finance.proto first, was
+        # excluded here and in the C++ twin the same day, and only came out of
+        # both once `make_amortization_extraction` carried an HOA phrasing and a
+        # retrained model was proven to emit it on a disjoint holdout.
         #
-        # Association dues reached finance.proto today because they had nowhere
-        # to go: dues are a CARRYING COST, they do not amortise anything, and
-        # before the field existed the assistant put a stated HOA in
-        # `monthly_overpayment` and paid the loan off years early -- 200 OK,
-        # every bound satisfied, nothing saying where the number came from.
-        #
-        # ON THE WIRE AND READ BY THE ENGINE TODAY; not taught here YET, and
-        # the two facts belong together exactly as the ComputeRentVsBuy entry
-        # above says. This one is the easier half of that procedure, because
-        # unlike repairs/insurance the corpus has no amortization utterance
-        # mentioning dues at all -- so there is nothing to teach until the
-        # templates grow one.
-        #
-        # TO FINISH: add an HOA phrasing to the amortization templates, drop
-        # `monthly_hoa` from these two sets, regenerate, retrain, prove the new
-        # model emits it on a disjoint holdout, THEN delete the matching C++
-        # rows. Removing the C++ rows first refuses every amortization request
-        # the moment it deploys; removing THIS side first is harmless, which is
-        # the asymmetry the block above spells out.
-        "monthly_hoa",
+        # Removing this side first was the safe half and the block above says
+        # why: it only lets the corpus teach a field the service still drops.
+        # Removing the C++ rows first would have refused every amortization
+        # request the moment it deployed -- G2b requires every declared field,
+        # so a field the deployed model has never seen is "left out" of the two
+        # most common operations there are.
     },
     "ComputeDetailedAmortization": {
+        # `monthly_hoa` came out of here with its sibling above, same day, same
+        # retrain. The two operations differ by one clause and one label field;
+        # teaching dues on one and not the other is what made the model drop a
+        # stated repair budget on the standard schedule (see the 2026-09-16
+        # note in make_amortization_extraction).
         "heloc_drawn_amount", "heloc_annual_rate", "heloc_term_years",
-        "monthly_hoa",
     },
 }
 
@@ -723,6 +717,25 @@ def make_amortization_extraction(rng: random.Random) -> dict:
     mention_growth = mention_repairs and rng.random() < 0.45
     cost_growth = round(rng.uniform(0.01, 0.06), 4) if mention_growth else 0.0
 
+    # WHAT THE ASSOCIATION CHARGES, decided before it is phrased for exactly the
+    # reason mention_pmi and mention_repairs are: sampling dues and THEN deciding
+    # whether to say them produces a label the utterance does not state, which is
+    # the label-not-derivable-from-its-input defect this corpus has paid for four
+    # times.
+    #
+    # DUES ARE MONTHLY AND THE FIELD IS MONTHLY, so the label is the stated figure
+    # with no conversion -- map M1, the identity. Its two annual siblings
+    # (annual_repairs, annual_insurance) are a yearly figure the engine divides by
+    # twelve, and `monthly_hoa` carries its unit in its name precisely so that
+    # difference is not silent. A phrasing here that said "a year" would teach a
+    # x12 the field does not want.
+    #
+    # Rounded to the nearest 5 rather than the generator's default 100: real dues
+    # are $275 and $325, not $300, and `phrase_money` derives the utterance from
+    # the label string so any value is exactly recoverable.
+    mention_hoa = rng.random() < 0.35
+    hoa = round_money(rng.triangular(80, 900, 280), nearest=5) if mention_hoa else 0.0
+
     mention_pmi = rng.random() < 0.35
     if mention_pmi:
         ltv = rng.uniform(0.8001, 0.97)
@@ -732,9 +745,21 @@ def make_amortization_extraction(rng: random.Random) -> dict:
         home_value = loan
         pmi = 0.0
 
+    # CLAUSE ORDER IS ITSELF A THING TO TEACH, and leaving it fixed cost a wrong
+    # answer. Every spelling above puts the overpayment immediately after the
+    # term and the dues clause later, so the model never saw the reverse -- and
+    # on "...with 275 per month HOA dues and 150 extra a month" it pointed
+    # `monthly_hoa` at the 150. The reciprocal lexer rule turns that into an
+    # honest refusal rather than a wrong figure, which is the right failure, but
+    # a refusal is not an answer: the shape has to be in the corpus.
+    #
+    # So when BOTH are present the overpayment trails the dues half the time.
+    # A fixed order is a prior the model will exploit exactly as it exploited
+    # the 70/30 operation prior this function's own header records.
+    overpay_trails = bool(overpay) and mention_hoa and rng.random() < 0.5
     base = (f"Amortization schedule for a {phrase_money(loan)} loan at "
             f"{phrase_pct(annual_rate)} over {phrase_years(term)}")
-    if overpay:
+    if overpay and not overpay_trails:
         base += f", paying an extra {phrase_money(overpay)}/month"
     if mention_pmi:
         base += (f". Home is worth {phrase_money(home_value)}, PMI runs "
@@ -758,6 +783,50 @@ def make_amortization_extraction(rng: random.Random) -> dict:
             base += rng.choice([
                 f", and those costs rise about {phrase_pct(cost_growth)} a year",
                 f", rising {phrase_pct(cost_growth)} a year",
+            ])
+    # FOUR SPELLINGS, and every one of them puts a word from the LEXER's own HOA
+    # list next to the figure -- hoa / dues / association. That is not stylistic:
+    # `mortgage_verification.cppm`'s lexer tags a literal `names_hoa` by looking
+    # four words forward and three back for exactly those words, and the tag is
+    # what keeps a stated HOA out of `monthly_overpayment`. A phrasing the lexer
+    # cannot tag would teach the model a pointer the serving layer then refuses.
+    #
+    # "fee" and "homeowners" are deliberately NOT relied on as the only cue --
+    # they are excluded from that word list because "a $400 fee" is any fee at
+    # all, so a clause carrying only those words would be untaggable.
+    if mention_hoa:
+        base += rng.choice([
+            f". HOA dues are {phrase_money(hoa)} a month",
+            f". Association dues run {phrase_money(hoa)} a month",
+            f". There is a {phrase_money(hoa)} a month HOA fee",
+            f". The HOA charges {phrase_money(hoa)} monthly",
+            # THE "with ... per month" TRAILING FORM, which is how the defect was
+            # reported: "amortize 500000 at 6% over 30 years with 275 per month
+            # HOA dues". A clause introduced by "with" and the words "per month"
+            # rather than "a month" -- taught because the reported phrasing is
+            # the one a user actually typed, and a corpus that teaches only the
+            # spellings the generator already liked is a corpus that cannot
+            # exhibit the failure.
+            f" with {phrase_money(hoa)} per month HOA dues",
+            f" with {phrase_money(hoa)} a month in HOA dues",
+            f", plus {phrase_money(hoa)} per month in association dues",
+        ])
+        if overpay_trails:
+            base += rng.choice([
+                # BOTH SPELLINGS PUT THE CUE WITHIN TWO WORDS OF THE FIGURE,
+                # because that is the window `names_increment` reads and the
+                # grounding sweep refuses anything it cannot. A third variant,
+                # ", plus $750 a month extra", was written and removed: "extra"
+                # lands THREE words after the figure, outside the window, so the
+                # flag did not set and the HOA back-scan claimed the 750 across
+                # the "and" -- one row, named by the sweep as
+                # `"monthly_overpayment" = 750.00 ... makes it an HOA fee`.
+                #
+                # The window is deliberately narrow (this flag MOVES a literal,
+                # so a false positive is a wrong answer), so the corpus bends to
+                # the lexer here rather than the lexer to the corpus.
+                f" and {phrase_money(overpay)} extra a month",
+                f" and I pay an extra {phrase_money(overpay)} a month",
             ])
     base += "."
     if op == "ComputeDetailedAmortization":
@@ -789,6 +858,21 @@ def make_amortization_extraction(rng: random.Random) -> dict:
                + (f", repairs {phrase_money(repairs)}/yr, insurance {phrase_money(insurance)}/yr"
                   if mention_repairs else "")
                + (f", costs rising {phrase_pct(cost_growth)}/yr" if mention_growth else "")
+               # ITS OWN SENTENCE, not a comma clause, and the grounding sweep is
+               # what forced that. Written as ", HOA dues $275/month" it sat two
+               # words after the INSURANCE figure in the compact spelling --
+               # "insurance $1,200/yr, HOA dues $275/month" -- and the lexer's
+               # forward scan skips "/", " " and "," while looking four words
+               # ahead for an HOA word, so it tagged the 1,200 as dues. The HOA
+               # rule then correctly removed that figure from `annual_insurance`
+               # and 15 rows were refused as their own gold.
+               #
+               # The fix uses the lexer's OWN separator rather than widening the
+               # rule: the adjacency scan stops dead at "." and ";", so a clause
+               # in its own sentence cannot reach back over one. The base
+               # spelling above was already written this way, which is why only
+               # the compact one failed.
+               + (f". HOA dues {phrase_money(hoa)}/month" if mention_hoa else "")
                + ".")
     if op == "ComputeDetailedAmortization":
         # Lead with the deduction in the compact template too, so the cue is not
@@ -813,6 +897,14 @@ def make_amortization_extraction(rng: random.Random) -> dict:
     obj["annual_repairs"] = money_str(repairs)
     obj["annual_insurance"] = money_str(insurance)
     obj["annual_cost_growth"] = rate_str(cost_growth, 4)
+    # Emitted ALWAYS, at the convention zero when no dues are stated, for the
+    # reason the three lines above are: a field the model sometimes OMITS is the
+    # `prepaid_interest_days` defect -- 48% of training rows omitted it and
+    # inference omitted it NEVER, because omission is not something this model
+    # learns. `kConventionValues` exempts `monthly_hoa` at exactly zero so the
+    # unstated case grounds, and `kOptionalModellingDefaults` supplies the same
+    # zero when a model leaves it out entirely.
+    obj["monthly_hoa"] = money_str(hoa)
     return convo(("system", SYSTEM), ("user", user),
                  ("assistant", params_block(op, obj)))
 
@@ -1434,7 +1526,25 @@ def make_rent_vs_buy_extraction(rng: random.Random) -> dict:
                "annual_inflation_rate": rate_str(0, 4)}
     else:
         price = round_money(rng.triangular(150_000, 1_200_000, 400_000))
-        down_payment = round_money(price * rng.uniform(0.05, 0.25))
+        # A ZERO DOWN PAYMENT, STATED IN WORDS OR NOT STATED AT ALL.
+        #
+        # Every rent-vs-buy utterance in this corpus used to name a figure, so
+        # "not mentioning a down payment" was OUT OF DISTRIBUTION -- and the
+        # model did not merely drop the field, it mis-pointed a NEIGHBOUR.
+        # Measured on one real holdout sentence with only the down-payment
+        # clause removed: `The assistant left out "property_price"`, on a
+        # sentence that states the price plainly.
+        #
+        # The serving layer already defaults an absent one (see
+        # `kOptionalModellingDefaults`), but a default cannot repair a pointer
+        # aimed at the wrong literal. The shape has to be in the corpus.
+        #
+        # Three ways people write it, all taught: the figure, a WORDED zero
+        # ("zero down"), and silence. 0% down is a real product -- VA and USDA
+        # loans -- so this is an ordinary request and not an edge case.
+        no_down = rng.random() < 0.22
+        down_worded = no_down and rng.random() < 0.6
+        down_payment = 0.0 if no_down else round_money(price * rng.uniform(0.05, 0.25))
         loan_amount = round_money(price - down_payment)
         loan_rate = round(rng.uniform(0.045, 0.085), 4)
         loan_term_years = rng.choice([15, 20, 30])
@@ -1467,22 +1577,36 @@ def make_rent_vs_buy_extraction(rng: random.Random) -> dict:
             extra_bits.append(f"{phrase_pct(inflation)} inflation")
         extras = (", " + ", ".join(extra_bits)) if extra_bits else ""
 
+        # The fragment carries its OWN leading connector, so the silent case
+        # removes the connector with it and leaves a grammatical sentence
+        # rather than "Buying is $400,000 with , a 30-year loan".
+        if not no_down:
+            down_with = f" with {phrase_money(down_payment)} down"
+            down_bare = f"{phrase_money(down_payment)} down"
+        elif down_worded:
+            worded = rng.choice(["zero down", "nothing down", "no money down", "0 down"])
+            down_with = f" with {worded}"
+            down_bare = worded
+        else:
+            down_with = ""
+            down_bare = "no down payment"
+
         user = rng.choice([
             f"Rent vs buy over {years} years: rent is {phrase_money(rent)}/month rising {phrase_pct(rent_increase)}/year. "
-            f"Buying is {phrase_money(price)} with {phrase_money(down_payment)} down{loan_desc}, a {loan_term_years}-year loan "
+            f"Buying is {phrase_money(price)}{down_with}{loan_desc}, a {loan_term_years}-year loan "
             f"at {phrase_pct(loan_rate)}, and {phrase_money(taxes_ins_maint)}/month in property taxes, insurance and maintenance. "
             f"Home appreciates at {phrase_pct(appreciation)}/year, and down payment would earn {phrase_pct(invest_return)} invested{extras}.",
             f"Should I rent for {phrase_money(rent)}/month (+{phrase_pct(rent_increase)} annually) or purchase a {phrase_money(price)} "
-            f"home? Financing: {phrase_money(down_payment)} down{loan_desc}, {phrase_pct(loan_rate)} mortgage over {loan_term_years} "
+            f"home? Financing: {down_bare}{loan_desc}, {phrase_pct(loan_rate)} mortgage over {loan_term_years} "
             f"years, monthly taxes/insurance/upkeep {phrase_money(taxes_ins_maint)}. Appreciation {phrase_pct(appreciation)}/year, "
             f"investment return {phrase_pct(invest_return)}, staying {years} years{extras}.",
             f"Evaluate rent vs. buy for a {years}-year horizon. Renting: {phrase_money(rent)} a month with {phrase_pct(rent_increase)} "
-            f"yearly increases. Buying: {phrase_money(price)} price, {phrase_money(down_payment)} down payment{loan_desc}, "
+            f"yearly increases. Buying: {phrase_money(price)} price, {down_bare}{loan_desc}, "
             f"{loan_term_years}-year fixed at {phrase_pct(loan_rate)}, plus {phrase_money(taxes_ins_maint)}/month non-debt carrying "
             f"costs (taxes, insurance, maintenance). Expected home appreciation is {phrase_pct(appreciation)}, alternative investment "
             f"yield {phrase_pct(invest_return)}{extras}.",
             f"Compare renting at {phrase_money(rent)}/month (escalating {phrase_pct(rent_increase)}/year) versus buying a "
-            f"{phrase_money(price)} property with {phrase_money(down_payment)} down{loan_desc}. Loan rate {phrase_pct(loan_rate)} "
+            f"{phrase_money(price)} property{down_with}{loan_desc}. Loan rate {phrase_pct(loan_rate)} "
             f"over {loan_term_years} years, monthly taxes/insurance/maintenance {phrase_money(taxes_ins_maint)}, appreciation "
             f"{phrase_pct(appreciation)}/year, investment return {phrase_pct(invest_return)} on down payment, holding for "
             f"{years} years{extras}.",
@@ -1840,7 +1964,11 @@ def make_down_payment_extraction(rng: random.Random) -> dict:
                # them and G2b requires every declared field.
                "annual_repairs": money_str(0),
                "annual_insurance": money_str(0),
-               "annual_cost_growth": rate_str(0, 4)}
+               "annual_cost_growth": rate_str(0, 4),
+               # monthly_hoa at the convention zero: this utterance states no
+               # dues, and a field the model sometimes OMITS is the
+               # prepaid_interest_days defect.
+               "monthly_hoa": money_str(0)}
         user = rng.choice([
             f"Amortization schedule for a {phrase_money(price)} home with {down_phrase} "
             f"at {phrase_pct(annual_rate)} for {phrase_years(term)}.",
@@ -1928,6 +2056,9 @@ def make_clarification(rng: random.Random) -> dict:
         obj["annual_repairs"] = money_str(0)
         obj["annual_insurance"] = money_str(0)
         obj["annual_cost_growth"] = rate_str(0, 4)
+        # monthly_hoa at the convention zero: this utterance states no dues, and
+        # a field this model sometimes OMITS is the prepaid_interest_days defect.
+        obj["monthly_hoa"] = money_str(0)
 
     elif scenario == "heloc_ltv":
         op = "ComputeHeloc"
@@ -2031,6 +2162,9 @@ def make_modification(rng: random.Random) -> dict:
         first["annual_repairs"] = money_str(0)
         first["annual_insurance"] = money_str(0)
         first["annual_cost_growth"] = rate_str(0, 4)
+        # monthly_hoa at the convention zero: this utterance states no dues, and
+        # a field this model sometimes OMITS is the prepaid_interest_days defect.
+        first["monthly_hoa"] = money_str(0)
         tax_clause = f" I'm in the {phrase_pct(tax_rate)} tax bracket." if detailed else ""
         first_user = (f"Amortize {phrase_money(loan)} at {phrase_pct(annual_rate)} over "
                       f"{phrase_years(term)}.{tax_clause}")
