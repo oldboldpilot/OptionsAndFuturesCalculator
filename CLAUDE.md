@@ -824,14 +824,32 @@ Gated: `test_mortgage_verification` **318 -> 331 checks / 0 failures**,
 the ask sweep **13,143 probes / 0 asked wrongly** -- the over-matching
 direction, which has no alarm -- and the derivation sweep **0 rows corrupted**.
 
-**STILL OPEN, and it is a MODEL gap rather than a serving one.**
-`"with 150 extar each month"` returns `monthly_overpayment = 0`: the 150 is
-dropped. `"paying 150 extar a month"` returns 150, so the misspelling is not
-the cause -- the phrasing is. The serving layer cannot close this: a figure the
-model declined to claim cannot be invented by a gate whose whole job is to
-refuse figures the utterance does not support. It needs a corpus row and a
+**THAT "STILL OPEN" NOTE IS CLOSED, and it closed on the RETRAIN rather than on
+anything in this section.** It read: *"`with 150 extar each month` returns
+`monthly_overpayment = 0`: the 150 is dropped ... It needs a corpus row and a
 retrain. Also unfixed and unmeasured: plural concept spellings (`condos`,
-`extras`) are insertions, not transpositions, so this rule does not reach them.
+`extras`) are insertions, not transpositions, so this rule does not reach
+them."* The diagnosis was right and the retrain it asked for shipped the same
+day (`9e9c2b5`, deployment `3c4baf0c`). Measured against production
+2026-10-05, after it:
+
+| utterance | result |
+| --- | --- |
+| `with 150 extar each month` | `monthly_overpayment = 150` |
+| `paying 150 extar a month` | `monthly_overpayment = 150` |
+| `275 monthly HOA duess` | `monthly_hoa = 275`, `original_home_value = 480000` |
+| `275 monthly condos fee` | `monthly_hoa = 275`, `original_home_value = 480000` |
+| `150 extras a month` | `monthly_overpayment = 150` |
+
+**THE PLURAL ROWS PASS FOR A REASON THAT IS NOT THIS RULE, and saying so matters
+because the opposite reading would overstate what a transposition buys.** The
+rule still does not reach an insertion. `HOA duess` grounds because the lexer's
+scan needs only ONE concept word and `HOA` itself is spelled correctly;
+`condos fee` grounds on `fee`, which is in the same word list; and `extras a
+month` never needed the guard because the model claimed the 150 directly. So
+the insertion gap is still real as a PROPERTY of the matcher -- it is simply not
+reachable from these utterances. A corpus that cannot exhibit a failure is not a
+control for it, which this file records four times elsewhere.
 
 ### The solver layer: recency in the graph, and two logical defects in `reconcile`
 
@@ -1399,8 +1417,27 @@ exists for exactly this shape simply goes unused — the model never names it.
 `finance.proto` says of that field *"PMI drops off against this, not the loan"*,
 so the schedule starts at 100% LTV where the borrower is at 80%.
 
-**The control that says it is the MODEL and not the serving layer:** stating the
-two figures separately is answered correctly —
+**ALL THREE OF THOSE DEFECTS ARE GONE AS OF THE RETRAIN, measured against
+production on 2026-10-05 after deployment `3c4baf0c`:**
+
+```
+"amortize a 600000 house with 20% down at 6.5% for 30 years with 0.8% PMI"
+-> loan_amount 480000, original_home_value 600000, pmi_annual_rate 0.008
+                                                            LTV 80%, 200 OK
+```
+
+So the down payment IS applied (600000 x 0.80), the property value is the price
+rather than the loan, and the stated PMI is carried rather than zeroed. **The
+paragraph above is kept because its DIAGNOSIS is what the retrain was aimed at**
+-- `make_down_payment_extraction` was written for exactly this shape and this
+file recorded it as "written and NOT retrained" -- and because the reasoning
+about why a verifier rule could not have closed it is still correct and still
+worth not re-litigating. What is no longer true is the "live outcome" it
+reports and its closing sentence that the retrain "is a GPU-server task": it
+ran. Do not quote the 600000/600000/0 row as current.
+
+**The control that says it WAS the MODEL and not the serving layer:** stating the
+two figures separately was answered correctly even before the retrain —
 
 ```
 "amortize 480000 at 6.5% for 30 years, house is worth 600000, PMI 0.8%"
