@@ -1,6 +1,12 @@
 cmake_minimum_required(VERSION 3.28)
 project(OptionsCalculatorEngine CXX)
 
+# Stale module BMIs: a BMI records its compiler and clang refuses one from another,
+# while CMake does not notice because the compiler PATH is unchanged. One guard in the
+# TOP-LEVEL project sweeps the whole tree, embedded submodules included. Shared file,
+# byte-identical across every top-level project here, and that identity is gated.
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/ToolchainBMIGuard.cmake)
+
 # SENSEN_NO_IMPORT_STD is deliberately NOT defined here any more, which is why
 # this comment survives the line it used to explain.
 #

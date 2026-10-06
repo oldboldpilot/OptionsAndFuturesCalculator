@@ -6277,6 +6277,43 @@ answers by being read, not by being argued.
   vitest 4 pulls in. The build itself does not require it; the test suite does.
 - **Backend Docker Build:** `docker build -t options-backend backend/`
 
+  **STALE MODULE BMIs ARE NOW INVALIDATED BY THE BUILD SYSTEM, in every repository
+  in this ecosystem.** `backend/cmake/ToolchainBMIGuard.cmake` records the toolchain
+  identity in `toolchain_bmi_guard.stamp` and sweeps every `.pcm`/`.modmap` under the
+  build directory when it changes. The identity includes the compiler's SIZE and
+  MTIME as well as its version string, because an in-place rebuild at the same
+  version is still a different compiler and this project installs LLVM by overlay.
+  It runs **once per configure from whichever copy gets there first** -- a CMake
+  GLOBAL property, since `add_subdirectory` gives each project its own variable
+  scope -- and its glob is recursive over the TOP-LEVEL binary directory, so
+  embedding sensen/SGEE/the logger/fastjson protects the whole tree even when the
+  enclosing project carries no guard. Measured here: ONE configure that embeds four
+  of them emitted exactly two guard lines and swept 1,215 artefacts.
+  **NO STAMP PLUS EXISTING BMIs SWEEPS TOO**, because provenance that is unknown is
+  as dangerous as provenance that is known-stale; an earlier version merely recorded
+  in that case and would have blessed 1,481 stale files.
+  `scripts/check_bmi_guard_identity.sh` gates that every copy is byte-identical to
+  `backend/cmake/`'s -- identity against the source of truth rather than a recorded
+  checksum, for the reason `check_vendored_protos.sh` gives, with a positive control
+  (comparing zero copies is a FAILURE).
+  **mortgage-nest-egg deliberately has no copy**: it has zero CMakeLists.txt of its
+  own, and the guard reaches it through its `backend/sensen` and
+  `backend/external/SGEE` pins instead, so there is nothing there to drift.
+
+  **`GIT_SHALLOW TRUE` MAKES A RAW-SHA `GIT_TAG` A COINCIDENCE, NOT A PIN, and the
+  failure is a hard configure error in every CONSUMING tree.** SGEE's
+  `FetchContent_Declare(cpp23_logger)` carried both, with a comment saying it was
+  pinned "not the floating `master`" -- which the shallow flag silently contradicted,
+  because `--depth 1` of a branch can only reach the SHA while it IS the tip.
+  Measured 2026-10-05: two commits landed on the logger's master and ctest went
+  213/7/**0 failed** to **2 failed** -- `RabbitMqHeaderProbe` and
+  `EmbedSubdirectoryParentProbe`, ONE CAUSE WEARING TWO NAMES, both dying on
+  `fatal: unable to read tree (c60d3c95...)`. Shown rather than inferred: a
+  `--depth 1 --branch master` clone lands on the new tip with the pinned SHA ABSENT.
+  Fixed by bumping the pin AND removing `GIT_SHALLOW` (SGEE `a27f908f`); the second
+  half is what makes it not recur. **Note the asymmetry that hides it: SGEE's own
+  configure passes, because there the pin and the tip agree until they do not.**
+
   **sensen master DOES NOT CONFIGURE ON A WARM BUILD DIRECTORY, and the gate that
   stops it is its own.** `backend/sensen/CMakeLists.txt:3159` runs clang-tidy at
   CONFIGURE time and `message(FATAL_ERROR "clang-tidy validation failed!")` on any
