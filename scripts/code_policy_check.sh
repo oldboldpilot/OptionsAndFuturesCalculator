@@ -72,6 +72,48 @@ ERRORS=0
 # "upgrade for a new one", and a checker that reports that as a raw allocation
 # teaches the reader to ignore it.
 # --------------------------------------------------------------------------
+# A SMART POINTER ADOPTING A PRIVATELY-CONSTRUCTED OBJECT IS NOT A RAW POINTER,
+# and this exclusion is the root policy applied to its own rule. Four classes in
+# this tree (EncoderAssistant, LlqQ8Source, LlqBf16Source, LlqLowBitSource,
+# LoadScope) hide their constructor and expose a static factory -- which is P2,
+# Encapsulation, and exactly what the design principles ask for.
+# `std::make_unique`/`make_shared` REQUIRE PUBLIC CONSTRUCTION, so the only way
+# to hand out an owning smart pointer to such a type is
+# `std::unique_ptr<T>(new T(...))`. Ownership transfers inside that one
+# expression: no owning raw pointer ever exists as a variable, which is what
+# Rule 3 is about.
+#
+# The alternative was to add a pass-key tag struct to five classes so a checker
+# would stop objecting -- adding code to satisfy a rule, which the root policy
+# names as a defect in its own right ("Code bloat is a defect") and which P8
+# forbids. So the rule is the thing to fix, exactly as the principles instruct.
+#
+# IT MUST SEE THE PREVIOUS LINE, which a line-based grep cannot. Three of the
+# five sites write the idiom on one line; the other two break after the opening
+# paren, leaving `new LlqBf16Source(...)` alone on a line with no smart pointer
+# in sight. Each candidate is therefore joined with its predecessor before the
+# test, and whitespace is stripped so both layouts collapse to one shape:
+# `shared_ptr<constLlqBf16Source>(newLlqBf16Source(`.
+#
+# NARROW BY CONSTRUCTION: the angle-bracket span may not contain a paren, and
+# `new` must follow the `>(` immediately. `foo(unique_ptr<A>(x), new Widget())`
+# is therefore still a violation -- what follows `>(` there is `x`.
+drop_smart_pointer_adoption() {
+    local adopt='(unique_ptr|shared_ptr)<[^()]*>\(new[A-Za-z_]'
+    while IFS= read -r line; do
+        local file="${line%%:*}"
+        local rest="${line#*:}"
+        local lineno="${rest%%:*}"
+        local text="${rest#*:}"
+        local joined
+        joined=$(sed -n "$(( lineno > 1 ? lineno - 1 : lineno )),${lineno}p" "$file" 2>/dev/null | tr -d '[:space:]')
+        if printf '%s' "$joined" | grep -qE "$adopt"; then
+            continue
+        fi
+        printf '%s:%s:%s\n' "$file" "$lineno" "$text"
+    done
+}
+
 strip_string_literals_then_match() {
     local pattern="$1"
     while IFS= read -r line; do
@@ -116,6 +158,7 @@ RAW_NEW=$(grep -nE "\bnew\s+[A-Za-z_][A-Za-z0-9_]*" "${CXX_FILES[@]}" 2>/dev/nul
     | grep -v "NOLINT" \
     | grep -vE "\bnew[[:space:]]*\(" \
     | strip_string_literals_then_match "\bnew\s+[A-Za-z_]" \
+    | drop_smart_pointer_adoption \
     || true)
 if [[ -n "$RAW_NEW" ]]; then
     echo "❌ POLICY VIOLATION: Raw 'new' allocation found (Rule 3 - No Raw Pointers):"
