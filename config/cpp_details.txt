@@ -12,6 +12,35 @@
   changes to sensen are governed by that one, and the two are NOT identical.
 ═══════════════════════════════════════════════════════════════════════════════
 
+DESIGN PRINCIPLES — ROOT POLICY (made official 2026-10-06)
+These govern every rule below and every line of code in this repository. Where a
+numbered rule and a principle seem to conflict, the principle wins and the rule
+is the thing to fix. Code bloat is a defect: a review may reject a change for
+adding code that these principles say should not exist.
+
+P1.  Separation of Concerns — one kind of work per part (UI / domain /
+     persistence / infra). The root principle.
+P2.  Encapsulation / Information Hiding — a small, stable contract; hide the
+     internals.
+P3.  High Cohesion + Loose Coupling — what changes together lives together;
+     independent parts talk through narrow interfaces.
+P4.  DRY — one authoritative representation of each piece of KNOWLEDGE, not of
+     every similar-looking line. Avoid over-DRY: do not couple things that only
+     happen to look alike today.
+P5.  KISS — the simplest design that works. Complexity is a long-term tax paid
+     by every later reader.
+P6.  Single Responsibility — one reason to change.
+P7.  Depend on Abstractions — policy does not depend on details; both depend on
+     contracts.
+P8.  YAGNI — no speculative features, frameworks or "later" hooks.
+P9.  Composition over Inheritance — assemble pieces; do not grow fragile
+     hierarchies.
+P10. Open/Closed, with discipline — extend at stable boundaries, and only where
+     change has shown up twice.
+
+Honorable mentions: Law of Demeter · fail fast / make illegal states
+unrepresentable · optimize for deletion · Unix do-one-thing + compose.
+
 C++23 code purely that adheres to the following rules:
 1. Follows C++23 standard.
 2. Follows C++ Core Guidelines.
