@@ -72,7 +72,11 @@ RUN printf '%s\n' \
     '[req_dn]' \
     > /etc/ssl/openssl.cnf
 
-COPY runtime/ /opt/sensen-runtime/
+# MODES ARE SET HERE, NOT INHERITED FROM THE BUILD CONTEXT. The image runs as uid 10001, and a
+# context assembled under `umask 077` made these 0600: every library was then unreadable and the
+# binary died before main with "libc++abi.so.1: cannot open shared object file". An image must
+# not depend on the umask of whoever copied files into its context.
+COPY --chmod=0755 runtime/ /opt/sensen-runtime/
 COPY sensen-gateway /usr/local/bin/sensen-gateway
 ENV LD_LIBRARY_PATH=/opt/sensen-runtime
 
