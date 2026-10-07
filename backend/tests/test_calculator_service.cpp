@@ -47,6 +47,9 @@
 //      max_loss_unbounded instead of reporting the edge of the +/-25% grid as a
 //      maximum. Every expected figure is the closed form of a payoff written
 //      out by hand beside it, not a number the engine produced.
+//   9. FUTURES NEED NO VOLATILITY: a position of linear legs prices, flags and
+//      draws its curve with no implied volatility anywhere, and the probability
+//      fields stay at zero without an error or a NaN.
 //
 // Deliberately scoped to calculator_service.cpp's request handling and
 // response marshalling around SGEE, exactly as the two finance-service test
@@ -218,6 +221,23 @@ auto add_linear_leg(StrategyRequest& req, Leg::Action action, Leg::Type type, do
     leg->set_quantity(qty);
     leg->set_premium(entry);
     leg->set_contract_multiplier(multiplier);
+}
+
+/** Every number a response carries, finite: a NaN rendered as a price is the failure to rule out. */
+auto all_finite(const StrategyResponse& r) -> bool {
+    bool ok = std::isfinite(r.max_profit()) && std::isfinite(r.max_loss()) &&
+              std::isfinite(r.break_even()) && std::isfinite(r.expected_value()) &&
+              std::isfinite(r.pop()) && std::isfinite(r.risk_reward_ratio()) &&
+              std::isfinite(r.probability_of_touch()) &&
+              std::isfinite(r.probability_of_target_profit());
+    for (const auto& p : r.pnl_matrix()) ok = ok && std::isfinite(p.pnl());
+    for (const auto& c : r.matrix()) ok = ok && std::isfinite(c.pnl_dollars());
+    const auto& g = r.net_greeks();
+    ok = ok && std::isfinite(g.delta()) && std::isfinite(g.gamma()) && std::isfinite(g.theta()) &&
+         std::isfinite(g.vega()) && std::isfinite(g.rho());
+    const auto& m = r.risk_metrics();
+    return ok && std::isfinite(m.var_parametric_95()) && std::isfinite(m.var_parametric_99()) &&
+           std::isfinite(m.cvar_parametric_95()) && std::isfinite(m.cvar_parametric_99());
 }
 
 /** The extremes of the CURVE a response carries: what the grid alone would have reported. */
@@ -1330,6 +1350,88 @@ auto main() -> int {
             check(near(lo, 560.0, 1e-9), "...while the matrix really is on the pinned window");
             check(resp.breakeven_prices_size() == beyond.breakeven_prices_size(),
                   "...and the breakevens, read off the curve, are the unpinned curve's");
+        }
+    }
+
+    // =======================================================================
+    section("9. FUTURES NEED NO VOLATILITY");
+    // =======================================================================
+    // A future's P&L is (price - entry) * multiplier * quantity. It has no
+    // implied volatility, and a request made only of futures legs has none
+    // anywhere. The engine must price it, flag it, and leave the probability
+    // fields at zero -- without an error and without a NaN -- because the
+    // client is about to stop demanding an IV for a position that has no use
+    // for one.
+    {
+        constexpr double kEs = 7855.19;
+        constexpr double kMult = 50.0;
+        const auto es_request = [&] {
+            auto req = make_request(kEs);
+            req.set_underlying_symbol("ES");
+            return req;
+        };
+
+        {   // -- long ES, December, 72 days, NO implied volatility anywhere --------
+            auto req = es_request();
+            add_linear_leg(req, Leg::BUY, Leg::FUTURE, kEs, 72.0, kMult);
+            auto [status, resp] = call_strategy(stub, req);
+            check(status.ok(), "long future, no IV: RPC succeeds (got " + status.error_message() + ")");
+            check(resp.max_profit_unbounded() && !resp.max_loss_unbounded(),
+                  "long future: profit unbounded, loss bounded");
+            check(near(resp.max_loss(), -kEs * kMult),
+                  "long future: max_loss == -(7855.19 * 50), the contract going to zero (got " +
+                      std::to_string(resp.max_loss()) + ")");
+            check(near(resp.max_profit(), kEs * 0.25 * kMult),
+                  "long future: max_profit is the grid's edge, 0.25 * 7855.19 * 50 (got " +
+                      std::to_string(resp.max_profit()) + ")");
+            check(near(resp.net_greeks().delta(), kMult), "long future: net delta == +50");
+            check(resp.leg_risk_size() == 1 && near(resp.leg_risk(0).open_pnl(), 0.0) &&
+                      near(resp.leg_risk(0).greeks().delta(), kMult),
+                  "long future: one leg_risk, open P&L 0 at entry, delta 50");
+            check(near(resp.curve_days_to_expiration(), 72.0),
+                  "long future: the curve is drawn at the 72-day expiry");
+            check(resp.pnl_matrix_size() == 81 && resp.matrix_size() == 81 * 12,
+                  "long future: curve and matrix have the requested dimensions");
+            check(resp.pop() == 0.0 && resp.expected_value() == 0.0 &&
+                      resp.probability_of_touch() == 0.0 &&
+                      resp.probability_of_target_profit() == 0.0 &&
+                      resp.risk_metrics().var_parametric_95() == 0.0 &&
+                      resp.risk_metrics().cvar_parametric_99() == 0.0,
+                  "long future: every probability field is left at zero");
+            check(all_finite(resp), "long future: no NaN or infinity anywhere in the response");
+            check(resp.breakeven_prices_size() == 1 && near(resp.break_even(), kEs, 1e-3),
+                  "long future: one breakeven, at the entry price");
+        }
+
+        {   // -- short ES: the mirror -------------------------------------------
+            auto req = es_request();
+            add_linear_leg(req, Leg::SELL, Leg::FUTURE, kEs, 72.0, kMult);
+            auto [status, resp] = call_strategy(stub, req);
+            check(status.ok(), "short future, no IV: RPC succeeds");
+            check(resp.max_loss_unbounded() && !resp.max_profit_unbounded(),
+                  "short future: loss unbounded, profit bounded");
+            check(near(resp.max_profit(), kEs * kMult),
+                  "short future: max_profit == entry * 50 * 1, at a price of zero (got " +
+                      std::to_string(resp.max_profit()) + ")");
+            check(near(resp.net_greeks().delta(), -kMult), "short future: net delta == -50");
+            check(resp.risk_reward_ratio() == 0.0 && all_finite(resp),
+                  "short future: no ratio, nothing non-finite");
+        }
+
+        {   // -- a future AND an option with an IV: protective put ---------------
+            auto req = es_request();
+            add_linear_leg(req, Leg::BUY, Leg::FUTURE, kEs, 72.0, kMult);
+            add_leg(req, Leg::BUY, Leg::PUT, 7800.0, 72.0, 120.50, 0.18, 1, kMult);
+            auto [status, resp] = call_strategy(stub, req);
+            check(status.ok(), "future + put: RPC succeeds (got " + status.error_message() + ")");
+            check(resp.max_profit_unbounded() && !resp.max_loss_unbounded(),
+                  "future + put: the put adds no upside slope, so profit is still unbounded");
+            check(near(resp.max_loss(), (7800.0 - kEs - 120.50) * kMult),
+                  "future + put: max_loss == (7800 - 7855.19 - 120.50) * 50 = -8,784.50 (got " +
+                      std::to_string(resp.max_loss()) + ")");
+            check(resp.pop() > 0.0 && resp.pop() < 1.0 && all_finite(resp),
+                  "future + put: the option's IV drives the probabilities, which are finite");
+            check(resp.leg_risk_size() == 2, "future + put: one leg_risk per leg");
         }
     }
 
