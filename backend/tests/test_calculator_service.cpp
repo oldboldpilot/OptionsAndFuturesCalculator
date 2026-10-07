@@ -53,6 +53,9 @@
 //  10. ONE TODAY: the dates the chain serves and the dates the matrix is drawn
 //      on come from the same calendar, so a cache that outlives a midnight
 //      cannot put the last matrix column a day past the chosen expiry.
+//  11. NO QUOTE FOR THE WRONG INSTRUMENT: a CRYPTO quote is refused rather than
+//      answered with the price of the listed equity of the same name, and the
+//      EQUITY and FUTURES quotes are unchanged.
 //
 // Deliberately scoped to calculator_service.cpp's request handling and
 // response marshalling around SGEE, exactly as the two finance-service test
@@ -272,6 +275,7 @@ public:
 
     [[nodiscard]] auto quote(const std::string& symbol) const
         -> std::expected<md::Quote, std::error_code> override {
+        ++quote_calls_;
         return md::Quote{.symbol = symbol,
                          .price = 779.0,
                          .previous_close = 778.0,
@@ -296,10 +300,12 @@ public:
         return c;
     }
 
+    [[nodiscard]] auto quote_calls() const noexcept -> int { return quote_calls_.load(); }
     [[nodiscard]] auto chain_calls() const noexcept -> int { return chain_calls_.load(); }
     [[nodiscard]] auto expirations_calls() const noexcept -> int { return expirations_calls_.load(); }
 
 private:
+    mutable std::atomic<int> quote_calls_{0};
     mutable std::atomic<int> chain_calls_{0};
     mutable std::atomic<int> expirations_calls_{0};
 };
@@ -321,6 +327,17 @@ public:
 
 std::chrono::sys_days g_fake_today{};
 auto fake_today() -> std::chrono::sys_days { return g_fake_today; }
+
+auto get_quote(OptionsCalculator::Stub& stub, const std::string& symbol,
+               const std::string& asset_class) -> std::pair<grpc::Status, calculator::QuoteResponse> {
+    calculator::QuoteRequest req;
+    req.set_symbol(symbol);
+    req.set_asset_class(asset_class);
+    calculator::QuoteResponse resp;
+    const auto ctx = make_context();
+    const auto status = stub.GetMarketQuote(ctx.get(), req, &resp);
+    return {status, resp};
+}
 
 auto get_chain(OptionsCalculator::Stub& stub, const std::string& symbol,
                const std::string& asset_class, const std::string& expiration_date)
@@ -1629,6 +1646,64 @@ auto main() -> int {
         const auto after = std::chrono::floor<std::chrono::days>(std::chrono::system_clock::now());
         check(restored >= before && restored <= after,
               "clearing the provider restores the real UTC date");
+    }
+
+    // =======================================================================
+    section("11. NO QUOTE FOR THE WRONG INSTRUMENT");
+    // =======================================================================
+    // OFC-015. Typing BTC resolves to the CRYPTO asset class. GetMarketChain
+    // already answers UNIMPLEMENTED for it, but GetMarketQuote fell through to
+    // the equity path and returned 37.84 -- the price of the US-listed ticker
+    // that happens to be named BTC -- which the header then showed as
+    // "BTC | CRYPTO | 37.84 | QUOTE". The provider here answers 779 for ANY
+    // symbol, and counts how often it was asked: a refusal that came after the
+    // lookup would still have spent the wrong-instrument answer, and a count of
+    // zero is what says it never did.
+    {
+        auto fake = std::make_shared<FakeChainProvider>();
+        md::set_provider(fake);
+        md::set_rate_provider(std::make_shared<FakeRateProvider>());
+        md::quote_cache().clear();
+        md::rate_cache().clear();
+
+        auto [crypto_status, crypto] = get_quote(stub, "BTC", "CRYPTO");
+        check(crypto_status.error_code() == grpc::StatusCode::UNIMPLEMENTED,
+              "a CRYPTO quote is UNIMPLEMENTED (got code " +
+                  std::to_string(static_cast<int>(crypto_status.error_code())) + ")");
+        check(crypto_status.error_message().find("BTC") != std::string::npos &&
+                  crypto_status.error_message().find("different instrument") != std::string::npos,
+              "...and says it is a different instrument (got '" + crypto_status.error_message() + "')");
+        check(crypto.price() == 0.0 && crypto.provider().empty(),
+              "...with no price and no provider attributed");
+        check(fake->quote_calls() == 0,
+              "...and the feed was never asked: the refusal precedes the lookup");
+
+        // Unchanged: the equity path, stated and unstated.
+        auto [eq_status, eq] = get_quote(stub, "SPY", "EQUITY");
+        check(eq_status.ok() && near(eq.price(), 779.0) && eq.asset_class() == "EQUITY" &&
+                  eq.provider() == "alpaca",
+              "EQUITY is unchanged: 779, asset_class EQUITY, provider alpaca");
+        auto [bare_status, bare] = get_quote(stub, "SPY", "");
+        check(bare_status.ok() && near(bare.price(), 779.0) && bare.asset_class() == "EQUITY",
+              "an unstated asset class is still an equity");
+        check(fake->quote_calls() >= 1, "...and those two did reach the feed");
+
+        // Unchanged: a futures root with a proxy is priced through it, and one
+        // without is refused with the futures wording rather than the crypto one.
+        md::quote_cache().clear();
+        auto [fut_status, fut] = get_quote(stub, "ES", "FUTURES");
+        check(fut_status.ok() && near(fut.price(), 7790.0) && fut.asset_class() == "FUTURES" &&
+                  fut.provider().find("SPY") != std::string::npos,
+              "FUTURES is unchanged: ES is priced as SPY x 10 = 7790 through the index proxy");
+        auto [cl_status, cl] = get_quote(stub, "CL", "FUTURES");
+        check(cl_status.error_code() == grpc::StatusCode::UNIMPLEMENTED &&
+                  cl_status.error_message().find("futures quote source") != std::string::npos,
+              "a futures root with no proxy is still refused, in the futures wording");
+
+        // The chain refusal this one is parallel to is unchanged.
+        auto [chain_status, chain_unused] = get_chain(stub, "BTC", "CRYPTO", "");
+        check(chain_status.error_code() == grpc::StatusCode::UNIMPLEMENTED,
+              "the CRYPTO option chain is still UNIMPLEMENTED");
     }
 
     // -----------------------------------------------------------------

@@ -85,6 +85,25 @@ static constexpr std::array<FuturesProxy, 2> kFuturesProxies{{
                       "rather than a price at the wrong level.");
 }
 
+/**
+ * The refusal for a CRYPTO quote.
+ *
+ * The same collision as the futures roots, and refused the same way. This feed
+ * carries listed US securities and no crypto at all, so a request for "BTC" as
+ * CRYPTO that fell through to the equity path was answered with the price of the
+ * US-listed ticker that happens to be named BTC: a real quote for a different
+ * instrument, rendered in the header as the quote of the thing the user typed.
+ * The option-chain RPC already refuses this asset class; the quote RPC has to say
+ * the same thing for the same reason.
+ */
+[[nodiscard]] auto no_crypto_source(const std::string& symbol) -> Status {
+    return Status(grpc::StatusCode::UNIMPLEMENTED,
+                  "No crypto quote source for " + symbol +
+                      ". The ticker resolves to a listed equity of the same name, "
+                      "which is a different instrument, so nothing is returned "
+                      "rather than a price for the wrong thing.");
+}
+
 // --------------------------------------------------------------------------
 // Pricing helpers
 // --------------------------------------------------------------------------
@@ -1482,6 +1501,10 @@ public:
             !s.ok()) {
             return s;
         }
+
+        // Refused before the feed is asked, not after: the lookup itself is
+        // the wrong-instrument answer, so there is nothing to inspect afterwards.
+        if (req.asset_class() == "CRYPTO") return no_crypto_source(symbol);
 
         // What to actually ask the feed for, and what to scale its answer by.
         std::string quote_symbol = symbol;
