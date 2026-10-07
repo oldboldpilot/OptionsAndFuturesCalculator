@@ -327,6 +327,12 @@ export class StrategyResponse extends jspb.Message {
   clearLegRiskList(): StrategyResponse;
   addLegRisk(value?: LegRisk, index?: number): LegRisk;
 
+  getMaxProfitUnbounded(): boolean;
+  setMaxProfitUnbounded(value: boolean): StrategyResponse;
+
+  getMaxLossUnbounded(): boolean;
+  setMaxLossUnbounded(value: boolean): StrategyResponse;
+
   serializeBinary(): Uint8Array;
   toObject(includeInstance?: boolean): StrategyResponse.AsObject;
   static toObject(includeInstance: boolean, msg: StrategyResponse): StrategyResponse.AsObject;
@@ -353,6 +359,8 @@ export namespace StrategyResponse {
     probabilityOfTargetProfit: number,
     curveDaysToExpiration: number,
     legRiskList: Array<LegRisk.AsObject>,
+    maxProfitUnbounded: boolean,
+    maxLossUnbounded: boolean,
   }
 }
 
