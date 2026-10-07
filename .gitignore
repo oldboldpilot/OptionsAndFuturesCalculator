@@ -74,6 +74,9 @@ agent/dataset/out/
 # Caught by `git add -A agent` sweeping one into a commit about something else.
 agent/dataset/data_mortgage/
 agent/dataset/data_mortgage.*/
+# Retrained corpora kept beside the canonical one while a model is being compared. Regenerated
+# byte for byte from `build_mortgage_dataset.py --seed`, so the 37 MB is not repository content.
+agent/dataset/data_mortgage_v*/
 
 # Issued API keys in plaintext. Never committed; hand to the customer and delete.
 config/keys/

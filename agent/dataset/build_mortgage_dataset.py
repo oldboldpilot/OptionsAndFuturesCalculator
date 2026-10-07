@@ -495,6 +495,15 @@ SYSTEM = (
 )
 
 
+# A field a request may LEAVE OUT of its label because the utterance does not state it, and which
+# no convention value stands in for. `original_home_value` was the one this corpus used to FILL by
+# pointing the LOAN literal at it ("home value == loan when nothing else is stated"), so a model
+# trained on it put one number into two slots -- and a $480,000 loan against a house "worth" $275
+# was what that cost on production (2026-10-05). An unstated home value is now absent, and the
+# serving layer returns only what was stated. `home_values` is the batch operation's array twin.
+STATED_ONLY_OMITTABLE = {"original_home_value", "home_values"}
+
+
 def params_block(op: str, obj: dict) -> str:
     # Field order follows the proto's own declaration order (OPERATIONS[op]
     # preserves parse order), same rationale as build_dataset.py's fixed key
@@ -506,7 +515,7 @@ def params_block(op: str, obj: dict) -> str:
     # convention" -- see _FIELD_RE for why this parser has to know the
     # difference at all.
     required = ({f["name"] for f in OPERATIONS[op]["fields"] if not f.get("optional")}
-                - OP_EXCLUDED_FIELDS.get(op, set()))
+                - OP_EXCLUDED_FIELDS.get(op, set()) - STATED_ONLY_OMITTABLE)
     emitted = set(obj.keys())
     assert emitted <= known, (
         f"{op}: emitted {sorted(emitted - known)} which the proto does not declare"
@@ -901,7 +910,11 @@ def make_amortization_extraction(rng: random.Random) -> dict:
 
     obj = {"loan_amount": money_str(loan), "annual_rate": rate_str(annual_rate, 4),
            "term_months": term, "monthly_overpayment": money_str(overpay),
-           "pmi_annual_rate": rate_str(pmi, 4), "original_home_value": money_str(home_value)}
+           "pmi_annual_rate": rate_str(pmi, 4)}
+    if mention_pmi:
+        # STATED ONLY: the home value is a label only when the utterance gives one. Unstated, it used
+        # to be set to the loan (a SHARED literal), which is how one number came to fill two slots.
+        obj["original_home_value"] = money_str(home_value)
     if op == "ComputeDetailedAmortization":
         obj["annual_tax_rate"] = rate_str(tax_rate, 4)
     # BOTH operations, which is the point of the 2026-09-16 change. The tax
@@ -945,7 +958,10 @@ def make_amortization_batch_extraction(rng: random.Random) -> dict:
         # for why sampling these independent of whether the text mentions
         # them is a defect, not a source of harmless variety.
         pmi = 0.0
-        home_value = loan
+        # STATED ONLY: no home value is stated, so the fill is zero -- not the loan amount, which the
+        # label used to share with `loan_amounts` and the serving layer then returned as a figure the
+        # visitor never gave (2026-10-06, `home_values=[362100,256100]` on a two-offer comparison).
+        home_value = 0.0
         scenarios.append((loan, annual_rate, term, overpay, pmi, home_value))
 
     descs = [f"{phrase_money(l)} at {phrase_pct(r)} over {phrase_years(t)}"
@@ -2096,7 +2112,7 @@ def make_clarification(rng: random.Random) -> dict:
         follow = phrase_pct(annual_rate)
         obj = {"loan_amount": money_str(loan), "annual_rate": rate_str(annual_rate, 4),
                "term_months": term, "monthly_overpayment": money_str(0),
-               "pmi_annual_rate": rate_str(0, 4), "original_home_value": money_str(loan)}
+               "pmi_annual_rate": rate_str(0, 4)}
         if detailed:
             obj["annual_tax_rate"] = rate_str(tax_rate, 4)
         # BOTH operations carry the carrying costs since 2026-09-16. The
@@ -2207,7 +2223,7 @@ def make_modification(rng: random.Random) -> dict:
         tax_rate = round(rng.uniform(0.15, 0.37), 4)
         first = {"loan_amount": money_str(loan), "annual_rate": rate_str(annual_rate, 4),
                  "term_months": term, "monthly_overpayment": money_str(0),
-                 "pmi_annual_rate": rate_str(0, 4), "original_home_value": money_str(loan)}
+                 "pmi_annual_rate": rate_str(0, 4)}
         if detailed:
             first["annual_tax_rate"] = rate_str(tax_rate, 4)
         first["annual_repairs"] = money_str(0)
@@ -2315,12 +2331,17 @@ def _refusal_advice(rng: random.Random) -> tuple[str, str]:
 
     if sub == "refinance":
         rate = phrase_pct(round(rng.uniform(0.05, 0.08), 4))
+        # The two phrasings that STATE a balance or a rate were declines here until 2026-10-06 and
+        # are now ordinary refinance requests (`visitor_phrasing_ops.r_refinance` carries them, with
+        # the new rate missing, which the serving layer asks for). A refusal is only right when
+        # there is nothing to calculate: "should I refinance right now?" with a $280,000 balance at
+        # 6.25% states two of the three inputs, and declining it taught the model to throw away a
+        # calculable request because it was worded as a question.
         users = [
-            f"I owe {_amt(rng, 80_000, 900_000, 280_000)} at {rate} -- should "
-            f"I refinance right now?",
             f"{circumstance.capitalize()}. Should I refinance my mortgage?",
             f"Is now a good time for me to refinance? I'm in {city}.",
-            f"My rate is {rate} -- is it worth refinancing?",
+            f"{circumstance.capitalize()}. Is it worth refinancing?",
+            f"Should I refinance right now? I'm in {city}.",
         ]
         declines = [
             "I can't tell you whether to refinance -- that depends on your "
@@ -2385,10 +2406,10 @@ def _refusal_advice(rng: random.Random) -> tuple[str, str]:
         rate1 = phrase_pct(round(rng.uniform(0.05, 0.075), 4))
         rate2 = phrase_pct(round(rng.uniform(0.055, 0.085), 4))
         users = [
-            f"Should I take the {rate1} 30-year or the {rate2} 15-year?",
             f"Which loan should I pick -- fixed or ARM? {circumstance}.",
             f"{circumstance.capitalize()}. Which mortgage option is better "
             f"for me?",
+            f"{circumstance.capitalize()}. Should I take the 30-year or the 15-year?",
         ]
         declines = [
             "Which loan is 'better' depends on how long you'll stay and how "
@@ -2911,12 +2932,46 @@ CORPUS_MIX = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# VISITOR-STYLE, STATED-ONLY generators (see visitor_phrasing.py for the why).
+#
+# Every generator above writes its utterance FROM a complete scenario, so every row states every
+# figure and the model never learned to read a request that states three of them. These generators
+# state what a visitor states, label only that (plus the conventions the schema already treats as a
+# class), and carry the missing-essential and advice-worded shapes. They own VISITOR_SHARE of the
+# mix; the rows above keep the rest, scaled by the same factor, so the relative shape of the
+# long-standing generators is unchanged -- the discipline the 0.897 scale above set.
+# ---------------------------------------------------------------------------
+import sys as _sys  # noqa: E402
+
+_sys.path.insert(0, str(HERE))
+import visitor_phrasing_ops as _visitor  # noqa: E402
+
+VISITOR_SHARE = 0.55
+_OLD_TOTAL = sum(w for w, _ in CORPUS_MIX)
+CORPUS_MIX = ([(w * (1.0 - VISITOR_SHARE) / _OLD_TOTAL, fn) for w, fn in CORPUS_MIX]
+              + _visitor.build(_sys.modules[__name__], VISITOR_SHARE))
+# `test_corpus_invariants` derives its subjects from the module's own make_* names and from
+# CORPUS_MIX, and asserts the two agree; registering the generated functions keeps them one table.
+for _w, _fn in CORPUS_MIX:
+    globals().setdefault(_fn.__name__, _fn)
+#: Generators whose labels are STATED-ONLY: they omit a field the utterance does not state, so their
+#: key set is a SUBSET of the operation's fields rather than equal to it.
+STATED_ONLY_GENERATORS = {fn.__name__ for _w, fn in CORPUS_MIX if fn.__name__.startswith("make_visitor_")}
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=str(HERE / "data_mortgage"))
     ap.add_argument("--n", type=int, default=12000)
     ap.add_argument("--seed", type=int, default=3407)
     ap.add_argument("--val-frac", type=float, default=0.05)
+    ap.add_argument("--exclude-holdout", action="append", default=[], metavar="JSONL",
+                    help="drop every generated row whose USER turns equal a row of this file. The "
+                         "per-generator streams make a generator's k-th row the same whatever the "
+                         "mix is, so a retrained corpus re-draws rows of an earlier holdout; "
+                         "excluding by USER TEXT (not by whole row) also catches the case where only "
+                         "the label changed. Repeatable.")
     args = ap.parse_args()
 
     # PER-GENERATOR SEEDING. One shared stream used to drive the weighted
@@ -2989,6 +3044,22 @@ def main() -> None:
         seen.add(key)
         rows.append(row)
         counts[fn.__name__] += 1
+
+    # HOLDOUT EXCLUSION. See --exclude-holdout: without it a retrain re-draws rows of the holdout
+    # it is about to be scored on, which subsidises the new model exactly as a train/val overlap
+    # subsidised the older one (304 of 600 rows, recorded in the project guide).
+    if args.exclude_holdout:
+        def _users(r: dict) -> tuple:
+            return tuple(t["content"] for t in r["conversations"] if t["role"] == "user")
+
+        held = set()
+        for path in args.exclude_holdout:
+            with open(path) as fh:
+                held.update(_users(json.loads(line)) for line in fh if line.strip())
+        before = len(rows)
+        rows = [r for r in rows if _users(r) not in held]
+        print(f"  --exclude-holdout: removed {before - len(rows)} rows whose user turns appear in "
+              f"{len(args.exclude_holdout)} holdout file(s) ({len(held)} distinct holdout rows)")
 
     # Sorted before shuffling, so the split is a function of the SET of rows and
     # the seed -- not of the order the generators happened to be selected in.

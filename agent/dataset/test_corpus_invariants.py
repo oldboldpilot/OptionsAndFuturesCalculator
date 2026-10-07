@@ -255,7 +255,15 @@ for _, fn in G.CORPUS_MIX:
         if op not in G.OPERATIONS:
             bad_ops.append(f"{name}: {op}")
             continue
-        if set(p_) - {"operation"} != G.op_field_names(op):
+        keys, fields = set(p_) - {"operation"}, G.op_field_names(op)
+        if name in G.STATED_ONLY_GENERATORS:
+            # STATED-ONLY labels (visitor_phrasing.py): a field the utterance does not state is
+            # absent, so the key set is a SUBSET of the operation's declared fields.
+            if not keys <= fields:
+                bad_keys.append(f"{name}/{op}")
+        elif keys not in (fields, fields - G.STATED_ONLY_OMITTABLE):
+            # The long-standing generators still emit every field, except the one the utterance may
+            # leave unstated (`STATED_ONLY_OMITTABLE`): `original_home_value`.
             bad_keys.append(f"{name}/{op}")
         for f in G.OP_EXCLUDED_FIELDS.get(op, set()):
             if f in p_:
@@ -267,8 +275,8 @@ check(not empty, f"no generator emits an empty utterance ({sorted(set(empty))})"
 check(not bad_ops,
       f"every operation named exists in finance.proto ({sorted(set(bad_ops))[:3]})")
 check(not bad_keys,
-      f"every key set EXACTLY equals the operation's field set minus exclusions "
-      f"({sorted(set(bad_keys))[:3]})")
+      f"every key set equals the operation's field set minus exclusions (stated-only generators: is a "
+      f"subset of it) ({sorted(set(bad_keys))[:3]})")
 check(not excluded_leaks,
       f"no generator labels a field its operation DISCARDS "
       f"({sorted(set(excluded_leaks))[:3]})")
