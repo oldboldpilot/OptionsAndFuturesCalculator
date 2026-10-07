@@ -4121,6 +4121,132 @@ auto main() -> int {
     }
 
     // -----------------------------------------------------------------
+    // 31. Optional cash flows: a lump sum has no payment, a stream has no starting amount.
+    //
+    // The assistant now returns ONLY what the visitor stated, and the site passes it to this service
+    // unchanged. "What will $10,000 grow to at 5% over 10 years?" states a rate, a term and a
+    // starting amount -- and ComputeFutureValue REQUIRED `payment`, so a correct parse was refused
+    // for a payment nobody makes. The same shape sat on ComputePresentValue (a future value and no
+    // payment), ComputeFutureValueDetailed (a yearly contribution and no starting balance, or the
+    // reverse) and ComputeAmortizationBatch (a comparison states loans, rates and terms only).
+    //
+    // What stays refused matters as much, and is asserted beside each relaxation: BOTH cash flows
+    // absent is a question about nothing; and a ragged batch is still ragged.
+    {
+        std::printf("\n-- 31. optional cash flows\n");
+        {
+            sensen::finance::FutureValueRequest req;
+            req.set_rate("0.0041666666667");
+            req.set_periods(120);
+            req.set_present_value("10000");
+            sensen::finance::DecimalResponse resp;
+            auto ctx = make_context();
+            const auto st = stub.ComputeFutureValue(ctx.get(), req, &resp);
+            check(st.ok(), "31a. ComputeFutureValue of a LUMP SUM with no payment answers");
+            check(st.ok() && std::stod(resp.value()) < -16000.0 && std::stod(resp.value()) > -16500.0,
+                  "31b. ...and 10,000 at 5%/yr for 120 months is about 16,470 (sign: an outflow) -- got " +
+                      resp.value());
+            sensen::finance::FutureValueRequest neither;
+            neither.set_rate("0.004");
+            neither.set_periods(120);
+            sensen::finance::DecimalResponse r2;
+            auto c2 = make_context();
+            check(is_invalid_argument(stub.ComputeFutureValue(c2.get(), neither, &r2)),
+                  "31c. ...but NO payment and NO starting amount is still refused");
+        }
+        {
+            sensen::finance::FutureValueRequest req;
+            req.set_rate("0.005");
+            req.set_periods(240);
+            req.set_payment("500");
+            sensen::finance::DecimalResponse resp;
+            auto ctx = make_context();
+            check(stub.ComputeFutureValue(ctx.get(), req, &resp).ok(),
+                  "31d. ComputeFutureValue of monthly deposits with no starting amount answers");
+        }
+        {
+            sensen::finance::PresentValueRequest req;
+            req.set_rate("0.005");
+            req.set_periods(240);
+            req.set_future_value("50000");
+            sensen::finance::DecimalResponse resp;
+            auto ctx = make_context();
+            check(stub.ComputePresentValue(ctx.get(), req, &resp).ok(),
+                  "31e. ComputePresentValue of a future lump sum with no payment answers");
+            sensen::finance::PresentValueRequest neither;
+            neither.set_rate("0.005");
+            neither.set_periods(240);
+            sensen::finance::DecimalResponse r2;
+            auto c2 = make_context();
+            check(is_invalid_argument(stub.ComputePresentValue(c2.get(), neither, &r2)),
+                  "31f. ...but NO payment and NO future value is still refused");
+        }
+        {
+            sensen::finance::FutureValueDetailedRequest only_contrib;
+            only_contrib.set_annual_rate("0.07");
+            only_contrib.set_years(25);
+            only_contrib.set_annual_contribution("6000");
+            only_contrib.set_compound_frequency(12);
+            sensen::finance::FutureValueDetailedResponse resp;
+            auto ctx = make_context();
+            check(stub.ComputeFutureValueDetailed(ctx.get(), only_contrib, &resp).ok(),
+                  "31g. ComputeFutureValueDetailed with a yearly contribution and no starting balance answers");
+            sensen::finance::FutureValueDetailedRequest only_principal;
+            only_principal.set_annual_rate("0.0385");
+            only_principal.set_years(37);
+            only_principal.set_current_principal("172300");
+            only_principal.set_compound_frequency(12);
+            sensen::finance::FutureValueDetailedResponse r2;
+            auto c2 = make_context();
+            check(stub.ComputeFutureValueDetailed(c2.get(), only_principal, &r2).ok(),
+                  "31h. ...and a starting balance with no contributions answers");
+            sensen::finance::FutureValueDetailedRequest neither;
+            neither.set_annual_rate("0.05");
+            neither.set_years(10);
+            neither.set_compound_frequency(12);
+            sensen::finance::FutureValueDetailedResponse r3;
+            auto c3 = make_context();
+            check(is_invalid_argument(stub.ComputeFutureValueDetailed(c3.get(), neither, &r3)),
+                  "31i. ...but saving NOTHING is still refused");
+        }
+        {
+            // A comparison states loans, rates and terms; the three optional columns are absent.
+            sensen::finance::AmortizationBatchRequest req;
+            for (const double loan : {350000.0, 350000.0}) req.add_loan_amounts(loan);
+            req.add_annual_rates(0.0675);
+            req.add_annual_rates(0.06);
+            req.add_term_months(360);
+            req.add_term_months(180);
+            sensen::finance::AmortizationBatchResponse resp;
+            auto ctx = make_context();
+            const auto st = stub.ComputeAmortizationBatch(ctx.get(), req, &resp);
+            check(st.ok() && resp.summaries_size() == 2,
+                  "31j. a loan comparison with NO extra_payments / pmi_rates / home_values answers, one summary per offer");
+            // ...and the answer equals the one with the columns spelled out as zeros / the loan.
+            sensen::finance::AmortizationBatchRequest full = req;
+            for (int i = 0; i < 2; ++i) {
+                full.add_extra_payments(0.0);
+                full.add_pmi_rates(0.0);
+                full.add_home_values(350000.0);
+            }
+            sensen::finance::AmortizationBatchResponse r2;
+            auto c2 = make_context();
+            check(stub.ComputeAmortizationBatch(c2.get(), full, &r2).ok() && r2.summaries_size() == 2 &&
+                      resp.summaries_size() == 2 &&
+                      resp.summaries(0).total_interest_paid() == r2.summaries(0).total_interest_paid() &&
+                      resp.summaries(1).total_interest_paid() == r2.summaries(1).total_interest_paid(),
+                  "31k. ...and it is byte-identical to the same comparison with the columns written out");
+            // A column with the WRONG number of entries is still a ragged batch.
+            sensen::finance::AmortizationBatchRequest ragged = req;
+            ragged.add_extra_payments(0.0);
+            sensen::finance::AmortizationBatchResponse r3;
+            auto c3 = make_context();
+            check(is_invalid_argument(stub.ComputeAmortizationBatch(c3.get(), ragged, &r3)),
+                  "31l. ...but a column with one entry for two loans is still REFUSED as ragged");
+        }
+    }
+
+    // -----------------------------------------------------------------
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }
