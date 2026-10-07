@@ -534,9 +534,40 @@ auto emit_literal_facts(std::string_view text, int turn, std::string& facts) -> 
             case mv::LiteralTag::Years:  facts += "years(" + v + tail; break;
             case mv::LiteralTag::Months: facts += "months(" + v + tail; break;
             case mv::LiteralTag::Days:   facts += "days(" + v + tail; break;
-            case mv::LiteralTag::Untagged: break;
+            case mv::LiteralTag::Untagged:
+                // A BARE FIGURE OF MONEY SIZE IS MONEY, which is how a visitor writes it ("a 631500
+                // house, 20% down, rent $3,500/mo"). Counting only the dollar-sign figures made the
+                // rent the ONE money literal, so the rules read it as the price and rewrote the
+                // stated 631,500 to 3,500 -- found 2026-10-06 when the sweep was handed rows written
+                // the way people write. With both counted the price slot has two candidates, which
+                // `reconcile` keeps as AMBIGUOUS and so leaves the model's own value alone.
+                // Below a thousand a bare number is a year, a count or a payment number.
+                if (lit.value.units() >= 1000 * mv::Decimal::kScale && lit.scale == 1 && !lit.names_hoa) {
+                    facts += (lit.names_down_payment ? "down_money("
+                              : lit.names_increment  ? "extra_money("
+                                                     : "money(") + v + tail;
+                }
+                break;
         }
     }
+}
+
+/**
+ * Whether the words name a compounding cadence other than monthly. Every rule here that turns a
+ * stated duration into a period count multiplies by twelve, which is the cadence of a mortgage and
+ * wrong for "40 years compounded yearly" (40 periods, not 480): the rule base then offered 480 and
+ * 120 against a correct 40 and `reconcile` rewrote it. With a stated cadence the count of periods
+ * is not this layer's to derive.
+ */
+[[nodiscard]] auto names_non_monthly_compounding(std::string_view text) -> bool {
+    std::string lower;
+    lower.reserve(text.size());
+    for (const char c : text) { lower += static_cast<char>(std::tolower(static_cast<unsigned char>(c))); }
+    if (lower.find("compound") == std::string::npos) { return false; }
+    for (const std::string_view cadence : {"yearly", "annual", "quarterly", "semi", "daily", "weekly"}) {
+        if (lower.find(cadence) != std::string::npos) { return true; }
+    }
+    return false;
 }
 
 }  // namespace
@@ -556,6 +587,7 @@ auto derive_candidates_in_turns(std::string_view operation, std::string_view ear
         return out;
     }
 
+    const bool other_cadence = names_non_monthly_compounding(earlier) || names_non_monthly_compounding(latest);
     std::string facts;
     emit_literal_facts(earlier, 0, facts);
     if (!latest.empty()) {
@@ -578,10 +610,16 @@ auto derive_candidates_in_turns(std::string_view operation, std::string_view ear
         const std::string name{f.field};
         switch (mv::classify_slot(f.field)) {
             case mv::SlotKind::Rate:
+                // `rate`/`periods` are a PAIR on one cadence; with a stated non-monthly compounding
+                // neither is derived (see `names_non_monthly_compounding`).
+                if (other_cadence && (f.field == "rate" || f.field == "periods")) { break; }
                 facts += "rate_slot(" + name + ", "
                        + std::to_string(rate_divisor(operation, f.field)) + ").\n";
                 break;
-            case mv::SlotKind::MonthCount: facts += "months_slot(" + name + ").\n"; break;
+            case mv::SlotKind::MonthCount:
+                if (other_cadence && f.field == "periods") { break; }
+                facts += "months_slot(" + name + ").\n";
+                break;
             case mv::SlotKind::YearCount:  facts += "years_slot(" + name + ").\n"; break;
             case mv::SlotKind::Money:
                 // These three sets are the rule base's whole vocabulary of
@@ -727,10 +765,62 @@ auto reconcile(const std::vector<FieldCandidates>& candidates,
         ++claimed[c.values.front()];
     }
 
+    // THE RATE AND THE PERIOD COUNT OF A TIME-VALUE QUESTION ARE ONE CADENCE, and the rule base only
+    // knows the monthly one. "$207,000 in savings over 15 yrs at a 4.75% rate" is, to a visitor, an
+    // ANNUAL rate over 15 YEARS; the model said exactly that (0.0475, 15) and the layer, deriving
+    // months from years, rewrote the correct 15 to 180 -- an annual rate on a 180-year horizon, served
+    // as the answer. Found by the derivation sweep the day visitor-phrased rows entered the mix.
+    //
+    // An emitted rate that IS the annual reading of the derived monthly one (x12) states the cadence:
+    // leave it, and measure the periods in years. Anything else keeps the old monthly behaviour, so a
+    // model that emitted a monthly rate over 15 periods is still repaired to 180.
+    bool annual_cadence = false;
+    std::optional<std::string> annual_periods;
+    {
+        const auto single = [&](std::string_view field) -> std::optional<std::string> {
+            for (const auto& c : candidates) {
+                if (c.field == field && c.values.size() == 1) { return c.values.front(); }
+            }
+            return std::nullopt;
+        };
+        const auto rate_cand = single("rate");
+        const auto periods_cand = single("periods");
+        const auto emitted_rate = emitted.find("rate");
+        if (rate_cand && emitted_rate != emitted.end()) {
+            // The solver spells 4.75/1200 with 38 places, which the strict grammar (at most 34
+            // characters) refuses outright -- which is also why this layer has never replaced a
+            // non-terminating monthly rate. Truncating to the grammar's own fifteen places is exact
+            // enough here: x12 turns a 1e-15 truncation into 1.2e-14, eight orders below the
+            // six-place spelling it is compared against.
+            const auto cut = [](std::string_view v) {
+                const auto dot = v.find('.');
+                return std::string{dot == std::string_view::npos
+                                       ? v
+                                       : v.substr(0, std::min(v.size(), dot + 1 + static_cast<std::size_t>(mv::Decimal::kPlaces)))};
+            };
+            const auto monthly_rate = mv::parse_strict_decimal(cut(*rate_cand));
+            const auto months = periods_cand ? mv::parse_strict_decimal(*periods_cand) : std::nullopt;
+            const auto annual_rate = monthly_rate ? monthly_rate->scaled_by(12) : std::nullopt;
+            const auto years = months ? months->divided_exactly_by(12) : std::nullopt;
+            // The RATE alone decides the cadence: a visitor who typed "over 15 yeas" has no periods
+            // candidate at all, and the annual 0.04125 was still rewritten to a monthly 0.003438.
+            if (annual_rate && same_value(annual_rate->to_string(), emitted_rate->second)) {
+                annual_cadence = true;
+                if (years) { annual_periods = years->to_string(); }
+            }
+        }
+    }
+
     for (const auto& c : candidates) {
         const auto it = emitted.find(c.field);
         if (it == emitted.end()) {
             continue;   // never ADD a field; the field-set contract is G2's
+        }
+        if (annual_cadence && c.field == "rate") {
+            continue;   // already the annual figure the visitor stated
+        }
+        if (annual_cadence && c.field == "periods" && !annual_periods) {
+            continue;   // an annual rate over a horizon that is not whole years: nothing to repair to
         }
         // THE EMITTED VALUE MUST BE A SCALAR DECIMAL for this layer to have
         // anything to say about it. A REPEATED field arrives as JSON array
@@ -747,7 +837,8 @@ auto reconcile(const std::vector<FieldCandidates>& candidates,
             continue;
         }
         if (c.values.size() == 1) {
-            const std::string& only_value = c.values.front();
+            const std::string only_value =
+                (annual_periods && c.field == "periods") ? *annual_periods : c.values.front();
             if (same_value(only_value, it->second)) {
                 continue;                       // already right, nothing to do
             }

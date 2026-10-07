@@ -811,78 +811,23 @@ export [[nodiscard]] auto operation_excludes_field(std::string_view operation,
 export [[nodiscard]] auto variant_governing_field(std::string_view operation) -> std::string_view;
 
 /**
- * The value to use when `field` was never stated and never emitted, or empty
- * when its absence is a genuine gap that must be asked about or refused.
+ * True when the utterance says IN WORDS that there is none of this -- "zero down", "no HOA",
+ * "without PMI".
  *
- * See `kOptionalModellingDefaults`, which also says at length why this is a
- * different question from `is_convention_value` and why answering it from
- * that table instead would price a zero-dollar mortgage.
- *
- * The CALLER must still establish that the utterance states nothing for the
- * field. A default is what the user meant only while they said nothing; a
- * figure they DID give and the model then dropped must keep its refusal,
- * because substituting a zero there would silently discard it.
- */
-export [[nodiscard]] auto optional_modelling_default(std::string_view field) -> std::string_view;
-
-/**
- * True when the utterance does not MENTION the concept `field` names, so an
- * absent value is the user declining to model it rather than a figure the
- * model dropped.
- *
- * NOT `utterance_states_nothing_for`, AND THE DIFFERENCE IS THE WHOLE REASON
- * THIS EXISTS. That predicate asks "is there a literal of a compatible kind
- * that no other field has claimed?" -- built for the ASKING decision, where
- * erring toward "the user stated it" correctly keeps a refusal. Applied to a
- * DEFAULT it is inert: a claim only counts ACROSS slot kinds (two Money slots
- * are interchangeable enough that one number could be either), so on any
- * utterance containing a second money figure -- which is every mortgage
- * utterance -- a Money slot like `monthly_hoa` always looks "stated" and the
- * default could never fire. Measured: the first version of this pass used it
- * and did nothing at all, and a unit check on the fully-built field set is
- * what caught it.
- *
- * The question a default actually turns on is whether the user SAID ANYTHING
- * ABOUT THE THING, which is a property of the text and not of what the model
- * emitted. It reuses the lexer's own word lists -- one copy, in
- * `detail::is_hoa_word` and its siblings -- so a phrasing taught to the lexer
- * is understood here too.
- *
- * FAILS CLOSED: a field with no concept list returns false, so it is never
- * defaulted. And a mention with no figure beside it ("no HOA dues", "there's
- * no PMI") suppresses the default and falls back to the refusal that was
- * there before -- the safe direction, costing a default and never a figure.
- */
-export [[nodiscard]] auto utterance_names_nothing_for(std::string_view field,
-                                                      std::string_view user_text) -> bool;
-
-/**
- * True when the utterance says IN WORDS that there is none of this -- "zero
- * down", "no HOA", "without PMI".
- *
- * A WORDED ZERO IS A STATEMENT, NOT AN OMISSION, and conflating the two was a
- * live defect with an almost perverse shape. `utterance_names_nothing_for`
- * refuses to default a field the user NAMED, which is right when they named a
- * figure the model then dropped. But "zero down" names the down payment and
- * supplies its value as a WORD, so no numeric literal exists for anything to
- * point at -- and the naming then blocked the very zero it was stating.
- * Measured against production:
+ * A WORDED ZERO IS A STATEMENT, NOT AN OMISSION. "zero down" supplies the down payment's value as a
+ * WORD, so no numeric literal exists for anything to ground against; without this the stated
+ * zero was indistinguishable from a convention the model filled in. `shape_stated_params` serves a
+ * zero exactly when this says it was worded, and omits every other zero -- which is what lets "no
+ * PMI" overwrite the form's own PMI while "6.5% over 30 years" leaves it alone. Measured against
+ * production before shaping existed:
  *
  *   "480000 rental, zero down, 2400 a month rent, 10 years"
  *   -> The assistant left out "down_payment", which ComputeRentVsBuy needs.
  *
- * The user said zero twice over -- once in the word and once by giving no
- * figure -- and was told they had not said it at all.
- *
- * PHRASES, NOT A WORD WINDOW, deliberately. "no" and "zero" are among the
- * commonest words in English and a proximity rule over them would fire on "no
- * more than 20% down" and on "zero-coupon", both of which state something
- * else. A short closed list of the ways people actually write "none of this"
- * is checkable by eye, and every entry pins its own test.
- *
- * It licenses the CONVENTION ZERO and nothing else: the value substituted is
- * the one `kOptionalModellingDefaults` already carries, so it is verified by
- * G5 and G3 exactly as a stated figure is.
+ * PHRASES, NOT A WORD WINDOW, deliberately. "no" and "zero" are among the commonest words in
+ * English and a proximity rule over them would fire on "no more than 20% down" and on
+ * "zero-coupon", both of which state something else. A short closed list of the ways people
+ * actually write "none of this" is checkable by eye, and every entry pins its own test.
  */
 export [[nodiscard]] auto utterance_states_none_for(std::string_view field,
                                                     std::string_view user_text) -> bool;
@@ -1581,6 +1526,115 @@ export [[nodiscard]] auto utterance_states_nothing_for(std::string_view field,
 export [[nodiscard]] auto clarifying_question(std::string_view operation,
                                               std::string_view field) -> std::string;
 
+/**
+ * The visitor's own words for `field` ("home price", "interest rate"), or empty for a name this
+ * contract does not declare. For a sentence that has to say WHICH figure without naming the
+ * engine's field: the site shows refusal text verbatim, so a field name in it is a leak of
+ * internals (observed live 2026-10-06: `left out "property_price", which ComputeRentVsBuy needs`).
+ */
+export [[nodiscard]] auto field_label(std::string_view field) -> std::string_view;
+
+/**
+ * A double as a PLAIN positional decimal -- never an exponent -- in its shortest round-trip form:
+ * 500000 -> "500000", -100000 -> "-100000", 0.0385 -> "0.0385".
+ *
+ * `std::to_chars(double)` with no format argument picks the SHORTER of fixed and scientific, and
+ * "5e+05" is shorter than "500000", so every round figure came out in exponent form -- which this
+ * contract's own lexer and `is_decimal_literal` deliberately refuse. A visitor's "$500,000 loan"
+ * was therefore a REFUSAL on every Double-typed field (a cumulative-interest loan, a cash-flow
+ * list, a comparison of loan offers), invisible for as long as the corpus held 499,900 and 431,600
+ * and found on 2026-10-06 by a request set written the way people write.
+ */
+export [[nodiscard]] auto plain_decimal_text(double v) -> std::string;
+
+/**
+ * Whether the request names a payment cadence other than monthly that a monthly-only calculation would
+ * silently drop: "bi-weekly payment on a $350,000 loan" was answered with the MONTHLY payment
+ * (2026-10-06, production) -- a correct-looking figure for a question nobody asked. Phrases, not a
+ * lexer: the words carry the meaning. Weekly/daily are NOT here: they are compounding words too, and
+ * `cadence_word_grounds` owns those.
+ */
+export [[nodiscard]] auto names_unsupported_cadence(std::string_view text) -> bool;
+
+// ===========================================================================
+// 6b. WHAT THE VISITOR STATED, AND WHAT THEY MUST HAVE.
+//
+// THE CONTRACT THAT REPLACED "EVERY DECLARED FIELD" (owner decision, 2026-10-06).
+//
+// G2b used to demand every field an operation declares, so a model -- or an encoder -- had to
+// say something for fields the visitor never mentioned, and what it said was a zero or a
+// default. The site applies the answer as a form patch (`{...form, ...patch}`), so each invented
+// zero OVERWROTE the visitor's own value; and an operation whose declared field set the visitor
+// could not fill was refused as "left out X". Measured on production the same day:
+//
+//   "amortization schedule for $350,000 at 6% over 30 years"
+//   -> seven fields the visitor never said, and a home value set equal to the loan
+//   "What are my closing costs on a $500,000 house with 20% down?"
+//   -> asks "Over how many years?"
+//   "rent vs buy: 600k home, 20% down, 6.5% for 30 years, rent 3000 a month"
+//   -> refused: the assistant left out the price that is plainly stated
+//
+// The replacement has two halves and they are one idea. The assistant returns ONLY what the
+// visitor stated, or what follows from what they stated (a loan from a price and a down-payment
+// percent, a monthly rate from an annual one). Every other field is OMITTED, so the site keeps
+// its own value for it. And it asks a question ONLY when an ESSENTIAL input is missing -- one
+// without which the calculation is undefined -- never refuses with "left out".
+//
+// `essential_requirements` is the ONE table that says which inputs are essential. It is derived
+// from what `finance_service.cpp` cannot compute without (REQUIRE_DECIMAL, and the integers it
+// refuses at zero), then narrowed to what the VISITOR must say: a modelling assumption the
+// calculator's own form already holds (appreciation, a cap rate, a cadence) is not something to
+// interrogate them about. Each exception is a row that is NOT in the table, with its reason in
+// the table's own comment.
+// ===========================================================================
+
+/** One thing the visitor MUST have stated: at least one of `any_of`. A single name is the
+ *  ordinary case; two names are alternatives, as in a lump sum (a starting amount and no
+ *  payments) against a stream of payments. */
+export struct EssentialRequirement {
+    std::vector<std::string_view> any_of;
+};
+
+/**
+ * The essential requirements of `operation`.
+ *
+ * `variant` is the governing enum's value for the one operation whose essentials depend on it
+ * (ComputeDepreciation's `method`: straight-line needs a life, MACRS a recovery period and a
+ * year). Empty reads as the proto default, which is the value omission already means.
+ */
+export [[nodiscard]] auto essential_requirements(std::string_view operation,
+                                                 std::string_view variant = {})
+    -> std::vector<EssentialRequirement>;
+
+/** What the visitor's own words say about one emitted field. */
+export enum class Evidence {
+    Stated,       ///< a literal, a derivation over literals, or a worded "none" supports the value
+    Defaulted,    ///< the value is a convention or a default and nothing in the words supports it
+    Unsupported,  ///< a real value the words do NOT support -- kept, so verification refuses it
+};
+
+/** The fields to SERVE, and the first essential requirement still unmet. */
+export struct ShapedParams {
+    /// Names of the emitted fields to serve, in emitted order.
+    std::vector<std::string> kept;
+    /// The field to ASK about when an essential requirement is unmet (the first alternative of
+    /// the first unmet requirement), else empty.
+    std::string missing_field;
+};
+
+/**
+ * Decide which of the emitted fields the visitor's words support, and whether the essential
+ * inputs are all present. Runs BEFORE `verify_mortgage_output`: what it keeps is what gets
+ * verified, so a convention value the visitor never stated never reaches grounding at all.
+ *
+ * An UNSUPPORTED value is deliberately KEPT. `present_value = 304000.00` against a 495,000
+ * utterance is the documented dangerous failure; dropping it here would turn a refusal into a
+ * silent omission, and asking would hide it. Only a value that is a recognised DEFAULT (a zero,
+ * a cadence of twelve, an enum's proto default) with no statement behind it is dropped.
+ */
+export [[nodiscard]] auto shape_stated_params(const MortgageParamsInput& input,
+                                              std::string_view user_text) -> ShapedParams;
+
 export [[nodiscard]] auto ground_emitted_values(const MortgageParamsInput& input,
                                                 std::string_view user_text) -> VerificationVerdict;
 
@@ -2268,123 +2322,6 @@ constexpr std::array<ConventionValue, 53> kConventionValues{{
     {.field = "monthly_taxes_ins_hoa", .value = "0"},
 }};
 
-/**
- * Fields whose ABSENCE is a complete statement rather than a gap: the user
- * said nothing about a down payment, HOA dues or PMI because there are none.
- *
- * THIS IS NOT `kConventionValues` AND MUST NOT BE MERGED WITH IT. The two
- * answer different questions and only one of them is safe to ask globally:
- *
- *   kConventionValues -- "may the model emit this value with no literal
- *     behind it?" Safe as a GLOBAL (field, value) table because the
- *     EMISSION is itself the evidence: the model saying `pmi_annual_rate:
- *     0` is the model declaring there is no PMI.
- *
- *   this table -- "nobody said anything at all; what is it?" NOT safe
- *     globally, because absence is not evidence of anything.
- *
- * `loan_amount` is what makes that distinction load-bearing rather than
- * fastidious. It IS convention-zero, and legitimately so -- a zero loan is
- * how a ComputeRentVsBuy request says "I am using the legacy composite
- * shape, not the granular one". Reading that row as a DEFAULT would answer
- * "what's the payment on a loan at 6.5% over 30 years?" with a zero-dollar
- * mortgage instead of asking how much the loan is for. `loan_annual_rate`,
- * `loan_term_years` and `monthly_piti_and_maintenance` are the same row for
- * the same reason, and `annual_other_expenses`, `down_payment` and
- * `down_payment_percent` sit in that table beside them with no way to tell
- * which kind each one is. So the knowledge is written down here, once,
- * per field, with the reason attached.
- *
- * Every entry is an OPTIONAL MODELLING INPUT: a carrying cost or a financing
- * assumption that a loan may simply not have. None of them is a term of the
- * loan itself. `test_mortgage_verification` asserts that the terms --
- * `loan_amount`, `present_value`, `annual_rate`, `periods`, `term_months`,
- * `monthly_gross_rent` and their spellings -- are ABSENT from this table,
- * because that denylist is the property that keeps it from growing into the
- * thing the paragraph above warns about.
- *
- * TWO MORE INVARIANTS, both asserted rather than merely intended:
- *
- *   - the default must be a value `kConventionValues` already exempts, with
- *     exactly ONE convention value for that field. Substituting a value
- *     grounding would then refuse would trade a needless question for a
- *     needless refusal, and `prepaid_interest_days` (15 AND 0) and
- *     `selling_cost_percent` (0.06 AND 0) are the fields that prove the
- *     uniqueness half is reachable: proto3 explicit presence makes an absent
- *     `prepaid_interest_days` mean 15 and an explicit 0 mean zero days, so
- *     there is no single answer to substitute and neither field is listed.
- *
- *   - no REPEATED field. `pmi_rates` and `extra_payments` are the per-offer
- *     spellings for ComputeAmortizationBatch and are deliberately absent:
- *     the right default is one zero PER OFFER, and the offer count lives in
- *     a sibling array rather than anywhere this table can see. A scalar "0"
- *     substituted into a parallel-array request would be a shape error
- *     dressed as a default.
- */
-struct OptionalModellingDefault {
-    std::string_view field;
-    std::string_view value;
-};
-
-constexpr std::array<OptionalModellingDefault, 19> kOptionalModellingDefaults{{
-    // The down payment. "you should not need to state a downpayment when it
-    // can be assumed as 0" -- and nothing else in the request changes meaning
-    // when it is absent: price, rate and term are all still stated.
-    {.field = "down_payment", .value = "0"},
-    {.field = "down_payment_percent", .value = "0"},
-    // HOA and association dues. A CARRYING COST, never a payment against the
-    // loan -- which is the whole reason `names_hoa` exists in the lexer -- so
-    // a loan with no dues is an ordinary loan and not an under-specified one.
-    {.field = "monthly_hoa", .value = "0"},
-    {.field = "monthly_taxes_ins_hoa", .value = "0"},
-    // PMI, in all three spellings the proto uses. A borrower who says nothing
-    // about mortgage insurance is describing a loan without it; the engine's
-    // own PMI block is skipped at a zero rate, so the answer is the same one
-    // the user would get by stating zero.
-    {.field = "pmi_annual_rate", .value = "0"},
-    {.field = "current_pmi_monthly", .value = "0"},
-    {.field = "new_pmi_monthly", .value = "0"},
-    // The one entry that is NOT "none of this": 80% is the statutory
-    // threshold at which PMI drops off, so an unstated drop-off LTV has a
-    // right answer rather than an empty one. Listed because the question
-    // "at what LTV does PMI stop?" has a legal answer the user should not
-    // have to supply, and refused as a magnitude slip above 150% exactly as
-    // a stated one would be -- G5 runs on the substituted value too.
-    {.field = "pmi_drop_off_ltv", .value = "0.80"},
-    // Inflation, for the same reason as the dues: a request that models no
-    // inflation is a request, not an omission.
-    {.field = "annual_inflation_rate", .value = "0"},
-    // SWEEPING THE CLASS RATHER THAN THE INSTANCE, which is what the live
-    // probe forced. With only the down-payment, HOA and PMI families listed,
-    //
-    //   "a 480000 condo renting at 2400 a month, 3800 a year taxes, 1500
-    //    insurance, 6% management fee, 10% vacancy, over 10 years"
-    //
-    // still came back `The assistant left out "annual_home_appreciation",
-    // which ComputeRentVsBuy needs` -- a FOURTH field of exactly this kind,
-    // blocking exactly the request the report was about. A rule applied to
-    // three members of a family and not the rest is the defect this file
-    // records against `guess`, the batch plurals and `dates_to_seconds`.
-    //
-    // Appreciation and escalation are MODELLING ASSUMPTIONS: "assume the
-    // house does not appreciate" and "assume rent does not rise" are answers,
-    // and a request that gives neither is complete.
-    {.field = "annual_home_appreciation", .value = "0"},
-    {.field = "annual_appreciation_rate", .value = "0"},
-    {.field = "annual_appreciation", .value = "0"},
-    {.field = "annual_rent_increase", .value = "0"},
-    {.field = "annual_expense_increase", .value = "0"},
-    {.field = "annual_cost_growth", .value = "0"},
-    // The optional HELOC leg, and the cash-out leg of a refinance. Both are
-    // already convention-zero for the mirror-image reason -- a rate-and-term
-    // refinance states no cash out, and `finance.proto` says "omit for a
-    // rate-and-term refinance" in as many words.
-    {.field = "heloc_drawn_amount", .value = "0"},
-    {.field = "heloc_annual_rate", .value = "0"},
-    {.field = "heloc_term_years", .value = "0"},
-    {.field = "cash_out_amount", .value = "0"},
-}};
-
 // --- product-scope bounds (G5); see the file banner on non-duplication ----
 
 /** Ten billion. No residential mortgage, HELOC draw, rental or home-NPV
@@ -2545,13 +2482,6 @@ auto operation_excludes_field(std::string_view operation, std::string_view field
 
 auto variant_governing_field(std::string_view operation) -> std::string_view {
     return detail::variant_governing_field(operation);
-}
-
-auto optional_modelling_default(std::string_view field) -> std::string_view {
-    for (const auto& d : detail::kOptionalModellingDefaults) {
-        if (d.field == field) { return d.value; }
-    }
-    return {};
 }
 
 auto tvm_payment_needs_sign_flip(std::string_view operation, std::string_view present_value,
@@ -2929,6 +2859,14 @@ namespace detail {
     // magnitude slip this gate exists to catch.
     if (kind == SlotKind::Money && lit.scale != 1) {
         push(lit.value.scaled_by(lit.scale));
+        // M8 STILL APPLIES: this branch returned before the cash-flow negation below, so a scaled
+        // figure ("75k", "$1.2M") could ground a POSITIVE flow and never the NEGATIVE outlay. Every
+        // "irr if I put in 75k and get back 20k, 30k" and "payback on a 12k water heater" was refused
+        // as ungrounded (2026-10-06): the outlay is always the figure written with a suffix.
+        if (field_name == "values") {
+            const std::size_t n = out.size();
+            for (std::size_t i = 0; i < n; ++i) out.push_back(out[i].negated());
+        }
         return out;
     }
 
@@ -3046,6 +2984,41 @@ namespace detail {
     return out;
 }
 
+/**
+ * M9 (the other direction): a DOWN PAYMENT stated as a percent of a stated price -- "$450,000 rental
+ * with 25% down" states the deposit, 112,500, without writing it. The loan rule above takes the
+ * deposit OFF the price; this is the deposit itself, `price x pct / 100`. Fenced like its sibling: only
+ * the slot named `down_payment`, only a percent the LEXER tagged as naming a down payment, and only
+ * against a price literal that is not itself a down payment.
+ */
+[[nodiscard]] inline auto expand_down_from_percent(const std::vector<NumericLiteral>& literals,
+                                                   SlotKind kind, std::string_view field_name)
+    -> std::vector<Decimal> {
+    std::vector<Decimal> out;
+    if (kind != SlotKind::Money || field_name != "down_payment") return out;
+    static_assert(Decimal::kPlaces == 15, "the split below assumes the unit scale");
+    for (const auto& price : literals) {
+        if (price.names_down_payment || !tag_admissible(SlotKind::Money, price.tag)) continue;
+        const __int128 p = price.scale != 1 ? price.value.scaled_by(price.scale).value_or(Decimal{0}).units()
+                                            : price.value.units();
+        if (p <= 0) continue;
+        for (const auto& dp : literals) {
+            if (!dp.names_down_payment || dp.offset == price.offset) continue;
+            const bool percent_signature =
+                dp.tag == LiteralTag::Percent ||
+                (dp.tag == LiteralTag::Untagged && dp.value.units() > 0 &&
+                 dp.value.units() < static_cast<__int128>(100) * Decimal::kScale);
+            if (!percent_signature) continue;
+            const __int128 pct = dp.value.units();
+            if (pct <= 0 || pct >= static_cast<__int128>(100) * Decimal::kScale) continue;
+            const __int128 whole = p / Decimal::kScale;
+            const __int128 frac = p % Decimal::kScale;
+            out.push_back(Decimal{(whole * pct) / 100 + (frac * pct) / (Decimal::kScale * 100)});
+        }
+    }
+    return out;
+}
+
 /** The two money slots that hold a loan AFTER the down payment is taken off.
  * Scoped by NAME, exactly as `kPerPeriodRateFields` scopes M3 -- the netting
  * is a property of what the slot means, not of its type. */
@@ -3158,6 +3131,32 @@ inline constexpr std::array<std::string_view, 2> kNettedLoanFields{"present_valu
  * infer is exactly the set the rate is allowed to be divided by. Adding one in
  * a single place would let the two disagree again.
  */
+/**
+ * Does some literal of the utterance, under any map `ground_emitted_values` knows, produce this
+ * value for this field? THE one grounding predicate: `ground_emitted_values` and
+ * `field_evidence_of` both call it, so what counts as "the visitor said it" cannot differ between
+ * the gate that refuses and the filter that serves.
+ */
+[[nodiscard]] inline auto grounded_by_literal(const std::vector<NumericLiteral>& literals,
+                                              std::int64_t periods_per_year, SlotKind kind,
+                                              std::string_view field, const Decimal& value)
+    -> bool {
+    const __int128 tolerance = slot_tolerance_units(kind);
+    for (const auto& lit : literals) {
+        for (const auto& candidate : expand_candidates(lit, kind, field, periods_per_year)) {
+            if (value.within(candidate, tolerance)) { return true; }
+        }
+    }
+    // M9, the binary map, consulted only after every unary one has failed.
+    for (const auto& candidate : expand_netted_loan(literals, kind, field)) {
+        if (value.within(candidate, tolerance)) { return true; }
+    }
+    for (const auto& candidate : expand_down_from_percent(literals, kind, field)) {
+        if (value.within(candidate, tolerance)) { return true; }
+    }
+    return false;
+}
+
 [[nodiscard]] inline auto infer_periods_per_year(const std::vector<EmittedField>& fields,
                                                  const std::vector<NumericLiteral>& literals)
     -> std::optional<std::int64_t> {
@@ -3237,11 +3236,12 @@ inline constexpr std::array<std::string_view, 2> kNettedLoanFields{"present_valu
     };
     // Longest-first where one word contains another: "semi-annual" must be
     // tested before "annual", or a semi-annual schedule grounds as 1.
-    static constexpr std::array<Cadence, 9> kCadences{{
+    static constexpr std::array<Cadence, 11> kCadences{{
         {.word = "semi-annual", .per_year = 2},  {.word = "semiannual", .per_year = 2},
         {.word = "bi-weekly", .per_year = 26},   {.word = "biweekly", .per_year = 26},
         {.word = "quarterly", .per_year = 4},    {.word = "monthly", .per_year = 12},
         {.word = "annually", .per_year = 1},     {.word = "annual", .per_year = 1},
+        {.word = "yearly", .per_year = 1},       {.word = "daily", .per_year = 365},
         {.word = "weekly", .per_year = 52},
     }};
     std::string lower;
@@ -3415,12 +3415,9 @@ template <std::size_t N>
 }
 
 /**
- * THE CONCEPT WORD LISTS, hoisted so each exists exactly once.
- *
- * The lexer uses them to decide which SLOT a figure belongs in; the
- * unstated-default pass uses them to decide whether the user mentioned the
- * concept AT ALL. Two consumers, one list -- a second copy would agree the day
- * it was written and drift on the first phrasing anyone adds.
+ * THE HOA WORD LIST, one copy: the lexer uses it to decide which SLOT a figure beside it belongs
+ * in. (It once had a second consumer -- a pass that asked whether the visitor mentioned a concept
+ * AT ALL, in order to default it to zero. That pass is gone: an unstated input is now omitted.)
  */
 [[nodiscard]] inline auto is_hoa_word(std::string_view w) -> bool {
     static constexpr std::array<std::string_view, 6> kWords{"hoa",   "hoas", "dues",
@@ -3429,84 +3426,20 @@ template <std::size_t N>
 }
 
 /**
- * The same list MINUS "condo", for the existence question only.
- *
- * THE TWO CONSUMERS GENUINELY DIFFER HERE AND IT IS THE ONE PLACE THEY DO.
- * `is_hoa_word` answers "a figure sits next to this word -- is the figure
- * dues?", and next to a number "condo" means exactly that ("$275 condo fee").
- * This one answers "did the user SAY ANYTHING ABOUT DUES?", and there "condo"
- * is the PROPERTY TYPE: "a 480000 condo renting at 2400" mentions no dues at
- * all. Keeping condo here would suppress the default on precisely the
- * properties that have dues, so every condo request would go back to refusing.
- *
- * DERIVED from the one list rather than restated, so the two can only differ
- * in this single documented way -- a second literal list would drift on the
- * first phrasing anyone adds to either.
+ * "condo" names the CHARGE only when a fee word follows it ("condo fee", "condo dues"). Alone it
+ * names the PROPERTY: "closing costs on a 300k condo with 20% down" states a home price, and with
+ * "condo" as an HOA word on its own that figure was tagged a dues payment and removed from the
+ * price slot -- so every condo request was refused "I couldn't match the home price" (found
+ * 2026-10-06 by a request set written the way people write, 2 of 272).
  */
-[[nodiscard]] inline auto is_hoa_mention_word(std::string_view w) -> bool {
-    // THE EXCLUSION HAS TO BE FUZZY TOO, or the typo tolerance would quietly
-    // undo it: `codno` matches `condo` and is therefore an HOA word, and a
-    // bare `w != "condo"` would then let a misspelled PROPERTY TYPE count as a
-    // mention of dues -- restoring the refusal on exactly the properties that
-    // have them. One spelling, named once, used by both halves.
-    static constexpr std::string_view kPropertyType{"condo"};
-    return is_hoa_word(w) && w != kPropertyType && !one_transposition_of(w, kPropertyType);
-}
-
-/** Mirrors the down-payment adjacency's own list; see `names_down_payment`. */
-[[nodiscard]] inline auto is_down_payment_word(std::string_view w) -> bool {
-    static constexpr std::array<std::string_view, 3> kWords{"down", "downpayment", "deposit"};
+[[nodiscard]] inline auto is_condo_word(std::string_view w) -> bool {
+    static constexpr std::array<std::string_view, 2> kWords{"condo", "condominium"};
     return names_concept(kWords, w);
 }
 
-/** `insurance` and `escrow` are here because `monthly_taxes_ins_hoa` is a
- * COMPOSITE of taxes, insurance and dues -- mentioning any one of the three is
- * mentioning the field. Blocking on a superset is the safe direction: it costs
- * a default and never costs a figure. */
-[[nodiscard]] inline auto is_escrow_word(std::string_view w) -> bool {
-    static constexpr std::array<std::string_view, 4> kWords{"tax", "taxes", "insurance",
-                                                            "escrow"};
-    return is_hoa_mention_word(w) || names_concept(kWords, w);
-}
-
-/** PMI, in the spellings that are single words. The two-word "mortgage
- * insurance" is matched as a PHRASE by `utterance_names_nothing_for`, because
- * "insurance" on its own is homeowner's insurance -- a figure amortization
- * utterances state constantly, and treating it as a PMI mention would make the
- * PMI default fire almost never. */
-[[nodiscard]] inline auto is_pmi_word(std::string_view w) -> bool {
-    static constexpr std::array<std::string_view, 2> kWords{"pmi", "mip"};
-    return names_concept(kWords, w);
-}
-
-[[nodiscard]] inline auto is_inflation_word(std::string_view w) -> bool {
-    static constexpr std::array<std::string_view, 2> kWords{"inflation", "inflationary"};
-    return names_concept(kWords, w);
-}
-
-/** Appreciation, which a request may legitimately decline to model. Kept
- * SEPARATE from the growth words below even though "grows" could describe
- * either: a request that says rent grows 3% has said nothing about the
- * property APPRECIATING, and defaulting the wrong one of the two to zero
- * would discard a figure. */
-[[nodiscard]] inline auto is_appreciation_word(std::string_view w) -> bool {
-    static constexpr std::array<std::string_view, 5> kWords{
-        "appreciation", "appreciate", "appreciates", "appreciating", "appreciated"};
-    return names_concept(kWords, w);
-}
-
-/** Escalation of a recurring amount: rent, expenses, carrying costs. */
-[[nodiscard]] inline auto is_growth_word(std::string_view w) -> bool {
-    static constexpr std::array<std::string_view, 12> kWords{
-        "growth",   "grow",      "grows",     "growing", "increase", "increases",
-        "increasing", "escalate", "escalates", "escalation", "rising", "rises"};
-    return names_concept(kWords, w);
-}
-
-/** A HELOC leg the request may simply not have. The spelled-out forms are
- * phrases and are matched as such by `utterance_names_nothing_for`. */
-[[nodiscard]] inline auto is_heloc_word(std::string_view w) -> bool {
-    static constexpr std::array<std::string_view, 2> kWords{"heloc", "helocs"};
+[[nodiscard]] inline auto is_charge_word(std::string_view w) -> bool {
+    static constexpr std::array<std::string_view, 6> kWords{"fee",   "fees",       "dues",
+                                                            "charge", "charges", "assessment"};
     return names_concept(kWords, w);
 }
 
@@ -3516,30 +3449,10 @@ template <std::size_t N>
     return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + ('a' - 'A')) : c;
 }
 
-/** True when any alphabetic word of `text` satisfies `pred`. Word-bounded on
- * purpose: a substring match would see "down" inside "downturn". */
-template <typename Pred>
-[[nodiscard]] auto mentions_word(std::string_view text, Pred pred) -> bool {
-    std::size_t i = 0;
-    while (i < text.size()) {
-        if (!is_alpha(text[i])) {
-            ++i;
-            continue;
-        }
-        const std::size_t start = i;
-        while (i < text.size() && is_alpha(text[i])) { ++i; }
-        std::string word;
-        word.reserve(i - start);
-        for (std::size_t k = start; k < i; ++k) { word.push_back(ascii_lower(text[k])); }
-        if (pred(std::string_view{word})) { return true; }
-    }
-    return false;
-}
-
 /**
  * The same search, but the match must begin and end on a WORD BOUNDARY.
  *
- * `mentions_phrase` is a plain substring test and that is wrong for a phrase
+ * a plain substring test is wrong for a phrase
  * that starts with a digit: "0 down" occurs inside "96000 down", so a stated
  * down payment of 96,000 read as a worded ZERO. Caught by the check that exists
  * to hold that direction -- "a STATED down payment is not a worded zero" -- and
@@ -3572,25 +3485,6 @@ template <typename Pred>
         if (left_ok && right_ok) { return true; }
         from = at + 1;
     }
-}
-
-/** Case-insensitive phrase search, for the one concept whose name is two
- * words. Collapses runs of whitespace so "mortgage  insurance" matches. */
-[[nodiscard]] inline auto mentions_phrase(std::string_view text, std::string_view phrase)
-    -> bool {
-    std::string flat;
-    flat.reserve(text.size());
-    bool space = false;
-    for (const char c : text) {
-        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
-            if (!space && !flat.empty()) { flat.push_back(' '); }
-            space = true;
-            continue;
-        }
-        space = false;
-        flat.push_back(ascii_lower(c));
-    }
-    return flat.find(phrase) != std::string::npos;
 }
 
 /**
@@ -3662,49 +3556,6 @@ auto utterance_states_none_for(std::string_view field, std::string_view user_tex
         return any({"no heloc", "without a heloc", "no second lien",
                     "no home equity"});
     }
-    return false;
-}
-
-auto utterance_names_nothing_for(std::string_view field, std::string_view user_text) -> bool {
-    if (field == "down_payment" || field == "down_payment_percent") {
-        return !detail::mentions_word(user_text, detail::is_down_payment_word);
-    }
-    if (field == "monthly_hoa") {
-        return !detail::mentions_word(user_text, detail::is_hoa_mention_word);
-    }
-    if (field == "monthly_taxes_ins_hoa") {
-        return !detail::mentions_word(user_text, detail::is_escrow_word);
-    }
-    if (field == "pmi_annual_rate" || field == "current_pmi_monthly" ||
-        field == "new_pmi_monthly" || field == "pmi_drop_off_ltv") {
-        return !detail::mentions_word(user_text, detail::is_pmi_word) &&
-               !detail::mentions_phrase(user_text, "mortgage insurance");
-    }
-    if (field == "annual_inflation_rate") {
-        return !detail::mentions_word(user_text, detail::is_inflation_word);
-    }
-    if (field == "annual_home_appreciation" || field == "annual_appreciation_rate" ||
-        field == "annual_appreciation") {
-        return !detail::mentions_word(user_text, detail::is_appreciation_word);
-    }
-    if (field == "annual_rent_increase" || field == "annual_expense_increase" ||
-        field == "annual_cost_growth") {
-        return !detail::mentions_word(user_text, detail::is_growth_word);
-    }
-    if (field == "heloc_drawn_amount" || field == "heloc_annual_rate" ||
-        field == "heloc_term_years") {
-        return !detail::mentions_word(user_text, detail::is_heloc_word) &&
-               !detail::mentions_phrase(user_text, "home equity") &&
-               !detail::mentions_phrase(user_text, "equity line") &&
-               !detail::mentions_phrase(user_text, "line of credit");
-    }
-    if (field == "cash_out_amount") {
-        return !detail::mentions_phrase(user_text, "cash out") &&
-               !detail::mentions_phrase(user_text, "cash-out") &&
-               !detail::mentions_word(user_text,
-                                      [](std::string_view w) { return w == "cashout"; });
-    }
-    // No concept list: never defaulted. See the declaration -- fails closed.
     return false;
 }
 
@@ -3866,9 +3717,10 @@ auto lex_numeric_literals(std::string_view text) -> std::vector<NumericLiteral> 
         bool negative_prefix = false;
         {
             std::size_t back = start;
-            if (back > 0 && text[back - 1] == ' ') --back;
+            bool spaced_after = false;  // whitespace between the hyphen and the figure
+            if (back > 0 && text[back - 1] == ' ') { --back; spaced_after = true; }
             if (back > 0 && text[back - 1] == '$') --back;
-            if (back > 0 && text[back - 1] == ' ') --back;
+            if (back > 0 && text[back - 1] == ' ') { --back; spaced_after = true; }
             if (back > 0 && text[back - 1] == '-') {
                 // A DOUBLE hyphen is an em dash, not a sign, and reading it as
                 // one negates the next figure in the sentence.
@@ -3892,7 +3744,39 @@ auto lex_numeric_literals(std::string_view text) -> std::vector<NumericLiteral> 
                 // that guard is the reason this walk-back exists at all; the
                 // fix narrows the dash out rather than dropping the sign.
                 const bool em_dash = back >= 2 && text[back - 2] == '-';
-                negative_prefix = !em_dash;
+                // A HYPHEN WITH WHITESPACE ON BOTH SIDES IS A DASH, NOT A SIGN. "Atlanta - 479k loan"
+                // and "Denver - $658,600 house" lexed -479,000 and -658,600, so the correct principal
+                // grounded against nothing ("the nearest figure you gave is 180") -- a city or a label
+                // before a dash is how a visitor opens a question, and the sweep found it the day those
+                // rows entered the mix (3 of 466 refused against their own gold). A minus is attached to
+                // its figure ("-$250,000", "-100k", "x -5000"); one that stands apart from both
+                // neighbours separates clauses. Reading it as a dash is also the SAFE direction: a
+                // negative literal is meaningful only on a cash-flow series, and M8 grounds either sign
+                // there.
+                //
+                // WHAT THE WORD BEFORE IT SAYS. "a balance of - $1,200" is a minus: the hyphen follows a
+                // connective that is waiting for an operand. "Atlanta - 479k" is a dash: it follows a
+                // label. Anything that is not a word (a colon, comma, bracket, digit or "=") before a
+                // spaced hyphen is read as a minus, as it always was.
+                const std::size_t hyphen = back - 1;
+                const bool spaced_before = hyphen == 0 || std::isspace(static_cast<unsigned char>(text[hyphen - 1])) != 0;
+                bool follows_label = false;
+                if (spaced_before && spaced_after && hyphen > 0) {
+                    std::size_t k = hyphen;
+                    while (k > 0 && std::isspace(static_cast<unsigned char>(text[k - 1])) != 0) --k;
+                    std::size_t word_begin = k;
+                    while (word_begin > 0 && detail::is_alpha(text[word_begin - 1])) --word_begin;
+                    if (word_begin < k) {
+                        std::string word;
+                        for (std::size_t q = word_begin; q < k; ++q) {
+                            word += static_cast<char>(std::tolower(static_cast<unsigned char>(text[q])));
+                        }
+                        constexpr std::array<std::string_view, 14> kConnectives{
+                            "of", "is", "was", "are", "at", "by", "to", "for", "be", "equals", "now", "then", "with", "than"};
+                        follows_label = std::ranges::find(kConnectives, std::string_view{word}) == kConnectives.end();
+                    }
+                }
+                negative_prefix = !em_dash && !follows_label;
             }
         }
 
@@ -3932,6 +3816,12 @@ auto lex_numeric_literals(std::string_view text) -> std::vector<NumericLiteral> 
                 while (w < text.size() && (text[w] == ' ' || text[w] == '-')) ++w;
                 while (w < text.size() && detail::is_alpha(text[w])) ++w;
                 lit.end = w;
+                // THE ADJACENCY SCANS BELOW READ FROM `i`, so it must sit past the word too. Left at
+                // the end of the digits they read "percent" as the next word and never reached "down":
+                // "a 472k house with 30 percent down" tagged no down payment, so the loan netting
+                // that grounds 330,400 never ran and a correct parse was refused. "30%" worked and
+                // "30 percent" did not, which is not a distinction a visitor makes.
+                i = w;
             } else if (word == "k" || word == "thousand") {
                 lit.tag = LiteralTag::Money;
                 lit.scale = 1'000;
@@ -3964,13 +3854,56 @@ auto lex_numeric_literals(std::string_view text) -> std::vector<NumericLiteral> 
         {
             const std::string w1 = detail::next_word(text, i);
             if (w1 == "vacancy" || w1 == "vacant" || w1 == "vacancies") {
-                // The word FOLLOWS the figure in every phrasing people use:
+                // The word FOLLOWS the figure in the phrasing the corpus teaches:
                 // "8% vacancy", "budget 5% vacancy". One word, no window --
                 // this flag removes candidates, so a false positive refuses a
                 // correct parse.
                 lit.names_vacancy = true;
+            } else if (lit.tag == LiteralTag::Percent) {
+                // ...and it PRECEDES the figure in the phrasing visitors use: "vacancy 10%", "vacancy rate
+                // of 10%", "vacancy at 8%". Looked for at most three words back, only up to the
+                // nearest other figure, and only on a PERCENT so a dollar amount is never a vacancy.
+                std::size_t back = lit.offset;
+                for (int step = 0; step < 3 && !lit.names_vacancy; ++step) {
+                    std::size_t t = back;
+                    bool crossed_figure = false;
+                    while (t > 0 && !detail::is_alpha(text[t - 1])) {
+                        if (detail::is_digit(text[t - 1]) || text[t - 1] == '.' || text[t - 1] == ';') { crossed_figure = true; break; }
+                        --t;
+                    }
+                    if (crossed_figure) break;
+                    const std::string wp = detail::prev_word(text, back);
+                    if (wp.empty()) break;
+                    if (wp == "vacancy" || wp == "vacant" || wp == "vacancies") {
+                        // ...unless a figure of its own already stands right before the word:
+                        // "a 5% vacancy rate at 7.75% fixed" is the 5's, and the 7.75 is a loan rate.
+                        std::size_t word_end = back;
+                        while (word_end > 0 && !detail::is_alpha(text[word_end - 1])) --word_end;
+                        std::size_t word_begin = word_end;
+                        while (word_begin > 0 && detail::is_alpha(text[word_begin - 1])) --word_begin;
+                        std::size_t before = word_begin;
+                        while (before > 0 && text[before - 1] == ' ') --before;
+                        const bool claimed = before > 0 && (text[before - 1] == '%' || detail::is_digit(text[before - 1]));
+                        if (!claimed) lit.names_vacancy = true;
+                        break;
+                    }
+                    static constexpr std::array<std::string_view, 6> kLinks{"rate", "of", "at", "is", "about", "around"};
+                    if (std::ranges::find(kLinks, std::string_view{wp}) == kLinks.end()) break;
+                    while (back > 0 && !detail::is_alpha(text[back - 1])) --back;
+                    while (back > 0 && detail::is_alpha(text[back - 1])) --back;
+                }
             }
-            if (w1 == "down" || w1 == "downpayment" || w1 == "deposit") {
+            // "DOWN TO" IS A MOVEMENT, NOT A DEPOSIT: "a 25-year refi; 5.375% down to 4.375%" tagged the
+            // current rate as a down payment, and M0 refuses a down payment as a rate, so the stated
+            // 5.375% was refused against its own utterance. The word after "down" tells them apart.
+            bool down_to = false;
+            if (w1 == "down") {
+                std::size_t j = i;
+                while (j < text.size() && (text[j] == ' ' || text[j] == '-')) ++j;
+                while (j < text.size() && detail::is_alpha(text[j])) ++j;
+                down_to = detail::next_word(text, j) == "to";
+            }
+            if ((w1 == "down" && !down_to) || w1 == "downpayment" || w1 == "deposit") {
                 lit.names_down_payment = true;
             } else if (w1 == "as" || w1 == "for" || w1 == "with") {
                 // "20% as a down payment" -- one filler word, no more. A
@@ -4051,9 +3984,11 @@ auto lex_numeric_literals(std::string_view text) -> std::vector<NumericLiteral> 
             }
             if (!lit.names_increment) {
                 const std::string wp = detail::prev_word(text, lit.offset);
-                static constexpr std::array<std::string_view, 3> kBefore{
-                    "extra", "additional", "another"};
-                if (detail::names_concept(kBefore, wp)) {
+                static constexpr std::array<std::string_view, 7> kBefore{
+                    "extra", "additional", "another", "add", "adding", "overpay", "overpaying"};
+                // "+1000 extra $300 HOA": the 'extra' belongs to the +1000 that precedes it, and the
+                // HOA word right after the 300 says what that is.
+                if (detail::names_concept(kBefore, wp) && !detail::is_hoa_word(detail::next_word(text, i))) {
                     lit.names_increment = true;
                 }
             }
@@ -4168,20 +4103,96 @@ auto lex_numeric_literals(std::string_view text) -> std::vector<NumericLiteral> 
                                            text[j] == '-' || text[j] == ',')) {
                     ++j;
                 }
-                if (j < text.size() && (text[j] == '.' || text[j] == ';')) break;
+                if (j < text.size() && (text[j] == '.' || text[j] == ';' || text[j] == '?' || text[j] == '!' || text[j] == '\n')) break;
                 const std::string w = detail::next_word(text, j);
                 if (w.empty()) break;
-                if (is_hoa_word(w)) lit.names_hoa = true;
+                if (detail::is_condo_word(w)) {
+                    // Only "condo <fee word>" is dues; a bare "condo" is the kind of property.
+                    std::size_t k = j;
+                    while (k < text.size() && detail::is_alpha(text[k])) ++k;
+                    while (k < text.size() && (text[k] == ' ' || text[k] == '-')) ++k;
+                    if (detail::is_charge_word(detail::next_word(text, k))) lit.names_hoa = true;
+                } else if (is_hoa_word(w)) {
+                    // A COST WORD FOLLOWED STRAIGHT AWAY BY ITS OWN FIGURE GOVERNS THAT FIGURE.
+                    // "a $387,000 home HOA 100/month" and "$339,600 borrowed HOA $275/month" made the
+                    // price and the loan HOA dues, because the word was searched for up to four words
+                    // after EVERY figure; the 6,000-row sweep found six refusals of this one shape
+                    // ("your wording makes it an HOA or association fee ... so it cannot fill this field")
+                    // while the 500-row gate was green. "$200 HOA, then ..." (a comma) is unchanged.
+                    std::size_t k = j;
+                    while (k < text.size() && detail::is_alpha(text[k])) ++k;   // past the HOA word
+                    bool governs_next = false;
+                    for (int filler = 0; filler < 3 && k < text.size(); ++filler) {
+                        while (k < text.size() && (text[k] == ' ' || text[k] == ':')) ++k;
+                        if (k >= text.size()) break;
+                        if (detail::is_digit(text[k]) || text[k] == '$') { governs_next = true; break; }
+                        const std::string fw = detail::next_word(text, k);
+                        static constexpr std::array<std::string_view, 12> kFillers{
+                            "fee", "fees", "dues", "of", "is", "are", "at", "about", "around", "cost", "costs", "payment"};
+                        if (std::ranges::find(kFillers, std::string_view{fw}) == kFillers.end()) break;
+                        while (k < text.size() && detail::is_alpha(text[k])) ++k;
+                    }
+                    if (governs_next) break;
+                    lit.names_hoa = true;
+                }
                 while (j < text.size() && detail::is_alpha(text[j])) ++j;
             }
             if (!lit.names_hoa) {
                 std::size_t back = lit.offset;
                 for (int step = 0; step < 3 && !lit.names_hoa; ++step) {
+                    // ANOTHER FIGURE BETWEEN THE WORD AND THIS ONE: the word belongs to that figure.
+                    // "over 15 yrs, $150 HOA dues, rent $5k, $667,000" read the price as dues three
+                    // words back, across the $5k.
+                    {
+                        std::size_t t = back;
+                        bool crossed_figure = false;
+                        while (t > 0 && !detail::is_alpha(text[t - 1])) {
+                            if (detail::is_digit(text[t - 1])) { crossed_figure = true; break; }
+                            --t;
+                        }
+                        if (crossed_figure) break;
+                    }
                     const std::string wp = detail::prev_word(text, back);
                     if (wp.empty()) break;
-                    if (is_hoa_word(wp)) { lit.names_hoa = true; break; }
+                    if (detail::is_condo_word(wp)) {
+                        // "condo 300k" is a property; the charge reads "condo fee 275", which the
+                        // fee word below catches from the other side.
+                    } else if (detail::is_charge_word(wp) && !is_hoa_word(wp)) {
+                        // "condo fee is 275": a fee word with "condo" right before it.
+                        std::size_t k = back;
+                        while (k > 0 && !detail::is_alpha(text[k - 1])) --k;
+                        while (k > 0 && detail::is_alpha(text[k - 1])) --k;
+                        // `k` now sits at the start of the fee word; the word before it:
+                        if (detail::is_condo_word(detail::prev_word(text, k))) { lit.names_hoa = true; break; }
+                    } else if (is_hoa_word(wp)) {
+                        // ...unless a figure of its own stands right before the word: "$150 HOA dues
+                        // 1139000 home" -- the dues are the 150, and the 1139000 is the price. A unit
+                        // word between ("$150/mo HOA", "275 a month HOA") does not break the claim.
+                        std::size_t word_end = back;
+                        while (word_end > 0 && !detail::is_alpha(text[word_end - 1])) --word_end;
+                        std::size_t before = word_end;
+                        while (before > 0 && detail::is_alpha(text[before - 1])) --before;
+                        bool claimed = false;
+                        for (int unit = 0; unit < 7 && !claimed; ++unit) {
+                            while (before > 0 && (text[before - 1] == ' ' || text[before - 1] == '/')) --before;
+                            if (before > 0 && (detail::is_digit(text[before - 1]) || text[before - 1] == '%')) { claimed = true; break; }
+                            std::size_t wb = before;
+                            while (wb > 0 && detail::is_alpha(text[wb - 1])) --wb;
+                            if (wb == before) break;
+                            const std::string uw = detail::next_word(text, wb);
+                            // The rest of the HOA PHRASE ("$300 hoa dues": 'dues' has 'hoa' before it) and a
+                            // unit word both sit between the word and its figure.
+                            if (uw != "mo" && uw != "month" && uw != "monthly" && uw != "yr" && uw != "year" &&
+                                uw != "a" && uw != "per" && uw != "k" && uw != "in" && uw != "for" && uw != "of" &&
+                                uw != "on" && uw != "toward" && uw != "towards" && !is_hoa_word(uw) && !detail::is_charge_word(uw)) break;
+                            before = wb;
+                        }
+                        if (!claimed) { lit.names_hoa = true; }
+                        break;
+                    }
                     while (back > 0 && !detail::is_alpha(text[back - 1])) {
-                        if (text[back - 1] == '.' || text[back - 1] == ';') { back = 0; break; }
+                        if (text[back - 1] == '.' || text[back - 1] == ';' || text[back - 1] == '?' ||
+                            text[back - 1] == '!' || text[back - 1] == '\n') { back = 0; break; }
                         --back;
                     }
                     while (back > 0 && detail::is_alpha(text[back - 1])) --back;
@@ -4368,61 +4379,39 @@ auto MortgageParamsDomain::translate(const MortgageParamsInput& in) const -> Ver
         }
     }
 
-    // ---- G2b: every declared field must be emitted ----
+    // ---- G2b: every ESSENTIAL input must be emitted ----
     //
-    // The training format emits the COMPLETE key set for an operation
-    // (`build_mortgage_dataset.py`'s `params_block` asserts exactly that),
-    // so a missing key is a model defect, not an abbreviation. Refusing it
-    // is what keeps gate 4's rule -- never a fabricated default -- true at
-    // field granularity as well as at block granularity: the alternative is
-    // a service filling `annual_rate` with a proto zero and pricing an
-    // interest-free mortgage.
-    for (const auto& spec : declared) {
-        // A field this operation's own contract excludes is not required.
-        // It may still be EMITTED -- G2a keeps accepting it, which is what
-        // lets the deployed model keep parsing unchanged -- it simply no
-        // longer has to be. See kOperationExcludedFields.
-        if (detail::is_excluded_field(in.operation, spec.field)) {
-            continue;
-        }
-        // Nor is a field the chosen VARIANT does not read. The serving side
-        // DROPS these before building `in.fields` (mortgage_assistant_service),
-        // so requiring them here refuses the very parse that drop enables --
-        // which is exactly what happened when the drop shipped without this:
-        // ComputeDepreciation went from `"factor" = 3 ungrounded` to
-        // `"period" ... was not emitted`, trading one refusal for another.
-        //
-        // The variant comes from the model's OWN emitted enum, so a request
-        // that omits or garbles it drops nothing and every field stays
-        // required -- the fail-closed direction.
-        if (const auto governing = detail::variant_governing_field(in.operation);
-            !governing.empty()) {
-            std::string_view variant;
+    // THIS WAS "EVERY DECLARED FIELD" until 2026-10-06, and that is what made the assistant zero-fill
+    // everything the visitor never said (see section 6b). The training format still emits the
+    // complete key set, and the service now shapes that down to what was STATED before it gets
+    // here, so what this gate guards is the one thing shaping cannot invent: an input without which
+    // the calculation is undefined. A missing price must still never become a proto zero and a
+    // priced-at-nothing house -- it is a question, and `shape_stated_params` is what asks it.
+    //
+    // The variant comes from the model's OWN emitted enum, so a garbled or absent one reads as the
+    // proto default and the strictest straight-line requirement applies.
+    {
+        std::string_view variant;
+        if (const auto governing = detail::variant_governing_field(in.operation); !governing.empty()) {
             for (const auto& emitted : in.fields) {
                 if (emitted.name == governing && emitted.values.size() == 1) {
                     variant = emitted.values.front();
                     break;
                 }
             }
-            if (!variant.empty() &&
-                detail::is_variant_inert_field(in.operation, variant, spec.field)) {
-                continue;
-            }
         }
-        bool present = false;
-        for (const auto& emitted : in.fields) {
-            if (emitted.name == spec.field) {
-                present = true;
-                break;
+        for (const auto& req : essential_requirements(in.operation, variant)) {
+            const bool present = std::ranges::any_of(req.any_of, [&](std::string_view member) {
+                return std::ranges::any_of(in.fields, [&](const auto& e) { return e.name == member; });
+            });
+            if (!present) {
+                f.violated = true;
+                f.reason = ReasonCode::MissingField;
+                f.field = std::string{req.any_of.front()};
+                f.detail = "\"" + f.field + "\" is essential to " + in.operation +
+                           " and was not emitted; it will not be defaulted";
+                return f;
             }
-        }
-        if (!present) {
-            f.violated = true;
-            f.reason = ReasonCode::MissingField;
-            f.detail = std::string{"\""} + std::string{spec.field} + "\" is declared on " +
-                       in.operation + "'s request message but was not emitted; it will not be "
-                       "defaulted";
-            return f;
         }
     }
 
@@ -4575,8 +4564,6 @@ auto ground_emitted_values(const MortgageParamsInput& input, std::string_view us
             continue;  // enums and booleans are settled by G2, not by grounding
         }
 
-        const __int128 tolerance = detail::slot_tolerance_units(kind);
-
         for (const auto& raw : emitted.values) {
             const auto parsed = parse_strict_decimal(raw);
             if (!parsed.has_value()) {
@@ -4609,29 +4596,12 @@ auto ground_emitted_values(const MortgageParamsInput& input, std::string_view us
             // kConventionValues.
             if (detail::cadence_word_grounds(emitted.name, *parsed, user_text)) continue;
 
-            bool grounded = false;
-            for (const auto& lit : literals) {
-                for (const auto& candidate :
-                     detail::expand_candidates(lit, kind, emitted.name, periods_per_year)) {
-                    if (parsed->within(candidate, tolerance)) {
-                        grounded = true;
-                        break;
-                    }
-                }
-                if (grounded) break;
-            }
-
-            // M9 -- the binary map, consulted only after every unary one has
-            // failed, so the common path pays nothing for it.
-            if (!grounded) {
-                for (const auto& candidate :
-                     detail::expand_netted_loan(literals, kind, emitted.name)) {
-                    if (parsed->within(candidate, tolerance)) {
-                        grounded = true;
-                        break;
-                    }
-                }
-            }
+            // ONE grounding predicate, shared with the stated-only filter: what counts as
+            // "the visitor said it" must not differ between the gate that refuses a value and
+            // the filter that decides whether to serve one. M9 (the binary map) is consulted
+            // inside it, only after every unary map has failed.
+            const bool grounded = detail::grounded_by_literal(literals, periods_per_year, kind,
+                                                              emitted.name, *parsed);
 
             if (!grounded) {
                 // Name the closest literal the text does contain, so the
@@ -4936,36 +4906,830 @@ auto utterance_states_nothing_for(std::string_view field, std::string_view user_
     return true;
 }
 
-auto clarifying_question(std::string_view operation, std::string_view field) -> std::string {
-    // The WORDING comes from the corpus's own clarification rows, so the
-    // question a user sees here is the question the model was trained to ask.
-    // Two sources for one sentence would drift, and the corpus is the one that
-    // also teaches the model what the reply means.
-    (void)operation;
-    if (field == "periods" || field == "term_months" || field == "loan_term_years" ||
-        field == "new_term_years" || field == "repayment_term_years") {
-        return "Over how many years?";
+// ---------------------------------------------------------------------------
+// 6b. Essential requirements, and what the visitor stated.
+// ---------------------------------------------------------------------------
+
+namespace detail {
+
+struct EssentialEntry {
+    std::string_view operation;
+    std::string_view field;
+    /// "" = required on its own; the same non-empty name on several rows = at least ONE of them.
+    std::string_view group;
+    /// "" = every variant; else the governing enum's values this row applies to, joined by '|'.
+    std::string_view variants;
+};
+
+/**
+ * THE ESSENTIAL INPUTS, per operation. Read the comment on each block: a row that is MISSING is a
+ * decision, and the reason is beside the operation, because "why does it not ask for X" is the
+ * question this table gets.
+ *
+ * The rule: essential = what the calculation is UNDEFINED without, as the visitor would put it.
+ * `finance_service.cpp` is the floor (its REQUIRE_DECIMAL fields and the integers it refuses at
+ * zero), narrowed by one reading -- an input that is a MODELLING ASSUMPTION which the calculator's
+ * own form already holds is not something to interrogate a visitor about. Those are exactly the
+ * fields mortgage-nest-egg must complete from its form before it calls Finance (it passes this
+ * answer through unchanged): see the report that accompanied this change.
+ */
+inline constexpr auto kEssentialFields = std::to_array<EssentialEntry>({
+    // Loans: principal, rate and term. Overpayment, PMI, home value, upkeep and dues are things
+    // a visitor volunteers, and none of them changes whether a schedule exists.
+    {"ComputeAmortization", "loan_amount", "", ""},
+    {"ComputeAmortization", "annual_rate", "", ""},
+    {"ComputeAmortization", "term_months", "", ""},
+    // The detailed schedule exists to show a tax deduction, so the bracket is the question.
+    {"ComputeDetailedAmortization", "loan_amount", "", ""},
+    {"ComputeDetailedAmortization", "annual_rate", "", ""},
+    {"ComputeDetailedAmortization", "term_months", "", ""},
+    {"ComputeDetailedAmortization", "annual_tax_rate", "", ""},
+    {"ComputeAmortizationBatch", "loan_amounts", "", ""},
+    {"ComputeAmortizationBatch", "annual_rates", "", ""},
+    {"ComputeAmortizationBatch", "term_months", "", ""},
+    // Time value of money.
+    {"ComputePayment", "rate", "", ""},
+    {"ComputePayment", "periods", "", ""},
+    {"ComputePayment", "present_value", "", ""},
+    {"ComputeRate", "periods", "", ""},
+    {"ComputeRate", "payment", "", ""},
+    {"ComputeRate", "present_value", "", ""},
+    {"ComputePeriods", "rate", "", ""},
+    {"ComputePeriods", "payment", "", ""},
+    {"ComputePeriods", "present_value", "", ""},
+    {"ComputeInterestPayment", "rate", "", ""},
+    {"ComputeInterestPayment", "period", "", ""},
+    {"ComputeInterestPayment", "periods", "", ""},
+    {"ComputeInterestPayment", "present_value", "", ""},
+    {"ComputePrincipalPayment", "rate", "", ""},
+    {"ComputePrincipalPayment", "period", "", ""},
+    {"ComputePrincipalPayment", "periods", "", ""},
+    {"ComputePrincipalPayment", "present_value", "", ""},
+    // A LUMP SUM states no payment and a stream of payments states no starting amount: the engine
+    // reads an absent one as zero, so what must exist is AT LEAST ONE cash flow.
+    {"ComputePresentValue", "rate", "", ""},
+    {"ComputePresentValue", "periods", "", ""},
+    {"ComputePresentValue", "payment", "cash_flow", ""},
+    {"ComputePresentValue", "future_value", "cash_flow", ""},
+    {"ComputeFutureValue", "rate", "", ""},
+    {"ComputeFutureValue", "periods", "", ""},
+    {"ComputeFutureValue", "payment", "cash_flow", ""},
+    {"ComputeFutureValue", "present_value", "cash_flow", ""},
+    // Savings: a rate, a horizon and something being saved. The compounding frequency is NOT here:
+    // the engine refuses zero rather than defaulting it, so mortgage-nest-egg completes it from
+    // its form (or the visitor says "compounded monthly").
+    {"ComputeFutureValueDetailed", "annual_rate", "", ""},
+    {"ComputeFutureValueDetailed", "years", "", ""},
+    {"ComputeFutureValueDetailed", "current_principal", "saving", ""},
+    {"ComputeFutureValueDetailed", "annual_contribution", "saving", ""},
+    {"ComputeCumulative", "component", "", ""},
+    {"ComputeCumulative", "rate", "", ""},
+    {"ComputeCumulative", "periods", "", ""},
+    {"ComputeCumulative", "present_value", "", ""},
+    {"ComputeCumulative", "start_period", "", ""},
+    {"ComputeCumulative", "end_period", "", ""},
+    // Cash flows. A guess is a solver seed and no visitor states one.
+    {"ComputeNpv", "rate", "", ""},
+    {"ComputeNpv", "values", "", ""},
+    {"ComputeIrr", "values", "", ""},
+    {"ComputeXnpv", "rate", "", ""},
+    {"ComputeXnpv", "values", "", ""},
+    {"ComputeXnpv", "dates", "", ""},
+    {"ComputeXirr", "values", "", ""},
+    {"ComputeXirr", "dates", "", ""},
+    {"ComputePaybackPeriod", "values", "", ""},
+    // Depreciation: cost always; then what the chosen METHOD reads. Salvage and the declining
+    // factor are optional by the engine's own definition (zero salvage, double declining).
+    {"ComputeDepreciation", "cost", "", ""},
+    {"ComputeDepreciation", "life", "", "STRAIGHT_LINE|SUM_OF_YEARS_DIGITS|DECLINING_BALANCE"},
+    {"ComputeDepreciation", "period", "", "SUM_OF_YEARS_DIGITS|DECLINING_BALANCE"},
+    {"ComputeDepreciation", "recovery_period", "", "MACRS"},
+    {"ComputeDepreciation", "year", "", "MACRS"},
+    // Mortgages on the books. A HELOC question is "how much equity do I have": the cap, the rate
+    // and the term only matter once a draw is stated, and the calculator's form holds them.
+    {"ComputeHeloc", "home_value", "", ""},
+    {"ComputeHeloc", "current_mortgage_balance", "", ""},
+    // A refinance is a balance, the rate it has and the rate it could have. The payment, the
+    // remaining term and the closing costs are what the visitor's own loan page already holds.
+    {"ComputeRefinance", "current_loan_balance", "", ""},
+    {"ComputeRefinance", "current_annual_rate", "", ""},
+    {"ComputeRefinance", "new_annual_rate", "", ""},
+    // Paying off sooner is undefined without the payment it speeds up.
+    {"ComputePayoffTiming", "current_loan_balance", "", ""},
+    {"ComputePayoffTiming", "annual_rate", "", ""},
+    {"ComputePayoffTiming", "current_monthly_payment", "", ""},
+    // A recast is a balance and the lump sum; the loan's own terms are on the visitor's form.
+    {"ComputeMortgageRecast", "current_loan_balance", "", ""},
+    {"ComputeMortgageRecast", "lump_sum_payment", "", ""},
+    {"ComputeHomeFutureValue", "current_property_value", "", ""},
+    {"ComputeHomeFutureValue", "target_years", "", ""},
+    // Buying. A price, and what renting costs. The rate, the term, the appreciation and the
+    // investment return are assumptions the form holds -- and this is the operation the owner's
+    // live report was refused on.
+    {"ComputeRentVsBuy", "property_price", "", ""},
+    {"ComputeRentVsBuy", "current_monthly_rent", "", ""},
+    {"ComputeHomeNpv", "property_price", "", ""},
+    {"ComputeHomeNpv", "monthly_rent_saved", "", ""},
+    // Closing costs need a price. The rate is used ONLY for prepaid interest and the down payment
+    // only sizes the loan: both are what the closing-costs form already holds.
+    {"ComputeClosingCosts", "home_price", "", ""},
+    // Rentals. ROI is a ratio of four things the visitor knows; the cash-flow model needs a
+    // price and a rent and carries everything else as an assumption.
+    {"ComputeRentalRoi", "property_value", "", ""},
+    {"ComputeRentalRoi", "total_cash_invested", "", ""},
+    {"ComputeRentalRoi", "periodic_gross_rent", "", ""},
+    {"ComputeRentalRoi", "periodic_operating_expenses", "", ""},
+    {"ComputeRentalCashFlow", "property_price", "", ""},
+    {"ComputeRentalCashFlow", "monthly_gross_rent", "", ""},
+});
+
+/** The value an operation's governing enum has when nothing was said: what omission already
+ *  means to the engine. */
+[[nodiscard]] constexpr auto variant_default(std::string_view operation) -> std::string_view {
+    return operation == "ComputeDepreciation" ? std::string_view{"STRAIGHT_LINE"} : std::string_view{};
+}
+
+[[nodiscard]] constexpr auto variant_listed(std::string_view variants, std::string_view value) -> bool {
+    std::size_t at = 0;
+    while (at <= variants.size()) {
+        const auto bar = variants.find('|', at);
+        const auto end = bar == std::string_view::npos ? variants.size() : bar;
+        if (variants.substr(at, end - at) == value) { return true; }
+        if (bar == std::string_view::npos) { break; }
+        at = bar + 1;
     }
-    if (field == "years" || field == "recovery_period") { return "Over how many years?"; }
-    if (field == "annual_rate" || field == "rate" || field == "loan_annual_rate" ||
-        field == "new_annual_rate" || field == "current_annual_rate") {
-        return "What's the interest rate?";
+    return false;
+}
+
+/** Everything grounding needs, computed ONCE per request. */
+struct StatementContext {
+    const MortgageParamsInput& input;
+    std::string_view text;
+    std::string lower;
+    std::vector<NumericLiteral> literals;
+    std::int64_t periods_per_year = 12;
+};
+
+[[nodiscard]] inline auto lower_has(const std::string& lower, std::string_view needle) -> bool {
+    return lower.find(needle) != std::string::npos;
+}
+
+/**
+ * The visitor calls THIS figure a property -- "a $600,000 house", "house is worth 600000", "home
+ * value of $450k" -- as opposed to a loan on one ("$350,000 home loan").
+ *
+ * It exists for `original_home_value`, the one field the model fills from the LOAN literal
+ * whenever nothing else is stated: the corpus labelled it equal to the loan on every row that
+ * gave no home value, so the model learned to point one number at two slots. Grounding is per
+ * field, so nothing says the second pointing is wrong; this does.
+ */
+[[nodiscard]] inline auto literal_names_property(std::string_view text, const NumericLiteral& lit) -> bool {
+    static constexpr std::array<std::string_view, 12> kAfter{
+        "house", "home", "property", "condo", "townhouse", "townhome", "apartment",
+        "duplex", "place", "worth", "valuation", "appraisal"};
+    static constexpr std::array<std::string_view, 12> kBefore{
+        "worth", "valued", "value", "price", "priced", "appraised", "appraisal", "cost",
+        "costs", "purchase", "asking", "valuation"};
+    static constexpr std::array<std::string_view, 5> kLoanWords{"loan", "loans", "mortgage", "equity", "payment"};
+    const auto in_list = [](const auto& list, std::string_view w) {
+        return std::ranges::find(list, w) != list.end();
+    };
+    // Forward: "$600,000 house", "$600k home with ...". The word right after the figure.
+    {
+        std::size_t j = lit.end;
+        const std::string w1 = next_word(text, j);
+        if (in_list(kAfter, w1)) {
+            // "house" then "loan" is a loan.
+            std::size_t k = j;
+            while (k < text.size() && (text[k] == ' ' || text[k] == '-')) { ++k; }
+            while (k < text.size() && is_alpha(text[k])) { ++k; }
+            const std::string w2 = next_word(text, k);
+            if (!in_list(kLoanWords, w2)) { return true; }
+        }
     }
-    if (field == "max_ltv_rate") { return "What's the maximum loan-to-value?"; }
-    if (field == "periodic_operating_expenses" || field == "annual_other_expenses") {
-        return "What do operating expenses run per month -- taxes, insurance, maintenance?";
+    // Backward, three words, stopping at a sentence boundary: "house is worth 600000".
+    std::size_t back = lit.offset;
+    for (int step = 0; step < 3; ++step) {
+        const std::string wp = prev_word(text, back);
+        if (wp.empty()) { break; }
+        if (in_list(kBefore, wp)) { return true; }
+        while (back > 0 && !is_alpha(text[back - 1])) {
+            if (text[back - 1] == '.' || text[back - 1] == ';') { return false; }
+            --back;
+        }
+        while (back > 0 && is_alpha(text[back - 1])) { --back; }
+        if (back == 0) { break; }
     }
-    if (field == "loan_amount" || field == "present_value" || field == "property_price" ||
-        field == "property_value" || field == "home_value") {
-        return "How much is the loan or the property worth?";
+    return false;
+}
+
+[[nodiscard]] inline auto enum_evidence(const StatementContext& ctx, const EmittedField& f) -> Evidence {
+    const std::string& v = f.values.front();
+    const auto& L = ctx.lower;
+    if (f.name == "component") {
+        const bool interest = lower_has(L, "interest");
+        const bool principal = lower_has(L, "principal");
+        if (v == "INTEREST") { return interest ? Evidence::Stated : Evidence::Defaulted; }
+        if (v == "PRINCIPAL") { return principal ? Evidence::Stated : Evidence::Defaulted; }
+        return Evidence::Unsupported;
     }
-    if (field == "down_payment") { return "How much are you putting down?"; }
-    if (field == "monthly_gross_rent" || field == "periodic_gross_rent") {
-        return "What does it rent for?";
+    if (f.name == "method") {
+        if (v == "STRAIGHT_LINE") { return Evidence::Defaulted; }
+        if (v == "DECLINING_BALANCE") {
+            return (lower_has(L, "declining") || lower_has(L, "ddb") || lower_has(L, "double")) ? Evidence::Stated : Evidence::Defaulted;
+        }
+        if (v == "SUM_OF_YEARS_DIGITS") {
+            return (lower_has(L, "sum of") || lower_has(L, "sum-of") || lower_has(L, "syd")) ? Evidence::Stated : Evidence::Defaulted;
+        }
+        if (v == "MACRS") { return lower_has(L, "macrs") ? Evidence::Stated : Evidence::Defaulted; }
+        return Evidence::Unsupported;
     }
-    // No natural wording: the caller keeps the refusal rather than asking a
-    // question built out of a field name, which reads like a stack trace.
+    if (f.name == "closing_cost_type") {
+        if (v != "ROLLED_INTO_LOAN") { return Evidence::Defaulted; }
+        return (lower_has(L, "roll") || lower_has(L, "financ") || lower_has(L, "into the loan") ||
+                lower_has(L, "added to the loan") || lower_has(L, "wrap"))
+                   ? Evidence::Stated : Evidence::Defaulted;
+    }
+    if (f.name == "timing") {
+        if (v != "BEGINNING_OF_PERIOD") { return Evidence::Defaulted; }
+        return (lower_has(L, "annuity due") || lower_has(L, "beginning") || lower_has(L, "start of") ||
+                lower_has(L, "in advance") || lower_has(L, "upfront") || lower_has(L, "up front"))
+                   ? Evidence::Stated : Evidence::Defaulted;
+    }
+    if (f.name == "discounted") {
+        if (v != "true") { return Evidence::Defaulted; }
+        return lower_has(L, "discount") ? Evidence::Stated : Evidence::Defaulted;
+    }
+    return Evidence::Stated;
+}
+
+/**
+ * Whether some figure that grounds `value` for `f` is NOT already the evidence for a DIFFERENT
+ * emitted field.
+ *
+ * It exists for the convention constants (a declining factor of 2, a 15-day prepaid-interest
+ * default, a twelve-payment year): their value is a small integer, and a small integer is the one
+ * thing an utterance is always full of. "double declining balance for YEAR 2" grounds `period = 2`,
+ * and `factor = 2` then found the same "2" and read as the visitor's statement (2026-10-06: a
+ * `factor` nobody gave came back on a depreciation request). Grounding is per field, so nothing
+ * asked whose figure it was. A figure that another non-convention field already stands on is that
+ * field's, and a convention value resting only on such figures is the default it always was.
+ */
+[[nodiscard]] inline auto grounded_by_unclaimed_literal(const StatementContext& ctx, const EmittedField& f,
+                                                        SlotKind kind, const Decimal& v) -> bool {
+    for (const auto& lit : ctx.literals) {
+        const std::vector<NumericLiteral> one{lit};
+        if (!grounded_by_literal(one, ctx.periods_per_year, kind, f.name, v)) { continue; }
+        bool claimed = false;
+        for (const auto& other : ctx.input.fields) {
+            if (other.name == f.name || other.values.empty()) { continue; }
+            const SlotKind other_kind = classify_slot(other.name);
+            if (other_kind == SlotKind::Unclassified || other_kind == SlotKind::Enumeration ||
+                other_kind == SlotKind::Boolean) { continue; }
+            for (const auto& raw : other.values) {
+                const auto ov = parse_strict_decimal(raw);
+                if (!ov.has_value() || ov->is_zero() || is_convention_value(other.name, *ov)) { continue; }
+                if (grounded_by_literal(one, ctx.periods_per_year, other_kind, other.name, *ov)) {
+                    claimed = true;
+                    break;
+                }
+            }
+            if (claimed) { break; }
+        }
+        if (!claimed) { return true; }
+    }
+    return false;
+}
+
+[[nodiscard]] inline auto element_evidence(const StatementContext& ctx, const EmittedField& f,
+                                           SlotKind kind, const std::string& raw) -> Evidence {
+    const auto parsed = parse_strict_decimal(raw);
+    if (!parsed.has_value()) { return Evidence::Unsupported; }  // verification refuses it by name
+    const Decimal& v = *parsed;
+    // A solver seed is something no visitor states.
+    if (is_ungrounded_field(f.name)) { return Evidence::Defaulted; }
+
+    const bool by_literal = grounded_by_literal(ctx.literals, ctx.periods_per_year, kind, f.name, v);
+
+    // A cadence is a count per year and twelve is the unit every calculator here works in: only a
+    // cadence the visitor NAMES is a statement. "monthly payment" says nothing about compounding.
+    if (f.name == "payments_per_year" || f.name == "periods_per_year") {
+        if (v == Decimal::from_integer(12)) { return by_literal ? Evidence::Stated : Evidence::Defaulted; }
+        return (by_literal || cadence_word_grounds(f.name, v, ctx.text)) ? Evidence::Stated : Evidence::Unsupported;
+    }
+    if (f.name == "compound_frequency") {
+        if (by_literal) { return Evidence::Stated; }
+        if (cadence_word_grounds(f.name, v, ctx.text) && lower_has(ctx.lower, "compound")) { return Evidence::Stated; }
+        return v == Decimal::from_integer(12) ? Evidence::Defaulted : Evidence::Unsupported;
+    }
+
+    // A home value equal to the loan is the loan counted twice unless the words call it a home.
+    if (f.name == "original_home_value" && by_literal) {
+        std::optional<Decimal> loan;
+        for (const auto& other : ctx.input.fields) {
+            if ((other.name == "loan_amount" || other.name == "present_value") && other.values.size() == 1) {
+                loan = parse_strict_decimal(other.values.front());
+            }
+        }
+        if (loan.has_value() && *loan == v) {
+            // "$900,000, no down payment": with nothing put down the price IS the loan, and saying
+            // so is stating both. Without this the home value was dropped as the loan counted twice,
+            // which is harmless to the answer (the engine assumes a home worth the loan) and still a
+            // stated figure silently lost.
+            const auto bare_zero_down = [&] {
+                // "0 down" -- but not the tail of "$30,000 down", which contains the same characters.
+                for (std::size_t at = ctx.lower.find("0 down"); at != std::string::npos;
+                     at = ctx.lower.find("0 down", at + 1)) {
+                    const char before = at == 0 ? ' ' : ctx.lower[at - 1];
+                    if (before == ' ' || before == '$' || before == '(' || before == ',') {
+                        if (before != ',') return true;
+                    }
+                }
+                return false;
+            }();
+            if (lower_has(ctx.lower, "no down") || lower_has(ctx.lower, "nothing down") ||
+                lower_has(ctx.lower, "zero down") || lower_has(ctx.lower, "0% down") || bare_zero_down ||
+                lower_has(ctx.lower, "without a down") || lower_has(ctx.lower, "no money down")) {
+                return Evidence::Stated;
+            }
+            for (const auto& lit : ctx.literals) {
+                for (const auto& c : expand_candidates(lit, kind, f.name, ctx.periods_per_year)) {
+                    if (v.within(c, slot_tolerance_units(kind)) && literal_names_property(ctx.text, lit)) {
+                        return Evidence::Stated;
+                    }
+                }
+            }
+            return Evidence::Defaulted;
+        }
+        return Evidence::Stated;
+    }
+
+    if (by_literal) {
+        // A convention constant resting only on figures that ANOTHER emitted field already stands
+        // on is the default it always was; see `grounded_by_unclaimed_literal`.
+        if (!v.is_zero() && is_convention_value(f.name, v) && !grounded_by_unclaimed_literal(ctx, f, kind, v)) {
+            return Evidence::Defaulted;
+        }
+        // A zero that some literal "grounds" because the literal is ALSO zero is a statement; a
+        // zero with no zero literal falls through to the convention below.
+        return Evidence::Stated;
+    }
+    if (v.is_zero()) {
+        return utterance_states_none_for(f.name, ctx.text) ? Evidence::Stated : Evidence::Defaulted;
+    }
+    if (is_convention_value(f.name, v)) { return Evidence::Defaulted; }
+    // A value nothing in the words COULD have supplied is an invention about something the visitor
+    // never mentioned -- the ordinary shape of a model's default (an 80% loan-to-value on a HELOC
+    // question that gave no cap) -- and is dropped like any other default. A value for which a
+    // compatible, unclaimed figure DOES exist is a figure the model got wrong, which stays
+    // UNSUPPORTED so that verification refuses it: `present_value = 304000.00` against a 495,000
+    // utterance is exactly that, and must never be waved through as "not stated".
+    if (utterance_states_nothing_for(f.name, ctx.text, ctx.input)) { return Evidence::Defaulted; }
+    return Evidence::Unsupported;
+}
+
+[[nodiscard]] inline auto field_evidence_of(const StatementContext& ctx, const EmittedField& f) -> Evidence {
+    const SlotKind kind = classify_slot(f.name);
+    if (kind == SlotKind::Unclassified) { return Evidence::Unsupported; }
+    if (kind == SlotKind::Enumeration || kind == SlotKind::Boolean) {
+        if (f.values.size() != 1) { return Evidence::Unsupported; }
+        return enum_evidence(ctx, f);
+    }
+    if (f.values.empty()) { return Evidence::Unsupported; }
+    // An array is stated if ANY element is: [0, 0] extra payments say nothing, [0, 250] say 250.
+    bool any_stated = false;
+    for (const auto& raw : f.values) {
+        switch (element_evidence(ctx, f, kind, raw)) {
+            case Evidence::Unsupported: return Evidence::Unsupported;
+            case Evidence::Stated: any_stated = true; break;
+            case Evidence::Defaulted: break;
+        }
+    }
+    return any_stated ? Evidence::Stated : Evidence::Defaulted;
+}
+
+}  // namespace detail
+
+auto essential_requirements(std::string_view operation, std::string_view variant)
+    -> std::vector<EssentialRequirement> {
+    const std::string_view effective = variant.empty() ? detail::variant_default(operation) : variant;
+    std::vector<EssentialRequirement> out;
+    std::vector<std::string_view> groups;  // groups[i] names out[i], or "" for a singleton
+    for (const auto& e : detail::kEssentialFields) {
+        if (e.operation != operation) { continue; }
+        if (!e.variants.empty() && !detail::variant_listed(e.variants, effective)) { continue; }
+        if (e.group.empty()) {
+            out.push_back(EssentialRequirement{{e.field}});
+            groups.push_back({});
+            continue;
+        }
+        const auto at = std::ranges::find(groups, e.group);
+        if (at == groups.end()) {
+            out.push_back(EssentialRequirement{{e.field}});
+            groups.push_back(e.group);
+        } else {
+            out[static_cast<std::size_t>(at - groups.begin())].any_of.push_back(e.field);
+        }
+    }
+    return out;
+}
+
+namespace detail {
+
+/**
+ * The figures of a RANGE: "between 6% and 7%", "25 to 30 years", "$3,000-$3,500".
+ *
+ * A range states NO single figure, so a value the model took from one end of it is a choice the
+ * visitor never made -- and 6% priced as though they had said 6%. The answer to a range is a
+ * question ("which one?"), so both ends are removed from what can ground a value, and the field
+ * they would have filled is missing (asked, if essential). Two shapes, both narrow on purpose:
+ *   - `between X and Y`;
+ *   - `X to Y` / `X-Y` with X < Y, NOT after "from" (a refinance reads "from 7% to 6%") and NOT
+ *     after a counting word ("months 13 to 24", "payment 25 to 48" are a window, which the
+ *     cumulative operations take as two figures).
+ */
+[[nodiscard]] inline auto range_literal_indices(std::string_view text, const std::vector<NumericLiteral>& lits)
+    -> std::vector<std::size_t> {
+    std::vector<std::size_t> out;
+    const std::string lower = to_lower_copy(text);
+    const auto prior_words = [&](std::size_t at, int count) {
+        std::vector<std::string> words;
+        std::size_t back = at;
+        for (int i = 0; i < count; ++i) {
+            while (back > 0 && !is_alpha(lower[back - 1])) {
+                if (lower[back - 1] == '.' || lower[back - 1] == ';') { return words; }
+                --back;
+            }
+            std::size_t end = back;
+            while (back > 0 && is_alpha(lower[back - 1])) { --back; }
+            if (back == end) { break; }
+            words.push_back(lower.substr(back, end - back));
+        }
+        return words;
+    };
+    for (std::size_t i = 0; i + 1 < lits.size(); ++i) {
+        const auto& a = lits[i];
+        const auto& b = lits[i + 1];
+        if (b.offset < a.end || b.offset > lower.size()) { continue; }
+        std::string gap = lower.substr(a.end, b.offset - a.end);
+        // Drop what rides on a figure (currency, percent, units) so only the connector is left.
+        std::string core;
+        for (const char ch : gap) {
+            if (ch == '$' || ch == '%' || ch == ' ' || ch == ',') { continue; }
+            core += ch;
+        }
+        for (const std::string_view unit : {"years", "year", "yrs", "yr", "months", "month", "percent"}) {
+            const auto at = core.find(unit);
+            if (at == 0) { core.erase(0, unit.size()); break; }
+        }
+        const auto words = prior_words(a.offset, 3);
+        const auto has = [&](std::string_view w) { return std::ranges::find(words, w) != words.end(); };
+        bool range = false;
+        if (core == "and") {
+            range = has("between");
+        } else if (core == "to" || core == "-" || core == "\xE2\x80\x93" || core == "\xE2\x80\x94" ||
+                   core == "through" || core == "thru") {
+            const bool counted = has("month") || has("months") || has("payment") || has("payments") ||
+                                 has("period") || has("periods") || has("year") || has("years") ||
+                                 has("week") || has("weeks");
+            range = !has("from") && !counted &&
+                    a.value.units() * static_cast<__int128>(a.scale) < b.value.units() * static_cast<__int128>(b.scale);
+        }
+        if (range) {
+            out.push_back(i);
+            out.push_back(i + 1);
+        }
+    }
+    return out;
+}
+
+/** `text` with every range figure's digits blanked, so no lexer downstream can ground on them. */
+[[nodiscard]] inline auto mask_ranges(std::string_view text) -> std::string {
+    std::string out{text};
+    const auto lits = lex_numeric_literals(text);
+    for (const auto idx : range_literal_indices(text, lits)) {
+        const auto& lit = lits[idx];
+        for (std::size_t i = lit.offset; i < lit.end && i < out.size(); ++i) { out[i] = ' '; }
+    }
+    return out;
+}
+
+}  // namespace detail
+
+auto shape_stated_params(const MortgageParamsInput& input, std::string_view user_text) -> ShapedParams {
+    const std::string masked = detail::mask_ranges(user_text);
+    detail::StatementContext ctx{.input = input, .text = masked, .lower = detail::to_lower_copy(masked),
+                                 .literals = lex_numeric_literals(masked)};
+    ctx.periods_per_year = detail::infer_periods_per_year(input.fields, ctx.literals).value_or(12);
+
+    // The unmasked reading, for ONE question: was this value taken from an end of a range? A value the
+    // masked words do not support but the full words DO is exactly that, and it is a missing figure
+    // (asked, if essential), not a model error to refuse.
+    detail::StatementContext full{.input = input, .text = user_text, .lower = detail::to_lower_copy(user_text),
+                                  .literals = lex_numeric_literals(user_text)};
+    full.periods_per_year = ctx.periods_per_year;
+    const bool had_range = masked != user_text;
+
+    std::vector<Evidence> evidence;
+    evidence.reserve(input.fields.size());
+    for (const auto& f : input.fields) {
+        auto ev = detail::field_evidence_of(ctx, f);
+        if (had_range && ev == Evidence::Unsupported && detail::field_evidence_of(full, f) == Evidence::Stated) {
+            ev = Evidence::Defaulted;
+        }
+        evidence.push_back(ev);
+    }
+
+    // The variant is the governing enum's value ONLY if the visitor's words support it: a method
+    // the model volunteered with no cue is straight-line, which is what omission means.
+    std::string variant;
+    if (const auto governing = detail::variant_governing_field(input.operation); !governing.empty()) {
+        for (std::size_t i = 0; i < input.fields.size(); ++i) {
+            if (input.fields[i].name == governing && input.fields[i].values.size() == 1 &&
+                evidence[i] != Evidence::Defaulted) {
+                variant = input.fields[i].values.front();
+            }
+        }
+    }
+
+    ShapedParams out;
+    std::vector<std::string> present;
+    for (std::size_t i = 0; i < input.fields.size(); ++i) {
+        if (evidence[i] == Evidence::Defaulted) { continue; }
+        out.kept.push_back(input.fields[i].name);
+    }
+    for (const auto& req : essential_requirements(input.operation, variant)) {
+        const bool met = std::ranges::any_of(req.any_of, [&](std::string_view member) {
+            return std::ranges::find(out.kept, member) != out.kept.end();
+        });
+        if (!met) {
+            out.missing_field = std::string{req.any_of.front()};
+            break;
+        }
+    }
+    return out;
+}
+
+namespace detail {
+
+struct QuestionWording {
+    /// "" = any operation. An operation-specific row is looked up FIRST, because the same field
+    /// name means different things on different calculations (`present_value` is a loan on a
+    /// payment and a starting balance on a savings projection).
+    std::string_view operation;
+    std::string_view field;
+    std::string_view question;
+};
+
+/**
+ * The questions, in plain language. THE VISITOR READS THESE VERBATIM -- the site renders a
+ * clarification's text as the assistant's own words -- so none may name an operation, a proto
+ * field or anything else internal. `test_mortgage_verification` sweeps every essential
+ * requirement of every operation for a wording, which is what makes "no `left out X` refusal
+ * is reachable for an essential field" a property of the table rather than of its authors.
+ *
+ * The oldest wordings are the corpus's own ("Over how many years?"), because they are what the
+ * encoder reads back as context when the visitor answers; the rest follow their phrasing.
+ */
+inline constexpr auto kQuestions = std::to_array<QuestionWording>({
+    // --- how long
+    {"", "periods", "Over how many years?"},
+    {"", "term_months", "Over how many years?"},
+    {"", "loan_term_years", "Over how many years?"},
+    {"", "new_term_years", "Over how many years?"},
+    {"", "repayment_term_years", "Over how many years?"},
+    {"", "years", "Over how many years?"},
+    {"", "recovery_period", "Over how many years?"},
+    {"", "holding_period_years", "How many years will you hold it?"},
+    {"", "target_years", "How many years out?"},
+    {"", "remaining_months", "How many years are left on the loan?"},
+    {"", "current_remaining_months", "How many years are left on the loan?"},
+    {"ComputeDepreciation", "life", "How many years is its useful life?"},
+    {"ComputeDepreciation", "period", "Which year do you want the depreciation for?"},
+    {"ComputeDepreciation", "year", "Which year of the recovery period?"},
+    {"", "period", "Which payment number?"},
+    {"", "start_period", "From which payment number?"},
+    {"", "end_period", "Through which payment number?"},
+    // --- how much
+    {"ComputeAmortization", "loan_amount", "How much is the loan?"},
+    {"ComputeDetailedAmortization", "loan_amount", "How much is the loan?"},
+    {"", "loan_amount", "How much is the loan or the property worth?"},
+    {"ComputeFutureValue", "payment", "How much are you starting with, or putting in each period?"},
+    {"ComputeFutureValue", "present_value", "How much are you starting with, or putting in each period?"},
+    {"ComputePresentValue", "payment", "What's the payment, or the amount you'll have at the end?"},
+    {"ComputePresentValue", "future_value", "What's the payment, or the amount you'll have at the end?"},
+    {"", "present_value", "How much is the loan?"},
+    {"", "payment", "What's the monthly payment?"},
+    {"ComputeFutureValueDetailed", "annual_contribution", "How much are you starting with, or adding each year?"},
+    {"ComputeFutureValueDetailed", "current_principal", "How much are you starting with, or adding each year?"},
+    {"ComputeClosingCosts", "home_price", "What's the home price?"},
+    {"", "home_price", "What's the home price?"},
+    {"", "property_price", "What's the home price?"},
+    {"ComputeHeloc", "home_value", "What's the home worth?"},
+    {"", "home_value", "What's the home worth?"},
+    {"", "property_value", "What's the property worth?"},
+    {"", "current_property_value", "What's the property worth today?"},
+    {"", "current_loan_balance", "What's your current loan balance?"},
+    {"", "current_mortgage_balance", "How much do you still owe on your mortgage?"},
+    {"", "current_monthly_payment", "What's your current monthly payment?"},
+    {"", "lump_sum_payment", "How big is the lump sum?"},
+    {"", "total_cash_invested", "How much cash are you putting in?"},
+    {"", "cost", "What did the asset cost?"},
+    {"", "periodic_operating_expenses", "What do operating expenses run per month -- taxes, insurance, maintenance?"},
+    {"", "annual_other_expenses", "What do operating expenses run per month -- taxes, insurance, maintenance?"},
+    {"", "down_payment", "How much are you putting down?"},
+    {"", "down_payment_percent", "How much are you putting down?"},
+    // --- rent
+    {"", "monthly_gross_rent", "What does it rent for?"},
+    {"", "periodic_gross_rent", "What does it rent for?"},
+    {"", "current_monthly_rent", "What would you pay in rent each month?"},
+    {"", "monthly_rent_saved", "What would a comparable rental cost each month?"},
+    // --- rates
+    {"ComputeNpv", "rate", "What discount rate should I use?"},
+    {"ComputeXnpv", "rate", "What discount rate should I use?"},
+    {"", "current_annual_rate", "What's your current interest rate?"},
+    {"", "new_annual_rate", "What's the new interest rate?"},
+    {"", "annual_rate", "What's the interest rate?"},
+    {"", "rate", "What's the interest rate?"},
+    {"", "loan_annual_rate", "What's the interest rate?"},
+    {"", "annual_tax_rate", "What's your marginal tax rate?"},
+    {"", "max_ltv_rate", "What's the maximum loan-to-value?"},
+    // --- the rest
+    {"", "component", "Do you want the interest or the principal?"},
+    {"", "values", "What are the cash flows -- what you put in and what you get back each period?"},
+    {"", "dates", "On which days do the cash flows arrive?"},
+    {"", "loan_amounts", "Which loan offers should I compare -- the amount, rate and term of each?"},
+    {"", "annual_rates", "Which loan offers should I compare -- the amount, rate and term of each?"},
+});
+
+/**
+ * The visitor's own words for a field, so a sentence can say WHICH figure without naming the
+ * engine's. The site shows a refusal's text verbatim; a field name in it ("property_price") is a
+ * leak of internals, and a name assembled by stripping underscores reads worse than none. Every
+ * declared field is listed, and `test_mortgage_verification` sweeps the declared set so a field
+ * finance.proto grows later turns a test red instead of reaching a visitor as "one of the figures".
+ */
+inline constexpr auto kFieldLabels = std::to_array<std::pair<std::string_view, std::string_view>>({
+    {"annual_appreciation", "home price growth"},
+    {"annual_appreciation_rate", "home price growth"},
+    {"annual_capex_reserve", "capital expense reserve"},
+    {"annual_contribution", "yearly contribution"},
+    {"annual_cost_growth", "yearly cost growth"},
+    {"annual_discount_rate", "discount rate"},
+    {"annual_expense_increase", "yearly expense growth"},
+    {"annual_home_appreciation", "home price growth"},
+    {"annual_inflation_rate", "inflation rate"},
+    {"annual_insurance", "insurance cost"},
+    {"annual_investment_return", "investment return"},
+    {"annual_mortgage_rate", "mortgage rate"},
+    {"annual_other_expenses", "other expenses"},
+    {"annual_property_tax", "property tax"},
+    {"annual_rate", "interest rate"},
+    {"annual_rates", "interest rates"},
+    {"annual_rent_increase", "rent increase"},
+    {"annual_repairs", "repairs budget"},
+    {"annual_tax_rate", "tax rate"},
+    {"appraisal_fee", "appraisal fee"},
+    {"cash_out_amount", "cash-out amount"},
+    {"closing_cost_type", "way the closing costs are paid"},
+    {"closing_costs", "closing costs"},
+    {"closing_costs_buy", "closing costs"},
+    {"component", "interest-or-principal choice"},
+    {"compound_frequency", "compounding frequency"},
+    {"cost", "cost"},
+    {"current_annual_rate", "current interest rate"},
+    {"current_loan_balance", "loan balance"},
+    {"current_monthly_payment", "monthly payment"},
+    {"current_monthly_rent", "monthly rent"},
+    {"current_mortgage_annual_rate", "mortgage rate"},
+    {"current_mortgage_balance", "mortgage balance"},
+    {"current_mortgage_remaining_months", "time left on the mortgage"},
+    {"current_pmi_monthly", "current PMI"},
+    {"current_principal", "starting amount"},
+    {"current_property_value", "property value"},
+    {"current_remaining_months", "time left on the loan"},
+    {"dates", "dates"},
+    {"discount_points_percent", "discount points"},
+    {"discounted", "discounting choice"},
+    {"down_payment", "down payment"},
+    {"down_payment_percent", "down payment"},
+    {"drawn_amount", "draw amount"},
+    {"end_period", "last payment number"},
+    {"extra_monthly_payment", "extra monthly payment"},
+    {"extra_payments", "extra payments"},
+    {"factor", "declining-balance factor"},
+    {"future_value", "future value"},
+    {"guess", "starting guess"},
+    {"heloc_annual_rate", "HELOC rate"},
+    {"heloc_drawn_amount", "HELOC draw"},
+    {"heloc_term_years", "HELOC term"},
+    {"holding_period_years", "holding period"},
+    {"home_price", "home price"},
+    {"home_value", "home value"},
+    {"home_values", "home values"},
+    {"homeowners_insurance_annual", "homeowners insurance"},
+    {"inspection_fee", "inspection fee"},
+    {"life", "useful life"},
+    {"loan_amount", "loan amount"},
+    {"loan_amounts", "loan amounts"},
+    {"loan_annual_rate", "interest rate"},
+    {"loan_term_years", "loan term"},
+    {"lump_sum_payment", "lump sum"},
+    {"management_fee_rate", "management fee"},
+    {"max_ltv_rate", "loan-to-value limit"},
+    {"method", "depreciation method"},
+    {"monthly_gross_rent", "monthly rent"},
+    {"monthly_hoa", "HOA dues"},
+    {"monthly_maintenance", "monthly maintenance"},
+    {"monthly_overpayment", "extra monthly payment"},
+    {"monthly_piti_and_maintenance", "monthly cost of owning"},
+    {"monthly_rent_saved", "rent saved"},
+    {"monthly_taxes_ins_hoa", "taxes, insurance and HOA"},
+    {"monthly_taxes_ins_maintenance", "taxes, insurance and maintenance"},
+    {"new_annual_rate", "new interest rate"},
+    {"new_pmi_monthly", "new PMI"},
+    {"new_term_years", "new loan term"},
+    {"occupancy_rate", "vacancy"},
+    {"original_home_value", "home value"},
+    {"origination_fee_percent", "origination fee"},
+    {"other_lender_fees", "other lender fees"},
+    {"payment", "payment"},
+    {"payments_per_year", "payments per year"},
+    {"period", "payment number"},
+    {"periodic_gross_rent", "rent"},
+    {"periodic_mortgage_payment", "mortgage payment"},
+    {"periodic_operating_expenses", "operating expenses"},
+    {"periods", "term"},
+    {"periods_per_year", "periods per year"},
+    {"pmi_annual_rate", "PMI rate"},
+    {"pmi_drop_off_ltv", "PMI drop-off point"},
+    {"pmi_rates", "PMI rates"},
+    {"prepaid_interest_days", "prepaid interest days"},
+    {"present_value", "loan amount"},
+    {"property_price", "home price"},
+    {"property_tax_annual", "property tax"},
+    {"property_value", "property value"},
+    {"rate", "interest rate"},
+    {"recording_fees", "recording fees"},
+    {"recovery_period", "recovery period"},
+    {"remaining_months", "time left on the loan"},
+    {"repayment_term_years", "repayment term"},
+    {"salvage", "salvage value"},
+    {"seller_lender_credits", "seller credits"},
+    {"selling_closing_cost_percent", "selling costs"},
+    {"selling_cost_percent", "selling costs"},
+    {"start_period", "first payment number"},
+    {"target_years", "time horizon"},
+    {"tax_escrow_months", "tax escrow months"},
+    {"term_months", "term"},
+    {"timing", "payment timing"},
+    {"title_settlement_percent", "title and settlement fees"},
+    {"total_cash_invested", "cash invested"},
+    {"transfer_tax_percent", "transfer tax"},
+    {"values", "cash flows"},
+    {"year", "year"},
+    {"years", "term"}
+});
+
+}  // namespace detail
+
+auto names_unsupported_cadence(std::string_view text) -> bool {
+    const std::string lower = detail::to_lower_copy(text);
+    for (const std::string_view phrase :
+         {"bi-weekly", "biweekly", "bi weekly", "every two weeks", "every 2 weeks", "every other week",
+          "fortnight", "semi-monthly", "semimonthly", "twice a month", "twice monthly"}) {
+        if (lower.find(phrase) != std::string::npos) { return true; }
+    }
+    return false;
+}
+
+auto plain_decimal_text(double v) -> std::string {
+    std::array<char, 64> buffer{};
+    const auto result =
+        std::to_chars(buffer.data(), buffer.data() + buffer.size(), v, std::chars_format::fixed);
+    if (result.ec != std::errc{}) { return {}; }
+    std::string text{buffer.data(), result.ptr};
+    return text == "-0" ? std::string{"0"} : text;
+}
+
+auto field_label(std::string_view field) -> std::string_view {
+    for (const auto& [name, label] : detail::kFieldLabels) {
+        if (name == field) { return label; }
+    }
     return {};
+}
+
+auto clarifying_question(std::string_view operation, std::string_view field) -> std::string {
+    // An operation-specific row wins over the any-operation row; both are exact on the field.
+    const detail::QuestionWording* generic = nullptr;
+    for (const auto& q : detail::kQuestions) {
+        if (q.field != field) { continue; }
+        if (!q.operation.empty() && q.operation == operation) { return std::string{q.question}; }
+        if (q.operation.empty() && generic == nullptr) { generic = &q; }
+    }
+    // No natural wording: the caller keeps the refusal rather than asking a question built out
+    // of a field name, which reads like a stack trace.
+    return generic == nullptr ? std::string{} : std::string{generic->question};
 }
 
 /**

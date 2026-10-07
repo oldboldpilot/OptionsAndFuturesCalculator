@@ -199,6 +199,18 @@ auto main(int argc, char** argv) -> int {
     int ask_wrong = 0;
     std::map<std::string, std::string> ask_example;
 
+    // The STATED-ONLY sweep's counters (2026-10-06). The service shapes what the model emitted
+    // BEFORE it verifies -- `shape_stated_params` drops every value the visitor's words do not
+    // support and turns a missing essential into a question -- so the gold is shaped the same way
+    // here. Two properties, one per direction a filter can be wrong in:
+    //   asked_wrongly   the layer would ASK for an essential the gold STATES and grounds;
+    //   dropped_stated  the layer would DROP a gold figure the words ground (silently losing a
+    //                   figure the visitor gave, with no refusal and no question).
+    int shaped_asks = 0;
+    int asked_wrongly = 0;
+    int dropped_stated = 0;
+    std::map<std::string, std::string> shape_example;
+
     std::string line;
     while (std::getline(in, line)) {
         if (line.empty()) { continue; }
@@ -273,13 +285,42 @@ auto main(int argc, char** argv) -> int {
 
             auto probe = input;
             probe.fields[fi].values[0] = invented;
-            const auto pv = mv::verify_mortgage_output(probe, text);
+
+            // The service SHAPES first. A mutated value is then either DROPPED as a default (and, if
+            // the field is essential, asked about) or KEPT and refused. Asking about the mutated
+            // field is the defect: the words state it, so the model got it WRONG.
+            const auto probe_shape = mv::shape_stated_params(probe, text);
+            const auto asks_this = [&](const std::string& asked) {
+                if (asked.empty()) { return false; }
+                if (asked == ef.name) { return true; }
+                for (const auto& req : mv::essential_requirements(f[0], {})) {
+                    const bool both = std::ranges::find(req.any_of, asked) != req.any_of.end() &&
+                                      std::ranges::find(req.any_of, ef.name) != req.any_of.end();
+                    if (both) { return true; }
+                }
+                return false;
+            };
+            if (!probe_shape.missing_field.empty()) {
+                if (!asks_this(probe_shape.missing_field)) { continue; }   // a DIFFERENT field is missing
+                ++ask_probes;
+                ++ask_wrong;
+                if (!ask_example.contains(ef.name)) {
+                    ask_example[ef.name] = f[0] + " :: " + mv::clarifying_question(f[0], ef.name) +
+                                           "  <- but the user said " + ef.values.front() + "\n      " + text;
+                }
+                continue;
+            }
+            auto kept_probe = probe;
+            std::erase_if(kept_probe.fields, [&](const mv::EmittedField& pf) {
+                return std::ranges::find(probe_shape.kept, pf.name) == probe_shape.kept.end();
+            });
+            const auto pv = mv::verify_mortgage_output(kept_probe, text);
             if (pv.outcome == mv::Outcome::Proven) {
-                ++ask_unusable;  // the invented value grounded; nothing to assert
+                ++ask_unusable;  // the invented value grounded (or was dropped); nothing to assert
                 continue;
             }
             ++ask_probes;
-            if (pv.reason != mv::ReasonCode::UnstatedField) { continue; }
+            if (pv.reason != mv::ReasonCode::UnstatedField || !asks_this(pv.field)) { continue; }
 
             ++ask_wrong;
             if (!ask_example.contains(ef.name)) {
@@ -289,7 +330,75 @@ auto main(int argc, char** argv) -> int {
             }
         }
 
-        const auto verdict = mv::ground_emitted_values(input, text);
+        // ===================================================================
+        // SHAPE FIRST, EXACTLY AS THE SERVICE DOES, then verify what is KEPT.
+        // ===================================================================
+        const auto shaped = mv::shape_stated_params(input, text);
+        const auto is_kept = [&](std::string_view name) {
+            return std::ranges::find(shaped.kept, name) != shaped.kept.end();
+        };
+        // Alone, does the gold figure ground against the words? (The single-field probe is what
+        // separates "the visitor said it" from "the model put it there".)
+        const auto grounds_alone = [&](const mv::EmittedField& ef) {
+            mv::MortgageParamsInput one;
+            one.params_emitted = true;
+            one.operation = input.operation;
+            one.fields.push_back(ef);
+            return mv::ground_emitted_values(one, text).outcome == mv::Outcome::Proven;
+        };
+        const auto is_zero = [](const mv::EmittedField& ef) {
+            return std::ranges::all_of(ef.values, [](const std::string& v) {
+                const auto d = mv::parse_strict_decimal(v);
+                return d.has_value() && d->is_zero();
+            });
+        };
+        // A convention CONSTANT is dropped on purpose even when some figure happens to equal it.
+        const auto is_convention_name = [](std::string_view n) {
+            return n == "payments_per_year" || n == "periods_per_year" || n == "compound_frequency" ||
+                   n == "factor" || n == "pmi_drop_off_ltv" || n == "timing" || n == "max_ltv_rate";
+        };
+        for (const auto& ef : input.fields) {
+            // An ENUM or a boolean is a class default when the words are silent (straight-line,
+            // paid in cash, undiscounted): it grounds trivially, which says nothing about whether
+            // the visitor stated it. The numeric figures are the ones a filter can lose.
+            const auto kind = mv::classify_slot(ef.name);
+            if (kind == mv::SlotKind::Enumeration || kind == mv::SlotKind::Boolean) { continue; }
+            if (ef.repeated || is_kept(ef.name) || is_zero(ef) || is_convention_name(ef.name)) { continue; }
+            if (!grounds_alone(ef)) { continue; }
+            ++dropped_stated;
+            if (!shape_example.contains("drop:" + f[0] + "." + ef.name)) {
+                shape_example["drop:" + f[0] + "." + ef.name] =
+                    "DROPS a figure the words ground: " + ef.name + " = " + ef.values.front() + "\n      " + text;
+            }
+        }
+        if (!shaped.missing_field.empty()) {
+            // The service ASKS here. Right if the gold does not state that figure; wrong if it does.
+            ++shaped_asks;
+            for (const auto& req : mv::essential_requirements(f[0], {})) {
+                if (std::ranges::find(req.any_of, shaped.missing_field) == req.any_of.end()) { continue; }
+                for (const auto& ef : input.fields) {
+                    if (std::ranges::find(req.any_of, ef.name) == req.any_of.end()) { continue; }
+                    // AN ENUM GROUNDS TRIVIALLY, and the drop loop above already skips it for that
+                    // reason: "INTEREST" proves nothing about whether the visitor SAID interest.
+                    // Counting it here called the right question -- "interest or principal?", for a
+                    // cumulative figure asked of "from 1 to 7" -- a question about a stated figure.
+                    const auto ask_kind = mv::classify_slot(ef.name);
+                    if (ask_kind == mv::SlotKind::Enumeration || ask_kind == mv::SlotKind::Boolean) { continue; }
+                    if (ef.repeated || is_zero(ef) || !grounds_alone(ef)) { continue; }
+                    ++asked_wrongly;
+                    if (!shape_example.contains("ask:" + f[0] + "." + ef.name)) {
+                        shape_example["ask:" + f[0] + "." + ef.name] =
+                            "ASKS about " + shaped.missing_field + " but the words state " + ef.name + " = " +
+                            ef.values.front() + "\n      " + text;
+                    }
+                }
+            }
+            continue;
+        }
+        mv::MortgageParamsInput kept_input = input;
+        std::erase_if(kept_input.fields, [&](const mv::EmittedField& ef) { return !is_kept(ef.name); });
+
+        const auto verdict = mv::ground_emitted_values(kept_input, text);
         if (verdict.outcome == mv::Outcome::Proven) { continue; }
 
         if (known_ungroundable(f[0], verdict.message)) {
@@ -326,6 +435,18 @@ auto main(int argc, char** argv) -> int {
 
     std::printf("swept %d rows: %d refused, %d excused (declared generator findings)\n",
                 rows, refused, excused);
+    std::printf("shaping: %d rows the service would ASK about, %d asked wrongly, %d stated figures dropped\n",
+                shaped_asks, asked_wrongly, dropped_stated);
+    for (const auto& [key, ex] : shape_example) {
+        std::printf("  %s: %s\n", key.c_str(), ex.c_str());
+    }
+    if (asked_wrongly != 0 || dropped_stated != 0) {
+        std::printf(
+            "\nFAIL: the stated-only filter is wrong in the direction with no alarm. Either it\n"
+            "asks for a figure the visitor gave, or it silently drops one -- and no refusal and\n"
+            "no question marks the loss. Narrow the evidence rule; never widen the gold.\n");
+        return 1;
+    }
     for (const auto& [op, n] : by_op) {
         std::printf("  REFUSED %-34s %4d   e.g. %s\n", op.c_str(), n, example[op].c_str());
     }

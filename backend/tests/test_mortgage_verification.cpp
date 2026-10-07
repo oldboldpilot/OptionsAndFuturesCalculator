@@ -1037,9 +1037,13 @@ auto main() -> int {
     // Structural defects other than the six rows.
     {
         const auto ctl = control_payment();
-        expect(drop_field(ctl.input, "future_value"), ctl.text, mv::Outcome::Unsafe,
+        // G2b asks for the ESSENTIAL inputs, not every declared field (owner decision,
+        // 2026-10-06): a future value the visitor never mentioned is not a gap.
+        expect(drop_field(ctl.input, "future_value"), ctl.text, mv::Outcome::Proven, mv::ReasonCode::None,
+               "an OPTIONAL declared field left out is served without it, not refused");
+        expect(drop_field(ctl.input, "present_value"), ctl.text, mv::Outcome::Unsafe,
                mv::ReasonCode::MissingField,
-               "a declared field left out is refused, not defaulted to zero");
+               "an ESSENTIAL field left out is refused here, never defaulted to zero");
         expect(mutate(ctl.input, "timing", "MIDDLE_OF_PERIOD"), ctl.text, mv::Outcome::Unsafe,
                mv::ReasonCode::InvalidEnumValue, "an invented enum constant is refused");
 
@@ -2769,286 +2773,48 @@ auto main() -> int {
     }
 
     // ------------------------------------------------------------------
-    // Section 33. AN OPTIONAL MODELLING INPUT NOBODY MENTIONED IS A ZERO,
-    // NOT A QUESTION -- "you should be able to compute without a
-    // downpayment, hoa or pmi, this should not be a problem."
+    // Section 33. A WORDED NONE IS A STATEMENT.
     //
-    // All three failed before this, and in TWO different ways, which is why
-    // one fix covers both: `down_payment` has a clarifying wording so the
-    // service ASKED "How much are you putting down?" of someone who had
-    // already given price, rate and term, while `monthly_hoa` and
-    // `pmi_annual_rate` have none and so fell through to a flat refusal --
-    // "The assistant left out X, which <op> needs" -- on a request that was
-    // complete. Both are the same mistake: the service already knew what an
-    // unstated one is and was using that knowledge in one direction only.
-    //
-    // This section pins both halves of the fix: the fields that MUST
-    // default, and -- the half that keeps the table honest -- those that
-    // must NOT.
+    // This section used to pin `optional_modelling_default` -- "an optional modelling input
+    // nobody mentioned is a ZERO" -- and the pass that substituted it. That pass is GONE (owner
+    // decision, 2026-10-06): an input the visitor did not state is now OMITTED, not filled with
+    // a zero, so the site keeps its own value for it. What survives is the other half of the same
+    // idea, which is still true and is what lets "no PMI" reach the engine as a zero: a visitor
+    // who says there is none HAS said something, and omitting it would leave the form's own PMI
+    // standing against their words. `shape_stated_params` serves a zero exactly when
+    // `utterance_states_none_for` says it is worded.
     {
-        section("33. unstated down payment / HOA / PMI default rather than asking");
+        section("33. a worded none is a statement; an unmentioned zero is not");
 
-        check(mv::optional_modelling_default("down_payment") == "0",
-              "an unstated down payment defaults to 0");
-        check(mv::optional_modelling_default("down_payment_percent") == "0",
-              "an unstated down-payment PERCENT defaults to 0");
-        check(mv::optional_modelling_default("monthly_hoa") == "0",
-              "unstated HOA dues default to 0");
-        check(mv::optional_modelling_default("monthly_taxes_ins_hoa") == "0",
-              "the unstated composite taxes/insurance/HOA figure defaults to 0");
-        check(mv::optional_modelling_default("pmi_annual_rate") == "0",
-              "an unstated PMI rate defaults to 0");
-        check(mv::optional_modelling_default("current_pmi_monthly") == "0",
-              "unstated CURRENT PMI defaults to 0 (ComputeRefinance)");
-        check(mv::optional_modelling_default("new_pmi_monthly") == "0",
-              "unstated NEW PMI defaults to 0 (ComputeRefinance)");
-
-        // The one entry that is not "none of this" but a statutory answer.
-        check(mv::optional_modelling_default("pmi_drop_off_ltv") == "0.80",
-              "an unstated PMI drop-off LTV defaults to the statutory 80%, not to 0");
-
-        // THE DENYLIST, AND IT IS THE POINT OF THE SECTION. Every one of these
-        // is a TERM OF THE LOAN: absent means the user has not said what they
-        // are asking about, so it must stay a question or a refusal. The first
-        // four are what make this reachable rather than theoretical -- they are
-        // convention-ZERO in kConventionValues, because a zero loan is how a
-        // ComputeRentVsBuy request selects the legacy composite shape, so a
-        // fix that read THAT table as a table of defaults would have answered
-        // "what's the payment at 6.5% over 30 years?" with a zero-dollar loan.
-        for (const auto* term : {"loan_amount", "loan_annual_rate", "loan_term_years",
-                                 "monthly_piti_and_maintenance", "present_value",
-                                 "annual_rate", "rate", "periods", "term_months",
-                                 "monthly_gross_rent", "periodic_gross_rent",
-                                 "property_price", "home_value"}) {
-            check(mv::optional_modelling_default(term).empty(),
-                  std::string{"a TERM of the loan is never defaulted: "} + term);
-        }
-
-        // AMBIGUOUS CONVENTIONS ARE NOT DEFAULTS. Both carry TWO convention
-        // values, so there is no single answer to substitute: proto3 explicit
-        // presence makes an absent prepaid_interest_days mean the 15-day
-        // convention and an explicit 0 mean zero days, a distinction a default
-        // would destroy.
-        check(mv::optional_modelling_default("prepaid_interest_days").empty(),
-              "prepaid_interest_days has TWO conventions (15 and 0) and is not defaulted");
-        check(mv::optional_modelling_default("selling_cost_percent").empty(),
-              "selling_cost_percent has TWO conventions (0.06 and 0) and is not defaulted");
-
-        // NO REPEATED FIELD. The right default for a parallel-array request is
-        // one zero PER OFFER and the offer count lives in a sibling array, so a
-        // scalar substituted here would be a shape error wearing a default's
-        // clothes. The service additionally refuses any non-Decimal kind.
-        check(mv::optional_modelling_default("pmi_rates").empty(),
-              "pmi_rates is REPEATED, so it is not defaulted (one zero per offer)");
-        check(mv::optional_modelling_default("extra_payments").empty(),
-              "extra_payments is REPEATED, so it is not defaulted");
-
-        // THE SUBSTITUTED VALUE MUST SURVIVE THE GATES IT IS HANDED TO, which
-        // is what makes the whole pass safe: the service pushes the default
-        // into `verifiable.fields` BEFORE G5 and G3 run, so a default that was
-        // out of range or ungrounded would turn a needless question into a
-        // needless refusal. Asserted end to end rather than by re-reading the
-        // convention table. The FULL declared set is supplied because G2b
-        // requires every field -- an under-populated input refuses on the first
-        // one missing and would prove nothing about the default.
-        {
-            const std::string_view amort = "amortize 500000 at 6% over 30 years";
-            std::vector<KV> fields{{"loan_amount", "500000.00"},
-                                   {"annual_rate", "0.0600"},
-                                   {"term_months", "360"},
-                                   {"monthly_overpayment", "0"},
-                                   {"pmi_annual_rate", "0"},
-                                   {"original_home_value", "500000.00"},  // the corpus's own no-PMI
-                                   // convention: equal to the loan, which
-                                   // GROUNDS, rather than a 0 that does not
-                                   {"annual_repairs", "0"},
-                                   {"annual_insurance", "0"},
-                                   {"annual_cost_growth", "0"},
-                                   {"heloc_drawn_amount", "0"},
-                                   {"heloc_annual_rate", "0"},
-                                   {"heloc_term_years", "0"},
-                                   {"monthly_hoa", "0"}};
-            expect_pass(params("ComputeAmortization", fields), amort,
-                        "a defaulted PMI rate of 0 is PROVEN against an utterance that "
-                        "mentions no PMI -- the default is verified, not waved through");
-        }
-        {
-            const std::string_view refi =
-                "refinance my 400000 balance paying 2271 a month at 5.5% with 360 months "
-                "left on a 500000 home into a 30 year at 4.75%, closing costs 6000";
-            std::vector<KV> fields{{"current_loan_balance", "400000.00"},
-                                   {"current_monthly_payment", "2271.00"},
-                                   {"current_annual_rate", "0.0550"},
-                                   {"current_remaining_months", "360"},
-                                   {"property_value", "500000.00"},
-                                   {"new_annual_rate", "0.0475"},
-                                   {"new_term_years", "30"},
-                                   {"closing_costs", "6000.00"},
-                                   {"closing_cost_type", "PAID_IN_CASH"},
-                                   {"cash_out_amount", "0"},
-                                   {"current_pmi_monthly", "0"},
-                                   {"new_pmi_monthly", "0"},
-                                   {"pmi_drop_off_ltv", "0.80"},
-                                   {"payments_per_year", "12"}};
-            expect_pass(params("ComputeRefinance", fields), refi,
-                        "both PMI spellings AND the statutory 0.80 drop-off LTV are PROVEN "
-                        "against a refinance utterance that mentions no mortgage insurance");
-        }
-
-        // AND THE DIRECTION THAT MUST NOT MOVE. A figure the user DID state and
-        // the model then dropped keeps its refusal, because the default fires
-        // only while the utterance does not MENTION the concept. Silently
-        // zeroing a number the user gave is strictly worse than declining to
-        // answer.
-        //
-        // THE PREDICATE HERE IS THE ONE THE SERVICE GATES ON, and the first
-        // draft of this pass gated on the other one -- `utterance_states_nothing_for`,
-        // which the ask paths use. That version was INERT and this check is
-        // what proved it: a claim only counts ACROSS slot kinds, so with the
-        // price, the down payment and the rent all emitted, a Money slot like
-        // `monthly_hoa` still sees unclaimed Money literals and always looks
-        // "stated". The default could never have fired on any utterance with a
-        // second money figure in it, which is every mortgage utterance. Kept as
-        // an explicit pair of checks so a later reader cannot "simplify" the
-        // service back onto the inert predicate.
-        {
-            const std::string_view no_dues = "a 480000 condo with 96000 down renting at 2400 a month";
-            const std::string_view with_dues =
-                "a 480000 condo with 96000 down renting at 2400 a month with 275 per month "
-                "HOA dues";
-
-            check(mv::utterance_names_nothing_for("monthly_hoa", no_dues),
-                  "a CONDO with no dues mentioned names nothing for monthly_hoa -- so the "
-                  "default fires. \"condo\" is an HOA word for the LEXER, where it sits "
-                  "beside a figure, and a property type here");
-            check(!mv::utterance_names_nothing_for(
-                      "monthly_hoa", "a 480000 unit with 310 a month in association fees"),
-                  "\"association\" IS a dues mention even without the word HOA");
-            check(!mv::utterance_names_nothing_for("monthly_hoa", with_dues),
-                  "the SAME request NAMING the dues does name something, so the default "
-                  "cannot fire and a dropped figure still refuses");
-
-            // THE INERTNESS, pinned. This is the predicate the pass must NOT use.
-            std::vector<KV> rental{{"property_price", "480000.00"},
-                                   {"down_payment", "96000.00"},
-                                   {"monthly_gross_rent", "2400.00"},
-                                   {"monthly_hoa", "0"}};
-            check(!mv::utterance_states_nothing_for("monthly_hoa", no_dues,
-                                                    params("ComputeRentalCashFlow", rental)),
-                  "the ASK predicate reports monthly_hoa as STATED on the no-dues "
-                  "utterance (same-kind money literals) -- which is why defaulting "
-                  "cannot be gated on it");
-
-            // The down-payment family, both directions.
-            check(mv::utterance_names_nothing_for("down_payment",
-                                                  "amortize 500000 at 6% over 30 years"),
-                  "an utterance with no down payment names nothing for down_payment");
-            check(!mv::utterance_names_nothing_for(
-                      "down_payment", "a 500000 home with 20% down at 6.5% for 30 years"),
-                  "\"20% down\" names the down payment, so it is never defaulted away");
-
-            // PMI, including the two-word spelling that `is_pmi_word` cannot see.
-            check(mv::utterance_names_nothing_for("pmi_annual_rate",
-                                                  "amortize 500000 at 6% over 30 years"),
-                  "an utterance with no PMI names nothing for pmi_annual_rate");
-            check(!mv::utterance_names_nothing_for(
-                      "pmi_annual_rate", "amortize 500000 at 6% with PMI at 0.55%"),
-                  "\"PMI\" names it");
-            check(!mv::utterance_names_nothing_for(
-                      "pmi_annual_rate", "amortize 500000 at 6% with mortgage insurance of 180"),
-                  "the two-word \"mortgage insurance\" names it too -- matched as a PHRASE, "
-                  "because bare \"insurance\" is the homeowner's policy");
-            check(mv::utterance_names_nothing_for(
-                      "pmi_annual_rate", "amortize 500000 at 6% with 1800 a year insurance"),
-                  "bare \"insurance\" is NOT a PMI mention (the control for the phrase "
-                  "rule) -- otherwise the PMI default would fire almost never");
-
-            // THE REST OF THE CLASS, which the live probe forced into the
-            // table: with only the three families the report named, a rental
-            // utterance still refused on `annual_home_appreciation`.
-            check(mv::utterance_names_nothing_for(
-                      "annual_home_appreciation",
-                      "a 480000 condo renting at 2400 a month over 10 years"),
-                  "a request that models no appreciation names nothing for it");
-            check(!mv::utterance_names_nothing_for(
-                      "annual_home_appreciation",
-                      "a 480000 condo appreciating 3% a year renting at 2400"),
-                  "\"appreciating 3%\" names it, so it is never defaulted away");
-
-            // Appreciation and escalation are kept APART on purpose: a request
-            // that says rent GROWS has said nothing about the property
-            // appreciating, so sharing one word list would discard a figure.
-            check(mv::utterance_names_nothing_for(
-                      "annual_home_appreciation", "rent grows 3% a year on a 480000 condo"),
-                  "rent GROWTH is not an appreciation mention (the lists are separate)");
-            check(!mv::utterance_names_nothing_for(
-                      "annual_rent_increase", "rent grows 3% a year on a 480000 condo"),
-                  "...and it IS a rent-increase mention");
-
-            check(mv::utterance_names_nothing_for(
-                      "heloc_drawn_amount", "amortize 500000 at 6% over 30 years"),
-                  "a loan with no HELOC leg names nothing for heloc_drawn_amount");
-            check(!mv::utterance_names_nothing_for(
-                      "heloc_drawn_amount",
-                      "amortize 500000 at 6% and draw 50000 on a home equity line"),
-                  "\"home equity line\" names the HELOC leg -- matched as a PHRASE");
-            check(!mv::utterance_names_nothing_for(
-                      "cash_out_amount", "refinance 400000 at 4.75% and cash out 50000"),
-                  "\"cash out\" names the cash-out leg");
-            check(mv::utterance_names_nothing_for(
-                      "cash_out_amount", "refinance 400000 into a 30 year at 4.75%"),
-                  "a rate-and-term refinance names nothing for cash_out_amount");
-
-            // A WORDED ZERO IS A STATEMENT, NOT AN OMISSION, and the first
-            // version of this pass got that exactly backwards. "zero down"
-            // NAMES the down payment, so `utterance_names_nothing_for` is
-            // FALSE and the default was blocked -- by the very sentence that
-            // was stating the zero. Measured against production:
-            //
-            //   "480000 rental, zero down, 2400 a month rent, 10 years"
-            //   -> The assistant left out "down_payment", which
-            //      ComputeRentVsBuy needs.
-            //
-            // The user said zero twice over -- in the word, and by giving no
-            // figure -- and was told they had not said it at all.
-            check(!mv::utterance_names_nothing_for(
-                      "down_payment", "480000 rental, zero down, 2400 a month rent"),
-                  "\"zero down\" NAMES the down payment (so the names-nothing arm "
-                  "alone cannot default it -- this is the defect)");
+        // A WORDED ZERO IS A STATEMENT, NOT AN OMISSION.
+        check(mv::utterance_states_none_for(
+                  "down_payment", "480000 rental, zero down, 2400 a month rent"),
+              "\"zero down\" states that there is no down payment");
+        for (const auto* phr : {"zero down", "0 down", "nothing down", "no money down",
+                                "without a down payment", "no deposit"}) {
             check(mv::utterance_states_none_for(
-                      "down_payment", "480000 rental, zero down, 2400 a month rent"),
-                  "...and the states-none arm recognises it, which is what makes "
-                  "the zero fire");
-            for (const auto* phr : {"zero down", "0 down", "nothing down", "no money down",
-                                    "without a down payment", "no deposit"}) {
-                check(mv::utterance_states_none_for(
-                          "down_payment", std::string{"a 480000 rental, "} + phr + ", 2400 rent"),
-                      std::string{"a worded zero down payment: \""} + phr + "\"");
-            }
-            check(mv::utterance_states_none_for("monthly_hoa", "a 480000 condo with no HOA dues"),
-                  "\"no HOA dues\" states that there are none");
-            check(mv::utterance_states_none_for("pmi_annual_rate",
-                                                "amortize 500000 at 6% with no mortgage insurance"),
-                  "\"no mortgage insurance\" states that there is none");
-
-            // AND IT MUST NOT FIRE ON A STATED FIGURE. This is the direction
-            // that keeps the dangerous failure dangerous: a phrase rule over
-            // words as common as "no" and "zero" would otherwise reach a
-            // sentence that states an amount.
-            check(!mv::utterance_states_none_for(
-                      "down_payment", "a 480000 rental with 96000 down, 2400 rent"),
-                  "a STATED down payment is not a worded zero");
-            check(!mv::utterance_states_none_for(
-                      "down_payment", "no more than 20% down on a 480000 rental"),
-                  "\"no more than 20% down\" states a CAP, not an absence -- the "
-                  "case a proximity rule over \"no\" would have got wrong");
-            check(!mv::utterance_states_none_for("monthly_hoa", "275 a month in HOA dues"),
-                  "stated dues are not an absence");
-
-            // FAILS CLOSED for anything without a concept list.
-            check(!mv::utterance_names_nothing_for("loan_amount", "pay off the house"),
-                  "a field with no concept list is never reported unstated -- fails closed");
+                      "down_payment", std::string{"a 480000 rental, "} + phr + ", 2400 rent"),
+                  std::string{"a worded zero down payment: \""} + phr + "\"");
         }
+        check(mv::utterance_states_none_for("monthly_hoa", "a 480000 condo with no HOA dues"),
+              "\"no HOA dues\" states that there are none");
+        check(mv::utterance_states_none_for("pmi_annual_rate",
+                                            "amortize 500000 at 6% with no mortgage insurance"),
+              "\"no mortgage insurance\" states that there is none");
+
+        // AND IT MUST NOT FIRE ON A STATED FIGURE. A phrase rule over words as common as "no" and
+        // "zero" would otherwise reach a sentence that states an amount.
+        check(!mv::utterance_states_none_for(
+                  "down_payment", "a 480000 rental with 96000 down, 2400 rent"),
+              "a STATED down payment is not a worded zero");
+        check(!mv::utterance_states_none_for(
+                  "down_payment", "no more than 20% down on a 480000 rental"),
+              "\"no more than 20% down\" states a CAP, not an absence -- the case a proximity "
+              "rule over \"no\" would have got wrong");
+        check(!mv::utterance_states_none_for("monthly_hoa", "275 a month in HOA dues"),
+              "stated dues are not an absence");
+        check(!mv::utterance_states_none_for("loan_amount", "no loan_amount here"),
+              "a field with no worded-none rule is never reported as stated");
     }
 
     // =======================================================================
@@ -3118,50 +2884,555 @@ auto main() -> int {
         expect_pass(hoa_fields("monthly_hoa", "275.00"), typo,
                     "stated dues still reach monthly_hoa THROUGH the typo");
 
-        // --- the mention question, both directions --------------------------
-        check(!mv::utterance_names_nothing_for("monthly_hoa", "275 a month in HAO duse"),
-              "a misspelled dues word is still a MENTION of dues");
-        check(!mv::utterance_names_nothing_for("monthly_hoa", "275 a month in HOA dues"),
-              "a correctly-spelled dues word is a mention (regression)");
+        // --- the LEXER's reading of the same words, both directions ----------
+        const auto hoa_flag = [](std::string_view text, std::string_view figure) {
+            for (const auto& lit : mv::lex_numeric_literals(text)) {
+                if (lit.text == figure) { return lit.names_hoa; }
+            }
+            return false;
+        };
+        check(hoa_flag("with 275 a month in HAO duse", "275"),
+              "a misspelled dues word still tags the figure beside it as dues");
+        check(hoa_flag("with 275 a month in HOA dues", "275"),
+              "a correctly-spelled dues word tags it (regression)");
 
-        // ONE SUBSTITUTION IS DELIBERATELY NOT A MATCH, and `how` is the word
-        // that forced it: at three letters a Levenshtein-1 rule admits `how`,
-        // `hot` and `hoe`, and `how` opens every second mortgage question.
-        // This is the over-matching direction, which has no alarm -- a wrong
-        // match here silently SUPPRESSES the HOA default.
-        check(mv::utterance_names_nothing_for("monthly_hoa",
-                                              "how much is the payment on 480000 at 6.5%"),
-              "\"how\" is not a misspelling of \"hoa\" -- a substitution is not "
-              "a transposition");
-        check(mv::utterance_names_nothing_for("monthly_hoa",
-                                              "its a hot market, amortize 480000 at 6.5%"),
+        // ONE SUBSTITUTION IS DELIBERATELY NOT A MATCH, and `how` is the word that forced it: at
+        // three letters a Levenshtein-1 rule admits `how`, `hot` and `hoe`, and `how` opens every
+        // second mortgage question. This is the over-matching direction, which has no alarm -- a
+        // wrong match here silently removes a real figure from the principal slots.
+        check(!hoa_flag("amortize 480000 at 6.5% for 275 how much is the payment", "275"),
+              "\"how\" is not a misspelling of \"hoa\" -- a substitution is not a transposition");
+        check(!hoa_flag("its a hot market, amortize 480000 at 6.5% over 275 hot", "275"),
               "\"hot\" is not a misspelling of \"hoa\"");
-        check(mv::utterance_names_nothing_for("monthly_taxes_ins_hoa",
-                                              "it takes 30 years to pay off 480000 at 6.5%"),
-              "\"takes\" is not a misspelling of \"taxes\" -- the collision the "
-              "looser Levenshtein rule would have had, on a word that occurs 22 "
-              "times in our own corpus");
+    }
 
-        // THE `condo` ASYMMETRY SURVIVES THE TYPO TOLERANCE. `condo` is an HOA
-        // word beside a figure and a PROPERTY TYPE for the existence question;
-        // a misspelled condo must stay on the property-type side, or the
-        // default would go back to refusing on exactly the homes that have dues.
-        check(mv::utterance_names_nothing_for("monthly_hoa",
-                                              "a 480000 codno renting at 2400 a month"),
-              "a MISSPELLED condo is still the property type, not a mention of dues");
-        check(mv::utterance_names_nothing_for("monthly_hoa",
-                                              "a 480000 condo renting at 2400 a month"),
-              "a correctly-spelled condo is the property type (regression)");
+    // =======================================================================
+    section("ESSENTIAL FIELDS: the visitor's question is undefined without them");
+    // =======================================================================
+    // The owner's report (2026-10-06): the assistant zero-filled every field the visitor never
+    // stated, asked for a TERM on a closing-costs question, and refused "600k home" as "left
+    // out property_price". The contract it replaces required EVERY declared field (G2b). The
+    // contract that replaces THAT is: only what the visitor stated is returned, and a question
+    // is asked only when an ESSENTIAL input is missing -- one without which the calculation is
+    // undefined. This table is the one place that says which.
+    {
+        const auto ops = mv::operation_ids();
+        std::size_t without = 0;
+        std::size_t not_declared = 0;
+        for (const auto op : ops) {
+            const auto reqs = mv::essential_requirements(op);
+            if (reqs.empty()) {
+                ++without;
+                std::printf("    no essential requirement for %.*s\n", static_cast<int>(op.size()), op.data());
+            }
+            for (const auto& r : reqs) {
+                for (const auto f : r.any_of) {
+                    if (mv::find_field(op, f) == nullptr) {
+                        ++not_declared;
+                        std::printf("    %.*s lists essential field %.*s which it does not declare\n",
+                                    static_cast<int>(op.size()), op.data(), static_cast<int>(f.size()), f.data());
+                    }
+                }
+            }
+        }
+        check(!ops.empty() && without == 0,
+              "EVERY operation has at least one essential requirement (a calculation with none "
+              "would never ask, and would answer with whatever the model volunteered)");
+        check(not_declared == 0, "every essential field is a field its operation DECLARES");
 
-        // AN IDENTICAL WORD IS AN EXACT MATCH, NOT A TRANSPOSITION, and a word
-        // of a different LENGTH is neither -- the two ways the predicate could
-        // have been written to accept too much.
-        check(mv::utterance_names_nothing_for("monthly_hoa",
-                                              "amortize 480000 at 6.5% over 30 years"),
-              "an utterance naming no concept word at all still reports unstated");
-        check(mv::utterance_names_nothing_for("heloc_drawn_amount",
-                                              "amortize 480000 at 6.5% over 30 years"),
-              "the same, on a list whose words are longer");
+        // THE SWEEP THE OWNER ASKED FOR: no 'left out' refusal may remain reachable for an
+        // essential field, so every one of them needs a natural question.
+        std::size_t unworded = 0;
+        for (const auto op : ops) {
+            for (const std::string_view variant : {"", "STRAIGHT_LINE", "SUM_OF_YEARS_DIGITS",
+                                                  "DECLINING_BALANCE", "MACRS"}) {
+                for (const auto& r : mv::essential_requirements(op, variant)) {
+                    if (r.any_of.empty() || mv::clarifying_question(op, r.any_of.front()).empty()) {
+                        ++unworded;
+                        std::printf("    no question for %.*s.%.*s\n", static_cast<int>(op.size()), op.data(),
+                                    static_cast<int>(r.any_of.empty() ? 0 : r.any_of.front().size()),
+                                    r.any_of.empty() ? "" : r.any_of.front().data());
+                    }
+                }
+            }
+        }
+        check(unworded == 0,
+              "EVERY essential requirement has a clarifying question, so an absent essential field "
+              "can only ever become a question and never a \"left out\" refusal");
+        check(mv::clarifying_question("ComputeClosingCosts", "home_price").find("year") == std::string::npos,
+              "...and a closing-costs question is not about a TERM (the owner's first live defect)");
+    }
+
+    {
+        // The two the owner named, by name.
+        const auto closing = mv::essential_requirements("ComputeClosingCosts");
+        check(closing.size() == 1 && closing[0].any_of.size() == 1 && closing[0].any_of[0] == "home_price",
+              "closing costs need a PRICE and nothing else");
+        const auto pay = mv::essential_requirements("ComputePayment");
+        std::vector<std::string_view> pay_fields;
+        for (const auto& r : pay) { for (const auto f : r.any_of) { pay_fields.push_back(f); } }
+        std::ranges::sort(pay_fields);
+        check((pay_fields == std::vector<std::string_view>{"periods", "present_value", "rate"}),
+              "a payment needs principal, rate and term -- and not future_value or timing");
+        // A lump-sum future value states no payment, and that is not an omission.
+        const auto fv = mv::essential_requirements("ComputeFutureValue");
+        const bool has_any_of = std::ranges::any_of(fv, [](const auto& r) { return r.any_of.size() == 2; });
+        check(has_any_of, "a future value needs a payment OR a starting amount (a lump sum states no payment)");
+        // Depreciation's essentials depend on the method.
+        const auto sl = mv::essential_requirements("ComputeDepreciation", "STRAIGHT_LINE");
+        const auto macrs = mv::essential_requirements("ComputeDepreciation", "MACRS");
+        const auto has = [](const auto& reqs, std::string_view f) {
+            return std::ranges::any_of(reqs, [&](const auto& r) { return std::ranges::find(r.any_of, f) != r.any_of.end(); });
+        };
+        check(has(sl, "life") && !has(sl, "recovery_period") && !has(sl, "period"),
+              "straight-line depreciation needs cost and life, and not a period or a recovery period");
+        check(has(macrs, "recovery_period") && has(macrs, "year") && !has(macrs, "life"),
+              "MACRS needs cost, a recovery period and a year, and not a life");
+    }
+
+    // =======================================================================
+    section("STATED-ONLY: a field is served only if the visitor's words support it");
+    // =======================================================================
+    {
+        // THE OWNER'S SECOND LIVE DEFECT, verbatim: seven invented fields on "amortization
+        // schedule for $350,000 at 6% over 30 years", and the home value set equal to the loan.
+        const auto in = params("ComputeAmortization", {{"loan_amount", "350000"},
+                                                       {"annual_rate", "0.06"},
+                                                       {"term_months", "360"},
+                                                       {"monthly_overpayment", "0"},
+                                                       {"pmi_annual_rate", "0"},
+                                                       {"original_home_value", "350000"},
+                                                       {"annual_repairs", "0"},
+                                                       {"annual_insurance", "0"},
+                                                       {"annual_cost_growth", "0"},
+                                                       {"monthly_hoa", "0"}});
+        const auto sh = mv::shape_stated_params(in, "amortization schedule for $350,000 at 6% over 30 years");
+        std::string kept;
+        for (const auto& k : sh.kept) { kept += k + " "; }
+        check(sh.missing_field.empty(), "complete request: nothing to ask (asked about '" + sh.missing_field + "')");
+        check((sh.kept == std::vector<std::string>{"loan_amount", "annual_rate", "term_months"}),
+              "ONLY the loan, the rate and the term are served -- no zero-filled HOA, repairs, "
+              "insurance, growth, overpayment or PMI, and no home value invented from the loan (kept: " + kept + ")");
+    }
+    {
+        // The same fields, each STATED: every one of them must survive.
+        const auto in = params("ComputeAmortization", {{"loan_amount", "300000"},
+                                                       {"annual_rate", "0.0625"},
+                                                       {"term_months", "240"},
+                                                       {"monthly_overpayment", "150"},
+                                                       {"pmi_annual_rate", "0.008"},
+                                                       {"original_home_value", "375000"},
+                                                       {"annual_repairs", "3600"},
+                                                       {"annual_insurance", "0"},
+                                                       {"annual_cost_growth", "0"},
+                                                       {"monthly_hoa", "275"}});
+        const std::string text =
+            "amortize $300,000 at 6.25% for 20 years on a $375,000 house with $150 extra a month, "
+            "0.8% PMI, $3,600 a year for repairs and $275 a month HOA dues";
+        const auto sh = mv::shape_stated_params(in, text);
+        const auto kept = [&](std::string_view f) { return std::ranges::find(sh.kept, f) != sh.kept.end(); };
+        check(kept("monthly_overpayment") && kept("pmi_annual_rate") && kept("original_home_value") &&
+                  kept("annual_repairs") && kept("monthly_hoa"),
+              "every field the visitor DID state is served");
+        check(!kept("annual_insurance") && !kept("annual_cost_growth"),
+              "...and the two they did not are not");
+    }
+    {
+        // A STATED ZERO is a statement; an unstated zero is not.
+        const auto in = params("ComputeAmortization", {{"loan_amount", "400000"}, {"annual_rate", "0.065"},
+                                                       {"term_months", "360"}, {"pmi_annual_rate", "0"},
+                                                       {"monthly_hoa", "0"}});
+        const auto said_none =
+            mv::shape_stated_params(in, "amortize 400000 at 6.5% for 30 years, no PMI and no HOA dues");
+        check(std::ranges::find(said_none.kept, "pmi_annual_rate") != said_none.kept.end() &&
+                  std::ranges::find(said_none.kept, "monthly_hoa") != said_none.kept.end(),
+              "\"no PMI and no HOA dues\" is a STATEMENT, so the zeros are served (the form's own "
+              "PMI would otherwise survive the visitor saying there is none)");
+        const auto said_nothing = mv::shape_stated_params(in, "amortize 400000 at 6.5% for 30 years");
+        check(std::ranges::find(said_nothing.kept, "pmi_annual_rate") == said_nothing.kept.end() &&
+                  std::ranges::find(said_nothing.kept, "monthly_hoa") == said_nothing.kept.end(),
+              "...and the same zeros, never mentioned, are not");
+    }
+    {
+        // original_home_value: the loan literal is not a home value just because the model pointed
+        // at it twice. Equal to the loan, it needs a property word beside the figure.
+        const auto in = params("ComputeAmortization", {{"loan_amount", "350000"}, {"annual_rate", "0.06"},
+                                                       {"term_months", "360"}, {"original_home_value", "350000"}});
+        const auto bare = mv::shape_stated_params(in, "amortize 350000 at 6% for 30 years");
+        check(std::ranges::find(bare.kept, "original_home_value") == bare.kept.end(),
+              "a home value equal to the loan with no property word is the loan counted twice: dropped");
+        const auto house = mv::shape_stated_params(
+            in, "amortize 350000 at 6% for 30 years on a $350,000 house");
+        check(std::ranges::find(house.kept, "original_home_value") != house.kept.end(),
+              "...but a figure the visitor calls a HOUSE is a home value");
+        const auto home_loan = mv::shape_stated_params(
+            in, "I want a $350,000 home loan at 6% for 30 years, amortize it");
+        check(std::ranges::find(home_loan.kept, "original_home_value") == home_loan.kept.end(),
+              "...and \"home loan\" is a loan, not a home value");
+    }
+    {
+        // Cadence and enum conventions are not statements either.
+        const auto in = params("ComputePayment", {{"rate", "0.005416666666666"}, {"periods", "360"},
+                                                  {"present_value", "400000"}, {"future_value", "0"},
+                                                  {"timing", "END_OF_PERIOD"}});
+        const auto sh = mv::shape_stated_params(in, "What's my monthly payment on a $400,000 loan at 6.5% for 30 years?");
+        check((sh.kept == std::vector<std::string>{"rate", "periods", "present_value"}),
+              "ComputePayment serves its three stated fields and not future_value or timing");
+        const auto heloc = params("ComputeHeloc", {{"home_value", "500000"}, {"current_mortgage_balance", "300000"},
+                                                   {"max_ltv_rate", "0.80"}, {"drawn_amount", "0"},
+                                                   {"annual_rate", "0"}, {"repayment_term_years", "0"},
+                                                   {"payments_per_year", "12"}});
+        const auto hs = mv::shape_stated_params(heloc, "How much HELOC could I get on a $500,000 home with a $300,000 mortgage?");
+        check((hs.kept == std::vector<std::string>{"home_value", "current_mortgage_balance"}) && hs.missing_field.empty(),
+              "a HELOC question states a home and a balance: the LTV cap, rate, term and cadence are not invented");
+        const auto biweekly = params("ComputePayoffTiming", {{"current_loan_balance", "250000"}, {"annual_rate", "0.065"},
+                                                             {"current_monthly_payment", "1900"},
+                                                             {"extra_monthly_payment", "0"}, {"payments_per_year", "26"}});
+        const auto bs = mv::shape_stated_params(biweekly, "I owe $250,000 at 6.5% and pay $1,900 every two weeks, biweekly");
+        check(std::ranges::find(bs.kept, "payments_per_year") != bs.kept.end(),
+              "a NON-monthly cadence the visitor names is served");
+    }
+    {
+        // An essential field the model put a convention zero in is MISSING, not stated.
+        const auto in = params("ComputeAmortization", {{"loan_amount", "0"}, {"annual_rate", "0.065"},
+                                                       {"term_months", "360"}});
+        const auto sh = mv::shape_stated_params(in, "show me the amortization schedule at 6.5% for 30 years");
+        check(sh.missing_field == "loan_amount",
+              "a zero loan nobody stated is an ABSENT loan: the visitor is asked, never served a $0 mortgage");
+        check(mv::clarifying_question("ComputeAmortization", sh.missing_field) == "How much is the loan?",
+              "...with a question about the loan");
+    }
+    {
+        // ASKING: only for an essential field, and the FIRST one missing.
+        const auto in = params("ComputePayment", {{"rate", "0.005416666666666"}, {"present_value", "420000"}});
+        const auto sh = mv::shape_stated_params(in, "What's the payment on a $420,000 loan at 6.5%?");
+        check(sh.missing_field == "periods", "no term stated: the one question is about the term (asked: '" + sh.missing_field + "')");
+        const auto closing = params("ComputeClosingCosts", {{"home_price", "500000"}, {"down_payment_percent", "0.2"}});
+        const auto cs = mv::shape_stated_params(closing, "What are my closing costs on a $500,000 house with 20% down?");
+        check(cs.missing_field.empty() && cs.kept.size() == 2,
+              "closing costs on a priced house with 20% down: nothing to ask, and both stated fields served");
+        const auto fv = params("ComputeFutureValue", {{"rate", "0.004166666666666"}, {"periods", "120"}});
+        const auto fs = mv::shape_stated_params(fv, "what will it grow to at 5% over 10 years?");
+        check(!fs.missing_field.empty(),
+              "a future value with neither a payment nor a starting amount asks for one of them");
+        const auto lump = params("ComputeFutureValue", {{"rate", "0.004166666666666"}, {"periods", "120"},
+                                                        {"present_value", "10000"}, {"payment", "0"}});
+        const auto ls = mv::shape_stated_params(lump, "What will $10,000 grow to at 5% over 10 years?");
+        check(ls.missing_field.empty() && std::ranges::find(ls.kept, "payment") == ls.kept.end(),
+              "a lump sum is complete without a payment, and no payment of 0 is invented for it");
+    }
+    {
+        // The documented DANGEROUS failure must stay a refusal and must NOT become a question or
+        // be quietly dropped: a value the text contradicts is kept, so verification refuses it.
+        const auto in = params("ComputePayment", {{"rate", "0.005625"}, {"periods", "360"}, {"present_value", "304000.00"}});
+        const auto sh = mv::shape_stated_params(in, "What is the payment on $495,000 at 6.75% over 30 years?");
+        check(std::ranges::find(sh.kept, "present_value") != sh.kept.end() && sh.missing_field.empty(),
+              "present_value = 304000 against a 495,000 utterance is KEPT, so G3 refuses it as before");
+    }
+    {
+        // G2b now asks for the ESSENTIAL fields only.
+        const auto three = params("ComputePayment", {{"rate", "0.005"}, {"periods", "360"}, {"present_value", "300000"}});
+        expect_pass(three, "What's the payment on $300,000 at 6% over 30 years?",
+                    "ComputePayment with only its three essential fields is Proven (was MissingField on future_value)");
+        expect(drop_field(three, "periods"), "What's the payment on $300,000 at 6% over 30 years?",
+               mv::Outcome::Unsafe, mv::ReasonCode::MissingField,
+               "...and without the term it is still refused at G2b");
+    }
+
+    section("A RANGE states no figure: it is a question, not a pick of one end");
+    {
+        const auto kept = [](const mv::ShapedParams& sh, std::string_view name) {
+            return std::ranges::find(sh.kept, name) != sh.kept.end();
+        };
+        // The model took 6% from "between 6% and 7%" and priced the loan as though it were said.
+        const auto pay = params("ComputePayment", {{"rate", "0.005"}, {"periods", "360"}, {"present_value", "400000"}});
+        const auto sp = mv::shape_stated_params(pay, "what would the payment be on $400,000 at somewhere between 6% and 7% for 30 years?");
+        check(sp.missing_field == "rate", "a rate given as a range is MISSING and asked (got \"" + sp.missing_field + "\")");
+        check(!kept(sp, "rate"), "...and the rate the model took from one end is not served");
+        const auto am = params("ComputeAmortization", {{"loan_amount", "300000"}, {"annual_rate", "0.065"}, {"term_months", "360"}});
+        const auto sa = mv::shape_stated_params(am, "amortize 300k at 6.5% for 25 to 30 years");
+        check(sa.missing_field == "term_months", "a term given as '25 to 30 years' is asked (got \"" + sa.missing_field + "\")");
+        const auto rf = params("ComputeRefinance", {{"current_loan_balance", "300000"}, {"current_annual_rate", "0.07"}, {"new_annual_rate", "0.055"}});
+        const auto sr = mv::shape_stated_params(rf, "refinance my $300,000 loan from 7% to somewhere between 5.5% and 6%");
+        check(sr.missing_field == "new_annual_rate", "...and only the RANGED rate is asked, not the stated one (got \"" + sr.missing_field + "\")");
+        check(kept(sr, "current_annual_rate"), "the rate the visitor did state stays");
+        // The shapes that LOOK like ranges and are not.
+        const auto rf2 = params("ComputeRefinance", {{"current_loan_balance", "320000"}, {"current_annual_rate", "0.07"}, {"new_annual_rate", "0.06"}});
+        const auto s2 = mv::shape_stated_params(rf2, "Refinance 320000 from 7% to 6%");
+        check(s2.missing_field.empty() && kept(s2, "new_annual_rate"), "'from 7% to 6%' is a refinance, not a range");
+        const auto cu = params("ComputeCumulative", {{"component", "INTEREST"}, {"rate", "0.005"}, {"periods", "360"},
+                                                     {"present_value", "500000"}, {"start_period", "13"}, {"end_period", "24"}});
+        const auto sc = mv::shape_stated_params(cu, "interest paid in months 13 to 24 on a $500,000 loan at 6% over 30 years");
+        check(sc.missing_field.empty() && kept(sc, "start_period") && kept(sc, "end_period"),
+              "'months 13 to 24' is a window of two stated figures, not a range");
+    }
+
+    section("A CONVENTION CONSTANT resting on another field's figure is the default it always was");
+    {
+        // "double declining balance for year 2": the 2 is the YEAR, and `factor = 2` found the same
+        // figure and read as the visitor's own statement.
+        auto dep = params("ComputeDepreciation", {{"method", "DECLINING_BALANCE"}, {"cost", "90000"}, {"salvage", "9000"},
+                                                  {"life", "6"}, {"period", "2"}, {"factor", "2"}});
+        const auto sd = mv::shape_stated_params(dep, "double declining balance depreciation for year 2 on $90,000 of equipment, 6 year life, $9,000 salvage");
+        check(std::ranges::find(sd.kept, "factor") == sd.kept.end(), "factor = 2 is not stated by the 'year 2' that is the PERIOD");
+        check(std::ranges::find(sd.kept, "period") != sd.kept.end(), "...and the period it belongs to still is");
+    }
+
+    section("A cash flow written with a k suffix is grounded, and its outlay may be negative");
+    {
+        const auto irr = with_list(params("ComputeIrr", {}), "values", {"-75000", "20000", "30000", "40000", "25000"});
+        const auto v1 = mv::verify_mortgage_output(irr, "irr if I put in 75k and get back 20k, 30k, 40k and 25k in years 1 to 4");
+        std::printf("      [diag] outcome=%s reason=%s msg=%s\n", mv::to_string(v1.outcome).data(),
+                    mv::to_string(v1.reason).data(), v1.message.c_str());
+        check(v1.outcome == mv::Outcome::Proven, "k-suffixed cash flows ground, outlay negated");
+        const auto pb = with_list(params("ComputePaybackPeriod", {}), "values",
+                                  {"-12000", "900", "900", "900", "900", "900", "900", "900", "900", "900", "900", "900",
+                                   "900", "900", "900", "900", "900", "900", "900", "900", "900"});
+        const auto v2 = mv::verify_mortgage_output(pb, "payback on a 12k water heater that saves 900 a year");
+        std::printf("      [diag] outcome=%s reason=%s msg=%s\n", mv::to_string(v2.outcome).data(),
+                    mv::to_string(v2.reason).data(), v2.message.c_str());
+        check(v2.outcome == mv::Outcome::Proven, "a 12k outlay with a 900 saving grounds");
+    }
+
+    section("EVERY declared field has a visitor's-words label, and no visitor-facing text names an internal");
+    {
+        // The site renders a clarification's question and a refusal's message VERBATIM, twice. A field
+        // missing from `kFieldLabels` would reach the visitor as "one of the figures", and a wording
+        // that carries an operation or a snake_case field name is a leak of internals (observed live
+        // 2026-10-06: `The assistant left out "property_price", which ComputeRentVsBuy needs`). The sweep
+        // runs over the DECLARED set, so a field finance.proto grows later turns this red instead of
+        // reaching a visitor.
+        std::size_t fields_checked = 0, unlabeled = 0, leaks = 0;
+        std::string first_unlabeled, first_leak;
+        const auto leaky = [](std::string_view text) {
+            if (text.find("Compute") != std::string_view::npos) { return true; }
+            // a snake_case identifier: lowercase letters, an underscore, lowercase letters
+            for (std::size_t i = 1; i + 1 < text.size(); ++i) {
+                if (text[i] == '_' && std::islower(static_cast<unsigned char>(text[i - 1])) != 0 &&
+                    std::islower(static_cast<unsigned char>(text[i + 1])) != 0) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        for (const auto op : mv::operation_ids()) {
+            for (const auto& spec : mv::fields_of(op)) {
+                if (mv::operation_excludes_field(op, spec.field)) { continue; }
+                ++fields_checked;
+                const auto label = mv::field_label(spec.field);
+                if (label.empty()) {
+                    ++unlabeled;
+                    if (first_unlabeled.empty()) { first_unlabeled = std::string{op} + "." + std::string{spec.field}; }
+                } else if (leaky(label)) {
+                    ++leaks;
+                    if (first_leak.empty()) { first_leak = "label of " + std::string{spec.field}; }
+                }
+                const auto q = mv::clarifying_question(op, spec.field);
+                if (!q.empty() && leaky(q)) {
+                    ++leaks;
+                    if (first_leak.empty()) { first_leak = "question for " + std::string{op} + "." + std::string{spec.field}; }
+                }
+            }
+        }
+        check(fields_checked > 150, "the sweep covered the declared fields (" + std::to_string(fields_checked) + ")");
+        check(unlabeled == 0, "every declared field has a label (" + std::to_string(unlabeled) + " without, first: " + first_unlabeled + ")");
+        check(leaks == 0, "no label or question names an operation or a snake_case field (" + std::to_string(leaks) + ", first: " + first_leak + ")");
+        check(leaky("left out \"property_price\", which ComputeRentVsBuy needs"),
+              "the leak detector fires on the production text it exists to prevent");
+        check(!leaky("What's the home price?"), "...and stays quiet on a visitor's own words");
+    }
+
+    section("A cadence the calculation cannot serve is named, not dropped");
+    {
+        for (const char* t : {"bi-weekly payment on a $350,000 loan at 6.25% over 30 years", "Biweekly payments on 300k",
+                              "pay every two weeks instead", "twice a month", "a fortnightly schedule", "semi-monthly on $200,000"}) {
+            check(mv::names_unsupported_cadence(t), std::string{"named: "} + t);
+        }
+        for (const char* t : {"What's the monthly payment on $400,000 at 6.5% for 30 years?", "compounded weekly at 5%",
+                              "pay $500 more a month", "a week from now"}) {
+            check(!mv::names_unsupported_cadence(t), std::string{"not named: "} + t);
+        }
+    }
+
+    section("A deposit written the way visitors write it: '30 percent down', and a deposit AS a percent");
+    {
+        // "30 percent" (the word) did not tag the deposit, so the loan netting never ran.
+        const auto pay = params("ComputePayment", {{"rate", "0.003958"}, {"periods", "180"}, {"present_value", "330400"}});
+        expect_pass(pay, "a 472k house with 30 percent down; across 180 months: how much is the monthly payment? 4.75% fixed",
+                    "'30 percent down' nets a 472k price to a 330,400 loan, exactly as '30% down' does");
+        const auto pct = params("ComputePayment", {{"rate", "0.003958"}, {"periods", "180"}, {"present_value", "330400"}});
+        expect_pass(pct, "a 472k house with 30% down; across 180 months: how much is the monthly payment? 4.75% fixed",
+                    "...and the percent-sign spelling still does (the control)");
+        // The deposit itself: price x pct.
+        const auto rcf = params("ComputeRentalCashFlow", {{"property_price", "631500"}, {"down_payment", "126300"},
+                                                          {"monthly_gross_rent", "3500"}});
+        expect_pass(rcf, "rental cash flow 631500, 20% down rent $3,500/mo",
+                    "'631500, 20% down' states a 126,300 deposit (price x percent), not only a net loan");
+        const auto wrong = params("ComputeRentalCashFlow", {{"property_price", "631500"}, {"down_payment", "136300"},
+                                                            {"monthly_gross_rent", "3500"}});
+        expect(wrong, "rental cash flow 631500, 20% down rent $3,500/mo", mv::Outcome::Unsafe,
+               mv::ReasonCode::UngroundedValue, "...and a deposit that is NOT 20% of the price still refuses");
+        // "yearly" is a cadence word.
+        const auto fvd = params("ComputeFutureValueDetailed", {{"annual_rate", "0.0325"}, {"years", "30"},
+                                                               {"annual_contribution", "12000"}, {"current_principal", "145000"},
+                                                               {"compound_frequency", "1"}});
+        expect_pass(fvd, "and a 3.25% rate, 145k in a 401k, over 30 years, compounded yearly and saving 12k a year, how much will i have at the end?",
+                    "'compounded yearly' grounds compound_frequency = 1");
+    }
+
+    section("A CONDO is a property: '300k condo' states the home price");
+    {
+        const auto cc = params("ComputeClosingCosts", {{"home_price", "300000"}, {"down_payment_percent", "0.2"}});
+        const auto v1 = mv::verify_mortgage_output(cc, "Should I expect big closing costs on a 300k condo with 20% down?");
+        std::printf("      [diag] outcome=%s reason=%s msg=%s\n", mv::to_string(v1.outcome).data(),
+                    mv::to_string(v1.reason).data(), v1.message.c_str());
+        check(v1.outcome == mv::Outcome::Proven, "a 300k condo grounds home_price = 300000");
+        const auto sh = mv::shape_stated_params(cc, "Should I expect big closing costs on a 300k condo with 20% down?");
+        check(std::ranges::find(sh.kept, "home_price") != sh.kept.end(), "...and the price is kept, not dropped");
+        const auto house = mv::verify_mortgage_output(cc, "Should I expect big closing costs on a 300k house with 20% down?");
+        check(house.outcome == mv::Outcome::Proven, "a 300k HOUSE with the same wording is Proven (the control)");
+    }
+
+    section("A spaced hyphen is a dash, and 'down to' is a movement: neither is what its neighbour word says");
+    {
+        // Both found by GroundingCorpusSweepTest the day the visitor-phrased rows entered the mix:
+        //   "Atlanta - 479k loan spread over 180 montsh" lexed -479,000, so the correct 479,000 grounded
+        //   against nothing ("the nearest figure you gave is 180"); a city or a label before a dash is how
+        //   people open a question. A hyphen with a space on BOTH sides is punctuation, not a sign.
+        //   "a 25-year refi; 5.375% down to 4.375%" tagged the 5.375 as a DOWN PAYMENT because the next word
+        //   is "down", and M0 refuses a down payment as a rate -- so the stated current rate was refused.
+        for (const std::string_view text : {"Atlanta - 479k loan spread over 180 months", "Denver - $658,600 house, 30% down",
+                                            "Austin -- 300k at 6%", "Boston - 250,000 balance"}) {
+            bool negative = false;
+            for (const auto& l : mv::lex_numeric_literals(text)) { if (l.value.is_negative()) negative = true; }
+            check(!negative, std::string{"a spaced hyphen produces no negative literal: "} + std::string{text});
+        }
+        for (const std::string_view text : {"a -$250,000 position", "npv at 7%: -100k now then 30k", "outlay of -250000 today",
+                                            "a loan of - -5000"}) {
+            bool negative = false;
+            for (const auto& l : mv::lex_numeric_literals(text)) { if (l.value.is_negative()) negative = true; }
+            check(negative, std::string{"an attached minus still carries its sign: "} + std::string{text});
+        }
+        const auto atl = params("ComputePayment", {{"present_value", "479000"}, {"periods", "180"}, {"rate", "0.006354"}});
+        expect_pass(atl, "Atlanta - 479k loan spread over 180 montsh, what would I pay each month?\n7.625% interest",
+                    "'Atlanta - 479k loan' grounds a 479,000 principal");
+        const auto refi = params("ComputeRefinance", {{"current_annual_rate", "0.05375"}, {"new_annual_rate", "0.04375"},
+                                                      {"current_loan_balance", "580000"}, {"new_term_years", "25"}});
+        expect_pass(refi, "What would I save refinancing a $580,000 mortgage balance; a 25-year refi; 5.375% down to 4.375%?",
+                    "'5.375% down to 4.375%' is a rate coming down, not a 5.375% deposit");
+        bool deposit = false;
+        for (const auto& l : mv::lex_numeric_literals("a $400,000 house, 20% down, 6.5% for 30 years")) {
+            if (l.names_down_payment && l.value.to_string().rfind("20", 0) == 0) deposit = true;
+        }
+        check(deposit, "...while '20% down' is still a deposit (the control)");
+    }
+
+    section("A cost word governs the figure BESIDE it, not every figure within four words");
+    {
+        // Found by GroundingCorpusSweepTest over 6,000 generated rows (the 500-row gate was green):
+        // 6 of 10 refusals were one defect. The HOA word was searched for up to four words AFTER each
+        // figure, so "a $387,000 home HOA 100/month" made the PRICE an HOA fee ("your wording makes it
+        // an HOA or association fee ... so it cannot fill this field") and "$339,600 borrowed HOA
+        // $275/month" did the same to the loan. A cost word followed straight away by its own figure
+        // governs THAT figure.
+        const auto flag = [](std::string_view text, std::string_view figure, bool vacancy = false, bool increment = false) -> int {
+            for (const auto& l : mv::lex_numeric_literals(text)) {
+                std::string digits;
+                for (const char c : l.text) { if (c != ',' && c != '$') digits += c; }
+                if (digits == figure) { return vacancy ? (l.names_vacancy ? 1 : 0) : increment ? (l.names_increment ? 1 : 0) : (l.names_hoa ? 1 : 0); }
+            }
+            return -1;
+        };
+        check(flag("What's the schedule on $339,600 borrowed HOA $275/month at 8% over 30 years?", "339600") == 0,
+              "'$339,600 borrowed HOA $275/month': the loan is not HOA dues");
+        check(flag("What's the schedule on $339,600 borrowed HOA $275/month at 8% over 30 years?", "275") == 1,
+              "...and the $275 that follows the HOA word is");
+        check(flag("a $387,000 home HOA 100/month set aside $1,200 a year for repairs", "387000") == 0,
+              "'a $387,000 home HOA 100/month': the price is not HOA dues");
+        check(flag("a $387,000 home HOA 100/month set aside $1,200 a year for repairs", "100") == 1,
+              "...and the 100 beside the HOA word is");
+        check(flag("mortgage for 550000, insurance of 3k a year, an HOA fee of 300 a month", "3") == 0,
+              "'insurance of 3k a year, an HOA fee of 300 a month': the 3k is insurance, not dues");
+        check(flag("mortgage for 550000, insurance of 3k a year, an HOA fee of 300 a month", "300") == 1,
+              "...and 'HOA fee of 300' is dues");
+        // A HOA word already claimed by the figure BEFORE it does not also claim the next one.
+        check(flag("amortization for 5.68 percent rate, for 15 years, $300 hoa dues, 286400", "286400") == 0,
+              "'$300 hoa dues, 286400': the figure after claimed dues is the loan");
+        check(flag("a $375,400 loan, 15 years remaining, $412,000 home, $150/mo HOA and 1.2k insurance", "1.2") == 0,
+              "'$150/mo HOA and 1.2k insurance': the insurance is not dues (a unit word does not break the claim)");
+        check(flag("a $691k fixed mortgage, $275 a month in HOA dues, 1,800 a year for upkeep, at 4.66%", "1800") == 0,
+              "'$275 a month in HOA dues, 1,800 a year for upkeep': the upkeep is not dues");
+        check(flag("a $350 a month HOA fee?\n633k mortgage", "633") == 0,
+              "a question mark ends the sentence: '633k mortgage' on the next line is not HOA dues");
+        check(flag("HOA dues are 275 a month on a $400,000 house", "275") == 1,
+              "'HOA dues are 275': a word with no figure of its own before it still names the figure after (the control)");
+        // The controls: the word AFTER a figure still names it when no figure follows the word.
+        check(flag("a mortgage of $300,000 with $200 HOA, then $300 for insurance", "200") == 1,
+              "'$200 HOA, then $300...': a figure directly before the HOA word is still dues (the control)");
+        check(flag("over 15 yrs, $150 HOA dues, rent $5k, $667,000, 6.625%", "667000") == 0,
+              "a HOA word three words and another figure back does not make '$667,000' dues");
+        check(flag("over 15 yrs, $150 HOA dues, rent $5k, $667,000, 6.625%", "150") == 1,
+              "...while '$150 HOA dues' is");
+        // "extra" before a figure that the HOA word follows directly: the figure is the dues.
+        check(flag("$1,003,000 4.875% +1000 extra $300 HOA tax rate 28%", "300") == 1,
+              "'+1000 extra $300 HOA': the 300 is dues");
+        check(flag("$1,003,000 4.875% +1000 extra $300 HOA tax rate 28%", "300", false, true) == 0,
+              "...and not an overpayment, though 'extra' stands before it");
+        check(flag("$1,003,000 4.875% +1000 extra $300 HOA tax rate 28%", "1000", false, true) == 1,
+              "...while the +1000 that 'extra' follows is the overpayment (the control)");
+        // The word BEFORE a percent: "vacancy 10%" is as ordinary as "10% vacancy".
+        check(flag("cash flow on 461K buy-to-let, 6% mgmt $1,900 rent 7 years vacancy 10%", "10", true) == 1,
+              "'vacancy 10%' names the vacancy");
+        check(flag("rental analysis: $307,000, 5% down vacancy rate of 10% rent $4,900", "10", true) == 1,
+              "'vacancy rate of 10%' names the vacancy");
+        check(flag("cash flow on 461K buy-to-let, 6% mgmt $1,900 rent 7 years vacancy 10%", "6", true) == 0,
+              "...and the 6% management fee beside it does not");
+        check(flag("a duplex renting at $5,000 a month, a 5% vacancy rate at 7.75% fixed", "7.75", true) == 0,
+              "'a 5% vacancy rate at 7.75% fixed': the vacancy word belongs to the 5, so the 7.75 is a loan rate");
+        check(flag("a duplex renting at $5,000 a month, a 5% vacancy rate at 7.75% fixed", "5", true) == 1,
+              "...and the 5% it follows is the vacancy (the control)");
+        const auto occ = params("ComputeRentalCashFlow", {{"occupancy_rate", "0.9000"}});
+        check(mv::ground_emitted_values(occ, "cash flow on 461K buy-to-let, 89.8k down 6% mgmt $1,900 rent 7 years vacancy 10%")
+                      .outcome == mv::Outcome::Proven,
+              "a 10% vacancy grounds occupancy 0.90 whichever side the word is on");
+        // A no-deposit purchase: the price IS the loan, and the words say so.
+        const auto nodown = params("ComputeAmortization", {{"loan_amount", "900000.00"}, {"annual_rate", "0.05125"},
+                                                           {"term_months", "240"}, {"original_home_value", "900000.00"}});
+        const auto shaped = mv::shape_stated_params(nodown, "5.125% interest rate for 20 yrs. What if I pay extra? $900,000, no down payment");
+        check(std::ranges::find(shaped.kept, "original_home_value") != shaped.kept.end(),
+              "'$900,000, no down payment' states a home worth the loan, so it is kept");
+        const auto zero_down = mv::shape_stated_params(nodown, "0 down on a $900,000 house; on a 20 year schedule at 5.125%");
+        check(std::ranges::find(zero_down.kept, "original_home_value") != zero_down.kept.end(),
+              "'0 down on a $900,000 house' is also a no-deposit purchase");
+        const auto thirty_k = mv::shape_stated_params(nodown, "$30,000 down on $900,000 over 20 years at 5.125%");
+        check(std::ranges::find(thirty_k.kept, "original_home_value") == thirty_k.kept.end(),
+              "...but '$30,000 down' is not '0 down' (the tail characters match, the figure does not)");
+        const auto bare = params("ComputeAmortization", {{"loan_amount", "900000.00"}, {"annual_rate", "0.05125"},
+                                                         {"term_months", "240"}, {"original_home_value", "900000.00"}});
+        const auto shaped2 = mv::shape_stated_params(bare, "5.125% interest rate for 20 yrs on $900,000");
+        check(std::ranges::find(shaped2.kept, "original_home_value") == shaped2.kept.end(),
+              "...while the same figure with no 'no down payment' is still the loan counted twice (the control)");
+    }
+
+    section("A ROUND FIGURE IS RENDERED AS A PLAIN DECIMAL, never as an exponent");
+    {
+        // `std::to_chars(double)` with no format picks the SHORTER of fixed and scientific, and
+        // "5e+05" is shorter than "500000": every round figure came out in exponent form, which
+        // this contract refuses, so a correct parse of "$500,000" was a refusal on every
+        // Double-typed field. Production-found 2026-10-06 (12 of 272 visitor requests).
+        check(mv::plain_decimal_text(500000.0) == "500000", "500000 is \"500000\" (was \"5e+05\")");
+        check(mv::plain_decimal_text(-100000.0) == "-100000", "-100000 is \"-100000\" (was \"-1e+05\")");
+        check(mv::plain_decimal_text(400000.0) == "400000", "400000 is \"400000\"");
+        check(mv::plain_decimal_text(1200000.0) == "1200000", "1200000 keeps every digit");
+        check(mv::plain_decimal_text(0.0385) == "0.0385", "0.0385 is the shortest round-trip form, not padded");
+        check(mv::plain_decimal_text(2413.77) == "2413.77", "2413.77 keeps its cents");
+        check(mv::plain_decimal_text(0.0000001) == "0.0000001", "a small figure is positional too");
+        check(mv::plain_decimal_text(-0.0) == "0", "negative zero is plain zero");
+        for (const double v : {5e5, -1e5, 4e5, 2e6, 1e3, 3e4, 7.5e-5}) {
+            const auto text = mv::plain_decimal_text(v);
+            check(text.find('e') == std::string::npos && text.find('E') == std::string::npos,
+                  "no exponent marker in " + text);
+        }
     }
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);

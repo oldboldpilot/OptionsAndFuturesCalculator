@@ -533,6 +533,66 @@ auto main() -> int {
               "an insurance revision on ComputeAmortization is not read as a new loan");
     }
 
+    // -----------------------------------------------------------------------------------------
+    // 2026-10-06. The sweep (DerivationCorpusSweepTest) fed the layer its own GOLD through the new
+    // visitor-style generators and found five fields it would have REWRITTEN to a wrong value.
+    {
+        std::printf("\n-- the layer never rewrites a stated figure to another one\n");
+        // (a) A BARE price beside a "$" rent: the rent was the only money literal, so it became
+        //     "the price" -- 631,500 rewritten to 3,500.
+        for (const char* op : {"ComputeRentalCashFlow", "ComputeRentVsBuy", "ComputeClosingCosts"}) {
+            const auto price_field = std::string{op} == "ComputeClosingCosts" ? "home_price" : "property_price";
+            const auto c = md::derive_candidates(op, "a 631500 house, 20% down, rent $3,500/mo");
+            const auto got = only(c, price_field);
+            check(got.size() != 1 || got.front() != "3500",
+                  std::string{op} + ": the one DOLLAR figure (the rent) is not taken for the price");
+        }
+        // (b) A non-monthly compounding cadence: "40 years compounded yearly" is 40 PERIODS, and the
+        //     monthly rule base offered 480.
+        for (const char* text : {"164k invested at 6.65% for 40 years and compounded yearly",
+                                 "what will $20,000 be worth in 10 years compounded annually at 5%",
+                                 "10 years at 5% compounded quarterly on 30k"}) {
+            check(only(md::derive_candidates("ComputeFutureValue", text), "periods").empty(),
+                  std::string{"no months-derived periods for: "} + text);
+        }
+        check(only(md::derive_candidates("ComputeFutureValue", "future value of $20,000 at 5% for 10 years"),
+                   "periods").size() == 1,
+              "...while an UNQUALIFIED horizon is still 120 monthly periods");
+    }
+
+    // The rate and the period count of a time-value question are ONE cadence. Found by the derivation
+    // sweep the day visitor-phrased rows entered the mix: "207000 sitting in a savings account; over 15
+    // yrs; and a 4.75% rate" is, to a visitor, an ANNUAL rate over 15 YEARS, and the layer -- which
+    // derives months from years -- rewrote the correct 15 to 180, leaving an annual rate on a 180-year
+    // horizon. An emitted rate that IS the annual reading says the periods are years.
+    {
+        const std::string text = "What does 207000 sitting in a savings accunt; over 15 yrs; and a 4.75% rate.";
+        const auto c = md::derive_candidates("ComputeFutureValue", text);
+        const std::map<std::string, std::string> annual{{"rate", "0.047500"}, {"periods", "15"}, {"present_value", "207000.00"}};
+        const auto kept = md::reconcile(c, annual);
+        check(kept.replace.empty(), "an annual rate with its 15 YEARS is a consistent pair and is left alone");
+        const std::map<std::string, std::string> monthly{{"rate", "0.003958"}, {"periods", "180"}, {"present_value", "207000.00"}};
+        check(md::reconcile(c, monthly).replace.empty(), "...and so is the monthly rate with its 180 months (the control)");
+        const std::map<std::string, std::string> wrong_annual{{"rate", "0.047500"}, {"periods", "180"}, {"present_value", "207000.00"}};
+        const auto fix_a = md::reconcile(c, wrong_annual);
+        check(fix_a.replace.size() == 1 && fix_a.replace.front().field == "periods" &&
+                  fix_a.replace.front().values == std::vector<std::string>{"15"},
+              "an annual rate over 180 periods is repaired to 15 YEARS, on the cadence the rate states");
+        const std::map<std::string, std::string> wrong_monthly{{"rate", "0.003958"}, {"periods", "15"}, {"present_value", "207000.00"}};
+        const auto fix_m = md::reconcile(c, wrong_monthly);
+        check(fix_m.replace.size() == 1 && fix_m.replace.front().field == "periods" &&
+                  fix_m.replace.front().values == std::vector<std::string>{"180"},
+              "a monthly rate over 15 periods is still repaired to 180 months, as before");
+    }
+
+    // The RATE alone decides the cadence. "over 15 yeas" (a typo) leaves no periods candidate, and the
+    // annual 0.04125 the model emitted was rewritten to a monthly 0.003438 against its own 15 periods.
+    {
+        const auto c = md::derive_candidates("ComputeFutureValue", "If I put away 52000 in a brokerage account, at 4.125%, over 15 yeas");
+        const std::map<std::string, std::string> annual{{"rate", "0.041250"}, {"periods", "15"}, {"present_value", "52000.00"}};
+        check(md::reconcile(c, annual).replace.empty(), "an annual rate is not rewritten to a monthly one when the horizon was misspelt");
+    }
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }
