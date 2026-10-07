@@ -263,8 +263,39 @@ trap 'rm -f "$ARCHIVE" "$EXCLUDES"' EXIT
 
 grep -vE '^\s*(#|$)' .railwayignore > "$EXCLUDES"
 
-tar --exclude-from="$EXCLUDES" --exclude-vcs-ignores -czf "$ARCHIVE" . 2>/dev/null || \
-tar --exclude-from="$EXCLUDES" -czf "$ARCHIVE" .
+# --exclude-vcs-ignores drops every path a .gitignore MATCHES, and a file can be
+# tracked while matching one: cpp23-logger ignores `*.cmake` and tracks
+# cmake/ToolchainBMIGuard.cmake, so deployment 36b1d4e0 (2026-10-07) failed at
+# configure with "include could not find requested file". What ships is decided
+# by git, so every TRACKED file that .railwayignore does not exclude is put back.
+TARBALL="${ARCHIVE%.gz}"
+trap 'rm -f "$ARCHIVE" "$TARBALL" "$EXCLUDES"' EXIT
+tar --exclude-from="$EXCLUDES" --exclude-vcs-ignores -cf "$TARBALL" . 2>/dev/null || \
+tar --exclude-from="$EXCLUDES" -cf "$TARBALL" .
+DROPPED="$(mktemp -t railway-dropped-XXXXXX)"
+trap 'rm -f "$ARCHIVE" "$TARBALL" "$EXCLUDES" "$DROPPED"' EXIT
+comm -23 <(git ls-files --recurse-submodules | sed 's#^#./#' | sort -u) \
+         <(tar -tf "$TARBALL" | sort -u) > "$DROPPED.all"
+# Keep only paths that exist and that .railwayignore does not exclude: tar applies
+# the same exclude list to names given with -T, so one pass decides both.
+: > "$DROPPED"
+while IFS= read -r f; do [[ -f "$f" ]] && printf '%s\n' "$f"; done < "$DROPPED.all" > "$DROPPED"
+rm -f "$DROPPED.all"
+if [[ -s "$DROPPED" ]]; then
+    # CREATE mode with literal names: append mode (-r) reads `[strategy]` in a Next.js
+    # route path as a wildcard and fails; create mode does not, and still applies the
+    # exclude list to names given with -T.
+    EXTRA="${TARBALL}.extra"
+    tar --exclude-from="$EXCLUDES" --no-recursion --verbatim-files-from -cf "$EXTRA" -T "$DROPPED"
+    n=$(tar -tf "$EXTRA" | wc -l)
+    if [[ $n -gt 0 ]]; then
+        tar -Af "$TARBALL" "$EXTRA"
+        echo "archive: re-added ${n} tracked file(s) a .gitignore had matched:"
+        tar -tf "$EXTRA" | head -10 | sed 's/^/    /'
+    fi
+    rm -f "$EXTRA"
+fi
+gzip -c "$TARBALL" > "$ARCHIVE"
 
 SIZE=$(stat -c %s "$ARCHIVE")
 printf 'archive: %.1f MB\n' "$(echo "$SIZE/1048576" | bc -l)"
@@ -282,7 +313,8 @@ LIST="$(mktemp -t railway-list-XXXXXX)"
 trap 'rm -f "$ARCHIVE" "$EXCLUDES" "$LIST"' EXIT
 tar -tzf "$ARCHIVE" > "$LIST"
 
-for required in ./railway.json ./backend/Dockerfile ./backend/CMakeLists.txt ./backend/src/main.cpp; do
+for required in ./railway.json ./backend/Dockerfile ./backend/CMakeLists.txt ./backend/src/main.cpp \
+                ./backend/sensen/external/cpp23-logger/cmake/ToolchainBMIGuard.cmake; do
     grep -qxF "$required" "$LIST" || {
         echo "ERROR: $required missing from the archive." >&2; exit 1; }
 done
