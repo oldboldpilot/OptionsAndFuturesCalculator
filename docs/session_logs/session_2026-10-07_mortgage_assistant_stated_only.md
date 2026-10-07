@@ -63,3 +63,27 @@ Evidence: `docs/evidence/visitor-regression/RESULTS.md`.
   merge the form's values before calling Finance, stop writing `downPayment=0` and `homePrice=loan` for unstated fields,
   render the structured refusal, and byte-copy the proto. After that, upload the GGUF and deploy the engine.
 - Then move the assistant into mortgage-nest-egg (#81).
+
+## Deployed — 2026-10-07
+
+- **Client first:** mortgage-nest-egg `83553fa` (Railway mfv-web `e3947e7e`, SUCCESS 05:21). It sends the original request
+  plus `prior_question`/`prior_clarification`, merges form values before Finance, writes no unstated zeros, and renders
+  plain-word refusals. Verified by content: the live routes chunk carries the new `priorQuestion` field, which the old
+  source does not.
+- **Residue closed before the engine** (`625ef99`): three derivation rewrites (nearest-figure increment rule, sentence
+  break ends the look-back), doubled/dropped-letter slips on concept words (dictionary-measured floor of six letters),
+  and two ask defects. Sweeps clean at n=500/6000/25000; ctest 218: 208 passed, 8 skipped, 2 not run, 0 failed.
+- **Engine:** the first release, `36b1d4e0`, FAILED at configure. `cpp23-logger/cmake/ToolchainBMIGuard.cmake` is tracked
+  but matches the logger's `*.cmake` ignore rule, and the deploy archive used `tar --exclude-vcs-ignores`. Fixed in
+  `11d0069`: the archive now keeps every tracked file `.railwayignore` does not exclude (6 re-added).
+  `f1d1625a` SUCCESS.
+- **Cutover, read from the deployment's own logs:**
+  - 4 `model is LOADED` and 4 `ENCODER assistant ready`.
+  - The mortgage encoder reports 129 (slot,map) pairs and vocab 4096; the old one reported 109 and 2694.
+  - 2 SIMD lines; 0 `[ERROR`; 0 `[WARN ]`, against 36 `[INFO ]` as the positive control.
+- **Container sha256:** mortgage encoder `b03dcdef…` (v5e); strategy encoder `abd40b21…` (unchanged).
+- **Bucket:** v5e is uploaded beside the previous object as `mortgagefv-encoder-stated-only-v5e-2026-10-07.gguf`, with
+  the checksum verified by downloading it back. The previous URL and sha are kept for rollback.
+- **Production, against the live engine:**
+  - site and live visitor rows: 0/12 before, **12/12 after**;
+  - `ComputePayment` still `-3210.56057801266526493048779502036505463691`.
