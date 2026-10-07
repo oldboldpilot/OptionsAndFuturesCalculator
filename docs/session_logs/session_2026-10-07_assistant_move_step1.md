@@ -39,3 +39,19 @@ now). Step 1 moves the code both engines will need into sensen, with no behaviou
   (lane 8) rewrites them with the move's later steps.
 - Next steps from the plan: the build recipe in sensen, the mfv service port, image + Railway service + gate, parity
   scoring, client flip, OFC deletion, docs.
+
+## Deployed — 2026-10-07
+
+- Two uploads (`d5fc4c71`, `fefa83a0`) got `http=524` after ~130 s from Railway's `/up` edge and were recorded FAILED with
+  "Deployment does not have an associated build" -- nothing built; production stayed on `f1d1625a`. The same 18.2 MB
+  archive had uploaded in 3-7 s that morning, so the delay was Railway's. A retry 30 minutes later uploaded: `c84266fe`,
+  SUCCESS 11:18.
+- Deployed from a dedicated clean checkout (`~/.cache/deploy-ofc`, detached at `40cf824`, submodules at the gated pins),
+  not the lane worktree, because the next lane was already editing that one and the deploy archives the cwd.
+- Cutover, from the deployment's own logs: 4 `model is LOADED`, 4 `ENCODER assistant ready` (2 mortgage: 29 operations,
+  129 pairs, vocab 4096; 2 strategy: 48 operations, vocab 689), 2 `SIMD: runtime tier`, 0 `[ERROR`, 0 `[WARN ]` against
+  36 `[INFO ]` on the same pattern family.
+- Container sha256: mortgage encoder `b03dcdef…` (v5e), strategy encoder `abd40b21…` -- both unchanged.
+- Live: `ParseOperation` "$420,000 at 6.5% for 30 years" -> `ComputePayment{present_value 420000, periods 360, rate 0.065/12}`;
+  `ParseStrategy` "sell futures on nq, 60 days" -> NQ / FUTURES / futures_short / 60; `ComputePayment` still
+  `-3210.56057801266526493048779502036505463691`.
