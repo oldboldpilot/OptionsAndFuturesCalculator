@@ -46,7 +46,10 @@
   --color-ink-100: #f5f1ea;    /* primary values, headings  */
   --color-ink-200: #d1cdc5;    /* body                      */
   --color-ink-300: #a49e91;    /* labels, column headers    */
-  --color-ink-400: #777165;    /* disabled, hints           */
+  /* #948e81, not the #777165 this was: that is 3.4:1 on the panel ground and
+     3.2:1 on a table head, and it carries every hint, empty state and guide
+     label. 4.8:1 on the lightest ground it sits on. */
+  --color-ink-400: #948e81;    /* disabled, hints           */
 
   /* --- Semantic P&L ----------------------------------------------------
      Profit IS the brand, oklch(72% .14 165) — the same green the source uses
@@ -72,7 +75,13 @@
      --color-accent-dim: a "dim" on this ground has a floor, and #00603e is
      2.46:1 against it. */
   --color-profit-dim: #00764c;
-  --color-loss: #f04c55;
+  /* Text-sized green and red, separate from the fills. The brand green
+     #008154 is the right FILL on this theme (chips, bars, the P&L tint) and the
+     wrong TEXT colour: 3.9:1 on the panel ground, under AA for 12px figures.
+     The text variants hold 6.5:1 and above on every ground this theme has. */
+  --color-profit-text: #2dc08e;
+  --color-accent-text: #2dc08e;
+  --color-loss: #f7777d;
   --color-loss-dim: #a3262e;
   --color-flat: #777165;
 
@@ -224,13 +233,19 @@
   --color-ink-100: #0b121a;    /* --foreground       */
   --color-ink-200: #262f38;
   --color-ink-300: #454e58;    /* --muted-foreground */
-  --color-ink-400: #747b83;
+  /* #5a616a, not #747b83: the old value was 4.28:1 on white and 3.7:1 on a table
+     head, below AA for 12px text, and it carries every hint and empty state. */
+  --color-ink-400: #5a616a;
 
   /* Same reasoning as the dark theme: profit is the brand,
      oklch(52% .14 165). Darker here because it has to hold against paper. */
   --color-profit: #008154;
   --color-profit-dim: #00603e;
-  --color-loss: #cc2827;
+  /* The brand green is 4.9:1 on white and 4.3:1 on a table head, and a chip's
+     own tint of it pulls it down to 4.0:1. Text uses these instead. */
+  --color-profit-text: #00694a;
+  --color-accent-text: #00603e;
+  --color-loss: #ad2020;
   --color-loss-dim: #9c1e1d;
   --color-flat: #747b83;
 
@@ -243,7 +258,7 @@
   --rgb-accent: 0, 129, 84;
   --color-violet: #584fa3;
   --color-cyan: #006c98;
-  --color-warn: #a96b00;      /* assumptions only */
+  --color-warn: #8f5b00;      /* assumptions only; 5.0:1 on every ground, the old #a96b00 was 4.4:1 */
 
   --color-call-tint: rgba(0, 129, 84, 0.055);
   --color-put-tint: rgba(204, 40, 39, 0.05);
@@ -270,10 +285,27 @@
    Base
    ------------------------------------------------------------------------- */
 
-* {
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
+/*
+  The reset is in `@layer base`, and that is the whole fix for it.
+
+  It was an UNLAYERED `* { margin: 0; padding: 0 }`. Tailwind v4 emits its
+  utilities inside cascade layers, and any unlayered rule outranks every layer
+  regardless of specificity, so `mx-auto`, `px-4`, `p-1` and `gap-*`'s padding
+  siblings were all silently overridden by a rule that was never meant to beat
+  them. Measured on /auth/sign-in: the form sat flush against the left edge
+  instead of centred, and its inputs had no padding.
+
+  Tailwind's own preflight already sets margin and padding to zero inside this
+  same layer, so the reset costs nothing here; it is kept as the statement of
+  intent that every element starts from zero, now in the place where a utility
+  class is allowed to beat it.
+*/
+@layer base {
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
 }
 
 html,
@@ -519,7 +551,7 @@ body {
   letter-spacing: -0.01em;
 }
 
-.profit { color: var(--color-profit); }
+.profit { color: var(--color-profit-text); }
 .loss   { color: var(--color-loss); }
 .flat   { color: var(--color-flat); }
 
@@ -592,9 +624,12 @@ body {
 }
 
 .btn-buy {
-  background: color-mix(in srgb, var(--color-profit) 16%, transparent);
+  /* 10%, not 16%: on the at-the-money row the chain already carries a green
+     tint, and a 16% wash of red on top of it left the S at 4.0:1. The edge
+     (45%) is what makes it read as a button, not the fill. */
+  background: color-mix(in srgb, var(--color-profit) 10%, transparent);
   border-color: color-mix(in srgb, var(--color-profit) 45%, transparent);
-  color: var(--color-profit);
+  color: var(--color-profit-text);
 }
 .btn-buy:hover:not(:disabled) {
   background: color-mix(in srgb, var(--color-profit) 30%, transparent);
@@ -602,7 +637,7 @@ body {
 }
 
 .btn-sell {
-  background: color-mix(in srgb, var(--color-loss) 16%, transparent);
+  background: color-mix(in srgb, var(--color-loss) 10%, transparent);
   border-color: color-mix(in srgb, var(--color-loss) 45%, transparent);
   color: var(--color-loss);
 }
@@ -766,7 +801,7 @@ body {
   white-space: nowrap;
 }
 .chip-live {
-  color: var(--color-profit);
+  color: var(--color-profit-text);
   border-color: color-mix(in srgb, var(--color-profit) 40%, transparent);
   background: color-mix(in srgb, var(--color-profit) 10%, transparent);
 }
@@ -780,7 +815,7 @@ body {
   color: var(--color-ink-300);
 }
 .chip-accent {
-  color: var(--color-accent);
+  color: var(--color-accent-text);
   border-color: color-mix(in srgb, var(--color-accent) 40%, transparent);
   background: color-mix(in srgb, var(--color-accent) 12%, transparent);
 }
@@ -832,7 +867,7 @@ body {
 .empty-state--error .empty-state-title { color: var(--color-loss); }
 /* A paywall is not a fault. Red here would read as "something went wrong",
    which is exactly the misreading the "Unavailable" heading used to cause. */
-.empty-state--gate .empty-state-title { color: var(--color-accent); }
+.empty-state--gate .empty-state-title { color: var(--color-accent-text); }
 /* The gate state carries four elements where the others carry two, and `.panel`
    clips (`overflow: hidden`). With the inherited 1.75rem padding the price line
    rendered 17px BELOW the panel's painted box -- present in the DOM, invisible
@@ -844,3 +879,579 @@ body {
   min-height: 0;
   overflow-y: auto;
 }
+
+/* ---------------------------------------------------------------------------
+   Site nav
+
+   One row from 900px up, where the workspace below it subtracts exactly
+   `--nav-h`. Below that the workspace is not pinned to the viewport at all, so
+   the nav is free to wrap onto a second row instead of overflowing the page
+   sideways, which it did at 716px of nowrap content on a 390px phone.
+   ------------------------------------------------------------------------- */
+
+.site-nav {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.75rem;
+  padding: 0.25rem 0.75rem;
+  min-height: var(--nav-h);
+  border-bottom: 1px solid var(--color-line);
+  background: var(--color-base-800);
+  flex: none;
+}
+.site-nav-spacer {
+  margin-left: auto;
+}
+@media (min-width: 900px) {
+  .site-nav {
+    flex-wrap: nowrap;
+    height: var(--nav-h);
+    padding: 0 0.75rem;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Workspace layout
+
+   ONE document, three layouts, chosen by CSS alone. This is a static export, so
+   the HTML a visitor receives is the HTML that is painted: choosing the layout
+   in JavaScript would paint the desktop grid on a phone first and rearrange it
+   after hydration.
+
+     >= 1280px  four columns, every area visible, pinned to the viewport
+     900-1279   build column on the left; Results or Chain on the right (tabs)
+     <  900px   one column, the document scrolls; Build / Chain / Results tabs
+
+   Five areas, named by the grid they occupy on a desktop:
+
+     a  assistant + strategy picker      d  option chain (+ term structure)
+     b  ticket, position, exercise       e  outcome detail (Greeks, tail risk)
+     c  probability, matrix, surface
+
+   Tab -> area:  Build = a, b    Chain = d    Results = c, e
+
+   The minimum of the centre track is the point of the numbers below. At 1280 it
+   is 424px, and the other three tracks sum to their minimums (220 + 280 + 300)
+   with the padding and gaps: 1264px. The centre used to be `minmax(0, 1fr)`
+   beside three tracks that each grew to their MAXIMUM first, so it was handed
+   whatever was left -- 260px at 1280, 4px at 1024, 2px on a phone.
+   ------------------------------------------------------------------------- */
+
+.ws {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.ws-bar {
+  display: contents;
+}
+.ws-summary {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.125rem 0.75rem;
+  padding: 0.4375rem 0.75rem 0;
+  flex: none;
+}
+.ws-title {
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--color-ink-200);
+}
+.ws-guide-link {
+  font-size: var(--text-2xs);
+  color: var(--color-accent-text);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.ws-main {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.5rem;
+  min-width: 0;
+}
+.ws-left,
+.ws-right {
+  display: contents;
+}
+.ws-area {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* Phone: show the area the active tab names. */
+.ws:not([data-tab="build"]) :is(.ws-a, .ws-b) { display: none; }
+.ws:not([data-tab="chain"]) .ws-d { display: none; }
+.ws:not([data-tab="results"]) :is(.ws-c, .ws-e) { display: none; }
+
+/* Heights for panels that scroll inside themselves. On a phone the page
+   scrolls, so these panels need a height of their own or they grow to the full
+   length of their content (151 strikes is ~5000px). */
+.ws-slot { display: flex; min-width: 0; }
+.ws-slot-prob { height: 380px; }
+.ws-slot-matrix { height: 420px; }
+.ws-slot-surface { height: 320px; }
+.ws-slot-chain { height: min(72vh, 620px); }
+.ws-slot-term { flex: none; }
+
+/* The tab bar. Pinned to the bottom of the viewport on a phone. */
+.ws-tabs {
+  order: 99;
+  position: sticky;
+  bottom: 0;
+  z-index: 7;
+  display: flex;
+  margin: 0.25rem -0.5rem -0.5rem;
+  background: var(--color-base-800);
+  border-top: 1px solid var(--color-line);
+  box-shadow: 0 -8px 16px -12px rgba(0, 0, 0, 0.4);
+}
+.ws-tab {
+  flex: 1;
+  min-height: 2.75rem;
+  padding: 0.5rem;
+  background: transparent;
+  border: 0;
+  border-top: 2px solid transparent;
+  color: var(--color-ink-300);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  cursor: pointer;
+}
+.ws-tab[aria-selected="true"] {
+  color: var(--color-ink-100);
+  background: var(--color-base-700);
+  border-top-color: var(--color-accent);
+}
+
+/* Laptop and tablet. Everything in `.ws-left` stays in view; the right pane is
+   Results or Chain. `.ws-tabs` becomes a two-way switch at the top of it. */
+@media (min-width: 900px) {
+  .ws {
+    height: calc(100vh - var(--nav-h));
+    height: calc(100dvh - var(--nav-h));
+  }
+  .ws-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 0.25rem 1rem;
+    padding: 0.4375rem 0.75rem 0;
+    flex: none;
+  }
+  .ws-summary { padding: 0; }
+  .ws-main {
+    flex: 1;
+    min-height: 0;
+    flex-direction: row;
+  }
+  .ws-left,
+  .ws-right {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    min-width: 0;
+    min-height: 0;
+    overflow-y: auto;
+  }
+  .ws-left { flex: 0 0 clamp(300px, 34vw, 400px); }
+  .ws-right { flex: 1 1 0; }
+  .ws-area { flex: none; }
+
+  .ws-tabs {
+    order: -1;
+    position: static;
+    flex: none;
+    margin: 0;
+    border: 1px solid var(--color-line);
+    border-radius: var(--radius);
+    overflow: hidden;
+    box-shadow: none;
+  }
+  .ws-tab[data-area="build"] { display: none; }
+
+  /* The build column is always shown here (the selectors repeat the phone
+     rules' specificity, and come later, so they win), and until a position
+     exists "Build" shows the CHAIN on the right: a visitor's first move is to
+     pick a price, and that is where the prices are. The workspace switches to
+     Results by itself when the first leg lands. */
+  .ws[data-tab] :is(.ws-a, .ws-b) { display: flex; }
+  .ws[data-tab="build"] .ws-d { display: flex; }
+  .ws[data-tab="build"] :is(.ws-c, .ws-e) { display: none; }
+  /* The ticket and the position come before the picker: they are what a click
+     in the chain fills in, and under the picker they were below the fold. */
+  .ws-b { order: -1; }
+  .ws-d { flex: 1 0 480px; }
+  .ws-slot-chain { flex: 1; height: auto; }
+}
+
+/* Desktop: all five areas at once, pinned to the viewport. */
+@media (min-width: 1280px) {
+  .ws-tabs { display: none; }
+  .ws-main {
+    display: grid;
+    flex-direction: initial;
+    grid-template-columns:
+      minmax(220px, 260px) minmax(280px, 320px) minmax(424px, 1fr) minmax(300px, 380px);
+    grid-template-rows: minmax(0, 1fr) minmax(0, 34%);
+    grid-template-areas:
+      "a b c d"
+      "a b c e";
+  }
+  .ws-left,
+  .ws-right { display: contents; overflow: visible; }
+
+  /* `!important` only because the phone/laptop rules above hide areas by tab
+     and a desktop shows all of them whatever the tab says. */
+  .ws .ws-area { display: flex !important; flex: initial; }
+  .ws-a { grid-area: a; overflow-y: auto; }
+  .ws-b { grid-area: b; overflow-y: auto; }
+  .ws-c { grid-area: c; overflow-y: auto; }
+  .ws-d { grid-area: d; overflow: hidden; }
+  .ws-e { grid-area: e; overflow: hidden; }
+
+  .ws-slot-prob { flex: 1 1 0; height: auto; min-height: 300px; }
+  .ws-slot-matrix { flex: 0 0 32%; height: auto; min-height: 220px; }
+  .ws-slot-surface { flex: 0 0 26%; height: auto; min-height: 180px; }
+  .ws-slot-chain { flex: 1; height: auto; min-height: 0; }
+}
+
+@media (min-width: 1700px) {
+  .ws-main {
+    grid-template-columns:
+      minmax(240px, 300px) minmax(300px, 360px) minmax(424px, 1fr) minmax(340px, 460px);
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Results strip
+
+   The numbers the tool exists to show, pinned above the fold. They used to live
+   only in the Outcome panel, which grew to 603px inside a 380px column, so on
+   every desktop width the labels were visible and the values were 200px off the
+   right edge of the screen.
+   ------------------------------------------------------------------------- */
+
+.rs {
+  display: flex;
+  align-items: stretch;
+  flex-wrap: wrap;
+  gap: 0.25rem 1.5rem;
+  min-width: 0;
+  padding: 0.3125rem 0.75rem;
+  background: var(--color-base-800);
+  border-bottom: 1px solid var(--color-line);
+}
+.rs-item {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.rs-label {
+  font-size: var(--text-2xs);
+  color: var(--color-ink-300);
+  white-space: nowrap;
+}
+.rs-value {
+  font-family: var(--font-mono);
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--color-ink-100);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.rs-msg {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.75rem;
+  min-width: 0;
+  flex: 1 1 100%;
+  font-size: var(--text-xs);
+  color: var(--color-ink-300);
+}
+.rs[data-stale="true"] .rs-value { opacity: 0.55; }
+.rs-short { display: none; }
+
+/* Phone: sticky, four across, no detail row. */
+@media (max-width: 899.98px) {
+  .rs {
+    position: sticky;
+    top: 0;
+    z-index: 6;
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0.125rem 0.5rem;
+    padding: 0.375rem 0.5rem;
+  }
+  .rs-item--extra { display: none; }
+  /* Four across in 390px is ~88px a column. The labels are nowrap, and
+     "Chance of profit" at 12px was a pixel wider than its cell -- enough to
+     give the whole document a 1px sideways scroll. Clip rather than overflow. */
+  .rs-item { overflow: hidden; }
+  .rs-label { font-size: 0.6875rem; overflow: hidden; text-overflow: ellipsis; }
+  .rs-long { display: none; }
+  .rs-short { display: inline; }
+  .rs-value { font-size: var(--text-xs); overflow: hidden; text-overflow: ellipsis; }
+  .rs-msg { grid-column: 1 / -1; }
+}
+/* Laptop and desktop: sits in the summary row, right-aligned. */
+@media (min-width: 900px) {
+  .ws-bar .rs {
+    margin-left: auto;
+    padding: 0;
+    background: transparent;
+    border: 0;
+    gap: 0.25rem 1.5rem;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Top bar. Wraps instead of squeezing: it used to be one non-wrapping row, so
+   a status chip appearing beside the symbol search reduced the search box to a
+   16px sliver and pushed Recalculate off the right edge.
+   ------------------------------------------------------------------------- */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.375rem 0.875rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--color-base-800);
+  border-bottom: 1px solid var(--color-line);
+  box-shadow: var(--shadow-panel);
+  position: relative;
+  z-index: 5;
+  flex: none;
+}
+.topbar > * { min-width: 0; }
+.topbar-search { flex: 0 0 auto; width: 160px; }
+.topbar-tail {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.375rem 0.875rem;
+  margin-left: auto;
+  justify-content: flex-end;
+}
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex: none;
+}
+.topbar-status {
+  flex: 1 1 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.5rem;
+}
+.topbar-status .chip {
+  white-space: normal;
+  max-width: 100%;
+}
+.topbar-model {
+  display: none;
+  flex: 0 1 auto;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.375rem 0.875rem;
+}
+.topbar-model[data-open="true"] { display: flex; flex-basis: 100%; }
+@media (min-width: 900px) {
+  .topbar-model,
+  .topbar-model[data-open="true"] { display: flex; flex-basis: auto; }
+  .topbar-model-toggle { display: none; }
+}
+
+/* ---------------------------------------------------------------------------
+   Position legs: a card per leg, not a table row.
+
+   A table of side, type, strike, expiry, quantity, premium and three risk
+   columns is ~440px wide and the column it lives in is 258px, so the quantity
+   box was crushed to 6px of content and the remove button sat 118px outside the
+   panel. A leg is a small record; it reads better as one.
+   ------------------------------------------------------------------------- */
+
+.legs { list-style: none; display: flex; flex-direction: column; }
+.leg {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  padding: 0.5rem 0.625rem;
+  border-bottom: 1px solid var(--color-line-soft);
+}
+.leg:last-child { border-bottom: 0; }
+.leg-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+.leg-name { font-weight: 600; white-space: nowrap; }
+.leg-expiry { color: var(--color-ink-300); font-size: var(--text-2xs); white-space: nowrap; }
+.leg-remove { margin-left: auto; min-width: 1.75rem; min-height: 1.75rem; }
+.leg-fields {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.375rem 0.75rem;
+}
+.leg-field { display: flex; flex-direction: column; gap: 0.125rem; }
+.leg-field--qty { width: 4.5rem; }
+.leg-field--price { width: 6rem; }
+.leg-risk {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 0.625rem;
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--color-ink-300);
+}
+
+/* A status line that is not a refusal: something happened, here is the way back. */
+.notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.625rem;
+  padding: 0.4375rem 0.625rem;
+  border: 1px solid var(--color-line-strong);
+  border-radius: var(--radius);
+  background: var(--color-base-700);
+  color: var(--color-ink-200);
+  font-size: var(--text-xs);
+}
+
+/* Touch targets: 44px on a coarse pointer, never under 24px on any (WCAG 2.5.8). */
+.btn,
+.segment-item,
+.chip[role="button"],
+button.chip { min-height: 1.5rem; }
+.btn,
+.segment-item { min-width: 1.5rem; }
+select,
+.select,
+.input { min-height: 1.5rem; }
+summary { padding-block: 0.25rem; }
+@media (pointer: coarse) {
+  .btn,
+  .segment-item,
+  button.chip,
+  select,
+  .select,
+  .input { min-height: 2.75rem; }
+  .btn-icon { min-width: 2.75rem; }
+}
+
+/* ---------------------------------------------------------------------------
+   Option chain: the STRIKE column stays in view.
+
+   `left: 0; right: 0` on a sticky cell pins it inside the scroller from BOTH
+   sides, so whichever way the ladder is scrolled the strike is on screen. The
+   table is 823px wide in a 378px panel; the strike header sat at x=1427 against
+   a panel edge of 1431 and was only reachable by scrolling blind.
+   ------------------------------------------------------------------------- */
+
+.grid-table .chain-strike {
+  position: sticky;
+  left: 0;
+  right: 0;
+  z-index: 1;
+  background: var(--color-base-800);
+}
+.grid-table thead .chain-strike { z-index: 3; background: var(--color-base-600); }
+.grid-table tbody tr:nth-child(even) .chain-strike { background: var(--color-base-700); }
+.grid-table tbody tr[data-atm="true"] .chain-strike {
+  background: color-mix(in srgb, var(--color-accent) 16%, var(--color-base-800));
+}
+
+/* ---------------------------------------------------------------------------
+   Sign-in form. Theme tokens, so it is legible on both themes: it was
+   dark-theme Tailwind on a light default and the fields had no visible edge.
+   ------------------------------------------------------------------------- */
+
+.auth { width: 100%; min-width: 0; }
+.auth-row { display: flex; flex-direction: column; gap: 0.75rem; min-width: 0; }
+.auth-form { display: flex; flex-direction: column; gap: 0.5rem; width: 100%; min-width: 0; }
+.auth-field { display: flex; flex-direction: column; gap: 0.1875rem; }
+.auth .input { font-family: var(--font-sans); font-size: var(--text-xs); padding: 0.375rem 0.5rem; }
+.auth-links { display: flex; flex-wrap: wrap; gap: 0.25rem 0.875rem; }
+.auth-link {
+  background: none;
+  border: 0;
+  padding: 0.25rem 0;
+  min-height: 1.5rem;
+  color: var(--color-accent-text);
+  font-size: var(--text-2xs);
+  text-decoration: underline;
+  cursor: pointer;
+}
+.auth-link:disabled { opacity: 0.5; cursor: not-allowed; }
+.auth-oauth { display: flex; }
+
+/* Skip link: off-screen until it has keyboard focus. */
+.skip-link {
+  position: absolute;
+  left: 0.5rem;
+  top: -4rem;
+  z-index: 100;
+  padding: 0.5rem 0.875rem;
+  background: var(--color-base-800);
+  color: var(--color-ink-100);
+  border: 2px solid var(--color-accent);
+  border-radius: var(--radius);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  text-decoration: none;
+}
+.skip-link:focus { top: 0.5rem; }
+#main:focus { outline: none; }
+
+/* Top-bar field: label, input, unit, provenance chip, note. */
+.topbar-field { display: flex; align-items: center; flex-wrap: wrap; gap: 0.25rem 0.375rem; }
+.topbar-unit { font-size: var(--text-2xs); color: var(--color-ink-300); }
+
+/* A note you can open with a finger or a key, in place of a hover-only title. */
+.infotip { position: relative; display: inline-flex; align-items: center; }
+.infotip-btn {
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 50%;
+  border: 1px solid var(--color-line-strong);
+  background: transparent;
+  color: var(--color-ink-300);
+  font: italic 700 var(--text-2xs) var(--font-display);
+  line-height: 1;
+  cursor: pointer;
+}
+.infotip-btn:hover,
+.infotip-btn[aria-expanded="true"] { color: var(--color-ink-100); border-color: var(--color-accent); }
+.infotip-body {
+  position: absolute;
+  top: calc(100% + 0.25rem);
+  left: 0;
+  z-index: 30;
+  width: max-content;
+  max-width: min(22rem, calc(100vw - 2rem));
+  padding: 0.5rem 0.625rem;
+  background: var(--color-base-800);
+  color: var(--color-ink-200);
+  border: 1px solid var(--color-line-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-pop);
+  font-size: var(--text-2xs);
+  line-height: 1.45;
+  white-space: normal;
+}
+.infotip-body[data-align="end"] { left: auto; right: 0; }
