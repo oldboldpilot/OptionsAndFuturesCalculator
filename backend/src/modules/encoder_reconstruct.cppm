@@ -57,26 +57,31 @@
 // A hand-written copy of the label space is strictly forbidden.
 //
 // ---------------------------------------------------------------------------
-// THE 11 ADMISSIBLE MAPS: STRICT FAIL-CLOSED REFUSALS
+// THE ADMISSIBLE MAPS: STRICT FAIL-CLOSED REFUSALS
 // ---------------------------------------------------------------------------
 // Empirical analysis of the mortgage training corpus demonstrated that out of
-// 28 candidate maps in the reference extractability study, exactly 11 role
-// strings are used by the mortgage label space:
+// 28 candidate maps in the reference extractability study, a small closed set
+// of role strings is used by the mortgage label space. It was 11 until
+// 2026-10-06, when the visitor-style corpus (agent/dataset/visitor_phrasing.py)
+// taught four more that a visitor's own phrasing needs, each deterministic
+// arithmetic on one or two literals:
 //
 //   Unary:
 //     1.  "M1 identity"            v
-//     2.  "M1 identity#rep20"      v (repeated 20 times for payback cash-flows)
+//     2.  "M1 identity#repN"       v repeated N times, 2 <= N <= 64 (payback uses 20; "$12,000
+//                                  a year for 3 years" is #rep3)                         [was #rep20 only]
 //     3.  "M2 percent/100"         v / 100
 //     4.  "M3 annual%->monthly"    (v / 100) / 12
-//     5.  "M5 years->months"       v * 12
-//     6.  "M8 negate"              -v
-//     7.  "M10 complement%"        1 - (v / 100)
+//     5.  "M3 annual%->quarterly"  (v / 100) / 4                                         [NEW]
+//     6.  "M5 years->months"       v * 12
+//     7.  "M5 years->quarters"     v * 4                                                 [NEW]
+//     8.  "M8 negate"              -v
+//     9.  "M10 complement%"        1 - (v / 100)
 //
 //   Binary:
-//     8.  "M9 a-b#A"               a - b (operand A)
-//     9.  "M9 a-b#B"               a - b (operand B)
-//     10. "M9 a*(1-p)#A"           a * (1 - b / 100) (operand A)
-//     11. "M9 a*(1-p)#B"           a * (1 - b / 100) (operand B)
+//     10. "M9 a-b#A/#B"            a - b
+//     11. "M9 a*(1-p)#A/#B"        a * (1 - b / 100)
+//     12. "M9 a*p#A/#B"            a * (b / 100)   ("25% down on a $450,000 rental")     [NEW]
 //
 // REFUSAL RULE:
 // Any other role string encountered during reconstruction or schema processing
@@ -139,48 +144,51 @@ struct ParsedRole {
 };
 
 /**
- * Parse and validate a role string against the 11 mortgage maps.
+ * Parse and validate a role string against the closed set of mortgage maps (the unary ones, the
+ * repeated identity and the three binary ones).
  *
- * REFUSES any role string not in the 11 authorized maps rather than guessing.
+ * REFUSES any role string outside that set rather than guessing.
  */
 [[nodiscard]] auto parse_role(std::string_view role)
     -> std::expected<ParsedRole, std::string> {
-    if (role == "M1 identity") {
-        return ParsedRole{.name = "M1 identity", .kind = RoleKind::Unary, .rep = 1, .raw_role = "M1 identity"};
+    const auto unary = [&](std::string_view name) {
+        return ParsedRole{.name = std::string{name}, .kind = RoleKind::Unary, .rep = 1,
+                          .raw_role = std::string{role}};
+    };
+    for (const std::string_view name : {"M1 identity", "M2 percent/100", "M3 annual%->monthly",
+                                        "M3 annual%->quarterly", "M5 years->months",
+                                        "M5 years->quarters", "M8 negate", "M10 complement%"}) {
+        if (role == name) { return unary(name); }
     }
-    if (role == "M1 identity#rep20") {
-        return ParsedRole{.name = "M1 identity", .kind = RoleKind::Rep, .rep = 20, .raw_role = "M1 identity#rep20"};
+    // A repeated identity: "M1 identity#repN". N is bounded, and parsed rather than looked up, so
+    // a count the corpus teaches (2 for "$300 a month for 2 years", 20 for a payback) needs no
+    // code change -- while a count nobody could mean (0, 1, 65, "x") is still refused below.
+    constexpr std::string_view kRepPrefix = "M1 identity#rep";
+    if (role.starts_with(kRepPrefix)) {
+        int n = 0;
+        const auto digits = role.substr(kRepPrefix.size());
+        const auto [ptr, ec] = std::from_chars(digits.data(), digits.data() + digits.size(), n);
+        if (ec == std::errc{} && ptr == digits.data() + digits.size() && n >= 2 && n <= 64) {
+            return ParsedRole{.name = "M1 identity", .kind = RoleKind::Rep, .rep = n,
+                              .raw_role = std::string{role}};
+        }
     }
-    if (role == "M2 percent/100") {
-        return ParsedRole{.name = "M2 percent/100", .kind = RoleKind::Unary, .rep = 1, .raw_role = "M2 percent/100"};
-    }
-    if (role == "M3 annual%->monthly") {
-        return ParsedRole{.name = "M3 annual%->monthly", .kind = RoleKind::Unary, .rep = 1, .raw_role = "M3 annual%->monthly"};
-    }
-    if (role == "M5 years->months") {
-        return ParsedRole{.name = "M5 years->months", .kind = RoleKind::Unary, .rep = 1, .raw_role = "M5 years->months"};
-    }
-    if (role == "M8 negate") {
-        return ParsedRole{.name = "M8 negate", .kind = RoleKind::Unary, .rep = 1, .raw_role = "M8 negate"};
-    }
-    if (role == "M10 complement%") {
-        return ParsedRole{.name = "M10 complement%", .kind = RoleKind::Unary, .rep = 1, .raw_role = "M10 complement%"};
-    }
-    if (role == "M9 a-b#A") {
-        return ParsedRole{.name = "M9 a-b", .kind = RoleKind::A, .rep = 1, .raw_role = "M9 a-b#A"};
-    }
-    if (role == "M9 a-b#B") {
-        return ParsedRole{.name = "M9 a-b", .kind = RoleKind::B, .rep = 1, .raw_role = "M9 a-b#B"};
-    }
-    if (role == "M9 a*(1-p)#A") {
-        return ParsedRole{.name = "M9 a*(1-p)", .kind = RoleKind::A, .rep = 1, .raw_role = "M9 a*(1-p)#A"};
-    }
-    if (role == "M9 a*(1-p)#B") {
-        return ParsedRole{.name = "M9 a*(1-p)", .kind = RoleKind::B, .rep = 1, .raw_role = "M9 a*(1-p)#B"};
+    for (const std::string_view name : {"M9 a-b", "M9 a*(1-p)", "M9 a*p"}) {
+        if (role.size() == name.size() + 2 && role.starts_with(name) && role[name.size()] == '#') {
+            const char operand = role.back();
+            if (operand == 'A') {
+                return ParsedRole{.name = std::string{name}, .kind = RoleKind::A, .rep = 1,
+                                  .raw_role = std::string{role}};
+            }
+            if (operand == 'B') {
+                return ParsedRole{.name = std::string{name}, .kind = RoleKind::B, .rep = 1,
+                                  .raw_role = std::string{role}};
+            }
+        }
     }
 
     return std::unexpected(std::format(
-        "Refusing unapproved role string '{}': mortgage schema allows only the 11 specified maps",
+        "Refusing unapproved role string '{}': the mortgage schema allows only its closed set of maps",
         role));
 }
 
@@ -866,8 +874,22 @@ struct ReconstructedParams {
         }
         return *res2;
     }
+    if (name == "M3 annual%->quarterly") {
+        auto res1 = v.divide(sensen::BigDecimal(100));
+        if (!res1) {
+            return std::unexpected(std::format("M3 annual%->quarterly divide by 100 failed: {}", res1.error()));
+        }
+        auto res2 = res1->divide(sensen::BigDecimal(4));
+        if (!res2) {
+            return std::unexpected(std::format("M3 annual%->quarterly divide by 4 failed: {}", res2.error()));
+        }
+        return *res2;
+    }
     if (name == "M5 years->months") {
         return v * sensen::BigDecimal(12);
+    }
+    if (name == "M5 years->quarters") {
+        return v * sensen::BigDecimal(4);
     }
     if (name == "M8 negate") {
         return v.negate();
@@ -892,7 +914,7 @@ struct ReconstructedParams {
 /**
  * Compute the combined value of two literals under an approved binary map.
  *
- * Implements: M9 a-b, M9 a*(1-p).
+ * Implements: M9 a-b, M9 a*(1-p), M9 a*p.
  *
  * REFUSES any other binary map name.
  */
@@ -912,9 +934,16 @@ struct ReconstructedParams {
         auto factor = sensen::BigDecimal(1) - *b_pct;
         return a * factor;
     }
+    if (name == "M9 a*p") {
+        auto b_pct = b.divide(sensen::BigDecimal(100));
+        if (!b_pct) {
+            return std::unexpected(std::format("M9 a*p divide by 100 failed: {}", b_pct.error()));
+        }
+        return a * *b_pct;
+    }
 
     return std::unexpected(std::format(
-        "Refusing unapproved binary map '{}': only 'M9 a-b' and 'M9 a*(1-p)' are supported", name));
+        "Refusing unapproved binary map '{}': only 'M9 a-b', 'M9 a*(1-p)' and 'M9 a*p' are supported", name));
 }
 
 /** Alias for _binary_value conforming to standard naming. */
@@ -1179,7 +1208,8 @@ struct ReconstructedParams {
     std::optional<std::string_view> anchor,
     const std::unordered_map<std::string, std::vector<SlotEntry>>& by_slot,
     std::span<const int> groups,
-    std::span<const Literal> lits)
+    std::span<const Literal> lits,
+    std::span<const int> reps = {})
     -> std::expected<std::vector<sensen::BigDecimal>, std::string> {
 
     std::string name_str(name);
@@ -1223,12 +1253,18 @@ struct ReconstructedParams {
     for (int g : groups) bounds.push_back(g);
     bounds.push_back(1'000'000'000); // 10^9
 
+    // A group whose anchor literal is REPEATED (`#repN`) owns N elements, a plain group one. A single
+    // repeated anchor literal ("$350,000 ... against ...") may sit on either side of the offers, so
+    // its window is the whole utterance. Mirrors `_build_array` in agent/train/encoder_corpus.py.
+    std::vector<int> reps_v(reps.begin(), reps.end());
+    reps_v.resize(groups.size(), 1);
+
     std::vector<sensen::BigDecimal> out;
     out.reserve(groups.size());
 
     for (std::size_t k = 0; k < groups.size(); ++k) {
-        int lo = bounds[k];
-        int hi = bounds[k + 1];
+        const int lo = (groups.size() == 1 && reps_v[0] > 1) ? -1 : bounds[k];
+        const int hi = bounds[k + 1];
         std::vector<SlotEntry> hit;
         for (const auto& e : entries) {
             if (e.lit_idx >= lo && e.lit_idx < hi) {
@@ -1236,22 +1272,24 @@ struct ReconstructedParams {
             }
         }
 
-        if (!hit.empty()) {
-            const auto& first = hit.front();
-            if (first.lit_idx < 0 || static_cast<std::size_t>(first.lit_idx) >= lits.size()) {
-                return std::unexpected(std::format(
-                    "Array '{}' references literal index {} out of range [0, {})",
-                    name, first.lit_idx, lits.size()));
+        for (int c = 0; c < reps_v[k]; ++c) {
+            if (static_cast<std::size_t>(c) < hit.size()) {
+                const auto& pick = hit[static_cast<std::size_t>(c)];
+                if (pick.lit_idx < 0 || static_cast<std::size_t>(pick.lit_idx) >= lits.size()) {
+                    return std::unexpected(std::format(
+                        "Array '{}' references literal index {} out of range [0, {})",
+                        name, pick.lit_idx, lits.size()));
+                }
+                auto v = _unary_value(pick.role, lits[pick.lit_idx]);
+                if (!v) {
+                    return std::unexpected(std::format(
+                        "Array '{}' group {} evaluation failed for role '{}' on lit {}: {}",
+                        name, k, pick.role, pick.lit_idx, v.error()));
+                }
+                out.push_back(*v);
+            } else {
+                out.push_back(sensen::BigDecimal(0));
             }
-            auto v = _unary_value(first.role, lits[first.lit_idx]);
-            if (!v) {
-                return std::unexpected(std::format(
-                    "Array '{}' group {} evaluation failed for role '{}' on lit {}: {}",
-                    name, k, first.role, first.lit_idx, v.error()));
-            }
-            out.push_back(*v);
-        } else {
-            out.push_back(sensen::BigDecimal(0));
         }
     }
 
@@ -1265,9 +1303,10 @@ struct ReconstructedParams {
     std::optional<std::string_view> anchor,
     const std::unordered_map<std::string, std::vector<SlotEntry>>& by_slot,
     std::span<const int> groups,
-    std::span<const Literal> lits)
+    std::span<const Literal> lits,
+    std::span<const int> reps = {})
     -> std::expected<std::vector<sensen::BigDecimal>, std::string> {
-    return _build_array(sch, name, anchor, by_slot, groups, lits);
+    return _build_array(sch, name, anchor, by_slot, groups, lits, reps);
 }
 
 // ===========================================================================
@@ -1343,14 +1382,23 @@ struct ReconstructedParams {
 
     auto anchor = sch.get_anchor(op_name);
     std::vector<int> groups;
+    std::vector<int> reps;
     if (anchor.has_value()) {
         auto it = by_slot.find(std::string(*anchor));
         if (it != by_slot.end()) {
             std::set<int> unique_lis;
+            std::map<int, int> rep_at;
             for (const auto& entry : it->second) {
                 unique_lis.insert(entry.lit_idx);
+                if (auto parsed = parse_role(entry.role); parsed) {
+                    rep_at[entry.lit_idx] = parsed->rep;
+                }
             }
             groups.assign(unique_lis.begin(), unique_lis.end());
+            for (int g : groups) {
+                const auto at = rep_at.find(g);
+                reps.push_back(at != rep_at.end() ? at->second : 1);
+            }
         }
     }
 
@@ -1369,7 +1417,7 @@ struct ReconstructedParams {
         const std::string& kind = kind_it->second;
 
         if (kind == "arr") {
-            auto arr_val = _build_array(sch, name, anchor, by_slot, groups, lits);
+            auto arr_val = _build_array(sch, name, anchor, by_slot, groups, lits, reps);
             if (!arr_val) {
                 return std::unexpected(arr_val.error());
             }

@@ -193,6 +193,15 @@ _NUM = re.compile(
 _UNIT_AFTER = re.compile(
     r"^[\s-]*(years?|yrs?|months?|mos?|days?|weeks?|quarters?)\b", re.IGNORECASE
 )
+# A SPELLED scale -- "1.2 million", "350 thousand" -- which the DEPLOYED lexer
+# (`mortgage_verification.cppm`: word == "million" / "millions" / "mm" / "thousand") reads as a
+# money literal times the scale, with the SPAN ending after the digits and the word outside it,
+# exactly like "years" or "months". The trainer's lexer did not know the word, so "payment on 1.2
+# million at 6.25%" lexed as the bare number 1.2 and a label of 1,200,000 had no literal that
+# explained it; a visitor writes it that way (measured 2026-10-06, pay-04 in the visitor
+# regression). It is the same lexer-side fix as "percent" below: the half of the pipeline that can
+# move without a retrain.
+_SCALE_AFTER = re.compile(r"^[\s-]*(millions?|mm|thousand)\b", re.IGNORECASE)
 
 # Words that NAME a cadence without writing its number. "compounded quarterly"
 # -> 4 is a lexical cue to a small class, not an extraction; an encoder
@@ -237,9 +246,17 @@ def lex(utterance: str, legacy: bool = False) -> list[Lit]:
             v *= 1000
         elif sfx == "m":
             v *= 1000000
+        scaled = False
+        if not legacy and not sfx and not m.group("pct"):
+            sc = _SCALE_AFTER.match(utterance[m.end():])
+            if sc:
+                v *= 1000 if sc.group(1).lower() == "thousand" else 1000000
+                scaled = True
         unit = _UNIT_AFTER.match(utterance[m.end():])
         if m.group("pct"):
             tag = "percent"
+        elif scaled:
+            tag = "money"
         elif unit:
             u = unit.group(1).lower()
             tag = ("years" if u.startswith(("year", "yr")) else
@@ -849,7 +866,17 @@ def build_schema(all_facts: Sequence[Facts], op_key: str, question_mode: str,
                 raise ValueError(f"field {fd.name!r} is both {kind[fd.name]} and {fd.kind}")
     for op, c in keysets.items():
         if len(c) > 1:
-            op_fields[op] = list(c.most_common(1)[0][0])
+            # THE UNION, most common key set first. It used to be the most common key set alone,
+            # which was right while every gold carried every field and wrong the moment labels
+            # became stated-only: a SPARSE key set can be the commonest, and a field that is not in
+            # `op_fields` cannot be emitted at all -- not even when the visitor states it. Order is
+            # the commonest set's own, so an array's anchor (the first array field) is unchanged.
+            ordered = list(c.most_common(1)[0][0])
+            for names in sorted(c, key=lambda ns: -c[ns]):
+                for n in names:
+                    if n not in ordered:
+                        ordered.append(n)
+            op_fields[op] = ordered
         stats.keyset_variants[op] = len(c)
 
     # ---- value routing: which values of each field are CONVENTIONS
@@ -1113,19 +1140,38 @@ def _label_arrays(f: Facts, arr_facts: list[FieldFact], sch: Schema,
         pair_names[j].add((anchor.name, role if rep == 1 else f"{role}#rep{rep}"))
     route[anchor.name] = "array:anchor"
     bounds = [r[0] for r in runs] + [len(lits)]
+    reps = [r[2] for r in runs]
+    total = sum(reps)
     for fd in rest:
-        if len(fd.value) != len(runs):
+        if len(fd.value) == len(runs):
+            # one element per anchor literal: the original shape
+            slots = [(k, bounds[k]) for k in range(len(runs))]
+        elif len(fd.value) == total:
+            # ONE ANCHOR LITERAL, SEVERAL ELEMENTS: "$350,000 at 6.75% for 30 years against 6% for
+            # 15 years" states the loan once and compares two offers, so the anchor is one literal
+            # repeated (`#rep2`) and the SIBLING arrays carry one literal per copy. Each group owns
+            # `reps[k]` consecutive elements, found left to right inside the group's own window.
+            #
+            # When the loan is the ONLY anchor literal the offers may stand on either side of it
+            # ("compare 6.25% for 30 years with 5.5% for 15 years on a $500,000 loan"), so its window
+            # is the whole utterance; with several anchor literals each window starts at its own.
+            single = len(runs) == 1
+            slots = [(k, 0 if single else bounds[k]) for k in range(len(runs)) for _ in range(reps[k])]
+        else:
             route[fd.name] = "UNEXPLAINED"
             continue
-        found = []
-        for k, e in enumerate(fd.value):
+        found, lo, last_k = [], 0, -1
+        for (k, start), e in zip(slots, fd.value):
+            if k != last_k:
+                lo, last_k = start, k
             if e == 0:
                 continue                    # the fill: no literal states it
-            hit = _find(e, lits, bounds[k], bounds[k + 1], fd.name, sch)
+            hit = _find(e, lits, lo, bounds[k + 1], fd.name, sch)
             if hit is None:
                 found = None
                 break
             found.append(hit)
+            lo = hit[0] + 1
         if found is None:
             route[fd.name] = "UNEXPLAINED"
             continue
@@ -1252,12 +1298,15 @@ def reconstruct(sch: Schema, op: int, lits: list[dict], lit_pairs: list[list[int
 
     anchor = sch.anchor.get(op_name)
     groups: list[int] = []
+    reps: list[int] = []
     if anchor is not None:
         groups = sorted({li for li, _ in by_slot.get(anchor, [])})
+        rep_at = {li: parse_role(role)[2] for li, role in by_slot.get(anchor, [])}
+        reps = [rep_at[g] for g in groups]
     for name in sch.op_fields[op_name]:
         kind = sch.field_kind[name]
         if kind == "arr":
-            out[name[:-len(ARRAY_SUFFIX)]] = _build_array(sch, name, anchor, by_slot, groups, lits)
+            out[name[:-len(ARRAY_SUFFIX)]] = _build_array(sch, name, anchor, by_slot, groups, lits, reps)
             continue
         val = _scalar_from_pairs(name, by_slot.get(name, []), lits, score)
         if val is None:
@@ -1302,7 +1351,7 @@ def _class_value(sch: Schema, op_name: str, name: str, conv: dict[str, int]):
     return json.loads(text) if kind == "cat" else Decimal(text)
 
 
-def _build_array(sch, name, anchor, by_slot, groups, lits):
+def _build_array(sch, name, anchor, by_slot, groups, lits, reps=None):
     entries = sorted(by_slot.get(name, []))
     if name == anchor:
         out: list = []
@@ -1315,10 +1364,16 @@ def _build_array(sch, name, anchor, by_slot, groups, lits):
         return out
     out = []
     bounds = groups + [10 ** 9]
+    reps = reps or [1] * len(groups)
     for k in range(len(groups)):
-        hit = [(li, r) for li, r in entries if bounds[k] <= li < bounds[k + 1]]
-        v = _unary_value(hit[0][1], lits[hit[0][0]]) if hit else Decimal(0)
-        out.append(v if v is not None else MISSING)
+        lo = -1 if (len(groups) == 1 and reps[0] > 1) else bounds[k]   # see `_label_arrays`
+        hit = [(li, r) for li, r in entries if lo <= li < bounds[k + 1]]
+        # A group whose anchor literal is REPEATED owns that many elements (see `_label_arrays`);
+        # a plain group owns one. A repeated group with fewer literals than copies is filled with
+        # zero, exactly as an empty plain group is.
+        for c in range(reps[k]):
+            v = _unary_value(hit[c][1], lits[hit[c][0]]) if c < len(hit) else Decimal(0)
+            out.append(v if v is not None else MISSING)
     return out
 
 
@@ -1329,6 +1384,12 @@ def params_match(pred: dict | None, gold: dict | None) -> tuple[bool, list[str]]
     bad = []
     for k in set(gold) | set(pred):
         g, p = gold.get(k, MISSING), pred.get(k, MISSING)
+        if isinstance(g, Missing) and isinstance(p, Missing):
+            # STATED-ONLY LABELS: a field the visitor did not state is absent from the gold, and
+            # the decoder answers MISSING for a field with no pair, no class and no convention.
+            # Neither side makes a claim, so there is nothing to disagree about. Before this
+            # every gold carried every field, so this arm was unreachable.
+            continue
         if isinstance(g, Missing) or isinstance(p, Missing):
             bad.append(k)
         elif isinstance(g, list):

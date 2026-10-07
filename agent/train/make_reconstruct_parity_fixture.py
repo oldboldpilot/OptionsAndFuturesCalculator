@@ -122,9 +122,14 @@ def main() -> int:
     with (out / "python.ndjson").open("w") as fh:
         for i, ex in enumerate(examples):
             params = ec.reconstruct(sch, ex.op, ex.lits, ex.pairs, ex.conv)
+            # A field no route could produce is `Missing` in Python and `null` in the C++
+            # probe's canonical line. Left to `default=str` it was written as the TEXT
+            # "MISSING", which no C++ output can equal -- and since the stated-only contract
+            # makes most of an operation's fields missing on most rows, that read as 687
+            # disagreements on a gate whose arithmetic agreed everywhere.
             fh.write(json.dumps({"row": i, "params": params},
                                 separators=(",", ":"), sort_keys=True,
-                                default=str) + "\n")
+                                default=lambda o: None if isinstance(o, ec.Missing) else str(o)) + "\n")
 
     nonnull = sum(1 for ex in examples if ex.gold is not None)
     print(f"rows {len(examples)}  non-null params {nonnull}")

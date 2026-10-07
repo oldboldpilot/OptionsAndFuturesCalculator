@@ -80,6 +80,15 @@ KNOWN_QUESTIONS = {
     "What does it rent for?",
 }
 
+# Since 2026-10-06 the service asks about ANY essential input, not seven of them, so the independent
+# list above is joined by every wording `kQuestions` carries (parsed from the .cppm by the corpus
+# generator, which is what the encoder reads back as context). The check is unchanged in kind: a
+# question outside the table is the service inventing one.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "agent" / "dataset"))
+from visitor_phrasing import load_questions  # noqa: E402
+
+KNOWN_QUESTIONS |= set(load_questions().values())
+
 PASS, FAIL = [0], [0]
 
 

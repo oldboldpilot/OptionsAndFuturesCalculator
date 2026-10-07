@@ -374,7 +374,16 @@ auto EncoderAssistant::parse(const Turns& turns) const
                 "literal at offset {} ('{}') does not survive Decimal -> BigDecimal: {}",
                 l.offset, l.text, value.error()));
         }
+        // THE MAGNITUDE, NOT THE SIGN. The trainer's lexer has no minus sign: a literal is always
+        // the unsigned number, and the DIRECTION of a cash flow is a map's job (`M8 negate`), which
+        // the model learned to choose from context ("pay $100,000 now"). The deployed lexer reads
+        // "-100k" as -100,000, so handing that value over unchanged turned the one outflow a visitor
+        // writes with a minus into +100,000 once the model, correctly, chose to negate it
+        // (2026-10-06: "npv at 7%: -100k now then 30k, 40k" was refused as ungrounded). Giving the
+        // model the magnitude it was trained on is what makes the two lexers agree on the case the
+        // trainer cannot spell. The verifier still sees the signed text and grounds against it.
         auto scaled = *value;
+        if (scaled < sensen::BigDecimal(0)) scaled = scaled.negate();
         if (l.scale != 1) scaled = scaled * sensen::BigDecimal(static_cast<std::int64_t>(l.scale));
         rlits.emplace_back(std::move(scaled), std::string{"bare"}, l.offset, l.end, l.text);
     }
