@@ -82,26 +82,29 @@ message ParseRequest {
   // the two disagree about what was meant.
   string utterance = 1;
 
-  // The single short question this service asked on the PRIOR turn, if any.
-  // Present only when this request is the user's answer to a Clarification this
-  // same RPC returned a moment ago ("37 years", "30-year fixed"). Without it
-  // the model would have to re-derive missing context from a fragment that
-  // reads as nonsense in isolation.
+  // The visitor's REPLY to a question this service asked on the previous call, if any.
   //
-  // Deliberately just the one prior question -- not a full conversation
-  // transcript -- because that is the only prior state ParseOperation's own
-  // contract ever produces. This mirrors the model's training shape exactly:
-  // every clarification example in agent/dataset/build_mortgage_dataset.py is
-  // `user(full request) -> assistant(one short question) -> user(one short
-  // reply) -> assistant(final answer)`, so the reply belongs in a USER turn
-  // AFTER the original request, never in an assistant turn before it. Getting
-  // that backwards on the sibling service was a production defect
-  // (assistant_service.cpp's `build_prompt` documents it); this service's
-  // prompt builder was written from that conclusion rather than rediscovering
-  // it.
+  // THE CONTRACT, STATED ONCE AND CORRECTLY (2026-10-06). `utterance` is the ORIGINAL request,
+  // `prior_question` is the question this service asked, and `prior_clarification` is the visitor's
+  // answer to it ("37 years", "30-year fixed"). This comment used to describe
+  // `prior_clarification` as the QUESTION, which is the opposite of what the engine implements and
+  // of what every harness here sends -- and a client that followed it (mortgage-nest-egg sent the
+  // reply as `utterance` and the question as `prior_clarification`, and never the original
+  // request) got a different clarifying question back on every second turn, because the numbers
+  // the visitor had given were not in the request at all. Measured against production.
+  //
+  // Without the original request the model would have to re-derive missing context from a fragment
+  // that reads as nonsense in isolation. The engine renders the three fields as
+  // `utterance [SEP] prior_question [SEP] prior_clarification`, which is the shape the model was
+  // trained on: every clarification example in agent/dataset/build_mortgage_dataset.py is
+  // `user(full request) -> assistant(one short question) -> user(one short reply) -> final answer`,
+  // so the reply belongs in a USER turn AFTER the original request, never in an assistant turn
+  // before it. Getting that backwards on the sibling service was a production defect
+  // (assistant_service.cpp's `build_prompt` documents it).
   string prior_clarification = 2;
-
-  // The question THIS SERVICE ASKED that `prior_clarification` answers.
+  // Deliberately just the one prior exchange -- not a full conversation transcript -- because that
+  // is the only prior state ParseOperation's own contract ever produces.
+  // The question THIS SERVICE ASKED that `prior_clarification` is the answer to.
   //
   // Optional and backward-compatible: absent, the prompt builder falls back to
   // the neutral placeholder it has always used, and every existing client is
@@ -259,13 +262,22 @@ message FinanceParams {
   //                                    Arrays are the only nested shape any of
   //                                    these 26 requests has.
   //
-  // Every field of the named operation's request message is present. That is
-  // not an accident of the model's phrasing -- the service REQUIRES it and
-  // refuses a partial object with INVALID_PARAMETERS. The reason is that proto3
-  // has no "absent": a missing `term_months` arrives at ComputeAmortization as
-  // zero, and the response is then an exact, auditable amortization of a loan
-  // with a term nobody stated. A fabricated input is as much a fabrication as a
-  // fabricated output, and it is far harder to notice.
+  // ONLY WHAT THE VISITOR STATED IS PRESENT (2026-10-06). A field appears here when the visitor
+  // said it, or when it follows from what they said -- a loan from a price and a down-payment
+  // percent, a monthly rate from an annual one, months from years. Every other field of the
+  // operation's request message is OMITTED, never zero-filled and never defaulted, so the caller's
+  // own value for it survives. This used to read "every field is present"; the consequence was
+  // that a visitor who typed "amortization schedule for $350,000 at 6% over 30 years" was handed
+  // seven fields they never said (HOA 0, repairs 0, PMI 0, ...), and a site that applies the answer
+  // as a form patch had each of them OVERWRITE the visitor's own figure.
+  //
+  // What a caller must still supply before calling Finance: the Finance request REQUIRES some
+  // inputs this answer will not contain (an interest rate for closing costs, the appreciation
+  // assumptions of a rent-versus-buy, a cadence of payments per year). Those are modelling
+  // assumptions the caller's own form already holds, and Finance refuses an absent one by name
+  // rather than assuming it. The inputs this service REFUSES to proceed without -- the ones the
+  // calculation is undefined without -- are asked for as a Clarification instead of being served
+  // blank, so a FinanceParams always carries them.
   map<string, string> params = 2;
 }
 
@@ -275,7 +287,14 @@ message FinanceParams {
 // once, which is the same dishonesty a fabricated parameter would be, just
 // spread across more fields.
 message Clarification {
+  // Plain language, shown to the visitor as written. Never names an operation or a field.
   string question = 1;
+  // What the question is ABOUT, so a client can branch without parsing English. `operation` is the
+  // Finance RPC the request resolved to ("ComputeClosingCosts"); `field` is the input that is
+  // missing, spelled as that operation's request message spells it ("home_price"). Either is empty
+  // when the service does not know. Added 2026-10-06; an older client ignores them.
+  string operation = 2;
+  string field = 3;
 }
 
 // A machine-readable reason plus a human-readable message, because the two
@@ -318,5 +337,17 @@ message Refusal {
   }
 
   Reason reason = 1;
+  // Plain language, shown to the visitor as written. It never contains an operation name, a field
+  // name or any reasoning about the engine's internals -- the diagnosis goes to the log, because
+  // the UI renders this string verbatim. Where a refusal is about one figure it says which one in
+  // the visitor's own terms ("I couldn't tell your home price") and suggests how to state it.
   string message = 2;
+  // WHAT WENT WRONG ON, machine-readable, so the client can phrase its own help and offer the right
+  // calculator instead of re-displaying `message`. `operation` is the Finance RPC the request
+  // resolved to ("ComputeRentVsBuy"); `field` is the input that was missing or misread, spelled as
+  // that operation's request message spells it ("property_price"). Either is empty when the
+  // refusal is not about a calculation or a figure (an out-of-scope request, an unavailable model).
+  // Added 2026-10-06; an older client ignores them.
+  string operation = 3;
+  string field = 4;
 }
