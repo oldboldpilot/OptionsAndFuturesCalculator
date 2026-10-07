@@ -29,10 +29,14 @@ weights the engine loaded, which is the defect behind every four-tables scar in 
 `--schema` still overrides it, for scoring one model's answers against another's label space
 deliberately.
 """
-import glob, json, sys
-sys.path.insert(0, '/home/muyiwa/Development/OptionsAndFuturesCalculator/scripts')
-sys.path.insert(0, '/home/muyiwa/Development/OptionsAndFuturesCalculator/agent/train')
-sys.path[:0] = glob.glob('/home/muyiwa/Development/OptionsAndFuturesCalculator/agent/**/', recursive=True)
+import glob, json, os, sys
+# Resolved from THIS file, never from a fixed checkout: a worktree that imported the main
+# checkout's encoder_corpus and generated pb2 would score its own service with somebody else's
+# comparator and somebody else's wire contract, and nothing would say so.
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(_ROOT, 'scripts'))
+sys.path.insert(0, os.path.join(_ROOT, 'agent', 'train'))
+sys.path[:0] = glob.glob(os.path.join(_ROOT, 'agent', '**') + os.sep, recursive=True)
 import os
 import re
 import time
@@ -110,6 +114,15 @@ _ap.add_argument("--model", default="backend/models/mortgage-encoder.gguf",
                  help="the GGUF whose schema_json is the label space (read, never guessed)")
 _ap.add_argument("--schema", default=None,
                  help="override the schema with a JSON file instead of reading the GGUF")
+_ap.add_argument("--stated-only", action="store_true",
+                 help="score the STATED-ONLY contract instead of the old complete-answer one: a "
+                      "field the utterance states (the oracle labelled a literal for it) must be "
+                      "served and equal; a field it does not state must be ABSENT or equal; "
+                      "nothing may be invented. Lists every row that is not clean.")
+_ap.add_argument("--accept-missing", action="append", default=[], metavar="FIELD",
+                 help="with --stated-only: a stated field the service now deliberately leaves out "
+                      "(repeatable). Rows deviating ONLY there are counted separately, never as "
+                      "clean, so the explanation stays visible in the number.")
 _ap.add_argument("--val", default="agent/dataset/data_mortgage/val.jsonl")
 _ap.add_argument("--n", type=int, default=None)
 _args = _ap.parse_args()
@@ -164,6 +177,9 @@ else:
 _md = [("x-api-key", _key)] if _key else []
 st = pbg.MortgageAssistantStub(_chan)
 agree = differ = none_rows = refused = 0
+nonclean = []
+accepted_rows = 0
+accepted_tally = {}
 shapes = {}
 msgs = []
 # --two-call bookkeeping. `asked_ok` here is NOT eval_grpc_mortgage's: that one scores the
@@ -278,10 +294,21 @@ for i, ex in enumerate(examples):
         for f in _INERT.get(str(ex.gold.get('method', '')), set()):
             want.pop(f, None)
     bad = []
+    accepted_fields = []
     if r.params.operation != ex.gold['operation']:
         bad.append(f"operation: gold {ex.gold['operation']} served {r.params.operation}")
+    # THE STATED SET. A gold field is STATED when the oracle labelled a literal of the utterance
+    # for it; every other gold field is a convention value the model was taught to fill in, and
+    # the stated-only service correctly leaves it out. Derived from the labels the trainer itself
+    # scores against, so there is no second list of "which fields are conventions" to drift.
+    stated_slots = {sch.pairs[p][0] for lit_pairs in ex.pairs for p in lit_pairs}
     for k in set(want) | set(got):
         if k not in got:
+            if _args.stated_only and k not in stated_slots:
+                continue  # an unstated convention value, rightly omitted
+            if _args.stated_only and k in _args.accept_missing:
+                accepted_fields.append(k)
+                continue
             bad.append(f"{k}: missing")
         elif k not in want:
             bad.append(f"{k}: invented")
@@ -289,16 +316,21 @@ for i, ex in enumerate(examples):
             bad.append(f"{k}: gold {want[k]!r} served {got[k]!r}")
     if bad:
         differ += 1
+        if _args.stated_only:
+            nonclean.append(f"row {i} ({ex.gold['operation']}): " + "; ".join(bad[:4]))
         shape = ('sign-flip' if all('payment: gold' in b and b.endswith("'-" + b.split("gold '")[1].split("'")[0] + "'") for b in bad)
                  else 'inert-fields-dropped' if all(b.endswith(': missing') for b in bad)
                  else 'other')
         shapes[(ex.gold['operation'], shape)] = shapes.get((ex.gold['operation'], shape), 0) + 1
         if shape == 'other' and len(msgs) < 10:
             msgs.append(f"row {i} ({ex.gold['operation']}): " + "; ".join(bad[:3]))
+    elif accepted_fields:
+        accepted_rows += 1
+        accepted_tally[tuple(sorted(set(accepted_fields)))] = accepted_tally.get(tuple(sorted(set(accepted_fields))), 0) + 1
     else:
         agree += 1
 
-total = agree + differ + refused
+total = agree + differ + refused + accepted_rows
 print(f"rows with gold params      : {total}")
 print(f"  served and NUMERICALLY equal to gold : {agree}")
 print(f"  served and differing                 : {differ}")
@@ -316,6 +348,13 @@ print("(gold adjusted for the TVM sign flip and the per-method inert-field drops
 print("\ndisagreements by (operation, shape):")
 for (op, sh), n in sorted(shapes.items(), key=lambda x: -x[1]):
     print(f"  {n:4d}  {op:32s} {sh}")
+if _args.stated_only:
+    if accepted_rows:
+        print(f"\nSTATED-ONLY contract: {accepted_rows} rows deviate ONLY by a field the service deliberately "
+              f"leaves out: {accepted_tally}")
+    print(f"\nSTATED-ONLY contract: {agree}/{total} clean; EVERY row that is not clean ({len(nonclean)}):")
+    for m in nonclean:
+        print("  " + m)
 if msgs:
     print("\nthe 'other' disagreements:")
     for m in msgs:

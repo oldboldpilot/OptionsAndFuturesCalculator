@@ -1,0 +1,110 @@
+FAIL ip-03      should  [wrong_outcome:refused] refused (I couldn't tell which calculation you want. Try describing it with the figures you know, for example: "what would a $420,000 loan at 6.25% o), wanted params
+       Is the first payment mostly interest? $350,000 at 7% over 30 years -- how much interest is in payment 1?
+FAIL hn-01      full    [missing_field] omitted: annual_rent_increase
+       NPV of buying a $450,000 house with $90,000 down at 7% for 30 years. Rent saved is $2,400 a month rising 3%, discount rate 5%, appreciation 3.5%.
+FAIL rcf-02     full    [missing_field] omitted: annual_repairs
+       Is this rental worth buying? $658,000 price, $197,400 down, $11,300 closing costs, 7.99% over 30 years. Rent $5,800/month, assume 100% occupancy. Prop
+FAIL cu-03      should  [wrong_outcome:asked] asked (What's your marginal tax rate?), wanted params
+       Is most of my first year just interest? $300,000 at 6.5% over 30 years -- total interest from month 1 to month 12?
+FAIL sc5-02     full    [missing_field] omitted: annual_rent_increase
+       Buy or rent for 3 years? $390,000 home, $78,000 down, 6.5% for 30 years, 7% selling costs, rent $2,300 a month rising 3%, appreciation 3% a year.
+FAIL sc8-01     full    [missing_field] omitted: annual_rent_increase
+       NPV of buying a $450,000 house, $90,000 down, 7% for 30 years, rent saved $2,400 a month rising 3%, discount rate 5%, 3.5% appreciation
+FAIL pay-16     should  [wrong_operation] named ComputeAmortizationBatch, wanted ComputePayment
+       is a $350,000 loan at 7.25% over 30 years going to be too much each month? what's the payment
+FAIL fv-05      sparse  [wrong_outcome:refused] refused (I couldn't match the term to what you wrote, so I left it out rather than guess. Try stating the term directly, for example: "what would a $), wanted params
+       if I put $15,000 away at 4% for 12 years how much will it be?
+FAIL am-14      should  [wrong_outcome:asked] asked (Over how many years?), wanted params
+       should I get a 15 year or 30 year? amortize $300,000 at 6.5% over 15 years first
+FAIL rcf-06     full    [wrong_outcome:refused] refused (I couldn't match the vacancy to what you wrote, so I left it out rather than guess. Try stating the vacancy directly, for example: "what wou), wanted params
+       Cash flow on a $400,000 rental: $80,000 down, $6,000 closing, 7.25% for 30 years, rent $3,000 a month, 5% vacancy, $4,800 a year property tax, $1,500 
+
+TOTAL 262/272 passed
+
+BY EXPECTED OUTCOME
+  clarification                                  3/3  
+  clarification/params                           1/1  
+  clarification/refusal                          2/2  
+  params                                       238/248
+  refusal                                       18/18 
+
+BY OPERATION / GROUP
+  live:usability-audit                           9/9  
+  oos                                           14/14 
+  op:ComputeAmortization                        14/15 
+  op:ComputeAmortizationBatch                    4/4  
+  op:ComputeClosingCosts                         9/9  
+  op:ComputeCumulative                           4/5  
+  op:ComputeDepreciation                         7/7  
+  op:ComputeDetailedAmortization                 6/6  
+  op:ComputeFutureValue                          4/5  
+  op:ComputeFutureValueDetailed                  8/8  
+  op:ComputeHeloc                                7/7  
+  op:ComputeHomeFutureValue                      5/5  
+  op:ComputeHomeNpv                              4/5  
+  op:ComputeInterestPayment                      4/5  
+  op:ComputeIrr                                  4/4  
+  op:ComputeMortgageRecast                       5/5  
+  op:ComputeNpv                                  4/4  
+  op:ComputePaybackPeriod                        4/4  
+  op:ComputePayment                             19/20 
+  op:ComputePayoffTiming                         6/6  
+  op:ComputePeriods                              5/5  
+  op:ComputePresentValue                         6/6  
+  op:ComputePrincipalPayment                     5/5  
+  op:ComputeRate                                 5/5  
+  op:ComputeRefinance                            8/8  
+  op:ComputeRentVsBuy                            9/9  
+  op:ComputeRentalCashFlow                       4/6  
+  op:ComputeRentalRoi                            7/7  
+  op:ComputeXirr                                 3/3  
+  op:ComputeXnpv                                 3/3  
+  page:15-vs-30-year-mortgage-calculator         1/1  
+  page:biweekly-mortgage                         2/2  
+  page:early-mortgage-payoff-calculator          2/2  
+  page:fha-mortgage-calculator                   1/1  
+  page:future-value                              2/2  
+  page:heloc-calculator                          3/3  
+  page:mortgage                                  3/3  
+  page:mortgage-affordability-calculator         2/2  
+  page:mortgage-calculator-with-extra-payments   1/1  
+  page:mortgage-calculator.state.city            1/1  
+  page:mortgage-closing-costs-calculator         3/3  
+  page:mortgage-overpayment-calculator           1/1  
+  page:mortgage-rates-comparison                 1/1  
+  page:mortgage-recast-calculator                2/2  
+  page:npv-of-buying-a-house                     2/2  
+  page:pmi-calculator                            1/1  
+  page:refinance-break-even-calculator           2/2  
+  page:rent-vs-buy                               3/3  
+  page:rental-property-investment-calculator     1/1  
+  page:rental-roi                                2/2  
+  page:tools.rent-vs-buy                         1/1  
+  page:usda-loan-calculator                      1/1  
+  page:va-loan-calculator                        1/1  
+  scenario:15-vs-30-year-with-5-percent-inflation   2/2  
+  scenario:15-year-versus-30-year-with-investing   2/2  
+  scenario:buying-a-rental-property              4/4  
+  scenario:first-time-buyer-5-percent-down       4/4  
+  scenario:is-buying-worth-it-at-7-percent-npv   1/2  
+  scenario:mortgage-recast-vs-extra-principal    3/3  
+  scenario:pay-off-early-or-invest               3/3  
+  scenario:refinance-when-rates-drop             3/3  
+  scenario:relocating-in-three-years             2/3  
+  site:assistant-panel                           3/3  
+
+BY ROW KIND
+  full                                          43/48 
+  oos                                           16/16 
+  range                                          3/3  
+  should                                        53/57 
+  sparse                                        96/97 
+  suffix                                        30/30 
+  twoturn                                       14/14 
+  typo                                           7/7  
+
+FAILURE CLASSES
+  missing_field                4
+  wrong_outcome:refused        3
+  wrong_outcome:asked          2
+  wrong_operation              1

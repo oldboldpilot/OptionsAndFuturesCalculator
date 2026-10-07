@@ -1,0 +1,15 @@
+# ctest, serialised on the shared lock, final tree, 2026-10-07 (CCACHE_DISABLE=1 build of build_tests calculator_engine dbg_grounding dbg_derivation, rc=0)
+99% tests passed, 2 tests failed out of 218
+Total Test time (real) = 402.73 sec
+passed: 208  skipped: 8  not run: 2 (CausalityBenchGate, CausalityBenchGateCanFail)
+The following tests FAILED:
+	217 - CausalityBenchGate (Not Run)
+	218 - CausalityBenchGateCanFail (Not Run)
+Errors while running CTest
+  1/218 Test   #3: DerivationCorpusSweepTest ...................   Passed    0.12 sec
+  2/218 Test   #4: GroundingCorpusSweepTest ....................   Passed    0.12 sec
+ 46/218 Test  #25: MortgageGrammarTest .........................   Passed    0.39 sec
+ 55/218 Test  #28: FinanceServiceValidationTest ................   Passed    0.15 sec
+ 98/218 Test  #34: MortgageAssistantServiceTest ................   Passed    0.01 sec
+205/218 Test   #8: MortgageDerivationTest ......................   Passed    0.00 sec
+207/218 Test  #18: MortgageVerificationTest ....................   Passed    0.00 sec

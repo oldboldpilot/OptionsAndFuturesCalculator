@@ -1,0 +1,157 @@
+## A1 essential table: ComputePayment also REQUIRES future_value
+   [test_mortgage_verification] rc=1 398 checks, 8 failures
+     FAIL: an OPTIONAL declared field left out is served without it, not refused -> Unsafe/MissingField (wanted Proven/None; message: "future_value" is essential to ComputePayment and was not emitted; it w
+     FAIL: EVERY essential requirement has a clarifying question, so an absent essential field can only ever become a question and never a "left out" refusal
+     FAIL: a payment needs principal, rate and term -- and not future_value or timing
+     FAIL: present_value = 304000 against a 495,000 utterance is KEPT, so G3 refuses it as before
+     FAIL: ComputePayment with only its three essential fields is Proven (was MissingField on future_value) -> Unsafe ("future_value" is essential to ComputePayment and was not emitted; it will not be defa
+     FAIL: '30 percent down' nets a 472k price to a 330,400 loan, exactly as '30% down' does -> Unsafe ("future_value" is essential to ComputePayment and was not emitted; it will not be defaulted)
+   restored == baseline: True
+## A2 stated-only filter: a Defaulted field is KEPT
+   [test_mortgage_verification] rc=1 398 checks, 17 failures
+     FAIL: ONLY the loan, the rate and the term are served -- no zero-filled HOA, repairs, insurance, growth, overpayment or PMI, and no home value invented from the loan (kept: loan_amount annual_rate ter
+     FAIL: ...and the two they did not are not
+     FAIL: ...and the same zeros, never mentioned, are not
+     FAIL: a home value equal to the loan with no property word is the loan counted twice: dropped
+     FAIL: ...and "home loan" is a loan, not a home value
+     FAIL: ComputePayment serves its three stated fields and not future_value or timing
+   restored == baseline: True
+## A3 range masking removed
+   [test_mortgage_verification] rc=1 398 checks, 4 failures
+     FAIL: a rate given as a range is MISSING and asked (got "")
+     FAIL: ...and the rate the model took from one end is not served
+     FAIL: a term given as '25 to 30 years' is asked (got "")
+     FAIL: ...and only the RANGED rate is asked, not the stated one (got "")
+   restored == baseline: True
+## A4 convention constant claimed by another field still counts as stated
+   [test_mortgage_verification] rc=1 398 checks, 1 failures
+     FAIL: factor = 2 is not stated by the 'year 2' that is the PERIOD
+   restored == baseline: True
+## A5 scaled literal loses the cash-flow negation
+   [test_mortgage_verification] rc=1 398 checks, 2 failures
+     FAIL: k-suffixed cash flows ground, outlay negated
+     FAIL: a 12k outlay with a 900 saving grounds
+   restored == baseline: True
+## A6 plain decimal text: default to_chars (exponent form)
+   [test_mortgage_verification] rc=1 398 checks, 9 failures
+     FAIL: 500000 is "500000" (was "5e+05")
+     FAIL: -100000 is "-100000" (was "-1e+05")
+     FAIL: 400000 is "400000"
+     FAIL: a small figure is positional too
+     FAIL: no exponent marker in 5e+05
+     FAIL: no exponent marker in -1e+05
+   restored == baseline: True
+## A7 a bare condo is dues again
+   [test_mortgage_verification] rc=1 398 checks, 1 failures
+     FAIL: a 300k condo grounds home_price = 300000
+   restored == baseline: True
+## A8 the spelled percent word no longer advances the adjacency scan
+   [test_mortgage_verification] rc=1 398 checks, 1 failures
+     FAIL: '30 percent down' nets a 472k price to a 330,400 loan, exactly as '30% down' does -> Unsafe ("present_value" = 330400 does not correspond to anything in the request (the nearest figure you gave 
+   restored == baseline: True
+## A9 a deposit as a percent of the price no longer grounds
+   [test_mortgage_verification] rc=1 398 checks, 1 failures
+     FAIL: '631500, 20% down' states a 126,300 deposit (price x percent), not only a net loan -> Unsafe ("down_payment" = 126300 does not correspond to anything in the request (the nearest figure you gave 
+   restored == baseline: True
+## A10 yearly is not a cadence word
+   [test_mortgage_verification] rc=1 398 checks, 1 failures
+     FAIL: 'compounded yearly' grounds compound_frequency = 1 -> Unsafe ("compound_frequency" = 1 does not correspond to anything in the request (the nearest figure you gave is 3.25))
+   restored == baseline: True
+## A11 no cadence is ever unsupported
+   [test_mortgage_verification] rc=1 398 checks, 6 failures
+     FAIL: named: bi-weekly payment on a $350,000 loan at 6.25% over 30 years
+     FAIL: named: Biweekly payments on 300k
+     FAIL: named: pay every two weeks instead
+     FAIL: named: twice a month
+     FAIL: named: a fortnightly schedule
+     FAIL: named: semi-monthly on $200,000
+   restored == baseline: True
+## A12 a declared field without a label
+   [test_mortgage_verification] rc=1 398 checks, 1 failures
+     FAIL: every declared field has a label (3 without, first: ComputeAmortization.annual_repairs)
+   restored == baseline: True
+## A13 a spaced hyphen is a minus again ("Atlanta - 479k" lexes negative)
+   [test_mortgage_verification] rc=1 398 checks, 4 failures
+     FAIL: a spaced hyphen produces no negative literal: Atlanta - 479k loan spread over 180 months
+     FAIL: a spaced hyphen produces no negative literal: Denver - $658,600 house, 30% down
+     FAIL: a spaced hyphen produces no negative literal: Boston - 250,000 balance
+     FAIL: 'Atlanta - 479k loan' grounds a 479,000 principal -> Unsafe ("present_value" = 479000 does not correspond to anything in the request (the nearest figure you gave is 180))
+   restored == baseline: True
+## A14 "down to" is a deposit again
+   [test_mortgage_verification] rc=1 398 checks, 1 failures
+     FAIL: '5.375% down to 4.375%' is a rate coming down, not a 5.375% deposit -> Unsafe ("current_annual_rate" = 0.05375 does not correspond to anything in the request (the nearest figure you gave is 4.37
+   restored == baseline: True
+## A15 a HOA word followed by its own figure also claims the figure BEFORE it
+   [test_mortgage_verification] rc=1 398 checks, 3 failures
+     FAIL: '$339,600 borrowed HOA $275/month': the loan is not HOA dues
+     FAIL: 'a $387,000 home HOA 100/month': the price is not HOA dues
+     FAIL: 'insurance of 3k a year, an HOA fee of 300 a month': the 3k is insurance, not dues
+   restored == baseline: True
+## A16 a HOA word already claimed by a figure before it claims the next one too
+   [test_mortgage_verification] rc=1 398 checks, 3 failures
+     FAIL: '$300 hoa dues, 286400': the figure after claimed dues is the loan
+     FAIL: '$150/mo HOA and 1.2k insurance': the insurance is not dues (a unit word does not break the claim)
+     FAIL: '$275 a month in HOA dues, 1,800 a year for upkeep': the upkeep is not dues
+   restored == baseline: True
+## A17 an increment word before a figure beats a HOA word right after it
+   [test_mortgage_verification] rc=1 398 checks, 2 failures
+     FAIL: '+1000 extra $300 HOA': the 300 is dues
+     FAIL: ...and not an overpayment, though 'extra' stands before it
+   restored == baseline: True
+## A18 vacancy is only recognised AFTER the figure
+   [test_mortgage_verification] rc=1 398 checks, 3 failures
+     FAIL: 'vacancy 10%' names the vacancy
+     FAIL: 'vacancy rate of 10%' names the vacancy
+     FAIL: a 10% vacancy grounds occupancy 0.90 whichever side the word is on
+   restored == baseline: True
+## A19 a no-deposit purchase no longer states the home value
+   [test_mortgage_verification] rc=1 398 checks, 1 failures
+     FAIL: '$900,000, no down payment' states a home worth the loan, so it is kept
+   restored == baseline: True
+## S1 advice fix: the carve-out is removed (an advice phrase + figures is refused again)
+   [test_mortgage_assistant_service] rc=1 27 checks, 5 failures
+     FAIL: a fully specified rent-vs-buy calculation is NOT refused as advice, even though it opens with "Should I rent" (it may still refuse for another reason -- what must not happen is the ADVICE refusa
+     FAIL: admitted, not refused as advice: "should I rent or buy a $450,000 house?"
+     FAIL: admitted, not refused as advice: "Should I refinance my $300,000 loan at 7.5% to 6.25%?"
+     FAIL: admitted, not refused as advice: "is it worth refinancing a 400k balance from 7.1% to 6.2%?"
+     FAIL: admitted: "should I pay off my mortgage or invest 50k?"
+   restored == baseline: True
+## S2 advice fix: two figures only (the one-figure-and-a-named-calculation clause is removed)
+   [test_mortgage_assistant_service] rc=1 27 checks, 2 failures
+     FAIL: admitted, not refused as advice: "should I rent or buy a $450,000 house?"
+     FAIL: admitted: "should I pay off my mortgage or invest 50k?"
+   restored == baseline: True
+## F1 finance: ComputeFutureValue requires a payment again
+   [test_finance_service_validation] rc=1 351 checks, 2 failures
+     FAIL: 31a. ComputeFutureValue of a LUMP SUM with no payment answers
+     FAIL: 31b. ...and 10,000 at 5%/yr for 120 months is about 16,470 (sign: an outflow) -- got
+   restored == baseline: True
+## F2 finance: a batch with omitted optional arrays is ragged again
+   [test_finance_service_validation] rc=1 351 checks, 2 failures
+     FAIL: 31j. a loan comparison with NO extra_payments / pmi_rates / home_values answers, one summary per offer
+     FAIL: 31k. ...and it is byte-identical to the same comparison with the columns written out
+   restored == baseline: True
+## D1 derivation: a bare figure of money size is no longer a money fact
+   [test_mortgage_derivation] rc=1 84 checks, 3 failures
+     FAIL: ComputeRentalCashFlow: the one DOLLAR figure (the rent) is not taken for the price
+     FAIL: ComputeRentVsBuy: the one DOLLAR figure (the rent) is not taken for the price
+     FAIL: ComputeClosingCosts: the one DOLLAR figure (the rent) is not taken for the price
+   restored == baseline: True
+## D3 derivation: an annual rate is rewritten to a monthly one
+   [test_mortgage_derivation] rc=1 84 checks, 1 failures
+     FAIL: an annual rate is not rewritten to a monthly one when the horizon was misspelt
+   restored == baseline: True
+## D4 derivation: periods stay in months beside an annual rate
+   [test_mortgage_derivation] rc=1 84 checks, 2 failures
+     FAIL: an annual rate with its 15 YEARS is a consistent pair and is left alone
+     FAIL: an annual rate over 180 periods is repaired to 15 YEARS, on the cadence the rate states
+   restored == baseline: True
+## D2 derivation: a stated non-monthly compounding no longer stops the x12 rules
+   [test_mortgage_derivation] rc=1 84 checks, 3 failures
+     FAIL: no months-derived periods for: 164k invested at 6.65% for 40 years and compounded yearly
+     FAIL: no months-derived periods for: what will $20,000 be worth in 10 years compounded annually at 5%
+     FAIL: no months-derived periods for: 10 years at 5% compounded quarterly on 30k
+   restored == baseline: True
+
+rebuild the unmutated tree before measuring anything: CCACHE_DISABLE=1 ninja -C backend/build-lane build_tests calculator_engine
+EXIT 0

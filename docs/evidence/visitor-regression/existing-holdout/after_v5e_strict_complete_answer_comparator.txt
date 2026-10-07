@@ -1,0 +1,40 @@
+holdout : /home/muyiwa/.cache/lane-mfva-scratch/val_old_holdout_600.jsonl
+          sha256 062614ce7bb18abd055e28a1e0ef9b62b714437f2583e5575e784e8626b23c06
+schema  : /home/muyiwa/.cache/lane-mfva-scratch/mortgage-encoder-v5e.gguf (sensen-encoder.schema_json)
+wire    : one-call rendered join (the trainer control)
+rows with gold params      : 559
+  served and NUMERICALLY equal to gold : 61
+  served and differing                 : 498
+  refused / clarified instead          : 0
+rows whose gold is prose (skipped)     : 41
+
+SERVED-THROUGH-gRPC params exact-match: 61/559 = 10.91%
+(gold adjusted for the TVM sign flip and the per-method inert-field drops -- both
+ documented service behaviour, verified against tvm_payment_needs_sign_flip and
+ kVariantInertFields, not excused on the served side)
+
+disagreements by (operation, shape):
+    75  ComputeAmortization              inert-fields-dropped
+    61  ComputeDetailedAmortization      inert-fields-dropped
+    55  ComputePayment                   inert-fields-dropped
+    37  ComputeHeloc                     inert-fields-dropped
+    34  ComputeRentalCashFlow            inert-fields-dropped
+    33  ComputeRefinance                 inert-fields-dropped
+    24  ComputeRentalRoi                 inert-fields-dropped
+    24  ComputeFutureValueDetailed       inert-fields-dropped
+    22  ComputeRentVsBuy                 inert-fields-dropped
+    19  ComputePaybackPeriod             inert-fields-dropped
+    12  ComputeCumulative                inert-fields-dropped
+    11  ComputePrincipalPayment          inert-fields-dropped
+    10  ComputePayoffTiming              inert-fields-dropped
+    10  ComputeRate                      inert-fields-dropped
+     9  ComputePresentValue              inert-fields-dropped
+     9  ComputePeriods                   inert-fields-dropped
+     9  ComputeClosingCosts              inert-fields-dropped
+     8  ComputeFutureValue               inert-fields-dropped
+     8  ComputeHomeFutureValue           inert-fields-dropped
+     7  ComputeMortgageRecast            inert-fields-dropped
+     7  ComputeAmortizationBatch         inert-fields-dropped
+     6  ComputeInterestPayment           inert-fields-dropped
+     5  ComputeDepreciation              inert-fields-dropped
+     3  ComputeHomeNpv                   inert-fields-dropped

@@ -1,0 +1,10 @@
+# lexer parity, deployed lexer vs trainer lex(), v5 val user turns
+utterances: 2472   literals: 10687
+rows differing on ORDER/COUNT, SPAN or VALUE: 0
+  literal counts matching: 2472   span-start mismatches: 0   span-END mismatches: 0   value mismatches: 0
+  TAG divergences (counted, NOT a failure -- provably unused at serving time): 284
+    bare->money  282
+    years->money  2
+
+PARITY: the deployed lexer finds the same literals as the trainer's on 2472/2472 utterances (10687 literals: order, span, value)
+self-test: 10 passed / 0 failed

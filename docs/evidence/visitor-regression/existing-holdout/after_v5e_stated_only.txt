@@ -1,0 +1,20 @@
+holdout : /home/muyiwa/.cache/lane-mfva-scratch/val_old_holdout_600.jsonl
+          sha256 062614ce7bb18abd055e28a1e0ef9b62b714437f2583e5575e784e8626b23c06
+schema  : /home/muyiwa/.cache/lane-mfva-scratch/mortgage-encoder-v5e.gguf (sensen-encoder.schema_json)
+wire    : one-call rendered join (the trainer control)
+rows with gold params      : 559
+  served and NUMERICALLY equal to gold : 447
+  served and differing                 : 0
+  refused / clarified instead          : 0
+rows whose gold is prose (skipped)     : 41
+
+SERVED-THROUGH-gRPC params exact-match: 447/559 = 79.96%
+(gold adjusted for the TVM sign flip and the per-method inert-field drops -- both
+ documented service behaviour, verified against tvm_payment_needs_sign_flip and
+ kVariantInertFields, not excused on the served side)
+
+disagreements by (operation, shape):
+
+STATED-ONLY contract: 112 rows deviate ONLY by a field the service deliberately leaves out: {('original_home_value',): 112}
+
+STATED-ONLY contract: 447/559 clean; EVERY row that is not clean (0):

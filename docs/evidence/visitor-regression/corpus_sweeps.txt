@@ -1,0 +1,48 @@
+# GroundingCorpusSweepTest / DerivationCorpusSweepTest at three sample sizes
+# (the gate runs n=500; the larger samples are how the defects fixed here were found)
+
+## n=500 (generated rows swept: 466)
+-- dbg_grounding
+swept 466 rows: 0 refused, 0 excused (declared generator findings)
+shaping: 24 rows the service would ASK about, 0 asked wrongly, 0 stated figures dropped
+PASS: every generated label grounds against its own utterance.
+ask sweep: 1429 probes, 0 asked wrongly, 3 unusable (mutation still grounded)
+PASS: no clarifying question is asked about a field the utterance states.
+-- dbg_derivation
+466 rows swept, 0 rows the layer would CORRUPT, 0 fields (206 ambiguous, advisory)
+
+## n=6000 (generated rows swept: 5589) -- full output, regenerated against the final tree
+-- dbg_grounding
+swept 5589 rows: 0 refused, 0 excused (declared generator findings)
+shaping: 309 rows the service would ASK about, 0 asked wrongly, 0 stated figures dropped
+PASS: every generated label grounds against its own utterance.
+ask sweep: 17245 probes, 1 asked wrongly, 59 unusable (mutation still grounded)
+  WOULD ASK about cost                         ComputeDepreciation :: What did the asset cost?  <- but the user said 96500.00
+      depreciation: cost 96,500 year 2 macrs 15-year
+
+FAIL: the layer would ask a clarifying question about a field the utterance
+STATES. That is not a cosmetic slip -- it hides a corrupted value behind a
+question, which is the one thing `refine_unstated` promises never to do.
+Narrow what counts as evidence; do not widen the question table.
+-- dbg_derivation (CORRUPT rows and the summary line; the ambiguous rows are advisory and omitted)
+5589 rows swept, 0 rows the layer would CORRUPT, 0 fields (2097 ambiguous, advisory)
+
+## n=25000 (generated rows swept: 23270) -- full output, regenerated against the final tree
+-- dbg_grounding
+swept 23270 rows: 1 refused, 0 excused (declared generator findings)
+shaping: 1287 rows the service would ASK about, 3 asked wrongly, 6 stated figures dropped
+  ask:ComputeCumulative.start_period: ASKS about start_period but the words state start_period = 1
+      a $549,700 mortgage; with 6.25% interest; paid over 180 months; in paymentts 1 to 13? Is most of it interest? What's the total?
+  drop:ComputeCumulative.end_period: DROPS a figure the words ground: end_period = 13
+      a $549,700 mortgage; with 6.25% interest; paid over 180 months; in paymentts 1 to 13? Is most of it interest? What's the total?
+  drop:ComputeCumulative.start_period: DROPS a figure the words ground: start_period = 1
+      a $549,700 mortgage; with 6.25% interest; paid over 180 months; in paymentts 1 to 13? Is most of it interest? What's the total?
+
+FAIL: the stated-only filter is wrong in the direction with no alarm. Either it
+asks for a figure the visitor gave, or it silently drops one -- and no refusal and
+no question marks the loss. Narrow the evidence rule; never widen the gold.
+-- dbg_derivation (CORRUPT rows and the summary line; the ambiguous rows are advisory and omitted)
+CORRUPT	ComputePayoffTiming	extra_monthly_payment	gold=250.00	derived=1809.29	latest=
+CORRUPT	ComputeAmortization	monthly_overpayment	gold=750.00	derived=886600.00	latest=
+CORRUPT	ComputeRentalCashFlow	property_price	gold=300000.00	derived=1400.00	latest=
+23270 rows swept, 3 rows the layer would CORRUPT, 3 fields (8861 ambiguous, advisory)

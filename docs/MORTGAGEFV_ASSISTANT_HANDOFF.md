@@ -86,17 +86,33 @@ not a mystery later.
 ```json
 {
   "utterance": "Amortization schedule for a 15-year loan of $250,000 at 5 percent.",
+  "prior_question": "",
   "prior_clarification": ""
 }
 ```
 
 `utterance` is the user's own words, verbatim. Do not pre-parse, normalise or
-"clean" it — normalisation is the model's job, and doing it twice lets the two
+"clean" it -- normalisation is the model's job, and doing it twice lets the two
 disagree about what the user meant.
 
-`prior_clarification` is set ONLY when this request is the user's answer to a
-`clarification` this same RPC returned a moment ago (see §6). Otherwise omit it.
-It carries just that one question, not a conversation transcript.
+**A second turn sends all THREE fields, and each one carries what its name says**
+(this section described `prior_clarification` as the QUESTION until 2026-10-06,
+which is the opposite of what the engine implements):
+
+| field | on the second call |
+| --- | --- |
+| `utterance` | the user's ORIGINAL request, unchanged -- the figures they already gave live here |
+| `prior_question` | the question this service asked, exactly as it returned it |
+| `prior_clarification` | the user's answer to it ("37 years", "30-year fixed") |
+
+A client that sends the reply as `utterance` and the question as
+`prior_clarification` -- and never the original request -- gets a different
+question back on the second turn, because the numbers the user had given are
+no longer in the request at all. Measured on the fixed engine over the 14
+two-turn rows of the visitor regression: 12 of 14 fail when the second call is
+sent that way and all 14 complete when it follows the table above
+(`scripts/score_visitor_regression.py --two-turn-protocol site` sends the broken
+shape on purpose so the difference stays measurable).
 
 ---
 
@@ -105,59 +121,91 @@ It carries just that one question, not a conversation transcript.
 The response is a oneof. Exactly one field is present. **All three are success
 responses at the HTTP level** — a refusal is not an error.
 
-### 5.1 `params` — it understood
+### 5.1 `params` -- it understood
 
 ```json
 {"params":{
   "operation":"ComputeAmortization",
   "params":{
-    "loan_amount":"250000.00",
-    "annual_rate":"0.0500",
-    "term_months":"180",
-    "monthly_overpayment":"0.00",
-    "pmi_annual_rate":"0.0000",
-    "original_home_value":"250000.00"
+    "loan_amount":"250000",
+    "annual_rate":"0.05",
+    "term_months":"180"
   }}}
 ```
 
 `operation` is the Finance method name. `params` is a `map<string,string>` whose
-keys are **exactly** that method's request field names — verified: all six above
-match `AmortizationRequest` one-for-one.
+keys are **exactly** that method's request field names.
 
-So the follow-up call is a pass-through:
+**ONLY WHAT THE USER STATED IS PRESENT** (or a value that follows from it: a loan
+from a price and a down-payment percent, a monthly rate from an annual one, months
+from years). Every other field of the request message is OMITTED -- never
+zero-filled and never defaulted. Until 2026-10-06 this section said all six
+fields of `AmortizationRequest` were always present; the consequence was that a
+user who typed "$350,000 at 6% over 30 years" was handed an HOA of 0, repairs of
+0, PMI of 0 and a home value equal to the loan, and a site that applies the answer
+as a form patch had each of them overwrite the user's own figure.
+
+So the follow-up call is **not** a bare pass-through any more. Merge the answer
+over YOUR form's own values, then call Finance:
 
 ```
 POST /sensen.finance.Finance/{operation}
-body = the params map, unchanged
+body = { ...your form's values for that operation, ...params }
 ```
+
+Finance REQUIRES some inputs this answer will not contain and refuses an absent
+one by name rather than assuming it -- they are modelling assumptions your form
+already holds (a payments-per-year cadence, the appreciation and investment-return
+assumptions of a rent-versus-buy, an interest rate for closing costs). Inputs the
+calculation is undefined WITHOUT are not served blank: they are asked for as a
+`clarification` (5.2).
 
 Note `term_months` is `int32` in the proto but arrives as the string `"180"`,
 because the map is string-valued. proto3 JSON accepts a quoted integer for
-int32/int64 fields, so passing the map straight through works. Do not convert
-the money fields to numbers — see §8.
+int32/int64 fields. Do not convert the money fields to numbers -- see §8.
 
-### 5.2 `clarification` — it needs one more fact
+### 5.2 `clarification` -- it needs one more fact
 
 ```json
-{"clarification":{"question":"What rate should I use?"}}
+{"clarification":{
+  "question":"Over how many years?",
+  "operation":"ComputePayment",
+  "field":"periods"}}
 ```
 
-Show the question. Send the user's reply back as a new `ParseOperation` call
-with `utterance` = their reply and `prior_clarification` = the question you just
-showed.
+`question` is plain language, shown as written; it never names an operation or a
+field. `operation` and `field` say what it is ABOUT, so a client can branch
+without parsing English (`field` is spelled as that operation's request message
+spells it; either may be empty).
 
-### 5.3 `refusal` — it will not guess
+The service asks **only** for an input the calculation cannot be done without --
+the loan or price, the rate, the term -- and only when the user did not state it.
+It does not ask for anything with a sensible default, and it does not ask for
+something the user already said. Send the answer back as the second call
+described in §4 (original request, the question, the reply).
+
+### 5.3 `refusal` -- it will not guess
 
 ```json
 {"refusal":{
   "reason":"OUT_OF_SCOPE",
-  "message":"I don't give financial, tax or legal advice -- describe a specific calculation ... and I will work it out."}}
+  "message":"I don't give financial, tax or legal advice -- describe a specific calculation ... and I will work it out.",
+  "operation":"",
+  "field":""}}
 ```
 
 `reason` is one of `UNSUPPORTED_OPERATION`, `INVALID_PARAMETERS`,
 `OUT_OF_SCOPE`, `MODEL_UNAVAILABLE`, `REASON_UNSPECIFIED`.
 
-`message` is written to be shown to a user as-is. It is not a stack trace.
+`message` is plain language written to be shown as-is. It never contains an
+operation name or a field name -- the diagnosis goes to the engine log. When the
+refusal is about one figure, `operation` is the calculation the request resolved
+to and `field` the input that was missing or misread (both empty otherwise), so a
+client can offer the right calculator instead of re-displaying the sentence.
+
+A question worded as advice ("should I refinance my $300,000 loan at 7.5% to
+6.25%?") is a calculation and is answered as one; it is refused as advice only
+when it carries no figures to compute with.
 
 `MODEL_UNAVAILABLE` is the one to treat as infrastructure rather than as the
 model's judgement — it means the service has no weights loaded. Do not surface

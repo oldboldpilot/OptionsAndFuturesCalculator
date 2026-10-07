@@ -1,0 +1,50 @@
+FAIL pay-11     twoturn [wrong_outcome:asked] turn 2: asked (What's the interest rate?), wanted params
+       What's the payment on a $420,000 loan at 6.5%?
+FAIL pay-12     twoturn [wrong_outcome:asked] turn 2: asked (What's the home worth?), wanted params
+       What's the monthly payment at 6.5% for 30 years?
+FAIL pay-13     twoturn [wrong_outcome:asked] turn 2: asked (Over how many years?), wanted params
+       How much is the payment on a 30 year loan of $380,000?
+FAIL fvd-06     twoturn [wrong_outcome:refused] turn 2: refused (I couldn't tell which calculation you want. Try describing it with the figures you know, for example: "what would a $420,000 loan at 6.25% o), wanted params
+       What will my savings grow to at 6% over 20 years?
+FAIL am-09      twoturn [wrong_outcome:asked] turn 2: asked (Over how many years?), wanted params
+       Amortize $467,500 over 15 years.
+FAIL am-10      twoturn [wrong_outcome:asked] turn 2: asked (What's the interest rate?), wanted params
+       Show me the amortization schedule at 6.5% for 30 years
+FAIL da-05      twoturn [wrong_outcome:refused] turn 2: refused (I couldn't tell which calculation you want. Try describing it with the figures you know, for example: "what would a $420,000 loan at 6.25% o), wanted params
+       What's my tax deduction on a $500,000 mortgage at 6% over 30 years?
+FAIL po-05      twoturn [wrong_outcome:asked] turn 2: asked (What's your current loan balance?), wanted params
+       I owe $310,000 at 5.9%. How many months would I save paying $500 more a month?
+PASS hl-05      twoturn ComputeHeloc
+FAIL rb-06      twoturn [wrong_outcome:asked] turn 2: asked (What's the home price?), wanted params
+       should I rent or buy a $450,000 house?
+FAIL rr-05      twoturn [wrong_outcome:asked] turn 2: asked (What's the property worth?), wanted params
+       What's the return on a $350,000 rental I put $70,000 into? It rents for $2,800 a month.
+PASS cc-06      twoturn ComputeClosingCosts
+FAIL pay-20     twoturn [wrong_outcome:asked] turn 2: asked (How much is the loan?), wanted params
+       what's the payment on a $275,000 mortgage?
+FAIL rf-08      twoturn [wrong_outcome:asked] turn 2: asked (What's your current loan balance?), wanted params
+       should I refinance my $300,000 loan at 7.5%?
+
+TOTAL 2/14 passed
+
+BY EXPECTED OUTCOME
+  params                                         2/14 
+
+BY OPERATION / GROUP
+  op:ComputeAmortization                         0/2  
+  op:ComputeClosingCosts                         1/1  
+  op:ComputeDetailedAmortization                 0/1  
+  op:ComputeFutureValueDetailed                  0/1  
+  op:ComputeHeloc                                1/1  
+  op:ComputePayment                              0/4  
+  op:ComputePayoffTiming                         0/1  
+  op:ComputeRefinance                            0/1  
+  op:ComputeRentVsBuy                            0/1  
+  op:ComputeRentalRoi                            0/1  
+
+BY ROW KIND
+  twoturn                                        2/14 
+
+FAILURE CLASSES
+  wrong_outcome:asked          10
+  wrong_outcome:refused        2

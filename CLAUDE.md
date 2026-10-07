@@ -726,6 +726,97 @@ model — score `[assistant] raw model output`, which is logged before it runs.
 
 ## Mortgage assistant
 
+### The assistant returns what the visitor STATED, and asks only for what it cannot do without
+
+Reported 2026-10-06 as "terribly broken", and measured against PRODUCTION the same day with
+`scripts/score_visitor_regression.py` over 272 visitor-phrased rows: **19 of 272 passed**. The
+failures were not one defect. They were one CONTRACT -- "every declared field is present" -- and the
+five places that obeyed it:
+
+| symptom | cause |
+| --- | --- |
+| "amortize $350,000 at 6% over 30 years" came back with HOA 0, repairs 0, PMI 0 and a home value equal to the loan | the service REQUIRED every declared field and the model, taught to fill all of them, filled the unstated ones with conventions |
+| the site's form was overwritten with those zeros | the site applies the answer as a form patch (`paramsToInputs`), so a field the visitor never gave replaced a figure they had |
+| "Closing costs on 450k" asked "Over how many years?" | the question table named a field no closing-cost calculation takes |
+| rent-vs-buy refused as "left out property_price", "left out X" on every sparse request | an OPTIONAL field was treated as missing, and the refusal NAMED the field |
+| refinance and rent-vs-buy worded as advice were refused out of scope | the advice gate wanted two figures; "should I rent or buy a $450,000 house?" has one |
+| the visitor saw `ComputePayment` and `"present_value"` | refusal and question text were built from operation and field names |
+
+**The contract is now the opposite.** `ParseOperation` returns the fields the visitor STATED, or that
+follow from what they stated (a loan from a price and a down-payment percent, a monthly rate from an annual
+one, months from years) -- and OMITS everything else. It asks a clarifying question only for an input the
+calculation is undefined without (`kEssentialFields` in `mortgage_verification.cppm`, one table, any-of groups,
+variant-dependent for depreciation), and only when the visitor did not state it. Nothing is zero-filled,
+defaulted or refused as "left out". The shaping is `shape_stated_params`, which classifies each emitted field
+Stated / Defaulted / Unsupported: Defaulted is dropped, **Unsupported is KEPT so the grounding gate refuses it**
+(the documented dangerous failure, `present_value = 304000` against a 495,000 utterance, must not be converted
+into a silent omission), and a missing essential becomes a question. Refusals and questions carry
+`operation` and `field` as machine-readable strings and a short plain-language message that never contains
+either (`Refusal.operation=3`, `Refusal.field=4`, `Clarification.operation=2`, `Clarification.field=3`).
+
+**It needed a new training corpus, not only a new serving layer, and the two had to move together.** The model
+had learned to emit the full field set, so `agent/dataset/build_mortgage_dataset.py` now labels only stated
+fields (`STATED_ONLY_OMITTABLE`), the visitor-phrasing generators (`visitor_phrasing.py`,
+`visitor_phrasing_ops.py`: 55% of the corpus, sparse by default, with typos and unit suffixes) teach the shapes
+people actually type, and `encoder_corpus.py` treats a field absent on both sides as agreement. The adopted model
+is `mortgage-encoder-v5e.gguf` (sha256 `b03dcdeff5da7c18d0e0871457d54ef1a9e41b674fe9e3af496f2bb2af3434db`).
+
+**Measured, local engine on this tree against production's 19/272: 265 of 272.** The seven that remain are
+extraction errors of a 1.14M-parameter encoder, three of which serve a wrong or unstated VALUE (a literal given
+to the wrong one of two fields: the per-field blindness this file records for the 20%-down and repair-budget
+defects). `docs/evidence/visitor-regression/RESULTS.md` has every row, the raw model output behind each, the
+candidate models (v5f scored higher on its own validation set and LOWER on the held-out one), and the arbitration
+rule that was built, measured on those rows and reverted because it kept the wrong slot.
+
+**FIVE LATENT DEFECTS WERE FOUND BY THE NEW SHAPE OF ANSWER, and no accuracy number could have seen them**, because
+the old answers never exercised these paths on visitor phrasing: `std::to_chars` with no format picks the SHORTEST of fixed and scientific, so a round
+figure rendered as `5e+05` and was refused downstream (`plain_decimal_text`); and a scaled literal (`-100k`)
+returned early from candidate expansion before the cash-flow negation, so an outlay written with a minus and a
+suffix could not ground. A bare condo ("a 300k condo") was read as HOA dues, "30 percent down" was not seen as a
+deposit because the adjacency scan began after the word, and a derivation rule rewrote a stated price to the rent
+because the rent was the only dollar-sign figure. Each is a test plus a mutation arm
+(`scripts/mutation_arms_stated_only.py`).
+
+**THE LARGER SWEEPS FOUND SEVEN MORE, all in the lexer and the derivation layer, none visible at the n=500 the gate runs.**
+`GroundingCorpusSweepTest` and `DerivationCorpusSweepTest` at n=6,000 and n=25,000 are where they surfaced:
+a SPACED hyphen was a minus sign (`Atlanta - 479k loan` lexed -479k, so the principal grounded nowhere); `5.375% down to
+4.375%` was read as a 5.375% deposit; a HOA word claimed a figure on BOTH sides of it, so `$339,600 borrowed HOA $275/month` took
+the loan for the dues (a word with its own figure after it also claimed the one before) and `$300 hoa dues, 286400`
+took the loan for the dues (a word already claimed by the figure before it claimed the next one too), and an increment word before a figure
+(`+1000 extra $300 HOA`) beat the HOA word right after it; `vacancy 10%` was only a vacancy when the word came AFTER the
+figure; a no-deposit purchase (`$900,000, no down payment`) lost its home value; and the derivation layer rewrote a
+stated annual rate or a non-monthly compounding (`40 years compounded yearly`) as months, turning 40 years into 480
+periods beside an annual rate. Each has a test and a mutation arm; all 27 arms are RED against the final tree
+(`docs/evidence/visitor-regression/mutation/arms_all_final.txt`). Counts at this tree: `test_mortgage_verification`
+398, `test_mortgage_derivation` 84, `test_finance_service_validation` 351, `test_mortgage_assistant_service` 27, each 0
+failures.
+
+**WHAT THOSE SWEEPS STILL FIND, written down because they are not fixed** (`corpus_sweeps.txt`, and the "Open" section of
+`RESULTS.md`): at n=6,000 one ask probe of 17,245 asks about a stated figure (`ComputeDepreciation`, `depreciation: cost
+96,500 year 2 macrs 15-year`); at n=25,000 a typo'd `vaancy` is refused, a typo'd `paymentts` makes the service ask
+about and drop the stated `start_period`/`end_period` of a `ComputeCumulative` (the insertion gap this file already
+records below), and THREE derivation rewrites replace a correct emitted value with a wrong one
+(`extra_monthly_payment` 250 -> 1,809.29, `monthly_overpayment` 750 -> 886,600, `property_price` 300,000 -> 1,400).
+The last is the only one that serves a wrong value rather than refusing or asking, and its utterances are not printed by
+the sweep. The n=500 gate is green; do not read that as these being closed.
+
+**The existing holdout cannot be scored with the old comparator any more, and that is the point rather than a
+regression.** Against `agent/dataset/data_mortgage/val.jsonl` (559 params rows in the copy in this tree, not the 560
+this file quotes for an earlier regeneration) the old complete-answer comparator reads 61/559, because it counts every
+deliberately omitted field as a miss. `score_encoder_served_rpc.py --stated-only` scores the new contract: a gold
+field is stated when the oracle labelled a literal for it. Result **559/559** (447 exact, 112 deviating only by
+`original_home_value`), against production's 557/559 on the same file. Those 112 are one documented decision: the
+old corpus labelled `original_home_value` from the LOAN literal, which prices PMI against a house worth exactly the
+loan -- the `$480,000 loan against a "$275 house"` of 2026-10-05.
+
+**What the client must still do** (`mortgage-nest-egg`, not changed here). Send the original request as `utterance`,
+the question as `prior_question` and the reply as `prior_clarification` -- the client sent the reply as the
+utterance, so 12 of 14 second turns failed (`--two-turn-protocol site`). Merge the answer over the form's own values
+before calling Finance: of 247 answered rows, 110 are rejected by name for an input the form already holds (payments
+per year, appreciation and return assumptions, a holding period, a closing-cost rate). Stop writing `downPayment = 0`
+and `homePrice = loan` when the answer did not contain them. Byte-copy `backend/proto/mortgage_assistant.proto`.
+Deploy the client before the engine, because an engine that omits fields is only safe for a client that merges.
+
 ### A MISSPELLED ROLE WORD priced a $275 house, and both halves were latent
 
 Found 2026-10-05 by sweeping misspellings against PRODUCTION rather than by
