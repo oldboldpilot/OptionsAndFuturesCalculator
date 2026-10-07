@@ -41,6 +41,13 @@
 //      file only asserts the fixed (passing) behaviour, which is what a
 //      permanent regression gate should do.
 //
+//   8. THE POSITION'S EXTREMES, NOT THE GRID'S: max_profit and max_loss are
+//      the supremum and infimum over every price in (0, infinity), and a
+//      direction with no finite extreme says so in max_profit_unbounded /
+//      max_loss_unbounded instead of reporting the edge of the +/-25% grid as a
+//      maximum. Every expected figure is the closed form of a payoff written
+//      out by hand beside it, not a number the engine produced.
+//
 // Deliberately scoped to calculator_service.cpp's request handling and
 // response marshalling around SGEE, exactly as the two finance-service test
 // files are scoped to finance_service.cpp around sensen's pricers/solvers.
@@ -187,6 +194,45 @@ auto call_strategy(OptionsCalculator::Stub& stub, const StrategyRequest& req)
     const auto status = stub.CalculateStrategy(ctx.get(), req, &resp);
     return {status, resp};
 }
+
+/** A request with nothing in it but the underlying and the grid, for sections 8-10. */
+auto make_request(double spot, double price_range_percent = 0.25, std::uint32_t date_steps = 12)
+    -> StrategyRequest {
+    StrategyRequest req;
+    req.set_underlying_symbol("SPY");
+    req.set_current_price(spot);
+    req.set_risk_free_rate(0.04);
+    req.set_price_range_percent(price_range_percent);
+    req.set_price_steps(81);
+    req.set_date_steps(date_steps);
+    return req;
+}
+
+/** A future or stock leg: no strike, no volatility, the entry carried in `premium`. */
+auto add_linear_leg(StrategyRequest& req, Leg::Action action, Leg::Type type, double entry,
+                    double expiration_days, double multiplier, int qty = 1) -> void {
+    auto* leg = req.add_legs();
+    leg->set_action(action);
+    leg->set_type(type);
+    leg->set_expiration_days(expiration_days);
+    leg->set_quantity(qty);
+    leg->set_premium(entry);
+    leg->set_contract_multiplier(multiplier);
+}
+
+/** The extremes of the CURVE a response carries: what the grid alone would have reported. */
+auto curve_extremes(const StrategyResponse& r) -> std::pair<double, double> {
+    double lo = std::numeric_limits<double>::infinity();
+    double hi = -std::numeric_limits<double>::infinity();
+    for (const auto& p : r.pnl_matrix()) {
+        lo = std::min(lo, p.pnl());
+        hi = std::max(hi, p.pnl());
+    }
+    return {lo, hi};
+}
+
+auto near(double a, double b, double eps = 1e-6) -> bool { return std::abs(a - b) < eps; }
+
 
 
 // ---------------------------------------------------------------------------
@@ -1050,6 +1096,240 @@ auto main() -> int {
             check(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT,
                   "a NaN bound is REFUSED -- unchecked it renders as a grid of blanks, "
                   "which reads as 'no data' rather than as a bad argument");
+        }
+    }
+
+    // =======================================================================
+    section("8. THE POSITION'S EXTREMES, NOT THE GRID'S");
+    // =======================================================================
+    // max_profit and max_loss are the supremum and infimum of the expiry payoff
+    // over every price in (0, infinity). The curve is drawn on a +/-25% window,
+    // and before this section existed the extremes were read off that window:
+    // a SPY 779 call bought at 4.49 reported $19,037.25 (the grid's top edge)
+    // as its max profit and a risk/reward of 42:1, where the truth is
+    // "unlimited"; a long 779 put reported $19,114 where the truth is
+    // (779 - 3.54) * 100 = $77,546 at a price of zero.
+    //
+    // Every expected value below is the closed form of a payoff written out
+    // beside it, not a figure the engine handed itself. Every request is
+    // single-expiry, so the curve date IS each leg's expiry and every leg is
+    // settled: the payoff is piecewise linear with kinks at the strikes.
+    {
+        constexpr double kSpot = 779.0;
+
+        {   // -- long call: unbounded profit, loss is the premium ----------------
+            auto req = make_request(kSpot);
+            add_leg(req, Leg::BUY, Leg::CALL, 779.0, 30.0, 4.49, 0.20);
+            auto [status, resp] = call_strategy(stub, req);
+            check(status.ok(), "long call: RPC succeeds");
+            check(resp.max_profit_unbounded() && !resp.max_loss_unbounded(),
+                  "long call: profit is UNBOUNDED, loss is bounded");
+            check(near(resp.max_loss(), -449.0),
+                  "long call: max_loss == -(4.49 * 100) (got " + std::to_string(resp.max_loss()) + ")");
+            // What max_profit now means when the flag is set: the edge of the
+            // grid, a value the position reaches and not a maximum. Pinned so a
+            // client reading the number without the flag is a known quantity.
+            check(near(resp.max_profit(), (779.0 * 1.25 - 779.0 - 4.49) * 100.0),
+                  "long call: max_profit is the grid's top edge, (973.75 - 779 - 4.49) * 100 (got " +
+                      std::to_string(resp.max_profit()) + ")");
+            check(resp.risk_reward_ratio() == 0.0,
+                  "long call: no risk/reward ratio is built from a grid-edge profit (got " +
+                      std::to_string(resp.risk_reward_ratio()) + ")");
+            check(resp.pop() > 0.0 && resp.probability_of_target_profit() == 0.0,
+                  "long call: probabilities were computed (pop > 0) and 50%-of-max has no "
+                  "target, so it is left at zero");
+        }
+
+        {   // -- long put: bounded, and the maximum is at a price of ZERO --------
+            auto req = make_request(kSpot);
+            add_leg(req, Leg::BUY, Leg::PUT, 779.0, 30.0, 3.54, 0.20);
+            auto [status, resp] = call_strategy(stub, req);
+            check(status.ok(), "long put: RPC succeeds");
+            check(!resp.max_profit_unbounded() && !resp.max_loss_unbounded(),
+                  "long put: bounded in both directions");
+            check(near(resp.max_profit(), (779.0 - 3.54) * 100.0),
+                  "long put: max_profit == (779 - 3.54) * 100 = 77,546.00, the payoff at S = 0 (got " +
+                      std::to_string(resp.max_profit()) + ")");
+            check(near(resp.max_loss(), -354.0),
+                  "long put: max_loss == -(3.54 * 100) (got " + std::to_string(resp.max_loss()) + ")");
+            check(near(resp.risk_reward_ratio(), 77546.0 / 354.0, 1e-6),
+                  "long put: risk/reward is the real ratio, 77546 / 354 (got " +
+                      std::to_string(resp.risk_reward_ratio()) + ")");
+            // The extremes are folded in from beyond the grid and the CURVE is
+            // not: it is still exactly the 81-point window.
+            check(resp.pnl_matrix_size() == 81,
+                  "long put: the curve is still the requested 81 grid points");
+            check(curve_extremes(resp).second < resp.max_profit() - 1.0,
+                  "long put: no point of the drawn curve reaches max_profit -- it is not on the grid");
+        }
+
+        {   // -- short call: unbounded loss, profit is the credit -----------------
+            auto req = make_request(kSpot);
+            add_leg(req, Leg::SELL, Leg::CALL, 779.0, 30.0, 4.49, 0.20);
+            auto [status, resp] = call_strategy(stub, req);
+            check(status.ok(), "short call: RPC succeeds");
+            check(resp.max_loss_unbounded() && !resp.max_profit_unbounded(),
+                  "short call: loss is UNBOUNDED, profit is bounded");
+            check(near(resp.max_profit(), 449.0),
+                  "short call: max_profit == the 4.49 credit * 100 (got " +
+                      std::to_string(resp.max_profit()) + ")");
+            check(near(resp.max_loss(), curve_extremes(resp).first),
+                  "short call: max_loss is the grid's edge, the lowest point of the drawn curve");
+            check(resp.risk_reward_ratio() == 0.0, "short call: no risk/reward ratio");
+        }
+
+        {   // -- bull call spread INSIDE the grid: nothing moves ------------------
+            auto req = make_request(590.0);
+            add_leg(req, Leg::BUY, Leg::CALL, 580.0, 30.0, 12.00, 0.20);
+            add_leg(req, Leg::SELL, Leg::CALL, 600.0, 30.0, 4.75, 0.20);
+            auto [status, resp] = call_strategy(stub, req);
+            check(status.ok() && near(resp.max_profit(), 1275.0) && near(resp.max_loss(), -725.0),
+                  "bull call spread inside the grid: 1275 / -725, exactly as before");
+            check(!resp.max_profit_unbounded() && !resp.max_loss_unbounded(),
+                  "bull call spread: the flags default to false on a bounded position");
+            check(near(resp.risk_reward_ratio(), 1275.0 / 725.0, 1e-4),
+                  "bull call spread: risk/reward is unchanged");
+            check(resp.probability_of_target_profit() > 0.0,
+                  "bull call spread: a bounded max_profit still defines a 50% target");
+        }
+
+        // -- a spread struck BEYOND the grid: the plateau it has not reached ----
+        // Spot 500 with a +/-10% window is 450..550. The 560/600 vertical sits
+        // wholly above it, so every point the grid samples is flat at the debit
+        // and the old figure was -500 for BOTH extremes.
+        auto spread_beyond_grid = [] {
+            auto req = make_request(500.0, 0.10);
+            add_leg(req, Leg::BUY, Leg::CALL, 560.0, 30.0, 6.00, 0.20);
+            add_leg(req, Leg::SELL, Leg::CALL, 600.0, 30.0, 1.00, 0.20);
+            return req;
+        };
+        StrategyResponse beyond;
+        {
+            auto [status, resp] = call_strategy(stub, spread_beyond_grid());
+            beyond = resp;
+            check(status.ok(), "bull call spread beyond the grid: RPC succeeds");
+            check(near(resp.max_profit(), (600.0 - 560.0 - 5.0) * 100.0),
+                  "bull call spread beyond the grid: max_profit is the PLATEAU, "
+                  "(40 - 5) * 100 = 3500 (got " + std::to_string(resp.max_profit()) + ")");
+            check(near(resp.max_loss(), -500.0), "bull call spread beyond the grid: max_loss == -500");
+            check(!resp.max_profit_unbounded() && !resp.max_loss_unbounded(),
+                  "bull call spread beyond the grid: bounded both ways -- a capped spread is "
+                  "not 'unlimited' just because its cap is off screen");
+            check(near(curve_extremes(resp).second, -500.0),
+                  "bull call spread beyond the grid: the drawn curve is still flat at -500 -- "
+                  "the plateau is not painted into it");
+        }
+
+        {   // -- the downside twin: a put spread struck below the grid ------------
+            auto req = make_request(500.0, 0.10);
+            add_leg(req, Leg::BUY, Leg::PUT, 440.0, 30.0, 4.00, 0.20);
+            add_leg(req, Leg::SELL, Leg::PUT, 400.0, 30.0, 1.00, 0.20);
+            auto [status, resp] = call_strategy(stub, req);
+            check(status.ok(), "bear put spread below the grid: RPC succeeds");
+            check(near(resp.max_profit(), (440.0 - 400.0 - 3.0) * 100.0),
+                  "bear put spread below the grid: max_profit == (40 - 3) * 100 = 3700 (got " +
+                      std::to_string(resp.max_profit()) + ")");
+            check(near(resp.max_loss(), -300.0), "bear put spread below the grid: max_loss == -300");
+            check(!resp.max_profit_unbounded() && !resp.max_loss_unbounded(),
+                  "bear put spread below the grid: bounded both ways");
+        }
+
+        {   // -- iron condor: bounded, extremes are the closed form ---------------
+            auto req = make_request(590.0);
+            add_leg(req, Leg::BUY, Leg::PUT, 560.0, 30.0, 1.50, 0.20);
+            add_leg(req, Leg::SELL, Leg::PUT, 570.0, 30.0, 3.00, 0.20);
+            add_leg(req, Leg::SELL, Leg::CALL, 610.0, 30.0, 3.00, 0.20);
+            add_leg(req, Leg::BUY, Leg::CALL, 620.0, 30.0, 1.50, 0.20);
+            auto [status, resp] = call_strategy(stub, req);
+            check(status.ok() && near(resp.max_profit(), 300.0) && near(resp.max_loss(), -700.0),
+                  "iron condor: max_profit == the 3.00 net credit * 100, max_loss == -(10 - 3) * 100");
+            check(!resp.max_profit_unbounded() && !resp.max_loss_unbounded(),
+                  "iron condor: its long and short calls net to no upside slope, so bounded");
+        }
+
+        {   // -- covered call: a STOCK leg is a linear leg too --------------------
+            auto req = make_request(kSpot);
+            add_linear_leg(req, Leg::BUY, Leg::STOCK, 779.0, 30.0, 100.0);
+            add_leg(req, Leg::SELL, Leg::CALL, 800.0, 30.0, 5.00, 0.20);
+            auto [status, resp] = call_strategy(stub, req);
+            check(status.ok(), "covered call: RPC succeeds");
+            check(!resp.max_profit_unbounded() && !resp.max_loss_unbounded(),
+                  "covered call: +100 shares against a short call nets to no upside slope");
+            check(near(resp.max_profit(), (800.0 - 779.0 + 5.0) * 100.0),
+                  "covered call: max_profit == (800 - 779 + 5) * 100 = 2600 (got " +
+                      std::to_string(resp.max_profit()) + ")");
+            check(near(resp.max_loss(), (-779.0 + 5.0) * 100.0),
+                  "covered call: max_loss == the shares going to zero less the credit, -77,400 (got " +
+                      std::to_string(resp.max_loss()) + ")");
+        }
+
+        {   // -- a diagonal whose worst case is the TAIL: only the far point sees it
+            // Long a 90-day 600 call (8.00), short a 30-day 500 call (52.00), on
+            // a 550 underlying. The curve is drawn at the near expiry, where the
+            // short call is settled and the long one still has 60 days of life.
+            // Above 500 the position is C_far(S) - (S - 500) + 44, which falls
+            // monotonically toward its asymptote
+            //     500 - 600 * exp(-r * 60/365) + 44   per share,
+            // because the long call's value tends to S - K * exp(-rT). That
+            // asymptote is the worst the position can do, and the +25% grid
+            // (up to 687.5) stops short of it by about $77 per contract. Its
+            // calls net to zero slope, so the loss is bounded and must be the
+            // asymptote, not the grid's edge.
+            auto req = make_request(550.0);
+            add_leg(req, Leg::BUY, Leg::CALL, 600.0, 90.0, 8.00, 0.20);
+            add_leg(req, Leg::SELL, Leg::CALL, 500.0, 30.0, 52.00, 0.20);
+            auto [status, resp] = call_strategy(stub, req);
+            check(status.ok(), "call diagonal: RPC succeeds");
+            check(!resp.max_profit_unbounded() && !resp.max_loss_unbounded(),
+                  "call diagonal: a long and a short call net to no upside slope, so bounded");
+            const double tail = (500.0 - 600.0 * std::exp(-0.04 * 60.0 / 365.0) + 44.0) * 100.0;
+            check(near(resp.max_loss(), tail, 1e-3),
+                  "call diagonal: max_loss is the S -> infinity asymptote " + std::to_string(tail) +
+                      ", not the grid's edge (got " + std::to_string(resp.max_loss()) + ")");
+            check(curve_extremes(resp).first > resp.max_loss() + 10.0,
+                  "call diagonal: the drawn curve never reaches that loss -- it lies beyond the grid");
+            check(resp.max_profit() > 44.0 * 100.0,
+                  "call diagonal: max_profit exceeds the credit kept at S = 0, the peak being at 500");
+        }
+
+        {   // -- a call ratio backspread: net long calls, unbounded profit --------
+            // Sell 1 call at 500 for 12, buy 2 calls at 520 for 4. Per share the
+            // payoff is 4 up to 500, then 4 - (S - 500) to 520 where it bottoms
+            // at -16, then S - 536 climbing without limit. The +/-2% grid is
+            // 490..510, so the 520 kink where the loss is worst is OFF the grid.
+            auto req = make_request(500.0, 0.02);
+            add_leg(req, Leg::SELL, Leg::CALL, 500.0, 30.0, 12.00, 0.20, 1);
+            add_leg(req, Leg::BUY, Leg::CALL, 520.0, 30.0, 4.00, 0.20, 2);
+            auto [status, resp] = call_strategy(stub, req);
+            check(status.ok(), "call backspread: RPC succeeds");
+            check(resp.max_profit_unbounded() && !resp.max_loss_unbounded(),
+                  "call backspread: net long calls (2 against 1) are UNBOUNDED profit");
+            check(near(resp.max_loss(), -1600.0),
+                  "call backspread: max_loss == -16 * 100, at the 520 kink beyond the grid (got " +
+                      std::to_string(resp.max_loss()) + ")");
+            check(resp.risk_reward_ratio() == 0.0, "call backspread: no risk/reward ratio");
+        }
+
+        {   // -- the matrix window is a window on the matrix, not on the answer ---
+            auto pinned = spread_beyond_grid();
+            // A window across both strikes, where the payoff runs from -500 to
+            // 3500: a matrix grid leaking into the headline numbers would add a
+            // breakeven the +/-10% curve does not have.
+            pinned.set_matrix_price_min(560.0);
+            pinned.set_matrix_price_max(640.0);
+            auto [status, resp] = call_strategy(stub, pinned);
+            check(status.ok(), "pinned matrix window: RPC succeeds");
+            check(resp.max_profit() == beyond.max_profit() && resp.max_loss() == beyond.max_loss() &&
+                      resp.max_profit_unbounded() == beyond.max_profit_unbounded() &&
+                      resp.max_loss_unbounded() == beyond.max_loss_unbounded() &&
+                      resp.break_even() == beyond.break_even(),
+                  "pinning the matrix to 560..640 leaves max_profit, max_loss, break_even and BOTH "
+                  "flags identical -- the extremes never read the matrix grid");
+            double lo = std::numeric_limits<double>::infinity();
+            for (const auto& c : resp.matrix()) lo = std::min(lo, c.price());
+            check(near(lo, 560.0, 1e-9), "...while the matrix really is on the pinned window");
+            check(resp.breakeven_prices_size() == beyond.breakeven_prices_size(),
+                  "...and the breakevens, read off the curve, are the unpinned curve's");
         }
     }
 
