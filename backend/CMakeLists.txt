@@ -1128,9 +1128,12 @@ target_sources(test_mortgage_verification
     PRIVATE
     FILE_SET CXX_MODULES FILES
         sensen/src/gp_ara_interfaces.cppm
-        # The lexer and Decimal the verifier grounds against live in sensen now; both import
-        # only std, so they are compiled here as this target's own sources, as gp_ara is.
+        # The lexer and Decimal the verifier grounds against live in sensen now. The lexer
+        # imports ascii_text and float_types (which imports cpu_features) and nothing else, so
+        # the four are compiled here as this target's own sources, as gp_ara is.
         sensen/src/ascii_text.cppm
+        sensen/src/cpu_features.cppm
+        sensen/src/float_types.cppm
         sensen/src/numeric_lexer.cppm
         src/modules/mortgage_verification.cppm
 )
@@ -1204,11 +1207,13 @@ target_link_libraries(test_encoder_tokenizer_parity PRIVATE sensen_slim fastjson
 # are conversions rather than disagreements. Driven by
 # scripts/check_encoder_lexer_parity.py. A probe, not a ctest test: generated input.
 add_executable(test_encoder_lexer_parity tests/encoder_lexer_parity.cpp)
-# The lexer is sensen.numeric_lexer now (it imports only std and sensen.ascii_text), so this probe
-# compiles those two as its own sources rather than linking the whole of sensen_slim -- the same
-# light shape it had when the lexer lived inside mortgage_verification.
+# The lexer is sensen.numeric_lexer now (it imports sensen.ascii_text and sensen.float_types, which
+# imports sensen.cpu_features), so this probe compiles those four as its own sources rather than
+# linking the whole of sensen_slim -- the same light shape it had when the lexer lived inside
+# mortgage_verification.
 target_sources(test_encoder_lexer_parity PRIVATE FILE_SET CXX_MODULES FILES
-    sensen/src/ascii_text.cppm sensen/src/numeric_lexer.cppm)
+    sensen/src/ascii_text.cppm sensen/src/cpu_features.cppm sensen/src/float_types.cppm
+    sensen/src/numeric_lexer.cppm)
 target_link_libraries(test_encoder_lexer_parity PRIVATE fastjson)
 
 # The small-encoder mortgage assistant, end to end (lex -> tokenize -> encode -> mask ->
@@ -1293,6 +1298,8 @@ target_sources(test_mortgage_grammar
         sensen/src/gp_ara_interfaces.cppm
         sensen/src/grammar.cppm
         sensen/src/ascii_text.cppm
+        sensen/src/cpu_features.cppm
+        sensen/src/float_types.cppm
         sensen/src/numeric_lexer.cppm
         src/modules/mortgage_verification.cppm
         src/modules/mortgage_grammar.cppm
