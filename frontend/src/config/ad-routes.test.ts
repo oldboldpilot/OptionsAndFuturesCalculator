@@ -71,7 +71,7 @@ describe('adsOnRoute — the screens that do not', () => {
    * 27, on an account that has already been flagged.
    *
    * Enforced structurally rather than by this check: the loader ships from
-   * `app/guides/[strategy]/layout.tsx`, one segment BELOW `app/guides`, so the
+   * `app/(site)/guides/[strategy]/layout.tsx`, one segment BELOW `app/guides`, so the
    * index is outside the subtree that carries ad code.
    */
   it.each(['/guides', '/guides/'])('suppresses ads on the guides index %s', (route) => {
@@ -145,7 +145,7 @@ describe('adsOnRoute — edges', () => {
   });
 
   it('exposes the prefix the layout split is built on', () => {
-    // If this changes, `app/guides/[strategy]/layout.tsx` has to move with it —
+    // If this changes, `app/(site)/guides/[strategy]/layout.tsx` has to move with it —
     // the runtime check and the file that actually ships the loader are two
     // statements of one rule and must not drift.
     expect(AD_ROUTE_PREFIX).toBe('/guides/');

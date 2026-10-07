@@ -1,6 +1,6 @@
 import React from 'react';
 import { Metadata } from 'next';
-import StrategyWorkspace from '../../../components/StrategyWorkspace';
+import StrategyWorkspace from '@/components/StrategyWorkspace';
 import { branding } from '@/config/branding';
 import { StrategyStructuredData } from '@/components/StructuredData';
 import { getStrategyGuide } from '@/content/strategy-guides';

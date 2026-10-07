@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import { pageTitle } from '@/lib/seo-title';
-import StrategyWorkspace from '../components/StrategyWorkspace';
+import StrategyWorkspace from '@/components/StrategyWorkspace';
 
 export const metadata: Metadata = {
   title: pageTitle('Options & Futures Profit Calculator - Free Payoff & Greeks'),
