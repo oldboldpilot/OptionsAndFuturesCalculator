@@ -120,6 +120,14 @@ export interface FakeChainResponse {
 export interface FakeStrategyResponse {
   getMaxProfit(): number;
   getMaxLoss(): number;
+  /**
+   * True when the engine found no finite maximum (or minimum) over the
+   * underlying's whole range. `getMaxProfit()` is then only the value at the
+   * edge of the grid the engine swept, and must not be presented as a maximum.
+   */
+  getMaxProfitUnbounded(): boolean;
+  getMaxLossUnbounded(): boolean;
+  getBreakevenPricesList(): number[];
   getBreakEven(): number;
   getExpectedValue(): number;
   getPop(): number;
@@ -369,12 +377,22 @@ export function rateResponse(rate: number, opts: { tenor?: string; asOf?: string
 }
 
 export function strategyResponse(
-  over: Partial<{ maxProfit: number; maxLoss: number; breakEven: number; expectedValue: number; pop: number; curveDays: number }> = {}
+  over: Partial<{
+    maxProfit: number; maxLoss: number; breakEven: number; expectedValue: number; pop: number; curveDays: number;
+    maxProfitUnbounded: boolean; maxLossUnbounded: boolean; breakevens: number[];
+  }> = {}
 ): FakeStrategyResponse {
-  const { maxProfit = 1000, maxLoss = -500, breakEven = 100, expectedValue = 0, pop = 0.5, curveDays = 30 } = over;
+  const {
+    maxProfit = 1000, maxLoss = -500, breakEven = 100, expectedValue = 0, pop = 0.5, curveDays = 30,
+    // false is the proto3 default and what a bounded position carries.
+    maxProfitUnbounded = false, maxLossUnbounded = false, breakevens = [breakEven],
+  } = over;
   return {
     getMaxProfit: () => maxProfit,
     getMaxLoss: () => maxLoss,
+    getMaxProfitUnbounded: () => maxProfitUnbounded,
+    getMaxLossUnbounded: () => maxLossUnbounded,
+    getBreakevenPricesList: () => breakevens,
     getBreakEven: () => breakEven,
     getExpectedValue: () => expectedValue,
     getPop: () => pop,
