@@ -293,6 +293,41 @@ auto main() -> int {
               "afford a $600,000 house\" is still advice");
     }
 
+    {
+        // ONE figure is enough when the words NAME a calculation (2026-10-06, the owner's fifth live
+        // report): this is a rent-versus-buy comparison missing only the rent, which the assistant
+        // asks for. It was refused as advice because the carve-out wanted two figures.
+        for (const char* utterance : {"should I rent or buy a $450,000 house?",
+                                      "Should I refinance my $300,000 loan at 7.5% to 6.25%?",
+                                      "is it worth refinancing a 400k balance from 7.1% to 6.2%?"}) {
+            auto [status, resp] = call_parse(stub, utterance);
+            const bool advice_refusal =
+                resp.has_refusal() &&
+                resp.refusal().reason() == ::mortgage::assistant::Refusal::OUT_OF_SCOPE;
+            check(status.ok() && !advice_refusal,
+                  std::string{"admitted, not refused as advice: \""} + utterance + "\"");
+        }
+        // ...and the same one-figure test keeps refusing what names NO calculation.
+        for (const char* utterance : {"can I afford a $450,000 house?", "can I afford a $600,000 house?",
+                                      "should I pay off my mortgage or invest 50k?"}) {
+            auto [status, resp] = call_parse(stub, utterance);
+            const bool refused_out_of_scope =
+                resp.has_refusal() &&
+                resp.refusal().reason() == ::mortgage::assistant::Refusal::OUT_OF_SCOPE;
+            if (std::string_view{utterance}.find("pay off") != std::string_view::npos) {
+                // names a calculation ("pay off"): admitted; the model decides.
+                check(status.ok() && !refused_out_of_scope, std::string{"admitted: \""} + utterance + "\"");
+            } else {
+                check(status.ok() && refused_out_of_scope, std::string{"still advice: \""} + utterance + "\"");
+            }
+            if (resp.has_refusal()) {
+                const auto& text = resp.refusal().message();
+                check(text.find("Compute") == std::string::npos && text.find('_') == std::string::npos,
+                      "the refusal the visitor reads names no operation and no field: \"" + text + "\"");
+            }
+        }
+    }
+
     // =======================================================================
     section("4. THE DISCRIMINATING PROOF: a server missing the CheckModel "
             "action must NOT return an empty OK response");

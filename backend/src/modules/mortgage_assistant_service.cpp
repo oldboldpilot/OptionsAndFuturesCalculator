@@ -2265,19 +2265,26 @@ constexpr std::array<Operation, 28> kOperations{{
 }
 
 auto populate_refusal(::mortgage::assistant::ParseResponse& response,
-                      ::mortgage::assistant::Refusal_Reason reason, std::string message) -> void {
+                      ::mortgage::assistant::Refusal_Reason reason, std::string message,
+                      std::string_view operation = {}, std::string_view field = {}) -> void {
     auto* refusal = response.mutable_refusal();
     refusal->set_reason(reason);
     refusal->set_message(std::move(message));
+    refusal->set_operation(std::string{operation});
+    refusal->set_field(std::string{field});
 }
 
 /** Mirrors `populate_refusal` for the other successful-but-not-params outcome.
  * Its own function, rather than inlined at each call site, for the same reason:
  * one place that knows which field of the `oneof` a clarifying question belongs
- * in. */
-auto populate_clarification(::mortgage::assistant::ParseResponse& response, std::string question)
-    -> void {
-    response.mutable_clarification()->set_question(std::move(question));
+ * in. `operation` and `field` say what the question is ABOUT, machine-readably, so a
+ * client need not parse English to decide which input to highlight. */
+auto populate_clarification(::mortgage::assistant::ParseResponse& response, std::string question,
+                            std::string_view operation = {}, std::string_view field = {}) -> void {
+    auto* clarification = response.mutable_clarification();
+    clarification->set_question(std::move(question));
+    clarification->set_operation(std::string{operation});
+    clarification->set_field(std::string{field});
 }
 
 /**
@@ -2317,6 +2324,64 @@ enum class ModelOutputOutcome : std::uint8_t { Success, Refused, Clarified };
 
 namespace mv = ::mortgage_calculator::assistant::verify;
 namespace md = ::mortgage_calculator::assistant::derive;
+
+// ---------------------------------------------------------------------------
+// WHAT THE VISITOR READS.
+//
+// The site renders a refusal's message and a clarification's question VERBATIM, twice
+// (mortgage-nest-egg `routes/api/chat.ts`). Observed live 2026-10-06: `The assistant left out
+// "property_price", which ComputeRentVsBuy needs. Filling it in with a default would compute an
+// exact answer to a question nobody asked.` -- an engine's reasoning, a proto field name and an
+// operation name, shown to someone who typed "600k home". So every sentence below is plain
+// language, names a figure only in the visitor's own terms (`mv::field_label`), and carries the
+// machine-readable half -- the operation and the field -- in the structured fields of the
+// Refusal and Clarification instead. The diagnosis goes to the log. The corpus scorer FAILS any
+// row whose visitor-facing text matches /Compute[A-Z]|_[a-z]+_|"[a-z]+_[a-z_]+"/.
+// ---------------------------------------------------------------------------
+
+inline constexpr std::string_view kTryExample =
+    "\"what would a $420,000 loan at 6.25% over 30 years cost per month\"";
+
+[[nodiscard]] auto label_of(std::string_view field) -> std::string {
+    const auto label = mv::field_label(field);
+    return label.empty() ? std::string{"one of the figures"} : std::string{label};
+}
+
+[[nodiscard]] auto cannot_interpret_message() -> std::string {
+    return "I couldn't tell which calculation you want. Try describing it with the figures you "
+           "know, for example: " + std::string{kTryExample} + ".";
+}
+
+[[nodiscard]] auto unreadable_figure_message(std::string_view field) -> std::string {
+    return "I couldn't read the " + label_of(field) + " in your request, so I didn't run "
+           "anything. Try stating it as a plain number, for example: " + std::string{kTryExample} + ".";
+}
+
+[[nodiscard]] auto ungrounded_figure_message(std::string_view field) -> std::string {
+    return "I couldn't match the " + label_of(field) + " to what you wrote, so I left it out "
+           "rather than guess. Try stating the " + label_of(field) + " directly, for example: " +
+           std::string{kTryExample} + ".";
+}
+
+[[nodiscard]] auto out_of_range_message(std::string_view field) -> std::string {
+    return "The " + label_of(field) + " I read from your request looks out of range, so I didn't "
+           "use it. Please check it and try again.";
+}
+
+/** Populate a refusal and say so to the graph. */
+auto refuse(::mortgage::assistant::ParseResponse& response,
+            ::mortgage::assistant::Refusal_Reason reason, std::string message,
+            std::string_view operation = {}, std::string_view field = {}) -> ModelOutputOutcome {
+    populate_refusal(response, reason, std::move(message), operation, field);
+    return ModelOutputOutcome::Refused;
+}
+
+/** Populate a clarifying question and say so to the graph. */
+auto ask(::mortgage::assistant::ParseResponse& response, std::string question,
+         std::string_view operation, std::string_view field) -> ModelOutputOutcome {
+    populate_clarification(response, std::move(question), operation, field);
+    return ModelOutputOutcome::Clarified;
+}
 
 /**
  * Collapses the verifier's twelve reason codes onto this contract's four.
@@ -2457,10 +2522,10 @@ namespace md = ::mortgage_calculator::assistant::derive;
  * formatting would not be: `%f` on 0.0385 either pads it with zeros or, at low
  * precision, silently changes it. */
 [[nodiscard]] auto shortest_double_text(double v) -> std::string {
-    std::array<char, 32> buffer{};
-    const auto result = std::to_chars(buffer.data(), buffer.data() + buffer.size(), v);
-    if (result.ec != std::errc{}) return {};
-    return std::string{buffer.data(), result.ptr};
+    // PLAIN positional notation, never `std::to_chars`'s default: that picks the SHORTER of fixed and
+    // scientific, and "5e+05" is shorter than "500000", so every round figure came out in exponent
+    // form, which the verifier and `is_decimal_literal` refuse. See `mv::plain_decimal_text`.
+    return mv::plain_decimal_text(v);
 }
 
 /**
@@ -2679,9 +2744,14 @@ auto apply_tvm_sign_convention(std::string_view operation,
     auto& m = *params.mutable_params();
     const auto pv = m.find("present_value");
     const auto pmt = m.find("payment");
+    if (pv == m.end() || pmt == m.end()) return;
+    // An OMITTED future value is a zero one: this service no longer pads the answer with fields the
+    // visitor never stated, so the balloon of an ordinary loan is simply absent -- and the engine
+    // still refuses a same-signed pair, so the flip must still happen.
     const auto fv = m.find("future_value");
-    if (pv == m.end() || pmt == m.end() || fv == m.end()) return;
-    if (!mv::tvm_payment_needs_sign_flip(operation, pv->second, pmt->second, fv->second)) return;
+    const std::string no_balloon = "0";
+    if (!mv::tvm_payment_needs_sign_flip(operation, pv->second, pmt->second,
+                                         fv == m.end() ? no_balloon : fv->second)) return;
 
     // Flip the PAYMENT rather than the present value. Either gives the same
     // answer -- the balance equation is homogeneous -- and this is the leg a
@@ -3303,16 +3373,14 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
     -> ModelOutputOutcome {
     auto parsed = fastjson::parse(json_text);
     if (!parsed.has_value() || !parsed->is_object()) {
-        populate_refusal(response, ::mortgage::assistant::Refusal::INVALID_PARAMETERS,
-                         "The assistant's structured output could not be parsed as a JSON object.");
-        return ModelOutputOutcome::Refused;
+        return refuse(response, ::mortgage::assistant::Refusal::INVALID_PARAMETERS,
+                      cannot_interpret_message());
     }
     const auto& obj = parsed.value();
 
     if (!obj.contains("operation") || !obj["operation"].is_string()) {
-        populate_refusal(response, ::mortgage::assistant::Refusal::UNSUPPORTED_OPERATION,
-                         "The assistant did not name a calculation for this request.");
-        return ModelOutputOutcome::Refused;
+        return refuse(response, ::mortgage::assistant::Refusal::UNSUPPORTED_OPERATION,
+                      cannot_interpret_message());
     }
     const std::string operation{obj["operation"].as_string()};
 
@@ -3364,12 +3432,12 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
             remapped.has_value()) {
             return validate_and_populate_params(*remapped, user_text, latest_turn, response);
         }
-        populate_refusal(
+        return refuse(
             response, ::mortgage::assistant::Refusal::INVALID_PARAMETERS,
-            "This request gives the cash flows on stated days, which " + operation +
-                " cannot represent -- it discounts evenly-spaced periods and would "
-                "silently ignore the dates. Ask for the dated form instead.");
-        return ModelOutputOutcome::Refused;
+            "Your cash flows fall on specific days, and this calculation would treat them as "
+            "evenly spaced periods and ignore the dates. Ask for the return or value of dated "
+            "cash flows instead, listing each amount and the day it arrives.",
+            operation, "dates");
     }
 
     const Operation* op = find_operation(operation);
@@ -3381,10 +3449,25 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
         // ComputePrincipalPayment share a request message while returning
         // opposite halves of the same payment. Silently redirecting would
         // produce a confident answer to a question nobody asked.
-        populate_refusal(response, ::mortgage::assistant::Refusal::UNSUPPORTED_OPERATION,
-                         "\"" + operation +
-                             "\" is not one of the finance operations this assistant covers.");
-        return ModelOutputOutcome::Refused;
+        // The model's invented name is NOT echoed to the visitor or put in `operation`: it is not
+        // one of this contract's calculations, and showing it would be showing internals.
+        logger::Logger::getInstance().info(
+            "mortgage assistant: the model named \"{}\", which is not one of the calculations", operation);
+        return refuse(response, ::mortgage::assistant::Refusal::UNSUPPORTED_OPERATION,
+                      cannot_interpret_message());
+    }
+
+    // A CADENCE THIS CALCULATION CANNOT SERVE. "bi-weekly payment on a $350,000 loan" was answered
+    // with the MONTHLY payment (2026-10-06, production): a correct-looking figure for a question
+    // nobody asked, and nothing in the response said the cadence had been ignored. Where the
+    // operation has a payments-per-year input the cadence is a figure like any other (and is read
+    // as one); where it has none, the honest answer is to say so.
+    if (mv::names_unsupported_cadence(user_text) && find_field(*op, "payments_per_year") == nullptr &&
+        find_field(*op, "periods_per_year") == nullptr) {
+        return refuse(response, ::mortgage::assistant::Refusal::OUT_OF_SCOPE,
+                      "I can only work with monthly payments here, so I can't model a bi-weekly or "
+                      "twice-a-month schedule. Ask for the monthly payment and I'll run it.",
+                      operation, "payments_per_year");
     }
 
     // Graph C: the model interprets, the solver computes.
@@ -3451,14 +3534,17 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
     for (const auto& [key, value] : obj.as_object()) {
         if (key == "operation") continue;
         if (find_field(*op, key) == nullptr) {
-            populate_refusal(response, ::mortgage::assistant::Refusal::INVALID_PARAMETERS,
-                             "\"" + key + "\" is not a parameter of " + operation + " (" +
-                                 std::string{op->request_message} + ").");
-            return ModelOutputOutcome::Refused;
+            logger::Logger::getInstance().info(
+                "mortgage assistant: \"{}\" is not a parameter of {} ({})", key, operation,
+                op->request_message);
+            return refuse(response, ::mortgage::assistant::Refusal::INVALID_PARAMETERS,
+                          cannot_interpret_message(), operation);
         }
     }
 
-    // (3) and (5) -- every declared field must be present and must validate.
+    // (3) and (5) -- every field the model EMITTED must validate. A declared field it did not emit
+    // is not a gap (owner decision, 2026-10-06): only an ESSENTIAL input is, and that is decided
+    // below by what the visitor actually said.
     //
     // The verifier's view of the same object is assembled in this one pass
     // alongside the wire message, from the ENCODED value rather than from the
@@ -3469,8 +3555,6 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
     mv::MortgageParamsInput verifiable;
     verifiable.params_emitted = true;
     verifiable.operation = operation;
-    /// Declared fields the model left out, in `op->fields` order. See the deferral below.
-    std::vector<std::string> absent_fields;
     for (const auto& field : op->fields) {
         const std::string key{field.name};
 
@@ -3499,11 +3583,11 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
         // The same drop, one level finer: a field this operation's chosen
         // VARIANT does not read. DepreciationRequest is one message serving
         // four methods and finance.proto restricts six of its eight fields in
-        // comments no consumer can see. G2b requires every declared field, so
-        // the model fills slots the method discards and grounding then refuses
-        // the value it invented -- measured live on 2026-09-03, a straight-line
-        // request refused on `"factor" = 3`, a number that provably changes
-        // nothing (2.0/3.0/1.5 all return 5017.9487179487178).
+        // comments no consumer can see. The model fills slots the method
+        // discards and grounding then refuses the value it invented -- measured
+        // live on 2026-09-03, a straight-line request refused on `"factor" = 3`,
+        // a number that provably changes nothing (2.0/3.0/1.5 all return
+        // 5017.9487179487178).
         //
         // The governing value is read from the model's own object rather than
         // from loop order, because the enum may be declared after the field it
@@ -3517,39 +3601,18 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
             }
         }
 
+        // NOT EMITTED. For an optional field that IS the answer ("the visitor did not say"); for an
+        // essential one the shaping below turns it into a question. Neither is a refusal, and
+        // neither is a default.
         if (!obj.contains(key)) {
-            // DEFERRED, not refused here, and the deferral is the whole point.
-            //
-            // A FIELD THE USER NEVER STATED IS A QUESTION, NOT A REFUSAL -- this service
-            // already holds that rule and already implements it, for the two shapes the
-            // DECODER produces. G2b forces that model to emit every declared field, so "the
-            // user did not say" reaches the verifier as a WRONG VALUE: G3 ("periods" does not
-            // correspond) or G5 (the rate is outside the band), and `refine_unstated` turns
-            // either into "Over how many years?".
-            //
-            // THE ENCODER CANNOT PRODUCE EITHER SHAPE. It points at literals, so a parameter
-            // no literal supports is simply ABSENT -- a third arrival shape, which refused
-            // here before the asking machinery could see it. Measured on the holdout with the
-            // encoder backend: 98 rows refused `missing-field` and `asked_ok` was 0 of 86,
-            // against the decoder's 49 of 90. That is a user-visible regression on a real
-            // path, not a cosmetic difference.
-            //
-            // It is recorded and the loop CONTINUES so that `verifiable.fields` is complete
-            // before the decision is taken. That matters because the discriminator needs it:
-            // a compatible literal blocks the question only while no OTHER emitted field
-            // grounds against it -- the claimed-literal narrowing, which is why the
-            // three-argument `utterance_states_nothing_for` exists. Deciding inside the loop
-            // would judge against a half-built set and ask about a figure the user had just
-            // given, which this file's own ask-sweep gate exists to prevent.
-            absent_fields.push_back(key);
             continue;
         }
         std::string encoded;
         if (const auto problem = validate_and_encode(field, obj[key], encoded);
             problem.has_value()) {
-            populate_refusal(response, ::mortgage::assistant::Refusal::INVALID_PARAMETERS,
-                             "The assistant's " + *problem + ".");
-            return ModelOutputOutcome::Refused;
+            logger::Logger::getInstance().info("mortgage assistant: {}: {}", operation, *problem);
+            return refuse(response, ::mortgage::assistant::Refusal::INVALID_PARAMETERS,
+                          unreadable_figure_message(key), operation, key);
         }
         const bool repeated =
             field.kind == Kind::RepeatedDouble || field.kind == Kind::RepeatedInt;
@@ -3563,117 +3626,43 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
     }
 
     // ------------------------------------------------------------------
-    // (5b) A DECLARED FIELD THE MODEL LEFT OUT: ask if the user never stated it, refuse if
-    // they did. Same rule and the same two helpers the verdict branch below uses, applied to
-    // the one arrival shape that could not reach it -- an ABSENT key rather than a wrong
-    // value. See the deferral above for why this is not decided inside the loop.
+    // (5b) THE VISITOR'S OWN WORDS DECIDE WHAT IS SERVED, AND WHAT IS ASKED.
     //
-    // The ORIGINAL refusal wording is preserved for the refuse direction, deliberately: the
-    // case it describes is the model dropping a field the user DID state, which is a model
-    // defect and not a conversation to continue. Only the ask direction is new.
-    // AN OPTIONAL MODELLING INPUT NOBODY MENTIONED IS NOT A GAP -- IT IS A ZERO.
+    // Everything the model emitted is a CANDIDATE: a number the words support is served, and a
+    // zero, a cadence of twelve or an enum's default that nothing in the words supports is
+    // dropped, so the site keeps its own value for it. And an ESSENTIAL input that is absent or
+    // only defaulted is a QUESTION about exactly that input -- "Over how many years?" -- never the
+    // "left out X" refusal this branch used to return, and never a blank served to the engine.
     //
-    // "you should be able to compute without a downpayment, hoa or pmi, this should not
-    // be a problem." Before this pass, all three failed, and they failed in two
-    // DIFFERENT ways, which is why one fix covers both:
-    //
-    //   down_payment   -- has a clarifying wording, so the loop below ASKED
-    //                     "How much are you putting down?" of someone who had
-    //                     already given the price, the rate and the term.
-    //   monthly_hoa,   -- have no natural wording, so they fell through to the
-    //   pmi_annual_rate   refusal: "The assistant left out X, which <op> needs."
-    //                     A flat refusal on a request that was complete.
-    //
-    // Both are the same mistake. The service already KNOWS what an unstated down
-    // payment, HOA fee or PMI rate is -- `kConventionValues` has carried those exact
-    // values the whole time -- and was using that knowledge in one direction only:
-    // "the model may EMIT this zero without a literal" but not "if nobody said
-    // anything, it IS this zero". `mv::optional_modelling_default` is the second
-    // direction, and it is a separate, smaller table rather than that one because
-    // `loan_amount` is also convention-zero and defaulting IT would answer a
-    // mortgage question with a zero-dollar loan. That module says so at length.
-    //
-    // THREE GUARDS, and the first is the one that keeps the dangerous failure
-    // dangerous:
-    //
-    //   - `utterance_states_nothing_for` must hold. If the user DID state dues the
-    //     model then dropped, a compatible unclaimed literal exists, nothing is
-    //     substituted, and the refusal stands -- because silently zeroing a figure
-    //     the user gave is strictly worse than refusing to answer. This is the same
-    //     discriminator, with the same claimed-literal narrowing, that the ask paths
-    //     use; it is not a second copy of the rule.
-    //   - `Kind::Decimal` only. A repeated field's default is one zero PER OFFER and
-    //     the offer count is in a sibling array, so `pmi_rates` is deliberately not
-    //     in the table and this check is what makes that absence enforced rather
-    //     than merely intended.
-    //   - the substituted value is verified like any other. It is pushed into
-    //     `verifiable.fields` BEFORE G5/G3 run, so a default that was out of range
-    //     or ungrounded would be refused rather than served -- there is no bypass
-    //     here, only a value to check.
-    //
-    // DECIDED AGAINST THE FULLY-BUILT SET, THEN APPLIED. Same reason the deferral
-    // above exists: `utterance_states_nothing_for` reads the other emitted fields to
-    // ask whether a literal is already spoken for, so filling as we iterate would
-    // judge later fields against a set that already contains earlier substitutions.
-    std::vector<std::string> defaulted_fields;
-    for (const auto& field_name : absent_fields) {
-        const auto fallback = mv::optional_modelling_default(field_name);
-        if (fallback.empty()) { continue; }
-        // THE DEFAULT TURNS ON WHETHER THE USER MENTIONED THE THING, not on
-        // whether some number could have been it. `utterance_states_nothing_for`
-        // -- the predicate the ask paths below use -- is INERT here: a claim only
-        // counts across slot kinds, so on any utterance carrying a second money
-        // figure a Money slot always looks stated. Measured: with that predicate
-        // this pass fired on nothing. See the verifier's declaration.
-        // EITHER the utterance never mentions the thing, OR it says in words
-        // that there is none of it. The second arm is not a convenience: "zero
-        // down" NAMES the down payment, so the first arm alone refused to
-        // default the very zero the sentence was stating, and production
-        // answered "The assistant left out down_payment" to a request that said
-        // zero down. A worded zero is a statement, not an omission.
-        if (!mv::utterance_names_nothing_for(field_name, user_text) &&
-            !mv::utterance_states_none_for(field_name, user_text)) { continue; }
-        const auto desc = std::ranges::find_if(
-            op->fields, [&](const auto& f) { return f.name == field_name; });
-        if (desc == std::ranges::end(op->fields) || desc->kind != Kind::Decimal) { continue; }
-        defaulted_fields.push_back(field_name);
-    }
-    if (!defaulted_fields.empty()) {
-        for (const auto& field_name : defaulted_fields) {
-            const std::string fallback{mv::optional_modelling_default(field_name)};
-            verifiable.fields.push_back(mv::EmittedField{
-                .name = field_name, .values = {fallback}, .repeated = false});
-            (*params.mutable_params())[field_name] = fallback;
-            logger::Logger::getInstance().debug(
-                "mortgage assistant: {} left out \"{}\" and the utterance states nothing for "
-                "it -- it is an optional modelling input, so it defaults to {} rather than "
-                "becoming a question",
-                operation, field_name, fallback);
+    // An UNSUPPORTED value -- a real number the words contradict -- is deliberately KEPT through
+    // this step so (6) refuses it: `present_value = 304000.00` against a 495,000 utterance is the
+    // documented dangerous failure, and turning it into a question or a silent omission would hide
+    // it.
+    const auto shaped = mv::shape_stated_params(verifiable, user_text);
+    if (!shaped.missing_field.empty()) {
+        auto question = mv::clarifying_question(operation, shaped.missing_field);
+        if (question.empty()) {
+            // Unreachable by construction: test_mortgage_verification sweeps every essential
+            // requirement of every operation for a wording. Kept as a refusal that names no
+            // internals, not as a default, for the same fail-closed reason the sweep exists.
+            return refuse(response, ::mortgage::assistant::Refusal::INVALID_PARAMETERS,
+                          unreadable_figure_message(shaped.missing_field), operation,
+                          shaped.missing_field);
         }
-        std::erase_if(absent_fields, [&](const std::string& name) {
-            return std::ranges::find(defaulted_fields, name) != std::ranges::end(defaulted_fields);
-        });
+        logger::Logger::getInstance().info(
+            "mortgage assistant: {} needs \"{}\" and the visitor's words do not state it -- asking",
+            operation, shaped.missing_field);
+        return ask(response, std::move(question), operation, shaped.missing_field);
     }
-
-    if (!absent_fields.empty()) {
-        for (const auto& field_name : absent_fields) {
-            if (!mv::utterance_states_nothing_for(field_name, user_text, verifiable)) continue;
-            auto question = mv::clarifying_question(operation, field_name);
-            if (question.empty()) continue;  // no natural wording: a proto field name reads
-                                             // like a stack trace, so keep the refusal
-            logger::Logger::getInstance().debug(
-                "mortgage assistant: {} left out \"{}\" and the utterance states nothing for "
-                "it -- asking instead of refusing",
-                operation, field_name);
-            populate_clarification(response, std::move(question));
-            return ModelOutputOutcome::Clarified;
+    {
+        const auto is_kept = [&](const std::string& name) {
+            return std::ranges::find(shaped.kept, name) != shaped.kept.end();
+        };
+        std::erase_if(verifiable.fields, [&](const mv::EmittedField& f) { return !is_kept(f.name); });
+        auto& wire = *params.mutable_params();
+        for (auto it = wire.begin(); it != wire.end();) {
+            it = is_kept(it->first) ? std::next(it) : wire.erase(it);
         }
-        populate_refusal(response, ::mortgage::assistant::Refusal::INVALID_PARAMETERS,
-                         "The assistant left out \"" + absent_fields.front() + "\", which " +
-                             operation +
-                             " needs. Filling it in with a default would compute an exact "
-                             "answer to a question nobody asked.");
-        return ModelOutputOutcome::Refused;
     }
 
     // ------------------------------------------------------------------
@@ -3741,16 +3730,28 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
                 logger::Logger::getInstance().debug(
                     "mortgage assistant: {} never stated \"{}\" -- asking instead of refusing",
                     operation, verdict.field);
-                populate_clarification(response, std::move(question));
-                return ModelOutputOutcome::Clarified;
+                return ask(response, std::move(question), operation, verdict.field);
             }
         }
-        populate_refusal(response, map_verification_reason(verdict.reason),
-                         verdict.message.empty()
-                             ? "The assistant's parameters could not be verified against your "
-                               "request."
-                             : verdict.message);
-        return ModelOutputOutcome::Refused;
+        // The verifier's own message is a DIAGNOSIS -- it quotes a field name and a model value --
+        // so it goes to the log, and the visitor gets a sentence in their own terms.
+        logger::Logger::getInstance().info("mortgage assistant: {} refused: {}", operation,
+                                            verdict.message);
+        std::string visitor_text;
+        switch (verdict.reason) {
+            case mv::ReasonCode::UngroundedValue:
+                visitor_text = ungrounded_figure_message(verdict.field);
+                break;
+            case mv::ReasonCode::OutOfRange:
+                visitor_text = out_of_range_message(verdict.field);
+                break;
+            case mv::ReasonCode::UnknownOperation:
+            default:
+                visitor_text = cannot_interpret_message();
+                break;
+        }
+        return refuse(response, map_verification_reason(verdict.reason), std::move(visitor_text),
+                      operation, verdict.field);
     }
 
     apply_tvm_sign_convention(operation, params);
@@ -3804,81 +3805,49 @@ constexpr std::array<std::string_view, 16> kMortgageAdviceSignals{{
 }
 
 /**
- * True when an utterance carries enough SPECIFIED numbers to be a calculation,
- * whatever it sounds like.
+ * True when an utterance carries CALCULABLE CONTENT: at least two figures, one of them an amount of
+ * money or a percentage. That is the whole difference between a request for a JUDGEMENT and a
+ * calculation worded as a question.
  *
- * `kMortgageAdviceSignals` is a phrase list, and a phrase list cannot tell
- * "Should I rent or buy?" -- a request for a judgement -- from "Should I rent
- * at $2,900/month rising 4.87%, or buy a $546,500 home with $70,300 down at
- * 5.33% over 30 years?", which is a fully specified rent-vs-buy computation
- * wearing the same opening words. The gate refused both, so the most natural
- * phrasing of the question this feature exists to answer was answered with
- * "I don't give financial advice".
+ * `kMortgageAdviceSignals` is a phrase list, and a phrase list cannot tell "Should I refinance?"
+ * -- a request for an opinion -- from "Should I refinance my $300,000 loan at 7.5% to 6.25%?",
+ * which is a refinance calculation wearing the same opening words. The gate refused both. Measured
+ * against production on 2026-10-06, and it was the owner's fourth live report: "should I rent or
+ * buy a $450,000 house? rent is $2,500 a month" and the refinance above were both answered "I
+ * don't give financial advice", with every input the calculation needs on the page.
  *
- * Measured, not theorised. Verified against production on 2026-08-28: the
- * second utterance above returned the advice refusal with every input it
- * needed present. In the training corpus the same list refuses **103
- * extraction rows** whose gold is a real operation -- 99 of them
- * ComputeRentVsBuy, all on the single phrase "should i rent" -- so the model
- * never saw them at serving time either.
+ * It was `money >= 3 && percents >= 2 && years` before, set when only a fully specified
+ * rent-versus-buy comparison was in view; it admitted 103 of 103 such corpus rows and could not
+ * admit a refinance, a rent-or-buy with two figures, or anything else a visitor actually types.
+ * What it protected is still protected by the other half of the rule: the figures must exist.
+ * "Can I afford a $600,000 house?" has ONE figure and is still advice; "Should I rent or buy?" has
+ * none; "Do you recommend a 15 or 30 year mortgage?" has two figures and neither is an amount or a
+ * rate, so it is still advice. Anything that clears this gate and names no calculation is refused
+ * by the model's own `<NONE>`, in plain language, so admitting a borderline request costs a
+ * refusal and never an invented answer.
  *
- * The discriminator is DENSITY OF SPECIFICATION, not sentiment: three money
- * literals, two percentages and an explicit horizon. Somebody asking whether
- * to refinance does not supply all three; somebody describing a comparison
- * cannot avoid them. Measured over every advice-signalled row in the corpus:
- * admits **103/103** of the wrongly-refused calculations and wrongly admits
- * **0/141** genuine advice requests.
- *
- * The conjunction is the point. Each conjunct alone is far too permissive --
- * "can I afford a $600,000 house?" has a money literal and is exactly what
- * this gate must keep refusing. Loosening any one of the three is the mutation
- * that should break the test.
+ * The conjunction is the point: loosening either conjunct is the mutation that breaks the test.
  */
-[[nodiscard]] auto is_specified_calculation(std::string_view utterance) -> bool {
-    int money = 0;
-    int percents = 0;
-    bool years = false;
-    for (std::size_t i = 0; i < utterance.size(); ++i) {
-        const char c = utterance[i];
-        if (c == '$') {
-            // A currency mark followed by a digit, allowing one space.
-            std::size_t j = i + 1;
-            if (j < utterance.size() && utterance[j] == ' ') {
-                ++j;
-            }
-            if (j < utterance.size() && std::isdigit(static_cast<unsigned char>(utterance[j])) != 0) {
-                ++money;
-            }
-            continue;
-        }
-        if (c == '%') {
-            // A percent sign preceded by a digit, allowing one space.
-            std::size_t j = i;
-            if (j > 0 && utterance[j - 1] == ' ') {
-                --j;
-            }
-            if (j > 0 && std::isdigit(static_cast<unsigned char>(utterance[j - 1])) != 0) {
-                ++percents;
-            }
-            continue;
-        }
-        if (!years && (c == 'y' || c == 'Y')) {
-            // "<digits>[ -]year" / "yr", with at least one digit before it.
-            const std::string_view rest = utterance.substr(i);
-            const bool word = rest.starts_with("year") || rest.starts_with("Year") ||
-                              rest.starts_with("yr") || rest.starts_with("Yr");
-            if (word) {
-                std::size_t k = i;
-                while (k > 0 && (utterance[k - 1] == ' ' || utterance[k - 1] == '-')) {
-                    --k;
-                }
-                if (k > 0 && std::isdigit(static_cast<unsigned char>(utterance[k - 1])) != 0) {
-                    years = true;
-                }
-            }
-        }
-    }
-    return money >= 3 && percents >= 2 && years;
+[[nodiscard]] auto has_calculable_content(std::string_view utterance) -> bool {
+    const auto literals = mv::lex_numeric_literals(utterance);
+    const bool amount_or_rate = std::ranges::any_of(literals, [](const mv::NumericLiteral& lit) {
+        return lit.tag == mv::LiteralTag::Money || lit.tag == mv::LiteralTag::Percent;
+    });
+    if (literals.size() >= 2 && amount_or_rate) { return true; }
+    // ONE figure is enough when the words NAME a calculation: "should I rent or buy a $450,000
+    // house?" is a rent-versus-buy comparison missing only the rent, which the assistant asks for
+    // ("What would you pay in rent each month?") -- it was refused as advice (2026-10-06, production,
+    // fifth live report). "Can I afford a $600,000 house?" names no calculation and stays advice.
+    if (!amount_or_rate) { return false; }
+    std::string lower;
+    lower.reserve(utterance.size());
+    for (const char ch : utterance) { lower += static_cast<char>(std::tolower(static_cast<unsigned char>(ch))); }
+    return std::ranges::any_of(
+        std::array<std::string_view, 21>{"rent or buy", "buy or rent", "rent vs", "renting vs", "refinanc", "refi ",
+                                          "payment", "closing cost", "heloc", "recast", "amortiz", "amortis",
+                                          "pay off", "payoff", "interest", "npv", "irr", "depreciat",
+                                          "cash flow", "cap rate", "break even"},
+        [&lower](std::string_view phrase) { return lower.find(phrase) != std::string::npos; });
 }
 
 // ---------------------------------------------------------------------------
@@ -3950,10 +3919,8 @@ auto interpret_model_output(const std::string& raw_text, std::string_view uttera
         // Neither a valid params block nor something that looks like one short
         // clarifying question. That is a Refusal -- never a crash, and never an
         // invented answer.
-        populate_refusal(response, ::mortgage::assistant::Refusal::OUT_OF_SCOPE,
-                         "The assistant could not produce structured parameters or a short "
-                         "clarifying question for this request.");
-        return ModelOutputOutcome::Refused;
+        return refuse(response, ::mortgage::assistant::Refusal::OUT_OF_SCOPE,
+                      cannot_interpret_message());
     }
     populate_clarification(response, question);
     return ModelOutputOutcome::Success;
@@ -4071,13 +4038,13 @@ inline constexpr std::array<std::string_view, 4> kAllActionNames{
             "years\") without instructions aimed at the assistant itself.");
         return std::unexpected(sgee::ExecutionError::ActionFailed);
     }
-    // A request dense enough in stated figures is a CALCULATION even when it
-    // opens with an advice phrase -- see is_specified_calculation. Without this
-    // carve-out the gate refused "Should I rent at $2,900/month ... or buy a
-    // $546,500 home ... at 5.33% over 30 years?", which is the whole feature.
+    // A request that carries figures is a CALCULATION even when it opens with an advice phrase --
+    // see has_calculable_content. Without this carve-out the gate refused "Should I refinance my
+    // $300,000 loan at 7.5% to 6.25%?" and "should I rent or buy a $450,000 house? rent is $2,500
+    // a month", which are the product.
     if ((::options_calculator::assistant::verify::looks_like_advice_request(ctx->utterance) ||
          looks_like_domain_advice_request(ctx->utterance)) &&
-        !is_specified_calculation(ctx->utterance)) {
+        !has_calculable_content(ctx->utterance)) {
         populate_refusal(
             ctx->response, ::mortgage::assistant::Refusal::OUT_OF_SCOPE,
             "I don't give financial, tax or legal advice -- describe a specific calculation "
@@ -4150,15 +4117,23 @@ inline constexpr std::array<std::string_view, 4> kAllActionNames{
         if (!parsed.has_value()) {
             // A refusal from the chain is a REFUSAL, not a crash and not a silent empty
             // answer: a straddling literal span, an operation the schema cannot name, a
-            // literal that will not convert. Each is a statement about this request.
+            // literal that will not convert. Each is a statement about this request -- and an
+            // internal one, so the reason goes to the log and the visitor gets plain language.
+            logger::Logger::getInstance().info("mortgage assistant: the encoder chain refused: {}",
+                                                parsed.error());
             populate_refusal(ctx->response, ::mortgage::assistant::Refusal::INVALID_PARAMETERS,
-                             "The mortgage assistant could not interpret this request: " +
-                                 parsed.error());
+                             cannot_interpret_message());
             return std::unexpected(sgee::ExecutionError::ActionFailed);
         }
         if (!parsed->has_value()) {
-            ctx->model_text = "The assistant did not identify a calculation for this request.";
-            return {};
+            // `<NONE>`: the model recognised no calculation in the request. That is a REFUSAL,
+            // and it used to be rendered as a prose "question" -- "The assistant did not
+            // identify a calculation for this request." -- which the site then treated as a
+            // clarification to answer, so the visitor's next message was read as the reply to a
+            // question nobody asked.
+            populate_refusal(ctx->response, ::mortgage::assistant::Refusal::OUT_OF_SCOPE,
+                             cannot_interpret_message());
+            return std::unexpected(sgee::ExecutionError::ActionFailed);
         }
         ctx->model_text = "<params>" + encoder_params_to_json(**parsed) + "</params>";
         return {};
