@@ -630,6 +630,11 @@ struct ComputeContext {
     double sigma{0.0};
     double horizon{0.0};    // Latest leg expiry: the date axis of the matrix.
     double curve{0.0};      // Earliest leg expiry: the date the payoff curve is drawn at.
+    // The calendar date every date in this response counts from, read ONCE from
+    // market_data's date source. The matrix columns and the expiry dates the
+    // chain serves must come from the same today, or the last column lands a day
+    // off the expiry the caller chose.
+    std::chrono::sys_days today{};
     std::uint32_t date_steps{0};
     std::uint32_t price_steps{0};
     std::vector<double> price_grid;
@@ -684,6 +689,7 @@ inline constexpr std::array<std::string_view, 5> kAllActionNames{
     ctx->sigma = position_iv(ctx->request);
     ctx->horizon = horizon_days(ctx->request);
     ctx->curve = curve_days(ctx->request);
+    ctx->today = md::today();
 
     // Refuse rather than answer a question we were not asked. Each of these
     // was previously defaulted server-side, so the engine always produced a
@@ -902,7 +908,6 @@ inline constexpr std::array<std::string_view, 5> kAllActionNames{
 [[nodiscard]] auto action_matrix(Ctx& ctx) -> ExecutionResult<> {
     if (!ctx->status.ok()) return {};
 
-    const auto now = std::chrono::system_clock::now();
     const double risk = std::abs(ctx->response.max_loss());
 
     for (std::uint32_t d = 0; d < ctx->date_steps; ++d) {
@@ -919,8 +924,7 @@ inline constexpr std::array<std::string_view, 5> kAllActionNames{
         // labelled "today's DTE" and dated at the expiry, the last was
         // labelled "0 DTE" and dated today. Every date in the grid named the
         // wrong day except the midpoint.
-        const auto day = std::chrono::floor<std::chrono::days>(now) +
-                         std::chrono::days{static_cast<int>(std::llround(elapsed))};
+        const auto day = ctx->today + std::chrono::days{static_cast<int>(std::llround(elapsed))};
         const std::chrono::year_month_day ymd{day};
 
         // std::format, not a stream, and deliberately so. A default-constructed
@@ -1644,7 +1648,7 @@ public:
         static constexpr std::array<std::pair<unsigned, char>, 4> kCycle{
             {{3, 'H'}, {6, 'M'}, {9, 'U'}, {12, 'Z'}}};
 
-        const auto today = std::chrono::floor<std::chrono::days>(std::chrono::system_clock::now());
+        const auto today = md::today();
         const std::chrono::year_month_day now_ymd{today};
         int year = static_cast<int>(now_ymd.year());
         const auto month_now = static_cast<unsigned>(now_ymd.month());
@@ -1750,11 +1754,17 @@ public:
         res.set_provider("alpaca");
         res.set_fetched_at(chain->fetched_at);
 
+        // The cache holds dates and nothing derived from them: how far away a
+        // date is, and the label that says so, change at every midnight, and
+        // the chain and expiration caches outlive one. Counted here, from the
+        // same today the matrix columns are dated from.
+        const auto today = md::today();
         for (const auto& e : chain->expirations) {
+            const int dte = md::days_until(e.date, today);
             auto& exp = *res.add_available_expirations();
             exp.set_date_str(e.date);
-            exp.set_days_to_expiry(e.days);
-            exp.set_label(e.label);
+            exp.set_days_to_expiry(dte);
+            exp.set_label(md::expiry_label(e.date, dte));
         }
 
         // The at-the-money row is the listed strike closest to spot, not a

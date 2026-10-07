@@ -50,6 +50,9 @@
 //   9. FUTURES NEED NO VOLATILITY: a position of linear legs prices, flags and
 //      draws its curve with no implied volatility anywhere, and the probability
 //      fields stay at zero without an error or a NaN.
+//  10. ONE TODAY: the dates the chain serves and the dates the matrix is drawn
+//      on come from the same calendar, so a cache that outlives a midnight
+//      cannot put the last matrix column a day past the chosen expiry.
 //
 // Deliberately scoped to calculator_service.cpp's request handling and
 // response marshalling around SGEE, exactly as the two finance-service test
@@ -69,6 +72,7 @@
 
 import std;
 import calculator_service;
+import market_data;
 import strategy_store;
 
 namespace {
@@ -253,6 +257,83 @@ auto curve_extremes(const StrategyResponse& r) -> std::pair<double, double> {
 
 auto near(double a, double b, double eps = 1e-6) -> bool { return std::abs(a - b) < eps; }
 
+// ---------------------------------------------------------------------------
+// Section 10: a market-data provider and a calendar the test controls.
+// ---------------------------------------------------------------------------
+
+namespace md = options_calculator::market_data;
+using calculator::ChainRequest;
+using calculator::ChainResponse;
+
+/** One symbol at 779, two listed expirations, and a count of how often it was asked. */
+class FakeChainProvider final : public md::IMarketDataProvider {
+public:
+    [[nodiscard]] auto name() const -> std::string_view override { return "fake_calendar"; }
+
+    [[nodiscard]] auto quote(const std::string& symbol) const
+        -> std::expected<md::Quote, std::error_code> override {
+        return md::Quote{.symbol = symbol,
+                         .price = 779.0,
+                         .previous_close = 778.0,
+                         .timestamp = "2035-10-05T14:00:00Z"};
+    }
+
+    [[nodiscard]] auto expirations(const std::string&, double) const
+        -> std::expected<std::vector<md::Expiration>, std::error_code> override {
+        ++expirations_calls_;
+        return std::vector<md::Expiration>{md::Expiration{.date = "2035-10-12"},
+                                           md::Expiration{.date = "2035-10-19"}};
+    }
+
+    [[nodiscard]] auto chain(const std::string& symbol, const std::string& expiration,
+                             double spot) const -> std::expected<md::Chain, std::error_code> override {
+        ++chain_calls_;
+        md::Chain c;
+        c.symbol = symbol;
+        c.spot = spot;
+        c.selected_expiration = expiration;
+        c.strikes.push_back(md::StrikeRow{.strike = 779.0});
+        return c;
+    }
+
+    [[nodiscard]] auto chain_calls() const noexcept -> int { return chain_calls_.load(); }
+    [[nodiscard]] auto expirations_calls() const noexcept -> int { return expirations_calls_.load(); }
+
+private:
+    mutable std::atomic<int> chain_calls_{0};
+    mutable std::atomic<int> expirations_calls_{0};
+};
+
+/** A flat 4% curve, so the futures term structure has the one measured input it refuses to guess. */
+class FakeRateProvider final : public md::IRateProvider {
+public:
+    [[nodiscard]] auto name() const -> std::string_view override { return "fake_rate"; }
+    [[nodiscard]] auto risk_free_rate() const
+        -> std::expected<md::RiskFreeRate, std::error_code> override {
+        return md::RiskFreeRate{.rate = 0.04,
+                                .rate_published = 0.0392,
+                                .tenor = "3M",
+                                .as_of_date = "2026-10-05",
+                                .source = "fake",
+                                .fetched_at = "2026-10-06T00:00:00Z"};
+    }
+};
+
+std::chrono::sys_days g_fake_today{};
+auto fake_today() -> std::chrono::sys_days { return g_fake_today; }
+
+auto get_chain(OptionsCalculator::Stub& stub, const std::string& symbol,
+               const std::string& asset_class, const std::string& expiration_date)
+    -> std::pair<grpc::Status, ChainResponse> {
+    ChainRequest req;
+    req.set_symbol(symbol);
+    req.set_asset_class(asset_class);
+    req.set_expiration_date(expiration_date);
+    ChainResponse resp;
+    const auto ctx = make_context();
+    const auto status = stub.GetMarketChain(ctx.get(), req, &resp);
+    return {status, resp};
+}
 
 
 // ---------------------------------------------------------------------------
@@ -1433,6 +1514,121 @@ auto main() -> int {
                   "future + put: the option's IV drives the probabilities, which are finite");
             check(resp.leg_risk_size() == 2, "future + put: one leg_risk per leg");
         }
+    }
+
+    // =======================================================================
+    section("10. ONE TODAY: the chain's dates and the matrix's dates agree");
+    // =======================================================================
+    // OFC-018. The expiration list is cached for 12 hours and each entry used to
+    // carry `days` and a "(7d)" label computed WHEN IT WAS FILLED. Read after a
+    // UTC midnight the count was a day high; a client built its leg from it,
+    // and the matrix -- counting from today -- dated its last column a day past
+    // the expiry the user chose. Observed live: expiry 2026-10-13, last matrix
+    // column 2026-10-14 reading "0 days to expiry", the real expiry column
+    // reading "1 days".
+    //
+    // The calendar is injected, so midnight is crossed by assignment and not by
+    // sleeping. The fake provider counts its own calls, which is what proves the
+    // second read was SERVED FROM THE CACHE: without it, a re-fetch would
+    // recompute the count and this section would pass on a build with the bug.
+    {
+        auto fake = std::make_shared<FakeChainProvider>();
+        md::set_provider(fake);
+        md::set_rate_provider(std::make_shared<FakeRateProvider>());
+        md::set_calendar_provider(fake_today);
+        md::quote_cache().clear();
+        md::expiration_cache().clear();
+        md::chain_cache().clear();
+        md::rate_cache().clear();
+        md::clear_last_good_chain();
+
+        // Dates in 2035, far from any day this test can run on: a mutant that
+        // reads the REAL clock instead of the injected one must disagree with
+        // the injected dates, which it would not on the day they coincided.
+        constexpr std::string_view kExpiry = "2035-10-12";
+        const auto day_one = std::chrono::sys_days{std::chrono::year{2035} / std::chrono::October / 5};
+        const auto expiry_days = std::chrono::sys_days{std::chrono::year{2035} / std::chrono::October / 12};
+
+        const auto served = [&](const ChainResponse& chain) {
+            for (const auto& e : chain.available_expirations()) {
+                if (e.date_str() == kExpiry) return std::pair{e.days_to_expiry(), e.label()};
+            }
+            return std::pair{-999, std::string{"<expiry not listed>"}};
+        };
+
+        g_fake_today = day_one;
+        auto [st1, chain1] = get_chain(stub, "SPY", "EQUITY", std::string{kExpiry});
+        const auto [days1, label1] = served(chain1);
+        check(st1.ok() && days1 == 7 && label1 == "Oct 12, 2035 (7d)",
+              "day one: 2035-10-12 is 7 days away and labelled so (got " + std::to_string(days1) +
+                  ", '" + label1 + "')");
+        check(fake->chain_calls() == 1 && fake->expirations_calls() == 1,
+              "day one: the provider was asked once for each");
+
+        // Midnight passes. Nothing is evicted: the chain cache holds 15 minutes
+        // and the expiration cache 12 hours, so every entry below is served warm.
+        g_fake_today = day_one + std::chrono::days{1};
+        auto [st2, chain2] = get_chain(stub, "SPY", "EQUITY", std::string{kExpiry});
+        const auto [days2, label2] = served(chain2);
+        check(fake->chain_calls() == 1 && fake->expirations_calls() == 1,
+              "day two: served from the cache -- the provider was NOT asked again");
+        check(st2.ok() && days2 == 6 && label2 == "Oct 12, 2035 (6d)",
+              "day two: the SAME cached entry now reads 6 days and '(6d)' (got " +
+                  std::to_string(days2) + ", '" + label2 + "')");
+
+        // The leg the client builds from what it was served, priced by the
+        // engine on the same day. Every cell must be dated exactly as many days
+        // before the expiry as it says it is.
+        auto req = make_request(779.0, 0.25, 7);
+        add_leg(req, Leg::BUY, Leg::CALL, 779.0, static_cast<double>(days2), 4.49, 0.20);
+        auto [st3, resp] = call_strategy(stub, req);
+        check(st3.ok() && resp.matrix_size() == 81 * 7, "the matrix is 7 columns of 81 prices");
+
+        bool every_cell_consistent = true;
+        std::string first_date;
+        std::string last_date;
+        std::uint32_t first_dte = 0;
+        std::uint32_t last_dte = 99;
+        for (const auto& cell : resp.matrix()) {
+            const auto implied = expiry_days - std::chrono::days{cell.days_to_expiration()};
+            every_cell_consistent =
+                every_cell_consistent && cell.date_str() == std::format("{:%Y-%m-%d}", implied);
+        }
+        if (resp.matrix_size() > 0) {
+            first_date = resp.matrix(0).date_str();
+            first_dte = resp.matrix(0).days_to_expiration();
+            last_date = resp.matrix(resp.matrix_size() - 1).date_str();
+            last_dte = resp.matrix(resp.matrix_size() - 1).days_to_expiration();
+        }
+        check(every_cell_consistent,
+              "every matrix cell is dated (expiry - days_to_expiration): no column is off by a day");
+        check(last_date == kExpiry && last_dte == 0,
+              "the LAST column is the chosen expiry, 2035-10-12, reading 0 days (got " + last_date +
+                  ", " + std::to_string(last_dte) + ")");
+        check(first_date == "2035-10-06" && first_dte == 6,
+              "the FIRST column is today on the injected calendar, 2035-10-06, reading 6 days (got " +
+                  first_date + ", " + std::to_string(first_dte) + ")");
+
+        // The third place that reads a date: the futures term structure.
+        // ESZ35 settles on the third Friday of December 2035.
+        auto [st4, futures] = get_chain(stub, "ES", "FUTURES", "");
+        check(st4.ok() && futures.futures_contracts_size() > 0 &&
+                  futures.futures_contracts(0).code() == "ESZ35",
+              "the term structure's first contract is ESZ35");
+        const auto settle =
+            std::chrono::sys_days{std::chrono::year{2035} / std::chrono::December / std::chrono::Friday[3]};
+        if (futures.futures_contracts_size() > 0) {
+            check(futures.futures_contracts(0).days_to_expiry() == (settle - g_fake_today).count(),
+                  "the term structure counts from the same injected today (day two: " +
+                      std::to_string(futures.futures_contracts(0).days_to_expiry()) + ")");
+        }
+
+        md::set_calendar_provider(nullptr);
+        const auto before = std::chrono::floor<std::chrono::days>(std::chrono::system_clock::now());
+        const auto restored = md::today();
+        const auto after = std::chrono::floor<std::chrono::days>(std::chrono::system_clock::now());
+        check(restored >= before && restored <= after,
+              "clearing the provider restores the real UTC date");
     }
 
     // -----------------------------------------------------------------

@@ -124,6 +124,34 @@ export [[nodiscard]] auto clock_now() -> std::chrono::steady_clock::time_point {
     return g_clock_fn.load()();
 }
 
+/**
+ * The calendar date this service counts from: UTC midnight to UTC midnight.
+ *
+ * ONE source for every date in a response -- how many days away an expiration
+ * is, the date of each matrix column, the delivery months of the futures curve.
+ * Two sources that each read the system clock agree only until a request
+ * straddles a midnight, and a number cached under one midnight and read under
+ * the next is the same disagreement spread over hours.
+ *
+ * Injectable beside clock_now for the same reason that one is: a test that must
+ * prove behaviour across midnight cannot sleep to it.
+ */
+export using CalendarFn = std::chrono::sys_days (*)();
+
+inline auto default_calendar() -> std::chrono::sys_days {
+    return std::chrono::floor<std::chrono::days>(std::chrono::system_clock::now());
+}
+
+inline std::atomic<CalendarFn> g_calendar_fn{default_calendar};
+
+export auto set_calendar_provider(CalendarFn fn) -> void {
+    g_calendar_fn.store(fn != nullptr ? fn : default_calendar);
+}
+
+export [[nodiscard]] auto today() -> std::chrono::sys_days {
+    return g_calendar_fn.load()();
+}
+
 [[nodiscard]] auto credentials() -> const Credentials& {
     static const Credentials creds{
         .key = env_or("ALPACA_API_KEY", ""),
@@ -460,11 +488,6 @@ export [[nodiscard]] auto fetch_with_resilience(const std::string& host_key,
     return (f.is_string()) ? std::string{f.as_string()} : std::string{};
 }
 
-[[nodiscard]] auto today() -> std::chrono::year_month_day {
-    return std::chrono::year_month_day{
-        std::chrono::floor<std::chrono::days>(std::chrono::system_clock::now())};
-}
-
 /**
  * Constant-maturity par yields are bond-equivalent yields on a semiannual
  * compounding convention; Black-Scholes discounts continuously. They are not
@@ -522,8 +545,13 @@ export [[nodiscard]] auto rfc3339_now() -> std::string {
     return out;
 }
 
-/** "2026-08-21" -> days from today. Negative for past dates. */
-[[nodiscard]] auto days_until(const std::string& iso_date) -> int {
+/**
+ * "2026-08-21" -> whole days from `from`. Negative for past dates.
+ *
+ * Pure in both arguments, and exported so the date a cached expiration is read
+ * against is chosen by the reader. See Expiration.
+ */
+export [[nodiscard]] auto days_until(std::string_view iso_date, std::chrono::sys_days from) -> int {
     if (iso_date.size() < 10) return 0;
     int y{}, m{}, d{};
     std::from_chars(iso_date.data() + 0, iso_date.data() + 4, y);
@@ -535,16 +563,15 @@ export [[nodiscard]] auto rfc3339_now() -> std::string {
         std::chrono::day{static_cast<unsigned>(d)}};
     if (!target.ok()) return 0;
 
-    const auto a = std::chrono::sys_days{target};
-    const auto b = std::chrono::sys_days{today()};
-    return static_cast<int>((a - b).count());
+    return static_cast<int>((std::chrono::sys_days{target} - from).count());
 }
 
-[[nodiscard]] auto expiry_label(const std::string& iso_date, int dte) -> std::string {
+/** "Oct 13, 2026 (7d)" for a date and the days it is away; "LEAP" past a year. */
+export [[nodiscard]] auto expiry_label(std::string_view iso_date, int dte) -> std::string {
     static constexpr std::array<std::string_view, 13> kMonths{
         "", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
         "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
-    if (iso_date.size() < 10) return iso_date;
+    if (iso_date.size() < 10) return std::string{iso_date};
     int m{}, d{};
     std::from_chars(iso_date.data() + 5, iso_date.data() + 7, m);
     std::from_chars(iso_date.data() + 8, iso_date.data() + 10, d);
@@ -621,10 +648,20 @@ export struct StrikeRow {
     OptionQuote put;
 };
 
+/**
+ * A listed expiration, as the date alone.
+ *
+ * Nothing derived from the date is stored, and that is the point of this type.
+ * How many days away it is, and the label that prints the count, change at
+ * every midnight, while the caches holding these outlive one: the expiration
+ * list is held 12 hours, the chain that embeds it 15 minutes, and the last good
+ * chain an hour. A count taken when a cache entry was filled is a day wrong the
+ * morning after, and a client that builds a matrix from it dates the last
+ * column a day past the expiry it chose. The reader counts, against today(),
+ * with days_until and expiry_label.
+ */
 export struct Expiration {
     std::string date;
-    int days{0};
-    std::string label;
 };
 
 export struct Chain {
@@ -952,7 +989,7 @@ public:
      */
     [[nodiscard]] auto expirations(const std::string& symbol, double spot) const
         -> std::expected<std::vector<Expiration>, std::error_code> {
-        const auto ymd = today();
+        const std::chrono::year_month_day ymd{today()};
         std::string from = std::to_string(static_cast<int>(ymd.year()));
         from += (static_cast<unsigned>(ymd.month()) < 10 ? "-0" : "-") +
                 std::to_string(static_cast<unsigned>(ymd.month()));
@@ -979,11 +1016,10 @@ public:
             return std::unexpected(make_error_code(MarketDataError::MissingData));
         }
 
-        std::map<std::string, int> distinct;
+        std::set<std::string> distinct;
         for (const auto& c : root["option_contracts"].as_array()) {
             const auto date = str(c, "expiration_date");
-            if (date.empty()) continue;
-            distinct.emplace(date, days_until(date));
+            if (!date.empty()) distinct.insert(date);
         }
         if (distinct.empty()) {
             return std::unexpected(make_error_code(MarketDataError::NotFound));
@@ -991,9 +1027,7 @@ public:
 
         std::vector<Expiration> out;
         out.reserve(distinct.size());
-        for (const auto& [date, dte] : distinct) {
-            out.push_back(Expiration{.date = date, .days = dte, .label = expiry_label(date, dte)});
-        }
+        for (const auto& date : distinct) out.push_back(Expiration{.date = date});
         return out;
     }
 
@@ -1175,7 +1209,7 @@ public:
         // No key fields, so no configured() check: that is the whole point of
         // this feed. The host is overridable the same way the Alpaca hosts are.
         const auto host = env_or("TREASURY_RATES_URL", "https://home.treasury.gov");
-        const auto year = static_cast<int>(today().year());
+        const auto year = static_cast<int>(std::chrono::year_month_day{today()}.year());
 
         auto body = fetch_year(host, year);
 
@@ -1465,8 +1499,9 @@ export [[nodiscard]] auto fetch_chain(const std::string& symbol, const std::stri
         if (expirations) {
             std::string expiration = expiration_in;
             if (expiration.empty()) {
+                const auto from = today();
                 for (const auto& e : *expirations) {
-                    if (e.days >= 7) { expiration = e.date; break; }
+                    if (days_until(e.date, from) >= 7) { expiration = e.date; break; }
                 }
                 if (expiration.empty() && !expirations->empty()) expiration = expirations->back().date;
             }
