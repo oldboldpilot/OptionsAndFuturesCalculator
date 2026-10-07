@@ -22,7 +22,16 @@ import { useProStatus } from '../lib/useProStatus';
  * here would also put a second copy of the paywall's rules in the client, where
  * it would drift from the gate the moment either changed.
  */
-export const UpgradePrompt: React.FC<{ reason: string }> = ({ reason }) => {
+export const UpgradePrompt: React.FC<{
+  reason: string;
+  /**
+   * One line of flowing text, for the results strip, instead of the centred
+   * block the panels use. The strip carries the ONE notice for the whole results
+   * area; the panels below say "Needs Pro" in a few words and point up at it,
+   * where they used to repeat this whole pitch three times.
+   */
+  compact?: boolean;
+}> = ({ reason, compact = false }) => {
   const { pro, setError, error } = useProStatus();
   const [busy, setBusy] = useState(false);
 
@@ -36,6 +45,31 @@ export const UpgradePrompt: React.FC<{ reason: string }> = ({ reason }) => {
       setBusy(false);
     }
   };
+
+  if (compact) {
+    return (
+      <>
+        <strong style={{ color: 'var(--color-accent-text)' }}>Needs Pro</strong>
+        <span style={{ color: 'var(--color-ink-200)' }}>{reason}</span>
+        {pro ? (
+          <span style={{ color: 'var(--color-ink-300)' }}>
+            This browser holds a Pro licence the engine did not accept. Sign in again, or re-activate your key.
+          </span>
+        ) : (
+          <>
+            <button onClick={() => go('monthly')} disabled={busy} style={primaryBtn}>
+              {busy ? '…' : 'Start free trial'}
+            </button>
+            <button onClick={() => go('annual')} disabled={busy} style={secondaryBtn}>
+              Annual
+            </button>
+            <span style={{ color: 'var(--color-ink-300)' }}>7 days free, then $9.99/month or $99/year.</span>
+          </>
+        )}
+        {error && <span style={{ color: 'var(--color-loss)' }}>{error}</span>}
+      </>
+    );
+  }
 
   return (
     <div className="empty-state empty-state--gate">
@@ -89,7 +123,7 @@ const primaryBtn: React.CSSProperties = {
   fontSize: 'var(--text-2xs)',
   fontWeight: 600,
   background: 'var(--color-accent)',
-  color: 'var(--color-base-900, #000)',
+  color: '#fff',
   border: 'none',
   cursor: 'pointer',
 };

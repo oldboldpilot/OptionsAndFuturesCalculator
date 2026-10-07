@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { formatAmount, useCurrency } from '../lib/currency';
 import { useCalculatorStore } from '../store/useCalculatorStore';
-import ThemeToggle from './ThemeToggle';
+import { InfoTip } from './InfoTip';
 
 /**
  * Application header: instrument identity, live spot, and data provenance.
@@ -22,6 +22,9 @@ export function TopBar() {
   } = useCalculatorStore();
 
   const [draft, setDraft] = useState('');
+  // Below 900px the rate and dividend inputs fold behind one button; they are
+  // set once and rarely, and four rows of header is a third of a phone screen.
+  const [modelOpen, setModelOpen] = useState(false);
 
   // Fetched once, not from setSymbol: the risk-free rate is a property of the
   // market, not of the instrument, so it does not change when the symbol does.
@@ -108,7 +111,7 @@ export function TopBar() {
         // observation — styling that as live and hiding the date behind a hover
         // contradicts this file's own rule that provenance is chrome-level.
         return {
-          text: `CMT ${rateMeta?.tenor ?? ''} · ${rateMeta?.asOfDate ?? ''}`,
+          text: `US Treasury ${rateMeta?.tenor ?? ''} · ${rateMeta?.asOfDate ?? ''}`,
           cls: rateIsStale ? 'chip chip-stale' : 'chip chip-live',
           title: rateMeta
             ? `${rateMeta.tenor} US Treasury par yield (CMT) as of ${rateMeta.asOfDate}, source ${rateMeta.source} (home.treasury.gov). Published ${(rateMeta.published * 100).toFixed(2)}% bond-equivalent; priced at ${((riskFreeRate ?? 0) * 100).toFixed(2)}% continuously compounded.${rateIsStale ? ' This print is older than the last business day — the feed may be stale.' : ''}`
@@ -132,20 +135,7 @@ export function TopBar() {
   })();
 
   return (
-    <header
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: '0.875rem',
-        padding: '0.5rem 0.75rem',
-        background: 'var(--color-base-800)',
-        borderBottom: '1px solid var(--color-line)',
-        boxShadow: 'var(--shadow-panel)',
-        position: 'relative',
-        zIndex: 5,
-        flex: 'none',
-      }}
-    >
+    <header className="topbar">
       <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.375rem' }}>
         {/*
           The one place the display serif is used.
@@ -196,7 +186,7 @@ export function TopBar() {
         </span>
       </div>
 
-      <form onSubmit={submit} style={{ width: '160px' }}>
+      <form onSubmit={submit} className="topbar-search">
         <input
           className="input"
           placeholder="Search symbol…"
@@ -226,6 +216,7 @@ export function TopBar() {
       */}
       <div
         style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}
+        role="group"
         aria-label="Quick symbol select"
       >
         {([
@@ -261,7 +252,7 @@ export function TopBar() {
                 style={{
                   cursor: 'pointer',
                   border: symbol === sym ? '1px solid var(--color-accent)' : '1px solid var(--color-line)',
-                  color: symbol === sym ? 'var(--color-accent)' : 'var(--color-ink-300)',
+                  color: symbol === sym ? 'var(--color-accent-text)' : 'var(--color-ink-300)',
                   background: 'transparent',
                 }}
               >
@@ -272,6 +263,20 @@ export function TopBar() {
         ))}
       </div>
 
+      {/* Rate, dividend and the action buttons wrap TOGETHER: left to wrap one by
+          one, Recalculate was stranded alone on a second row. */}
+      <div className="topbar-tail">
+      <button
+        type="button"
+        className="chip topbar-model-toggle"
+        aria-expanded={modelOpen}
+        onClick={() => setModelOpen((v) => !v)}
+        style={{ cursor: 'pointer' }}
+      >
+        Rate &amp; dividend {modelOpen ? '▴' : '▾'}
+      </button>
+
+      <div className="topbar-model" data-open={modelOpen}>
       {/*
         The risk-free rate and its provenance. It was a hardcoded 0.05 that
         still fed every engine request and the distribution's drift; it is now
@@ -281,10 +286,10 @@ export function TopBar() {
         invoking the fallback is what makes it an assumption, and nothing here
         ever substitutes one silently.
       */}
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.3125rem' }}>
-        <label htmlFor="rfr" className={rateChip.cls} title={rateChip.title}>
-          {rateChip.text}
-        </label>
+      <div className="topbar-field">
+        {/* Plain words. This read "% r" and wrapped onto two lines, with the
+            provenance chip doing the work of a label. */}
+        <label htmlFor="rfr" className="stat-label">Risk-free rate</label>
         <input
           id="rfr"
           className="input num"
@@ -302,7 +307,9 @@ export function TopBar() {
           style={{ width: '64px', textAlign: 'right' }}
           aria-label="Risk-free rate, percent"
         />
-        <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--color-ink-400)' }}>% r</span>
+        <span className="topbar-unit">%</span>
+        <span className={rateChip.cls}>{rateChip.text}</span>
+        <InfoTip label="About the risk-free rate">{rateChip.title}</InfoTip>
       </div>
 
       {/*
@@ -316,18 +323,8 @@ export function TopBar() {
         no dividend is modelled, and the engine's q == 0 path is bit-for-bit
         plain Black-Scholes rather than a dividend model fed a zero.
       */}
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.3125rem' }}>
-        <label
-          htmlFor="divy"
-          className={dividendYield > 0 ? 'chip chip-modelled' : 'chip'}
-          title={
-            dividendYield > 0
-              ? `Assumed continuous dividend yield of ${(dividendYield * 100).toFixed(2)}% p.a. Priced by Black-Scholes-Merton at a discounted spot. This is a stated assumption, not measured data.`
-              : 'No dividend modelled. Enter a continuous annual yield to price by Black-Scholes-Merton; it will be labelled an assumption.'
-          }
-        >
-          {dividendYield > 0 ? 'div assumed' : 'no div'}
-        </label>
+      <div className="topbar-field">
+        <label htmlFor="divy" className="stat-label">Dividend yield</label>
         <input
           id="divy"
           className="input num"
@@ -345,32 +342,42 @@ export function TopBar() {
           style={{ width: '58px', textAlign: 'right' }}
           aria-label="Dividend yield, percent per annum"
         />
-        <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--color-ink-400)' }}>% q</span>
+        <span className="topbar-unit">%</span>
+        <span className={dividendYield > 0 ? 'chip chip-modelled' : 'chip'}>
+          {dividendYield > 0 ? 'assumed' : 'none modelled'}
+        </span>
+        <InfoTip label="About the dividend yield" align="end">
+          {dividendYield > 0
+            ? `Assumed continuous dividend yield of ${(dividendYield * 100).toFixed(2)}% p.a. Priced by Black-Scholes-Merton at a discounted spot. This is a stated assumption, not measured data.`
+            : 'No dividend is modelled. Enter a continuous annual yield to price by Black-Scholes-Merton; it will be labelled an assumption.'}
+        </InfoTip>
       </div>
 
-      <div style={{ flex: 1 }} />
+      </div>
 
-      {error && (
-        <span className="chip" style={{ color: 'var(--color-loss)', borderColor: 'var(--color-loss-dim)' }} title={error}>
-          {error.length > 46 ? `${error.slice(0, 46)}…` : error}
-        </span>
+      <div className="topbar-actions">
+        <button
+          className="btn btn-primary"
+          onClick={() => calculateStrategy()}
+          disabled={isLoading || legs.length === 0}
+        >
+          {isLoading ? 'Calculating…' : 'Recalculate'}
+        </button>
+      </div>
+      </div>
+
+      {/* Status lives on its own row. Beside the symbol search it squeezed that
+          box to 16px and pushed Recalculate off the edge of the screen. */}
+      {(error || notReady) && (
+        <div className="topbar-status" role="status">
+          {error && (
+            <span className="chip" style={{ color: 'var(--color-loss)', borderColor: 'var(--color-loss-dim)' }}>
+              {error}
+            </span>
+          )}
+          {notReady && <span className="chip">{notReady}</span>}
+        </div>
       )}
-
-      {notReady && (
-        <span className="chip" title={notReady}>
-          {notReady.length > 46 ? `${notReady.slice(0, 46)}…` : notReady}
-        </span>
-      )}
-
-      <ThemeToggle />
-
-      <button
-        className="btn btn-primary"
-        onClick={() => calculateStrategy()}
-        disabled={isLoading || legs.length === 0}
-      >
-        {isLoading ? 'Calculating…' : 'Recalculate'}
-      </button>
     </header>
   );
 }

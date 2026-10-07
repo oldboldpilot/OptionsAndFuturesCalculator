@@ -7,6 +7,7 @@ import { getStrategyGuide } from '@/content/strategy-guides';
 import { getCalculatorPageCopy } from '@/content/calculator-pages';
 import { CalculatorPageExtras } from '@/components/CalculatorPageExtras';
 import { pageTitle } from '@/lib/seo-title';
+import type { StrategySlug } from '@/config/strategies';
 
 // Shared with the sitemap, so the pages exported and the pages advertised to
 // crawlers cannot drift apart.
@@ -150,6 +151,9 @@ export default async function StrategyCalculatorPage({ params }: Props) {
       />
       <StrategyWorkspace
         heading={copy?.heading ?? `${strategyName} Calculator`}
+        // The page is named for a structure, so it opens on that structure. The
+        // static params guarantee the slug is one of ours.
+        strategySlug={slug as StrategySlug}
         // A real URL now, not the `#guide` anchor: the article moved to its own
         // page, so this is the crawlable link between the two intents rather
         // than a jump down the same document.
@@ -197,7 +201,7 @@ export default async function StrategyCalculatorPage({ params }: Props) {
             <p style={{ margin: '0.75rem 0 0' }}>
               <a
                 href={`/guides/${slug}`}
-                style={{ color: 'var(--color-accent)', textDecoration: 'none' }}
+                style={{ color: 'var(--color-accent-text)', textDecoration: 'none' }}
               >
                 {`The full ${strategyName} guide, worked example and FAQs →`}
               </a>

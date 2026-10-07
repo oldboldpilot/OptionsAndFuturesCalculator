@@ -2,6 +2,7 @@
 
 import React from 'react';
 import { CurrencySelect } from './CurrencySelect';
+import ThemeToggle from './ThemeToggle';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 
@@ -27,6 +28,21 @@ const TABS = [
   { href: '/guides', label: 'Guides' },
 ] as const;
 
+/**
+ * Where a tab goes FROM the current page.
+ *
+ * The Calculator tab went to `/` from everywhere, so a reader of the Iron Condor
+ * guide who pressed it lost the structure they were reading about and landed on
+ * a generic workspace with nothing selected. From a guide it now goes to that
+ * strategy's own calculator page, which is the screen the article is the
+ * companion to. Everywhere else it is unchanged.
+ */
+export function tabHref(tab: (typeof TABS)[number], pathname: string): string {
+  if (tab.label !== 'Calculator') return tab.href;
+  const guide = pathname.match(/^\/guides\/([^/]+)\/?$/);
+  return guide ? `/calculator/${guide[1]}` : tab.href;
+}
+
 export function SiteNav() {
   const pathname = usePathname() || '/';
 
@@ -40,19 +56,7 @@ export function SiteNav() {
       : pathname === href || pathname.startsWith(`${href}/`);
 
   return (
-    <nav
-      aria-label="Site"
-      style={{
-        height: 'var(--nav-h)',
-        display: 'flex',
-        alignItems: 'center',
-        gap: '0.75rem',
-        padding: '0 0.75rem',
-        borderBottom: '1px solid var(--color-line)',
-        background: 'var(--color-base-800)',
-        flex: 'none',
-      }}
-    >
+    <nav aria-label="Site" className="site-nav">
       <Link
         href="/"
         style={{
@@ -73,7 +77,7 @@ export function SiteNav() {
           return (
             <Link
               key={tab.href}
-              href={tab.href}
+              href={tabHref(tab, pathname)}
               aria-current={active ? 'page' : undefined}
               style={{
                 fontSize: 'var(--text-2xs)',
@@ -93,31 +97,14 @@ export function SiteNav() {
       </div>
 
       {/*
-        Says which screens carry advertising, on the screens that do not.
-        Cheap honesty, and it is the distinction this whole structure rests on:
-        the tool screens serve no Google ads precisely because they carry no
-        publisher content, and the guides carry both.
+        A spacer, and nothing else. This slot used to read "Ad-free tool", which
+        was the site's internal reason for the tool screens carrying no ads
+        printed as if it were a feature a visitor had asked about -- and, as its
+        own comment recorded, it was a small lie on any route that was not the
+        tool. Which screens carry advertising is a property of the routes, not
+        something a nav bar needs to announce.
       */}
-      <span
-        style={{
-          marginLeft: 'auto',
-          fontSize: 'var(--text-2xs)',
-          color: 'var(--color-ink-400)',
-          whiteSpace: 'nowrap',
-        }}
-      >
-        {/*
-          Tied to the CALCULATOR, not to the absence of ads.
-
-          It read `noAdsOnRoute(pathname)`, which was the right question while
-          that meant "one of the five tool and policy routes". Since the module
-          became an allowlist it means "anything that is not a guide article" —
-          which includes the guides index and the 404, neither of which is a
-          tool. Claiming "Ad-free tool" on an error page is a small lie in the
-          chrome of a site being reviewed for how it presents its advertising.
-        */}
-        {isActive('/') ? 'Ad-free tool' : null}
-      </span>
+      <span className="site-nav-spacer" aria-hidden="true" />
 
       {/*
         Sign in, with an ADDRESS.
@@ -154,6 +141,14 @@ export function SiteNav() {
         The display-currency picker. Formatting only -- see CurrencySelect for
         why that limit is stated in the tooltip rather than left implied.
       */}
+      {/*
+        The colour theme is a preference about the SITE, so it lives with the
+        other two site-wide preferences (sign-in and display currency) rather
+        than in the calculator's header, where it cost the symbol search a
+        hundred pixels and pushed Recalculate onto a second row.
+      */}
+      <ThemeToggle />
+
       <CurrencySelect />
     </nav>
   );

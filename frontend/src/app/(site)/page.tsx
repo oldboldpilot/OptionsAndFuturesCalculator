@@ -30,6 +30,7 @@ export default function Home() {
       // characters on the page rather than as an ampersand.
       heading={'Options & Futures Profit Calculator'}
       guideHref="/guides"
+      guideLabel="Learn how strategies work →"
     />
   );
 }

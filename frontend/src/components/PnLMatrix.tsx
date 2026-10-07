@@ -2,9 +2,14 @@
 
 import { useMemo, useState } from 'react';
 import { formatAmount, formatAmountCompact, parseMoneyInput, useCurrency } from '../lib/currency';
+import { GateNote } from './GateNote';
+import { InfoTip } from './InfoTip';
 import { useCalculatorStore } from '../store/useCalculatorStore';
 
 type ValueMode = 'dollars' | 'percent';
+
+/** "1 day", "7 days": the matrix tooltip said "1 days". */
+const dayText = (n: number) => `${n} day${n === 1 ? '' : 's'}`;
 
 /**
  * The price x date grid — P&L for each underlying price at each future date.
@@ -34,7 +39,10 @@ export function PnLMatrix() {
     result, spotPrice, isLoading, error, modelLimit, gateDenied, notReady,
     matrixPriceMin, matrixPriceMax, setMatrixBounds,
   } = useCalculatorStore();
-  const [mode, setMode] = useState<ValueMode>('percent');
+  // Dollars first. The grid opened in "% risk" and printed `+4254` with no sign
+  // to say what it was a percentage OF, which a first-time reader took for
+  // dollars. Percent is one click away and is now labelled.
+  const [mode, setMode] = useState<ValueMode>('dollars');
 
   const grid = useMemo(() => {
     const cells = result?.matrix ?? [];
@@ -170,7 +178,7 @@ export function PnLMatrix() {
   }
 
   function label(value: number): string {
-    if (mode === 'percent') return `${value > 0 ? '+' : ''}${value.toFixed(0)}`;
+    if (mode === 'percent') return `${value > 0 ? '+' : ''}${formatAmount(value, 0)}%`;
     // Grid cells are money. They were rendered with `toFixed(0)`, so a
     // five-figure P&L read `12775` -- the one place on this screen where an
     // amount carried no separator at all. Above a thousand the cell is too
@@ -189,7 +197,7 @@ export function PnLMatrix() {
     <div className="panel" style={{ flex: 1, minHeight: 0 }}>
       <div className="panel-head">
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.4375rem' }}>
-          <span className="panel-title">P&amp;L matrix</span>
+          <h2 className="panel-title">P&amp;L matrix</h2>
           <span
             className="chip"
             title={
@@ -213,17 +221,18 @@ export function PnLMatrix() {
           {/* Price bounds. Scoped to this panel because they are scoped to
               this panel's data -- the engine keeps the payoff curve, and
               therefore max profit and breakeven, on its own untouched grid. */}
-          <div
-            style={{ display: 'flex', alignItems: 'center', gap: '0.25rem' }}
-            title={
-              'Limits the price axis of this grid. The payoff curve, max profit, ' +
-              'max loss, breakeven and the probability distribution are unaffected ' +
-              '\u2014 they are computed over the full range regardless.'
-            }
-          >
-            <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--color-ink-400)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
+            <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--color-ink-300)' }}>
               price
             </span>
+            {/* Said where a finger or a keyboard can reach it, not in a hover
+                title: this is the one fact that stops a narrowed window being
+                mistaken for the position's real maximum. */}
+            <InfoTip label="What the price bounds change" align="end">
+              Limits the price axis of this grid. The payoff curve, max profit, max loss,
+              break-even and the probability distribution are unaffected &mdash; they are computed
+              over the full range regardless.
+            </InfoTip>
             <input
               className="input"
               style={{ width: '62px', textAlign: 'right' }}
@@ -292,9 +301,10 @@ export function PnLMatrix() {
               className="segment-item"
               data-active={mode === 'percent'}
               aria-pressed={mode === 'percent'}
+              title="Profit or loss as a percentage of the most this position can lose"
               onClick={() => setMode('percent')}
             >
-              % risk
+              % of risk
             </button>
           </div>
         </div>
@@ -325,14 +335,19 @@ export function PnLMatrix() {
           <table className="grid-table" style={{ fontVariantNumeric: 'tabular-nums' }}>
             <thead>
               <tr>
-                <th style={{ textAlign: 'left', position: 'sticky', left: 0, background: 'var(--color-base-800)' }}>
+                <th scope="col" style={{ textAlign: 'left', position: 'sticky', left: 0, background: 'var(--color-base-800)' }}>
                   Price
                 </th>
                 {grid.dates.map((d) => (
-                  <th key={d} title={`${d} · ${grid.dteByDate.get(d)} days to expiry`}>
+                  <th scope="col" key={d} title={`${d} · ${dayText(grid.dteByDate.get(d) ?? 0)} to expiry`}>
                     {/* MM-DD: the year is constant across the axis and the
-                        columns are narrow. Full date is in the tooltip. */}
+                        columns are narrow. The days left sit under it, because
+                        a date alone does not say which column is the expiry:
+                        the last column is "expiry", the first is today. */}
                     {d.slice(5)}
+                    <div style={{ fontWeight: 400, color: 'var(--color-ink-300)' }}>
+                      {(grid.dteByDate.get(d) ?? 0) === 0 ? 'expiry' : `${grid.dteByDate.get(d)}d`}
+                    </div>
                   </th>
                 ))}
               </tr>
@@ -352,7 +367,7 @@ export function PnLMatrix() {
                         position: 'sticky',
                         left: 0,
                         background: isSpot ? 'var(--color-atm-tint)' : 'var(--color-base-800)',
-                        color: isSpot ? 'var(--color-accent)' : 'var(--color-ink-200)',
+                        color: isSpot ? 'var(--color-accent-text)' : 'var(--color-ink-200)',
                         fontWeight: isSpot ? 600 : 400,
                       }}
                     >
@@ -365,8 +380,11 @@ export function PnLMatrix() {
                       return (
                         <td
                           key={d}
-                          className={value > 0 ? 'profit' : value < 0 ? 'loss' : 'flat'}
-                          style={{ background: tint(value, grid.magnitude) }}
+                          // Ink on the tint, not green or red on it: the strongest
+                          // cells are a 60% wash of the colour, and that colour as
+                          // TEXT on itself was 2:1. The sign is in the figure (+ / -)
+                          // and the tint carries the direction.
+                          style={{ background: tint(value, grid.magnitude), color: 'var(--color-ink-100)' }}
                           title={`${d} · ${formatAmount(price, 2)} · ${cell.pnl >= 0 ? '+' : ''}${formatAmount(cell.pnl, 2)} (${cell.returnOnRiskPercent >= 0 ? '+' : ''}${cell.returnOnRiskPercent.toFixed(1)}% of risk)`}
                         >
                           {label(value)}
@@ -379,10 +397,7 @@ export function PnLMatrix() {
             </tbody>
           </table>
         ) : gateDenied ? (
-          <div className="empty-state">
-            <span className="empty-state-title">Needs Pro</span>
-            <span>{gateDenied}</span>
-          </div>
+          <GateNote />
         ) : notReady ? (
           /* Replaces the empty state when set, sitting below the panel's
              rendered-output branch so it cannot replace a drawn chart. */

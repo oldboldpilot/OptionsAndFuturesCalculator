@@ -1,7 +1,7 @@
 'use client';
 
 import { useCalculatorStore } from '../store/useCalculatorStore';
-import { UpgradePrompt } from './UpgradePrompt';
+import { GateNote } from './GateNote';
 import { formatMoney, useCurrency } from '../lib/currency';
 
 /**
@@ -38,10 +38,9 @@ export function StrategyMetrics() {
   const { result, error, gateDenied, modelLimit, notReady } = useCalculatorStore();
 
   const shell = (body: React.ReactNode) => (
-    <div className="panel" style={{ flex: 'none' }}>
+    <div className="panel ws-outcome">
       <div className="panel-head">
-        <span className="panel-title">Outcome</span>
-        {result && <span className="chip chip-accent">engine</span>}
+        <h2 className="panel-title">Outcome</h2>
       </div>
       {body}
     </div>
@@ -53,7 +52,7 @@ export function StrategyMetrics() {
   // rendering it through the error branch is what produced a heading of
   // "Unavailable" over a message that was really an offer.
   if (gateDenied) {
-    return shell(<UpgradePrompt reason={gateDenied} />);
+    return shell(<GateNote />);
   }
 
   // Third refusal state, and the third that is NOT `error`. gateDenied is
@@ -88,9 +87,9 @@ export function StrategyMetrics() {
 
     const section = (title: string, children: React.ReactNode) => (
       <div style={{ marginTop: '0.625rem', paddingTop: '0.5rem', borderTop: '1px solid var(--color-line)' }}>
-        <div className="panel-title" style={{ marginBottom: '0.375rem', display: 'block' }}>
+        <h3 className="panel-title" style={{ marginBottom: '0.375rem', display: 'block' }}>
           {title}
-        </div>
+        </h3>
         {children}
       </div>
     );
@@ -107,35 +106,51 @@ export function StrategyMetrics() {
 
     return shell(
       <div className="panel-body">
+        {/* The same figures the results strip pins above the fold, with
+            the same rule: an unbounded end is "Unlimited", never the edge of
+            the engine's price grid dressed up as a maximum. */}
         <div className="stat">
           <span className="stat-label">Max profit</span>
-          <span className={`stat-value ${tone(result.max_profit)}`}>{money(result.max_profit)}</span>
+          <span
+            className={`stat-value ${result.max_profit_unbounded ? 'profit' : tone(result.max_profit)}`}
+            data-result="outcome-max-profit"
+          >
+            {result.max_profit_unbounded ? 'Unlimited' : money(result.max_profit)}
+          </span>
         </div>
         <div className="stat">
           <span className="stat-label">Max loss</span>
-          <span className={`stat-value ${tone(result.max_loss)}`}>{money(result.max_loss)}</span>
+          <span
+            className={`stat-value ${result.max_loss_unbounded ? 'loss' : tone(result.max_loss)}`}
+            data-result="outcome-max-loss"
+          >
+            {result.max_loss_unbounded ? 'Unlimited' : money(result.max_loss)}
+          </span>
         </div>
         <div className="stat">
           <span className="stat-label">Risk / reward</span>
-          <span className="stat-value">
+          <span className="stat-value" data-result="outcome-rr">
             {result.risk_reward_ratio > 0 ? `${result.risk_reward_ratio.toFixed(2)} : 1` : '—'}
           </span>
         </div>
         <div className="stat">
           <span className="stat-label">Break-even</span>
-          <span className="stat-value">
+          <span className="stat-value" data-result="outcome-break-even">
             {result.break_even > 0 ? money(result.break_even) : '—'}
           </span>
         </div>
         <div className="stat">
           <span className="stat-label">Expected value</span>
-          <span className={`stat-value ${result.expected_value >= 0 ? 'profit' : 'loss'}`}>
+          <span
+            className={`stat-value ${result.expected_value >= 0 ? 'profit' : 'loss'}`}
+            data-result="outcome-ev"
+          >
             {money(result.expected_value)}
           </span>
         </div>
         <div className="stat">
           <span className="stat-label">Probability of profit</span>
-          <span className="stat-value">
+          <span className="stat-value" data-result="outcome-pop">
             {result.pop > 0 ? `${(result.pop * 100).toFixed(1)}%` : '—'}
           </span>
         </div>
@@ -155,7 +170,7 @@ export function StrategyMetrics() {
         */}
         {section(
           'Greeks',
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '0 0.75rem' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: '0 0.75rem' }}>
             {greek('Delta Δ', 'shares', g.delta.toFixed(3))}
             {greek('Gamma Γ', 'Δ/$1', g.gamma.toFixed(4))}
             {greek('Theta Θ', '$/day', g.theta.toFixed(2))}
@@ -167,7 +182,7 @@ export function StrategyMetrics() {
         {hasRisk
           ? section(
               'Tail risk (parametric)',
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '0 0.75rem' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: '0 0.75rem' }}>
                 <div className="stat">
                   <span className="stat-label">VaR 95</span>
                   <span className={`stat-value ${tone(r.var95)}`}>{money(r.var95)}</span>
@@ -207,7 +222,8 @@ export function StrategyMetrics() {
         */}
         {section(
           'Model inputs',
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '0 0.75rem' }}>
+          <>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: '0 0.75rem' }}>
             <div className="stat">
               <span className="stat-label">Spot</span>
               <span className="stat-value">{money(result.inputs.spot)}</span>
@@ -236,34 +252,40 @@ export function StrategyMetrics() {
               </span>
             </div>
             <div className="stat">
-              <span className="stat-label">
-                Risk-free rate{' '}
-                {result.inputs.rateSource === 'measured' && result.inputs.rateMeta ? (
-                  <span
-                    className="chip chip-live"
-                    title={`${result.inputs.rateMeta.tenor} US Treasury par yield (CMT) as of ${result.inputs.rateMeta.asOfDate}, source ${result.inputs.rateMeta.source}. Published ${(result.inputs.rateMeta.published * 100).toFixed(2)}% bond-equivalent; priced at ${(result.inputs.riskFreeRate * 100).toFixed(2)}% continuously compounded.`}
-                  >
-                    CMT {result.inputs.rateMeta.tenor} · {result.inputs.rateMeta.asOfDate}
-                  </span>
-                ) : (
-                  <span className="chip" title="A rate stated in the header, not observed market data.">
-                    assumption
-                  </span>
-                )}
-              </span>
+              <span className="stat-label">Risk-free rate</span>
               {/*
                 The rate the engine was given, not the published par yield. This
                 section is titled "Model inputs" and this row is the model's r —
                 rendering the bond-equivalent figure here stated a number the
                 calculation did not use. The published figure remains in the chip
-                tooltip above, which is where a user goes to reconcile against
+                tooltip below, which is where a user goes to reconcile against
                 treasury.gov.
               */}
               <span className="stat-value">
                 {(result.inputs.riskFreeRate * 100).toFixed(2)}%
               </span>
             </div>
-          </div>,
+          </div>
+          {/* Where the rate came from, in words. It was a chip INSIDE the rate
+              row, nowrap, which made the row 300px wide and the whole panel
+              603px -- the reason the values below it were off the screen. On
+              its own line it can be as long as it needs to be. */}
+          <div style={{ marginTop: '0.375rem', fontSize: 'var(--text-2xs)', color: 'var(--color-ink-300)' }}>
+            {result.inputs.rateSource === 'measured' && result.inputs.rateMeta ? (
+              <span
+                className="chip chip-live"
+                style={{ whiteSpace: 'normal' }}
+                title={`${result.inputs.rateMeta.tenor} US Treasury par yield (CMT) as of ${result.inputs.rateMeta.asOfDate}, source ${result.inputs.rateMeta.source}. Published ${(result.inputs.rateMeta.published * 100).toFixed(2)}% bond-equivalent; priced at ${(result.inputs.riskFreeRate * 100).toFixed(2)}% continuously compounded.`}
+              >
+                US Treasury {result.inputs.rateMeta.tenor} yield · {result.inputs.rateMeta.asOfDate}
+              </span>
+            ) : (
+              <span className="chip" title="A rate stated in the header, not observed market data.">
+                rate assumed
+              </span>
+            )}
+          </div>
+          </>,
         )}
       </div>,
     );

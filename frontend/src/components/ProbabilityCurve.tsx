@@ -1,7 +1,8 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { formatAmount, formatMoney, useCurrency } from '../lib/currency';
+import { GateNote } from './GateNote';
 import { useCalculatorStore, type CurvePoint } from '../store/useCalculatorStore';
 
 /* ---------------------------------------------------------------------------
@@ -56,9 +57,46 @@ function pnlAt(curve: CurvePoint[], price: number): number | null {
   return curve[curve.length - 1].pnl;
 }
 
-const W = 760;
-const H = 268;
-const PAD = { l: 6, r: 6, t: 14, b: 30 };
+/**
+ * The chart is drawn in the pixels it is shown in.
+ *
+ * It used to be a fixed 760x268 viewBox stretched with
+ * `preserveAspectRatio="none"` into whatever box the layout gave it. At the
+ * 398x170 the centre column measured, that is a 0.52 horizontal and 0.63
+ * vertical scale, so 10px labels drew at about 5px and circles would have been
+ * ovals. The plot is now laid out against the measured width and height, so one
+ * SVG unit is one CSS pixel and the type is the size it says it is.
+ */
+const FALLBACK = { w: 760, h: 268 };
+const PAD = { l: 52, r: 10, t: 20, b: 26 };
+const FONT = 11;
+
+/** Width and height of an element, kept current. Null until first measured. */
+function useElementSize<T extends HTMLElement>() {
+  const [size, setSize] = useState<{ w: number; h: number } | null>(null);
+  const ref = useRef<T | null>(null);
+  const roRef = useRef<ResizeObserver | null>(null);
+
+  const attach = useCallback((el: T | null) => {
+    roRef.current?.disconnect();
+    ref.current = el;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const measure = () => {
+      const r = el.getBoundingClientRect();
+      setSize((prev) =>
+        prev && Math.abs(prev.w - r.width) < 0.5 && Math.abs(prev.h - r.height) < 0.5
+          ? prev
+          : { w: r.width, h: r.height },
+      );
+    };
+    measure();
+    roRef.current = new ResizeObserver(measure);
+    roRef.current.observe(el);
+  }, []);
+
+  useEffect(() => () => roRef.current?.disconnect(), []);
+  return [attach, size] as const;
+}
 
 /** The second copy of StrategyMetrics' helper; both now share one formatter. */
 const money = (v: number) => formatMoney(v, Math.abs(v) >= 100 ? 0 : 2);
@@ -82,6 +120,12 @@ export function ProbabilityCurve() {
   useCurrency();
   const { result, error, isLoading, symbol, modelLimit, gateDenied, notReady } = useCalculatorStore();
   const [hoverX, setHoverX] = useState<number | null>(null);
+  // True once the crosshair has been moved by keyboard, so the readout is then
+  // announced -- a mouse hover must not make a screen reader chatter.
+  const [keyboardMoved, setKeyboardMoved] = useState(false);
+  const [hostRef, measured] = useElementSize<HTMLDivElement>();
+  const W = Math.max(measured?.w ?? FALLBACK.w, PAD.l + PAD.r + 40);
+  const H = Math.max(measured?.h ?? FALLBACK.h, PAD.t + PAD.b + 60);
 
   const model = useMemo(() => {
     if (!result) return null;
@@ -204,13 +248,13 @@ export function ProbabilityCurve() {
       /** P(S_T ≤ price) under the same lognormal. */
       cdf: (price: number) => normalCdf((Math.log(price) - mu) / sd),
     };
-  }, [result]);
+  }, [result, W, H]);
 
   const shell = (body: React.ReactNode, chips?: React.ReactNode) => (
     <div className="panel" style={{ flex: 1, minHeight: 0 }}>
       <div className="panel-head">
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.4375rem' }}>
-          <span className="panel-title">Probability Distribution</span>
+          <h2 className="panel-title">Probability Distribution</h2>
           {chips}
         </div>
       </div>
@@ -256,12 +300,7 @@ export function ProbabilityCurve() {
 
   if (!model) {
     if (gateDenied) {
-      return shell(
-        <div className="empty-state">
-          <span className="empty-state-title">Needs Pro</span>
-          <span>{gateDenied}</span>
-        </div>,
-      );
+      return shell(<GateNote />);
     }
 
     /* Replaces the empty state when set, sitting below the panel's
@@ -280,6 +319,21 @@ export function ProbabilityCurve() {
       );
     }
 
+    // A position with a result but no volatility -- a future with none entered.
+    // Everything else on screen is exact without one; only this panel needs it.
+    if (result && result.inputs.impliedVolatility <= 0) {
+      return shell(
+        <div className="empty-state">
+          <span className="empty-state-title">Needs a volatility</span>
+          <span>
+            The distribution is drawn from an implied volatility, and this position has none: a
+            future&apos;s payoff does not depend on it. The profit, loss, break-even and matrix are
+            exact without one. Enter a volatility in the futures ticket to draw the odds.
+          </span>
+        </div>,
+      );
+    }
+
     return shell(
       <div className="empty-state">
         <span className="empty-state-title">No distribution yet</span>
@@ -294,165 +348,228 @@ export function ProbabilityCurve() {
   const enginePop = result?.pop ?? 0;
   const popValue = enginePop > 0 ? enginePop : model.derivedPop;
   const popIsEngine = enginePop > 0;
-  const ev = result?.expected_value ?? 0;
+  const profitUnbounded = result?.max_profit_unbounded ?? false;
+  const lossUnbounded = result?.max_loss_unbounded ?? false;
+  const curve = result!.expiryCurve;
 
-  const hoverPrice =
-    hoverX === null
-      ? null
-      : model.lo + ((hoverX - PAD.l) / (W - PAD.l - PAD.r)) * (model.hi - model.lo);
-  const hoverPnl =
-    hoverPrice === null ? null : pnlAt(result!.expiryCurve, hoverPrice) ?? null;
+  const plotW = W - PAD.l - PAD.r;
+  const xToPrice = (x: number) => model.lo + ((x - PAD.l) / plotW) * (model.hi - model.lo);
+  const hoverPrice = hoverX === null ? null : xToPrice(hoverX);
+  const hoverPnl = hoverPrice === null ? null : pnlAt(curve, hoverPrice) ?? null;
 
-  const axisTicks = Array.from({ length: 7 }, (_, i) => model.lo + ((model.hi - model.lo) * i) / 6);
+  const tickCount = W < 420 ? 4 : 7;
+  const axisTicks = Array.from(
+    { length: tickCount },
+    (_, i) => model.lo + ((model.hi - model.lo) * i) / (tickCount - 1),
+  );
+
+  // The payoff's own extremes, drawn as a labelled axis. The line was plotted
+  // with no scale at all -- no zero line label, no P&L values, nothing but a
+  // hover readout -- so a reader could see its shape and not read its height.
+  const pnlTop = Math.max(...model.samples.map((x) => x.pnl));
+  const pnlBottom = Math.min(...model.samples.map((x) => x.pnl));
+  const pnlTicks = [pnlTop, 0, pnlBottom].filter(
+    (v, i, a) => a.indexOf(v) === i && (v === 0 || Math.abs(model.yPnl(v) - model.yPnl(0)) > FONT + 2),
+  );
+
+  // What a screen reader gets instead of the picture. Generated from the same
+  // numbers the chart is drawn from, so it cannot describe a different chart.
+  const breakEvenText = model.breakEvens.length
+    ? `Break-even ${model.breakEvens.map((b) => formatAmount(b, 2)).join(' and ')}.`
+    : 'No break-even within the range shown.';
+  const summary =
+    `Probability distribution of ${symbol} at expiry, ${model.days} days out, with the position's profit and loss overlaid. ` +
+    `Probability of profit ${(popValue * 100).toFixed(1)} percent. ` +
+    `${profitUnbounded ? 'Profit has no ceiling.' : `Best case ${money(pnlTop)}.`} ` +
+    `${lossUnbounded ? 'Loss has no floor.' : `Worst case ${money(pnlBottom)}.`} ${breakEvenText} ` +
+    `Use the left and right arrow keys to read profit and probability at a price.`;
+
+  function onKey(e: React.KeyboardEvent<SVGSVGElement>) {
+    const step = (model!.hi - model!.lo) / 100;
+    const cur = hoverPrice ?? model!.spot;
+    let next: number | null = null;
+    if (e.key === 'ArrowRight') next = cur + step * (e.shiftKey ? 10 : 1);
+    else if (e.key === 'ArrowLeft') next = cur - step * (e.shiftKey ? 10 : 1);
+    else if (e.key === 'Home') next = model!.lo;
+    else if (e.key === 'End') next = model!.hi;
+    else if (e.key === 'Escape') { setHoverX(null); setKeyboardMoved(false); return; }
+    if (next === null) return;
+    e.preventDefault();
+    next = Math.min(model!.hi, Math.max(model!.lo, next));
+    setHoverX(PAD.l + ((next - model!.lo) / (model!.hi - model!.lo)) * plotW);
+    setKeyboardMoved(true);
+  }
+
+  const pointer = (e: React.PointerEvent<SVGSVGElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    setHoverX(((e.clientX - rect.left) / rect.width) * W);
+    setKeyboardMoved(false);
+  };
 
   return shell(
     <>
-      <svg
-        viewBox={`0 0 ${W} ${H}`}
-        preserveAspectRatio="none"
-        style={{ width: '100%', height: '100%', minHeight: 170, display: 'block', overflow: 'visible' }}
-        onMouseMove={(e) => {
-          const rect = e.currentTarget.getBoundingClientRect();
-          setHoverX(((e.clientX - rect.left) / rect.width) * W);
-        }}
-        onMouseLeave={() => setHoverX(null)}
-      >
-        <defs>
-          <linearGradient id="pdProfit" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="var(--color-profit)" stopOpacity="0.55" />
-            <stop offset="100%" stopColor="var(--color-profit)" stopOpacity="0.06" />
-          </linearGradient>
-          <linearGradient id="pdLoss" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="var(--color-loss)" stopOpacity="0.45" />
-            <stop offset="100%" stopColor="var(--color-loss)" stopOpacity="0.05" />
-          </linearGradient>
-        </defs>
+      {/* The chart's host. It owns the measured size; the SVG is absolutely
+          positioned inside it so the panel can shrink the chart without the
+          SVG's own height holding the layout open. */}
+      <div ref={hostRef} style={{ position: 'relative', flex: 1, minHeight: 170 }}>
+        <svg
+          viewBox={`0 0 ${W} ${H}`}
+          width={W}
+          height={H}
+          role="img"
+          aria-label={summary}
+          tabIndex={0}
+          style={{ position: 'absolute', inset: 0, display: 'block', overflow: 'visible', touchAction: 'pan-y' }}
+          onPointerMove={pointer}
+          onPointerDown={pointer}
+          onPointerLeave={() => { if (!keyboardMoved) setHoverX(null); }}
+          onKeyDown={onKey}
+          onBlur={() => { setKeyboardMoved(false); setHoverX(null); }}
+        >
+          <defs>
+            <linearGradient id="pdProfit" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="var(--color-profit)" stopOpacity="0.55" />
+              <stop offset="100%" stopColor="var(--color-profit)" stopOpacity="0.06" />
+            </linearGradient>
+            <linearGradient id="pdLoss" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="var(--color-loss)" stopOpacity="0.45" />
+              <stop offset="100%" stopColor="var(--color-loss)" stopOpacity="0.05" />
+            </linearGradient>
+          </defs>
 
-        {/* ±2σ then ±1σ bands, painted before everything so they sit behind */}
-        <rect
-          x={model.x(model.twoSigma.lo)}
-          y={PAD.t}
-          width={Math.max(0, model.x(model.twoSigma.hi) - model.x(model.twoSigma.lo))}
-          height={H - PAD.t - PAD.b}
-          fill="var(--color-accent)"
-          opacity="0.045"
-        />
-        <rect
-          x={model.x(model.oneSigma.lo)}
-          y={PAD.t}
-          width={Math.max(0, model.x(model.oneSigma.hi) - model.x(model.oneSigma.lo))}
-          height={H - PAD.t - PAD.b}
-          fill="var(--color-accent)"
-          opacity="0.055"
-        />
-
-        {/* Baseline */}
-        <line
-          x1={PAD.l} y1={H - PAD.b} x2={W - PAD.r} y2={H - PAD.b}
-          stroke="var(--color-line)" strokeWidth="1"
-        />
-
-        {/* Density, split by the sign of the payoff */}
-        {model.regions.map((r, i) => (
-          <path
-            key={i}
-            d={r.d}
-            fill={r.profitable ? 'url(#pdProfit)' : 'url(#pdLoss)'}
-            className="animate-fade"
-            style={{ animationDelay: `${0.05 + i * 0.04}s` }}
+          {/* ±2σ then ±1σ bands, painted before everything so they sit behind */}
+          <rect
+            x={model.x(model.twoSigma.lo)}
+            y={PAD.t}
+            width={Math.max(0, model.x(model.twoSigma.hi) - model.x(model.twoSigma.lo))}
+            height={H - PAD.t - PAD.b}
+            fill="var(--color-accent)"
+            opacity="0.045"
           />
-        ))}
+          <rect
+            x={model.x(model.oneSigma.lo)}
+            y={PAD.t}
+            width={Math.max(0, model.x(model.oneSigma.hi) - model.x(model.oneSigma.lo))}
+            height={H - PAD.t - PAD.b}
+            fill="var(--color-accent)"
+            opacity="0.055"
+          />
 
-        {/* Density outline */}
-        <path
-          d={model.densityLine}
-          fill="none"
-          stroke="var(--color-violet)"
-          strokeWidth="1.5"
-          strokeLinejoin="round"
-          className="draw-path"
-          style={{ ['--dash' as string]: '2600' }}
-          vectorEffect="non-scaling-stroke"
-        />
-
-        {/* Payoff zero line */}
-        <line
-          x1={PAD.l} y1={model.yPnl(0)} x2={W - PAD.r} y2={model.yPnl(0)}
-          stroke="var(--color-line-strong)" strokeWidth="1" strokeDasharray="3 4"
-        />
-
-        {/* Engine payoff curve */}
-        <path
-          d={model.pnlLine}
-          fill="none"
-          stroke="var(--color-accent)"
-          strokeWidth="2"
-          strokeLinejoin="round"
-          className="draw-path"
-          style={{ ['--dash' as string]: '2600', animationDelay: '0.15s' }}
-          vectorEffect="non-scaling-stroke"
-        />
-
-        {/* Break-evens */}
-        {model.breakEvens.map((b, i) => (
-          <g key={i} className="animate-fade" style={{ animationDelay: '0.5s' }}>
-            <line
-              x1={model.x(b)} y1={PAD.t} x2={model.x(b)} y2={H - PAD.b}
-              stroke="var(--color-warn)" strokeWidth="1" strokeDasharray="2 3"
-              vectorEffect="non-scaling-stroke"
-            />
-            <text
-              x={model.x(b)} y={PAD.t + 9}
-              fill="var(--color-warn)" fontSize="10" textAnchor="middle"
-              fontFamily="var(--font-mono)"
-            >
-              BE {formatAmount(b, 2)}
-            </text>
-          </g>
-        ))}
-
-        {/* Spot */}
-        <line
-          x1={model.x(model.spot)} y1={PAD.t} x2={model.x(model.spot)} y2={H - PAD.b}
-          stroke="var(--color-ink-100)" strokeWidth="1" opacity="0.55"
-          vectorEffect="non-scaling-stroke"
-        />
-
-        {/* Crosshair */}
-        {hoverX !== null && hoverPrice !== null && (
+          {/* Baseline */}
           <line
-            x1={hoverX} y1={PAD.t} x2={hoverX} y2={H - PAD.b}
-            stroke="var(--color-ink-300)" strokeWidth="1" strokeDasharray="2 2"
-            vectorEffect="non-scaling-stroke"
+            x1={PAD.l} y1={H - PAD.b} x2={W - PAD.r} y2={H - PAD.b}
+            stroke="var(--color-line)" strokeWidth="1"
           />
-        )}
 
-        {/* Price axis */}
-        {axisTicks.map((t, i) => (
-          <text
-            key={i}
-            x={model.x(t)}
-            y={H - PAD.b + 15}
-            fill="var(--color-ink-400)"
-            fontSize="10"
-            fontFamily="var(--font-mono)"
-            textAnchor={i === 0 ? 'start' : i === axisTicks.length - 1 ? 'end' : 'middle'}
-          >
-            {formatAmount(t, t >= 1000 ? 0 : 2)}
-          </text>
-        ))}
-      </svg>
+          {/* Density, split by the sign of the payoff */}
+          {model.regions.map((r, i) => (
+            <path
+              key={i}
+              d={r.d}
+              fill={r.profitable ? 'url(#pdProfit)' : 'url(#pdLoss)'}
+              className="animate-fade"
+              style={{ animationDelay: `${0.05 + i * 0.04}s` }}
+            />
+          ))}
 
-      {/* Hover readout — sits outside the SVG so it uses real text rendering */}
+          {/* Density outline */}
+          <path
+            d={model.densityLine}
+            fill="none"
+            stroke="var(--color-violet)"
+            strokeWidth="1.5"
+            strokeLinejoin="round"
+          />
+
+          {/* Payoff zero line, and the scale beside it */}
+          <line
+            x1={PAD.l} y1={model.yPnl(0)} x2={W - PAD.r} y2={model.yPnl(0)}
+            stroke="var(--color-line-strong)" strokeWidth="1" strokeDasharray="3 4"
+          />
+          {pnlTicks.map((v) => (
+            <text
+              key={v}
+              x={PAD.l - 6}
+              y={model.yPnl(v) + 4}
+              textAnchor="end"
+              fontSize={FONT}
+              fontFamily="var(--font-mono)"
+              fill={v === 0 ? 'var(--color-ink-300)' : v > 0 ? 'var(--color-profit)' : 'var(--color-loss)'}
+            >
+              {v === 0 ? '$0' : `${v > 0 ? '+' : '−'}${money(Math.abs(v)).replace('-', '')}`}
+            </text>
+          ))}
+
+          {/* Engine payoff curve */}
+          <path
+            d={model.pnlLine}
+            fill="none"
+            stroke="var(--color-accent)"
+            strokeWidth="2"
+            strokeLinejoin="round"
+          />
+          {/* Break-evens. The label sits clear of the dashed line, to its right. */}
+          {model.breakEvens.map((b, i) => (
+            <g key={i} className="animate-fade" style={{ animationDelay: '0.5s' }}>
+              <line
+                x1={model.x(b)} y1={PAD.t} x2={model.x(b)} y2={H - PAD.b}
+                stroke="var(--color-warn)" strokeWidth="1" strokeDasharray="2 3"
+              />
+              <text
+                x={model.x(b) + 4} y={PAD.t + 10}
+                fill="var(--color-warn)" fontSize={FONT} textAnchor="start"
+                fontFamily="var(--font-mono)"
+              >
+                BE {formatAmount(b, 2)}
+              </text>
+            </g>
+          ))}
+
+          {/* Spot */}
+          <line
+            x1={model.x(model.spot)} y1={PAD.t} x2={model.x(model.spot)} y2={H - PAD.b}
+            stroke="var(--color-ink-100)" strokeWidth="1" opacity="0.55"
+          />
+
+          {/* Crosshair */}
+          {hoverX !== null && hoverPrice !== null && (
+            <line
+              x1={hoverX} y1={PAD.t} x2={hoverX} y2={H - PAD.b}
+              stroke="var(--color-ink-300)" strokeWidth="1" strokeDasharray="2 2"
+            />
+          )}
+
+          {/* Price axis */}
+          {axisTicks.map((t, i) => (
+            <text
+              key={i}
+              x={model.x(t)}
+              y={H - PAD.b + 16}
+              fill="var(--color-ink-300)"
+              fontSize={FONT}
+              fontFamily="var(--font-mono)"
+              textAnchor={i === 0 ? 'start' : i === axisTicks.length - 1 ? 'end' : 'middle'}
+            >
+              {formatAmount(t, t >= 1000 ? 0 : 2)}
+            </text>
+          ))}
+        </svg>
+      </div>
+
+      {/* Readout -- outside the SVG so it uses real text rendering. Announced
+          only once the crosshair has been driven from the keyboard. */}
       <div
+        aria-live={keyboardMoved ? 'polite' : 'off'}
         style={{
           display: 'flex',
           gap: '0.75rem',
           justifyContent: 'center',
+          flexWrap: 'wrap',
           minHeight: '1.1rem',
           fontSize: 'var(--text-2xs)',
           color: 'var(--color-ink-300)',
           fontFamily: 'var(--font-mono)',
+          flex: 'none',
         }}
       >
         {hoverPrice !== null ? (
@@ -467,73 +584,64 @@ export function ProbabilityCurve() {
             <span>P(≤) {(model.cdf(hoverPrice) * 100).toFixed(1)}%</span>
           </>
         ) : (
-          <span style={{ color: 'var(--color-ink-400)' }}>
-            Hover the chart to read probability and P&amp;L at a price
+          <span style={{ color: 'var(--color-ink-300)' }}>
+            Hover, touch or press ← → to read P&amp;L at a price
           </span>
         )}
       </div>
+      {/* Said in words, not drawn on the chart: an open-ended payoff is cut at
+          the edge of the range, and the number at that edge is not a maximum. */}
+      {(profitUnbounded || lossUnbounded) && (
+        <div style={{ fontSize: 'var(--text-2xs)', color: 'var(--color-ink-300)', flex: 'none' }}>
+          {profitUnbounded && <span className="profit">↗ Profit has no ceiling. </span>}
+          {lossUnbounded && <span className="loss">↘ Loss has no floor. </span>}
+          The line is cut at the edge of the range drawn.
+        </div>
+      )}
 
-      {/* Probability readouts */}
+      {/* The ranges the distribution implies. Probability of profit and expected
+          value are in the results strip above, once, rather than here a second
+          time: this block took 70px the chart needed, and the panel clipped it
+          through the numerals. One line, natural height, never cut. */}
       <div
         style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(118px, 1fr))',
-          gap: '0.5rem 0.875rem',
-          marginTop: '0.5rem',
-          paddingTop: '0.5rem',
+          display: 'flex',
+          flexWrap: 'wrap',
+          gap: '0.25rem 1.25rem',
+          marginTop: '0.375rem',
+          paddingTop: '0.375rem',
           borderTop: '1px solid var(--color-line)',
+          fontSize: 'var(--text-2xs)',
+          color: 'var(--color-ink-300)',
+          flex: 'none',
         }}
       >
-        <div>
-          <div className="stat-label">
-            Probability of profit {!popIsEngine && <span style={{ color: 'var(--color-warn)' }}>·model</span>}
-          </div>
-          <div className="stat-value" style={{ fontSize: 'var(--text-base)' }}>
-            {(popValue * 100).toFixed(1)}%
-          </div>
-          <div className="meter" style={{ marginTop: '0.25rem' }}>
-            <div
-              className="meter-fill"
-              style={{
-                width: `${Math.min(100, popValue * 100)}%`,
-                background: 'var(--color-profit)',
-              }}
-            />
-          </div>
-        </div>
-
-        <div>
-          <div className="stat-label">Expected value</div>
-          <div className={`stat-value ${ev >= 0 ? 'profit' : 'loss'}`} style={{ fontSize: 'var(--text-base)' }}>
-            {money(ev)}
-          </div>
-        </div>
-
-        <div>
-          <div className="stat-label">1σ range (68%)</div>
-          <div className="stat-value">
+        <span>
+          1σ range (68%){' '}
+          <span className="num" style={{ color: 'var(--color-ink-100)' }}>
             {formatAmount(model.oneSigma.lo, 2)} – {formatAmount(model.oneSigma.hi, 2)}
-          </div>
-        </div>
-
-        <div>
-          <div className="stat-label">2σ range (95%)</div>
-          <div className="stat-value">
+          </span>
+        </span>
+        <span>
+          2σ range (95%){' '}
+          <span className="num" style={{ color: 'var(--color-ink-100)' }}>
             {formatAmount(model.twoSigma.lo, 2)} – {formatAmount(model.twoSigma.hi, 2)}
-          </div>
-        </div>
-
-        <div>
-          <div className="stat-label">Implied vol · horizon</div>
-          <div className="stat-value">
+          </span>
+        </span>
+        <span>
+          Implied vol{' '}
+          <span className="num" style={{ color: 'var(--color-ink-100)' }}>
             {(model.iv * 100).toFixed(1)}% · {model.days}d
-          </div>
-        </div>
+          </span>
+          {!popIsEngine && <span style={{ color: 'var(--color-warn)' }}> · odds modelled</span>}
+        </span>
       </div>
     </>,
     <>
-      <span className="chip chip-accent">payoff · engine</span>
-      <span className="chip chip-modelled">density · lognormal</span>
+      <span className="chip chip-accent" title="The payoff line comes from the pricing engine.">payoff</span>
+      <span className="chip chip-modelled" title="The shaded density is modelled: a lognormal from the live spot, the chain's implied volatility and the days to expiry.">
+        modelled odds
+      </span>
     </>,
   );
 }

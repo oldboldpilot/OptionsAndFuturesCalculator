@@ -1,9 +1,10 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useEffect, useMemo } from 'react';
 import { formatAmount, formatMoney, useCurrency } from '../lib/currency';
 import { MoneyInput } from './MoneyInput';
 import { useCalculatorStore } from '../store/useCalculatorStore';
+import { useProStatus } from '../lib/useProStatus';
 import type { AsianStyle } from '../store/useTreePricerStore';
 
 /**
@@ -49,8 +50,30 @@ export function OptionTicket() {
   const {
     ticket, setTicket, commitTicket,
     chainStrikes, chainExpirations, selectedExpiration, setSelectedExpiration,
-    chainStatus, spotPrice,
+    chainStatus, spotPrice, legs, seedTicketFromAtm,
   } = useCalculatorStore();
+  const { pro } = useProStatus();
+
+  // Open on the at-the-money contract. The Strike list started 28% in the
+  // money -- 151 strikes from 550.00 with the underlying at 779.09 -- and the
+  // first screen showed an empty ticket with nothing to say what a finished one
+  // looks like. A seed, not an overwrite: the store leaves a chosen strike alone.
+  useEffect(() => {
+    if (chainStatus === 'ready' && ticket.strike === null) seedTicketFromAtm();
+  }, [chainStatus, ticket.strike, seedTicketFromAtm]);
+
+  // What a select should say while it has nothing to list. "Loading chain…"
+  // used to stay on screen after the chain had FAILED, so a user on BTC or ES
+  // waited on a load that was never coming.
+  const emptyChainText =
+    chainStatus === 'error' ? 'No chain available'
+    : chainStatus === 'ready' ? 'No listed options'
+    : 'Loading chain…';
+
+  // A free account can hold one leg. Say so BEFORE the click: the button looked
+  // the same for a free action and a gated one, and pressing it on a second leg
+  // replaced the first leg's results with "Needs Pro".
+  const addNeedsPro = !pro && legs.length >= 1;
 
   // Keep the ticket's expiry in step with the chain the user is looking at.
   const expiry = ticket.expiration || selectedExpiration;
@@ -114,7 +137,7 @@ export function OptionTicket() {
     <div className="panel">
       <div className="panel-head">
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.4375rem' }}>
-          <span className="panel-title">Ticket</span>
+          <h2 className="panel-title">Ticket</h2>
           {moneyness && (
             <span
               className={moneyness.label === 'OTM' ? 'chip' : 'chip chip-accent'}
@@ -167,8 +190,14 @@ export function OptionTicket() {
             "is this leg Asian?" changes what every downstream panel is even
             able to say. Vanilla is the default, so the row costs one segment
             and answers that question without a click. */}
-        <div style={{ display: 'grid', gap: '0.1875rem' }}>
-          <span className="stat-label">Averaging</span>
+        <details style={{ display: 'grid', gap: '0.1875rem' }} open={ticket.asianType !== 'NOT_ASIAN'}>
+          {/* A first long call has nothing to average, so the row folds away
+              until it is wanted -- and stays open once a style is chosen, so a
+              non-default choice is never hidden. The segment group stays in
+              the markup either way. */}
+          <summary style={{ cursor: 'pointer', fontSize: 'var(--text-2xs)', color: 'var(--color-ink-300)' }}>
+            Averaging (Asian options) &middot; {ticket.asianType === 'NOT_ASIAN' ? 'vanilla' : 'on'}
+          </summary>
           <div className="segment" style={{ width: '100%' }} role="group" aria-label="Averaging">
             {AVERAGING_CHOICES.map(([type, label]) => (
               <button
@@ -195,7 +224,7 @@ export function OptionTicket() {
               Exercise &amp; Averaging.
             </span>
           )}
-        </div>
+        </details>
 
         <label style={{ display: 'grid', gap: '0.1875rem' }}>
           <span className="stat-label">Expiry</span>
@@ -208,7 +237,7 @@ export function OptionTicket() {
             }}
             disabled={chainExpirations.length === 0}
           >
-            {chainExpirations.length === 0 && <option value="">Loading chain…</option>}
+            {chainExpirations.length === 0 && <option value="">{emptyChainText}</option>}
             {chainExpirations.map((e) => (
               <option key={e.date} value={e.date}>{e.date} · {e.dte}d</option>
             ))}
@@ -224,14 +253,19 @@ export function OptionTicket() {
             disabled={chainStrikes.length === 0}
           >
             <option value="">
-              {chainStatus === 'ready' ? `Select one of ${chainStrikes.length} strikes` : 'Loading chain…'}
+              {chainStatus === 'ready' && chainStrikes.length > 0
+                ? `Select one of ${chainStrikes.length} strikes`
+                : emptyChainText}
             </option>
             {chainStrikes.map((s) => {
               const q = ticket.optionType === 'CALL' ? s.call : s.put;
               const px = ticket.action === 'BUY' ? q.ask : q.bid;
+              // The price is NAMED. It read "550.00  230.94", a bare second
+              // number that was an ask or a bid and said neither.
               return (
                 <option key={s.strike} value={s.strike}>
-                  {formatAmount(s.strike, 2)}{s.isAtm ? '  · ATM' : ''}{px > 0 ? `  ${formatAmount(px, 2)}` : '  no quote'}
+                  {formatAmount(s.strike, 2)}{s.isAtm ? ' · ATM' : ''}
+                  {px > 0 ? ` · ${ticket.action === 'BUY' ? 'ask' : 'bid'} ${formatAmount(px, 2)}` : ' · no quote'}
                 </option>
               );
             })}
@@ -300,6 +334,8 @@ export function OptionTicket() {
           className="btn btn-primary"
           onClick={commitTicket}
           disabled={!ready}
+          data-gated={addNeedsPro ? 'true' : undefined}
+          aria-describedby={addNeedsPro ? 'add-needs-pro' : undefined}
           title={ready ? 'Add this leg to the position' : 'Pick a strike with a price first'}
         >
           {/* The averaging style is named on the button because it is the one
@@ -315,6 +351,15 @@ export function OptionTicket() {
               : ''}
           {ticket.optionType.toLowerCase()}
         </button>
+        {addNeedsPro && (
+          <span
+            id="add-needs-pro"
+            style={{ fontSize: 'var(--text-2xs)', color: 'var(--color-ink-300)' }}
+          >
+            Adding this leg makes a multi-leg position, which needs Pro. Single-leg calls and puts stay
+            free.
+          </span>
+        )}
       </div>
     </div>
   );

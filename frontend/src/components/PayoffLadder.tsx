@@ -90,7 +90,7 @@ export function PayoffLadder() {
     <div className="panel" style={{ flex: 1, minHeight: 0 }}>
       <div className="panel-head">
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.4375rem' }}>
-          <span className="panel-title">Payoff</span>
+          <h2 className="panel-title">Payoff</h2>
           <span className="chip" title={curveLabel.title}>{curveLabel.text}</span>
         </div>
         <div className="segment" role="group" aria-label="Payoff units">
@@ -152,7 +152,7 @@ export function PayoffLadder() {
                     <td
                       style={{
                         textAlign: 'left',
-                        color: isSpot ? 'var(--color-accent)' : 'var(--color-ink-200)',
+                        color: isSpot ? 'var(--color-accent-text)' : 'var(--color-ink-200)',
                         fontWeight: isSpot ? 600 : 400,
                       }}
                     >
