@@ -1036,6 +1036,14 @@ target_sources(sensen_slim
         "${SENSEN_SRC}/llama_model.cpp"
         "${SENSEN_SRC}/tokenizer_gpu.cpp"
         "${SENSEN_SRC}/training_moe_impl.cpp"
+        # Out-of-line implementation units that sensen moved off three BMIs (iostream and
+        # ifstream stay out of the interface): sensen.utils.logger's write_stderr,
+        # sensen.qwen38's readWholeFile and sensen.weight_loader_factory's detail::readMagic.
+        # The closure script reports these three MISSING, and unlike the basename false
+        # positive for logger.cppm they are real omissions -- without them the engine fails at LINK, naming the symbol.
+        "${SENSEN_SRC}/utils/logger_io.cpp"
+        "${SENSEN_SRC}/qwen38_io.cpp"
+        "${SENSEN_SRC}/weight_loader_factory_io.cpp"
         # numa_bind.cpp is reported EXTRA by scripts/sensen_module_closure.py and
         # is NOT extra. It defines the extern "C" symbols
         # sensen_available_cpu_count and sensen_numa_bind_local_node, which
