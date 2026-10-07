@@ -24,9 +24,9 @@ import logger;
 import llq_weight_store;
 import quota;
 import api_key;
-import assistant_verification;
 import mortgage_verification;
-import encoder_assistant;
+import sensen.encoder_assistant;
+import sensen.utterance_guards;
 import mortgage_derivation;
 import mortgage_grammar;
 import inference_admission;
@@ -1351,7 +1351,7 @@ class MortgageAssistantWorker {
      * the operator asked for the encoder would put production on a model no gate in this
      * session covers, and vice versa.
      */
-    [[nodiscard]] auto encoder() const noexcept -> const encoder_assistant::EncoderAssistant* {
+    [[nodiscard]] auto encoder() const noexcept -> const sensen::encoder_assistant::EncoderAssistant* {
         return encoder_.get();
     }
 
@@ -1425,7 +1425,7 @@ class MortgageAssistantWorker {
                          "unable to provide it, this assistant is unavailable.");
                 return;
             }
-            auto built = encoder_assistant::EncoderAssistant::fromGguf(*enc_path);
+            auto built = sensen::encoder_assistant::EncoderAssistant::fromGguf(*enc_path);
             if (!built) {
                 log.error(std::format(
                     "The mortgage ENCODER failed to load from MORTGAGE_ENCODER_PATH ({}): {}. The "
@@ -1737,7 +1737,7 @@ class MortgageAssistantWorker {
     /// Non-null only on MORTGAGE_ASSISTANT_BACKEND=encoder. Loaded once and then const, so
     /// `parse()` is safe from several threads -- unlike the decoder, whose `generate()` cannot
     /// be called concurrently because FeedForwardNetwork holds mutable scratch per instance.
-    std::unique_ptr<encoder_assistant::EncoderAssistant> encoder_;
+    std::unique_ptr<sensen::encoder_assistant::EncoderAssistant> encoder_;
     std::shared_ptr<pg::Pool> pool_;
     std::shared_ptr<inference_queue::Queue> queue_;
     std::shared_ptr<inference_admission::LeaseSource> lease_source_;
@@ -3290,7 +3290,7 @@ auto apply_tvm_sign_convention(std::string_view operation,
  * are truncated to 15 places: still more than double the SIX the training corpus rounds them
  * to, so nothing downstream can tell, and stated rather than silent.
  */
-[[nodiscard]] auto encoder_params_to_json(const encoder_assistant::Parsed& parsed) -> std::string {
+[[nodiscard]] auto encoder_params_to_json(const sensen::encoder_assistant::Parsed& parsed) -> std::string {
     const auto* op = find_operation(parsed.operation);
 
     // Trim a 38-place BigDecimal rendering to its shortest exact form, then to the verifier's
@@ -3767,7 +3767,7 @@ auto validate_and_populate_params(std::string_view json_text, std::string_view u
 /**
  * Advice phrasings specific to THIS domain, on top of the shared table.
  *
- * `assistant_verification`'s `looks_like_advice_request` is reused rather than
+ * `sensen.utterance_guards`' `looks_like_advice_request` is reused rather than
  * reimplemented -- "should i buy", "worth it", "do you recommend", "what do you
  * think" are domain-neutral asks for a judgment and catch the common shapes here
  * too. What it cannot catch is the mortgage-specific vocabulary, because it was
@@ -4028,8 +4028,8 @@ inline constexpr std::array<std::string_view, 4> kAllActionNames{
         return std::unexpected(sgee::ExecutionError::ActionFailed);
     }
 
-    if (::options_calculator::assistant::verify::looks_like_prompt_injection(ctx->utterance) ||
-        ::options_calculator::assistant::verify::looks_like_prompt_injection(
+    if (::sensen::utterance_guards::looks_like_prompt_injection(ctx->utterance) ||
+        ::sensen::utterance_guards::looks_like_prompt_injection(
             ctx->prior_clarification)) {
         populate_refusal(
             ctx->response, ::mortgage::assistant::Refusal::OUT_OF_SCOPE,
@@ -4042,7 +4042,7 @@ inline constexpr std::array<std::string_view, 4> kAllActionNames{
     // see has_calculable_content. Without this carve-out the gate refused "Should I refinance my
     // $300,000 loan at 7.5% to 6.25%?" and "should I rent or buy a $450,000 house? rent is $2,500
     // a month", which are the product.
-    if ((::options_calculator::assistant::verify::looks_like_advice_request(ctx->utterance) ||
+    if ((::sensen::utterance_guards::looks_like_advice_request(ctx->utterance) ||
          looks_like_domain_advice_request(ctx->utterance)) &&
         !has_calculable_content(ctx->utterance)) {
         populate_refusal(
@@ -4110,7 +4110,7 @@ inline constexpr std::array<std::string_view, 4> kAllActionNames{
         // gave is 6.25)` -- the verifier names a number the model was never shown, because
         // `grounding_text()` concatenated the turns for the verifier and nothing did for the
         // model. A health signal read off the wrong layer, which is this file's oldest scar.
-        auto parsed = enc->parse(encoder_assistant::Turns{
+        auto parsed = enc->parse(sensen::encoder_assistant::Turns{
             .utterance = ctx->utterance,
             .prior_question = ctx->prior_question,
             .prior_clarification = ctx->prior_clarification});

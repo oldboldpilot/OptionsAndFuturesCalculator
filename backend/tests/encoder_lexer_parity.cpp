@@ -50,7 +50,7 @@
 #include <cstdio>
 #include <new>
 import std;
-import mortgage_verification;
+import sensen.numeric_lexer;
 import fastjson;
 
 auto main(int argc, char** argv) -> int {
@@ -64,7 +64,7 @@ auto main(int argc, char** argv) -> int {
         const auto text = std::string(e["text"].as_string());
         std::string out = "{\"row\":" + std::to_string(row) + ",\"lits\":[";
         bool first = true;
-        for (const auto& l : mortgage_calculator::assistant::verify::lex_numeric_literals(text)) {
+        for (const auto& l : sensen::numeric_lexer::lex_numeric_literals(text)) {
             if (!first) out += ",";
             first = false;
             out += "{\"text\":\"";

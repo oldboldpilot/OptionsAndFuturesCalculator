@@ -42,7 +42,8 @@ import api_key;
 import strategy_catalogue;
 import market_data;
 import assistant_verification;
-import encoder_assistant;
+import sensen.encoder_assistant;
+import sensen.utterance_guards;
 import inference_admission;
 import inference_queue;
 import sgee_queue_client;
@@ -1461,7 +1462,7 @@ class AssistantWorker {
      * is UNAVAILABLE rather than quietly served by the other -- the ASSISTANT_BACKEND=llamacpp
      * rule, which exists because every gate in this repository is defined on one path.
      */
-    [[nodiscard]] auto encoder() const noexcept -> const encoder_assistant::EncoderAssistant* {
+    [[nodiscard]] auto encoder() const noexcept -> const sensen::encoder_assistant::EncoderAssistant* {
         return encoder_.get();
     }
 
@@ -1552,7 +1553,7 @@ class AssistantWorker {
                          "provide it, this assistant is unavailable.");
                 return;
             }
-            auto built = encoder_assistant::EncoderAssistant::fromGguf(*enc_path);
+            auto built = sensen::encoder_assistant::EncoderAssistant::fromGguf(*enc_path);
             if (!built) {
                 log.error(std::format(
                     "The strategy ENCODER failed to load from STRATEGY_ENCODER_PATH ({}): {}. "
@@ -1931,7 +1932,7 @@ class AssistantWorker {
     /// Non-null only on ASSISTANT_MODEL=encoder. Loaded once then const, so parse() is safe
     /// from several threads -- unlike the decoder, whose generate() cannot be called
     /// concurrently because FeedForwardNetwork holds mutable scratch per instance.
-    std::unique_ptr<encoder_assistant::EncoderAssistant> encoder_;
+    std::unique_ptr<sensen::encoder_assistant::EncoderAssistant> encoder_;
     std::shared_ptr<pg::Pool> pool_;
     std::shared_ptr<inference_queue::Queue> queue_;
     std::shared_ptr<inference_admission::LeaseSource> lease_source_;
@@ -2388,7 +2389,7 @@ inline constexpr std::array<std::string_view, 3> kStrategyNumericFields{
  * Trailing zeros are trimmed: BigDecimal::to_string() emits 38 fractional places, and
  * `expiration_days` is a day count that must satisfy `is_number()` and then an int64 read.
  */
-[[nodiscard]] auto encoder_params_to_json(const encoder_assistant::Parsed& parsed) -> std::string {
+[[nodiscard]] auto encoder_params_to_json(const sensen::encoder_assistant::Parsed& parsed) -> std::string {
     const auto trim = [](std::string_view text) -> std::string {
         std::string out{text};
         if (const auto dot = out.find('.'); dot != std::string::npos) {
@@ -2987,8 +2988,8 @@ inline constexpr std::array<std::string_view, 4> kAllActionNames{
         return std::unexpected(sgee::ExecutionError::ActionFailed);
     }
 
-    if (::options_calculator::assistant::verify::looks_like_prompt_injection(ctx->utterance) ||
-        ::options_calculator::assistant::verify::looks_like_prompt_injection(
+    if (::sensen::utterance_guards::looks_like_prompt_injection(ctx->utterance) ||
+        ::sensen::utterance_guards::looks_like_prompt_injection(
             ctx->prior_clarification)) {
         populate_refusal(
             ctx->response, calculator::assistant::Refusal::OUT_OF_SCOPE,
@@ -2997,7 +2998,7 @@ inline constexpr std::array<std::string_view, 4> kAllActionNames{
             "2 contracts\") without instructions aimed at the assistant itself.");
         return std::unexpected(sgee::ExecutionError::ActionFailed);
     }
-    if (::options_calculator::assistant::verify::looks_like_advice_request(ctx->utterance)) {
+    if (::sensen::utterance_guards::looks_like_advice_request(ctx->utterance)) {
         populate_refusal(
             ctx->response, calculator::assistant::Refusal::OUT_OF_SCOPE,
             "I don't give trading advice, predictions, or recommendations -- describe a "
@@ -3070,7 +3071,7 @@ inline constexpr std::array<std::string_view, 4> kAllActionNames{
         // mismatch for the 278 clarify ones. Adding the field is a wire change reaching the
         // proto, both vendored copies, the client's derived allow-list and the drift gate;
         // the measurement for keeping this as it stands is in the commit that made it.
-        auto parsed = enc->parse(encoder_assistant::Turns{
+        auto parsed = enc->parse(sensen::encoder_assistant::Turns{
             .utterance = ctx->utterance,
             .prior_question = {},
             .prior_clarification = ctx->prior_clarification});

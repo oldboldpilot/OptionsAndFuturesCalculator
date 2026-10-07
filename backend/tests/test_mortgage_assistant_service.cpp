@@ -232,7 +232,7 @@ auto main() -> int {
     // =======================================================================
     // "should i refinance" is only in kMortgageAdviceSignals -- the
     // domain-specific addendum table this file adds on top of
-    // assistant_verification's shared looks_like_advice_request. Exercising
+    // sensen.utterance_guards' shared looks_like_advice_request. Exercising
     // it proves action_admission's `|| looks_like_domain_advice_request(...)`
     // clause, not only the shared guard section 3 already covers.
     {

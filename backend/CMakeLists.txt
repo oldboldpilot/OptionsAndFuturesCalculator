@@ -1009,6 +1009,18 @@ target_sources(sensen_slim
             # Needed because the mortgage encoder assistant loads it, and
             # encoder_dispatch and llq_weight_store are its imports.
             "${SENSEN_SRC}/text_encoder.cppm"
+            # The code both assistants share, which lived in this tree until it moved into
+            # sensen so a second service can import it instead of copying it:
+            # encoder_assistant is the chain (lex -> tokenize -> encode -> mask ->
+            # reconstruct), encoder_reconstruct its arithmetic, numeric_lexer the lexer and
+            # fifteen-place Decimal the verification gate grounds against, utterance_guards the
+            # pre-model injection/advice scans, and ascii_text the locale-free helpers under
+            # the last two.
+            "${SENSEN_SRC}/ascii_text.cppm"
+            "${SENSEN_SRC}/encoder_assistant.cppm"
+            "${SENSEN_SRC}/encoder_reconstruct.cppm"
+            "${SENSEN_SRC}/numeric_lexer.cppm"
+            "${SENSEN_SRC}/utterance_guards.cppm"
             "${SENSEN_SRC}/transformer_block.cppm"
             "${SENSEN_SRC}/triton_worker_bridge.cppm"
             "${SENSEN_SRC}/utils/logger.cppm"
@@ -1039,11 +1051,18 @@ target_sources(sensen_slim
         # Out-of-line implementation units that sensen moved off three BMIs (iostream and
         # ifstream stay out of the interface): sensen.utils.logger's write_stderr,
         # sensen.qwen38's readWholeFile and sensen.weight_loader_factory's detail::readMagic.
-        # The closure script reports these three MISSING, and unlike the basename false
-        # positive for logger.cppm they are real omissions -- without them the engine fails at LINK, naming the symbol.
+        # The closure script reported all three MISSING, and they were real omissions -- without
+        # them the engine fails at LINK, naming the symbol. qwen38_io.cpp and
+        # weight_loader_factory_io.cpp stopped being reported once listed; logger_io.cpp is
+        # still reported, by BASENAME, for the reason logger.cppm is (it sits under utils/), so
+        # the standing complaints are now logger.cppm and logger_io.cpp (basename), numa_bind.cpp
+        # EXTRA, and the CPU-excluded text_encoder_cuda.cpp / text_encoder_triton.cpp.
         "${SENSEN_SRC}/utils/logger_io.cpp"
         "${SENSEN_SRC}/qwen38_io.cpp"
         "${SENSEN_SRC}/weight_loader_factory_io.cpp"
+        # Implementation unit of sensen.encoder_assistant. It names a module, so the closure
+        # script (which walks IMPORTS) does not see it either, and omitting it fails at LINK.
+        "${SENSEN_SRC}/encoder_assistant.cpp"
         # numa_bind.cpp is reported EXTRA by scripts/sensen_module_closure.py and
         # is NOT extra. It defines the extern "C" symbols
         # sensen_available_cpu_count and sensen_numa_bind_local_node, which
@@ -1397,8 +1416,7 @@ endif()
 
 # Core engine binary
 add_executable(calculator_engine src/main.cpp src/issue_key.cpp src/modules/calculator_service.cpp src/modules/finance_service.cpp src/modules/quota.cpp src/modules/api_key.cpp src/modules/assistant_service.cpp src/modules/mortgage_assistant_service.cpp src/modules/inference_queue.cpp src/modules/inference_admission.cpp src/modules/sgee_queue_client.cpp src/modules/strategy_store.cpp src/modules/state_refresh.cpp)
-target_sources(calculator_engine PUBLIC FILE_SET CXX_MODULES FILES src/modules/calculator_service.cppm src/modules/market_data.cppm src/modules/finance_service.cppm src/modules/quota.cppm src/modules/api_key.cppm src/modules/fips_mode.cppm src/modules/state_refresh.cppm src/modules/strategy_catalogue.cppm src/modules/assistant_verification.cppm src/modules/assistant_service.cppm src/modules/mortgage_verification.cppm src/modules/mortgage_explanation.cppm src/modules/mortgage_derivation.cppm src/modules/mortgage_grammar.cppm src/modules/mortgage_assistant_service.cppm src/modules/pg.cppm src/modules/inference_queue.cppm src/modules/sgee_queue_client.cppm src/modules/inference_admission.cppm src/modules/strategy_store.cppm src/modules/llq_weight_store.cppm src/modules/encoder_reconstruct.cppm src/modules/encoder_assistant.cppm)
-target_sources(calculator_engine PRIVATE src/modules/encoder_assistant.cpp)
+target_sources(calculator_engine PUBLIC FILE_SET CXX_MODULES FILES src/modules/calculator_service.cppm src/modules/market_data.cppm src/modules/finance_service.cppm src/modules/quota.cppm src/modules/api_key.cppm src/modules/fips_mode.cppm src/modules/state_refresh.cppm src/modules/strategy_catalogue.cppm src/modules/assistant_verification.cppm src/modules/assistant_service.cppm src/modules/mortgage_verification.cppm src/modules/mortgage_explanation.cppm src/modules/mortgage_derivation.cppm src/modules/mortgage_grammar.cppm src/modules/mortgage_assistant_service.cppm src/modules/pg.cppm src/modules/inference_queue.cppm src/modules/sgee_queue_client.cppm src/modules/inference_admission.cppm src/modules/strategy_store.cppm src/modules/llq_weight_store.cppm)
 target_link_libraries(calculator_engine PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto sgee)
 # PostgreSQL::PostgreSQL is linked into calculator_engine further down, right
 # after find_package(PostgreSQL REQUIRED) runs (see that comment block) --
@@ -1671,6 +1689,10 @@ target_sources(test_assistant_verification
     PRIVATE
     FILE_SET CXX_MODULES FILES
         sensen/src/gp_ara_interfaces.cppm
+        # assistant_verification imports ascii_text; the guards it no longer owns are
+        # sensen.utterance_guards, which this test exercises directly. Both import only std.
+        sensen/src/ascii_text.cppm
+        sensen/src/utterance_guards.cppm
         src/modules/strategy_catalogue.cppm
         src/modules/assistant_verification.cppm
 )
@@ -1844,6 +1866,10 @@ target_sources(test_mortgage_verification
     PRIVATE
     FILE_SET CXX_MODULES FILES
         sensen/src/gp_ara_interfaces.cppm
+        # The lexer and Decimal the verifier grounds against live in sensen now; both import
+        # only std, so they are compiled here as this target's own sources, as gp_ara is.
+        sensen/src/ascii_text.cppm
+        sensen/src/numeric_lexer.cppm
         src/modules/mortgage_verification.cppm
 )
 # The label-space drift check re-parses finance.proto at RUN time, so the test
@@ -1874,14 +1900,9 @@ add_test(NAME MortgageVerificationTest COMMAND test_mortgage_verification)
 # ^test_, so the probe keeps COMPILING even though nothing runs it in ctest. A
 # probe that stops building is indistinguishable from one that was never written.
 add_executable(test_encoder_reconstruct_parity tests/encoder_reconstruct_parity.cpp)
-target_sources(test_encoder_reconstruct_parity
-    PRIVATE
-    FILE_SET CXX_MODULES FILES
-        src/modules/encoder_reconstruct.cppm
-)
-# sensen_slim carries sensen.bigdecimal (the exact fixed-point type every
-# reconstructed money value is computed in) and PUBLIC-links fastjson, whose
-# BMI both this probe and the module import.
+# sensen_slim carries sensen.encoder_reconstruct itself, sensen.bigdecimal (the exact
+# fixed-point type every reconstructed money value is computed in) and PUBLIC-links
+# fastjson, whose BMI the module imports.
 target_link_libraries(test_encoder_reconstruct_parity PRIVATE sensen_slim fastjson)
 
 # GATE for the per-operation mask both model heads are decoded through. Unlike the parity
@@ -1891,11 +1912,6 @@ target_link_libraries(test_encoder_reconstruct_parity PRIVATE sensen_slim fastjs
 # accuracy number the project had: the mortgage corpus's masks are all no-ops, so it served
 # 560/560 with the bug, and only the strategy corpus could exhibit it.
 add_executable(test_encoder_operation_decode tests/test_encoder_operation_decode.cpp)
-target_sources(test_encoder_operation_decode
-    PRIVATE
-    FILE_SET CXX_MODULES FILES
-        src/modules/encoder_reconstruct.cppm
-)
 target_link_libraries(test_encoder_operation_decode PRIVATE sensen_slim fastjson)
 add_test(NAME EncoderOperationDecodeTest COMMAND test_encoder_operation_decode)
 
@@ -1926,8 +1942,11 @@ target_link_libraries(test_encoder_tokenizer_parity PRIVATE sensen_slim fastjson
 # are conversions rather than disagreements. Driven by
 # scripts/check_encoder_lexer_parity.py. A probe, not a ctest test: generated input.
 add_executable(test_encoder_lexer_parity tests/encoder_lexer_parity.cpp)
+# The lexer is sensen.numeric_lexer now (it imports only std and sensen.ascii_text), so this probe
+# compiles those two as its own sources rather than linking the whole of sensen_slim -- the same
+# light shape it had when the lexer lived inside mortgage_verification.
 target_sources(test_encoder_lexer_parity PRIVATE FILE_SET CXX_MODULES FILES
-    sensen/src/gp_ara_interfaces.cppm src/modules/mortgage_verification.cppm)
+    sensen/src/ascii_text.cppm sensen/src/numeric_lexer.cppm)
 target_link_libraries(test_encoder_lexer_parity PRIVATE fastjson)
 
 # The small-encoder mortgage assistant, end to end (lex -> tokenize -> encode -> mask ->
@@ -1936,12 +1955,6 @@ target_link_libraries(test_encoder_lexer_parity PRIVATE fastjson)
 # and it isolates "does the chain work" from "does the RPC plumbing work". Needs the sensen
 # encoder and tokenizer (sensen_slim), the reconstruct port and the deployed lexer.
 add_executable(test_encoder_assistant_probe tests/encoder_assistant_probe.cpp)
-target_sources(test_encoder_assistant_probe PRIVATE FILE_SET CXX_MODULES FILES
-    sensen/src/gp_ara_interfaces.cppm
-    src/modules/mortgage_verification.cppm
-    src/modules/encoder_reconstruct.cppm
-    src/modules/encoder_assistant.cppm)
-target_sources(test_encoder_assistant_probe PRIVATE src/modules/encoder_assistant.cpp)
 target_link_libraries(test_encoder_assistant_probe PRIVATE sensen_slim fastjson)
 
 # Proto-derived CONSTRAINED DECODING for the mortgage assistant
@@ -2017,6 +2030,8 @@ target_sources(test_mortgage_grammar
     FILE_SET CXX_MODULES FILES
         sensen/src/gp_ara_interfaces.cppm
         sensen/src/grammar.cppm
+        sensen/src/ascii_text.cppm
+        sensen/src/numeric_lexer.cppm
         src/modules/mortgage_verification.cppm
         src/modules/mortgage_grammar.cppm
 )
@@ -2305,9 +2320,6 @@ target_link_libraries(calculator_engine PRIVATE PostgreSQL::PostgreSQL)
 add_executable(test_assistant_service
     tests/test_assistant_service.cpp
     src/modules/assistant_service.cpp
-    # The strategy ENCODER backend: assistant_service.cpp imports it unconditionally
-    # (ASSISTANT_MODEL selects at RUNTIME), so this target cannot compile without it.
-    src/modules/encoder_assistant.cpp
     src/modules/quota.cpp
     src/modules/api_key.cpp
     src/modules/inference_queue.cpp
@@ -2332,12 +2344,6 @@ target_sources(test_assistant_service
         # module is not a header and does not come along with the .cpp.
         src/modules/sgee_queue_client.cppm
         src/modules/inference_admission.cppm
-        # Same rule as sgee_queue_client above: encoder_assistant.cppm imports
-        # encoder_reconstruct and mortgage_verification (its lexer), so every target
-        # compiling the service needs all three in its OWN file set.
-        src/modules/encoder_reconstruct.cppm
-        src/modules/mortgage_verification.cppm
-        src/modules/encoder_assistant.cppm
 )
 target_link_libraries(test_assistant_service PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto sgee PostgreSQL::PostgreSQL)
 
@@ -2346,7 +2352,6 @@ add_test(NAME AssistantServiceTest COMMAND test_assistant_service)
 add_executable(test_mortgage_assistant_service
     tests/test_mortgage_assistant_service.cpp
     src/modules/mortgage_assistant_service.cpp
-    src/modules/encoder_assistant.cpp
     src/modules/quota.cpp
     src/modules/api_key.cpp
     src/modules/inference_queue.cpp
@@ -2360,13 +2365,9 @@ target_sources(test_mortgage_assistant_service
         # The service imports it to honour *_WEIGHT_STORE; inert unless that is set.
         src/modules/llq_weight_store.cppm
         src/modules/mortgage_verification.cppm
-        src/modules/encoder_reconstruct.cppm
-        src/modules/encoder_assistant.cppm
         # Graph C imports this; a target compiling the service must carry it.
         src/modules/mortgage_derivation.cppm
         src/modules/mortgage_grammar.cppm
-        src/modules/strategy_catalogue.cppm
-        src/modules/assistant_verification.cppm
         src/modules/quota.cppm
         src/modules/api_key.cppm
         src/modules/pg.cppm

@@ -21,6 +21,7 @@
 
 import std;
 import assistant_verification;
+import sensen.utterance_guards;
 // Named directly below (sensen::gp_ara::ReasonerErrorCode::Indeterminate) to
 // prove the reasoner's error code specifically, not just that it errored --
 // assistant_verification.cppm imports this non-exported, so this TU needs
@@ -735,8 +736,8 @@ auto main() -> int {
     std::printf("\n=== GP-ARA assistant verification: input-side guards "
                 "(prompt injection, investment-advice requests) ===\n");
     {
-        using options_calculator::assistant::verify::looks_like_advice_request;
-        using options_calculator::assistant::verify::looks_like_prompt_injection;
+        using sensen::utterance_guards::looks_like_advice_request;
+        using sensen::utterance_guards::looks_like_prompt_injection;
 
         // Adversarial security review, 2026-08-05 -- LOCAL ONLY, against a
         // build with MODEL_PATH set to the pinned deployed checkpoint (see
