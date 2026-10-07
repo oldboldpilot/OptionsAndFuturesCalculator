@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Gate: backend/start.sh sets the container's memory knobs instead of inheriting defaults that
-# were tuned for a different machine.
+# Gate: the two container entry scripts set their memory knobs instead of inheriting defaults that
+# were tuned for a different machine: backend/start.sh (the engine + Envoy) and
+# deploy/gateway/entrypoint.sh (sensen-gateway).
 #
 # @author Olumuyiwa Oluwasanmi
 #
@@ -27,6 +28,10 @@
 #   5. MALLOC_CONF set   -> the engine gets the operator's value verbatim, not ours
 #   6. Envoy never sees MALLOC_CONF: it links tcmalloc, and a jemalloc option string means
 #      nothing to it. The setting is scoped to the one process it was measured on.
+#   7. deploy/gateway/entrypoint.sh: MALLOC_CONF unset -> sensen-gateway starts with the gateway's
+#      allocator settings; set by the operator -> passed through verbatim. The gateway holds the
+#      memory of a 200-connection TLS burst at 52 MB until something purges it (measured); the
+#      same burst settles at 24 MB with a background purge.
 #
 # HOW. The script is run inside a throwaway container (podman, `--network none`) whose only
 # contents are the real start.sh and two stand-ins: an `envoy` that records its argv and an
@@ -41,7 +46,9 @@ set -uo pipefail
 cd "$(dirname "$0")/.." || exit 9
 
 START=backend/start.sh
+ENTRYPOINT=deploy/gateway/entrypoint.sh
 [ -f "$START" ] || { echo "FAIL: $START does not exist"; exit 1; }
+[ -f "$ENTRYPOINT" ] || { echo "FAIL: $ENTRYPOINT does not exist"; exit 1; }
 
 command -v podman >/dev/null 2>&1 || { echo "SKIP: podman is not installed"; exit 77; }
 
@@ -72,17 +79,35 @@ rm -f /out/envoy.argv /out/start.out /out/start.rc /out/engine.malloc_conf /out/
 bash /in/start.sh >/out/start.out 2>&1
 echo $? >/out/start.rc
 EOF
+cat >"$WORK/fake_gateway" <<'EOF'
+#!/bin/bash
+printf '%s\n' "${MALLOC_CONF-<unset>}" >/out/gateway.malloc_conf
+exit 0
+EOF
+cat >"$WORK/run_entrypoint.sh" <<'EOF'
+#!/bin/bash
+# Runs inside the container: stand-in sensen-gateway, REAL entrypoint.sh.
+cp /in/fake_gateway /usr/local/bin/sensen-gateway
+chmod +x /usr/local/bin/sensen-gateway
+rm -f /out/gateway.malloc_conf /out/start.rc
+SENSEN_GATEWAY_CERT_PEM=x SENSEN_GATEWAY_KEY_PEM=x SENSEN_GATEWAY_TICKET_KEY_HEX=x SENSEN_GATEWAY_STORE=/x \
+  bash /in/entrypoint.sh >/out/start.out 2>&1
+echo $? >/out/start.rc
+EOF
 cp "$START" "$WORK/start.sh"
-chmod +x "$WORK/fake_envoy" "$WORK/fake_engine" "$WORK/run_start.sh"
+cp "$ENTRYPOINT" "$WORK/entrypoint.sh"
+chmod +x "$WORK/fake_envoy" "$WORK/fake_engine" "$WORK/fake_gateway" "$WORK/run_start.sh" "$WORK/run_entrypoint.sh"
 
 # run_case <name> [ENV=VAL ...]  ->  leaves $WORK/out/<name>/{envoy.argv,start.out,start.rc}
+# INNER selects which entry script is exercised (default: backend/start.sh).
+INNER=run_start.sh
 run_case() {
   local name=$1; shift
   local out="$WORK/out/$name"; mkdir -p "$out"
   local envargs=()
   local e; for e in "$@"; do envargs+=(-e "$e"); done
   podman run --rm --network none --security-opt label=disable \
-    -v "$WORK:/in:ro" -v "$out:/out" "${envargs[@]}" "$IMAGE" bash /in/run_start.sh >"$out/podman.out" 2>&1
+    -v "$WORK:/in:ro" -v "$out:/out" "${envargs[@]}" "$IMAGE" bash "/in/$INNER" >"$out/podman.out" 2>&1
   return $?
 }
 
@@ -144,6 +169,19 @@ else bad "an operator's MALLOC_CONF must not be overridden: the engine got: $c";
 c=$(conf_of unset envoy)
 if [ "$c" = "<unset>" ]; then ok "Envoy does not inherit MALLOC_CONF (it links tcmalloc)"
 else bad "Envoy must not receive MALLOC_CONF, it got: $c"; fi
+
+# --- the gateway entrypoint -----------------------------------------------------------------
+GW_EXPECTED_CONF='narenas:4,background_thread:true,dirty_decay_ms:3000'
+INNER=run_entrypoint.sh
+run_case gw_unset
+c=$(conf_of gw_unset gateway)
+if [ "$c" = "$GW_EXPECTED_CONF" ]; then ok "gateway: MALLOC_CONF unset -> sensen-gateway runs with $GW_EXPECTED_CONF"
+else bad "gateway: MALLOC_CONF unset -> expected '$GW_EXPECTED_CONF', sensen-gateway got: $c"; fi
+
+run_case gw_operator MALLOC_CONF=dirty_decay_ms:0
+c=$(conf_of gw_operator gateway)
+if [ "$c" = "dirty_decay_ms:0" ]; then ok "gateway: an operator's MALLOC_CONF reaches sensen-gateway verbatim"
+else bad "gateway: an operator's MALLOC_CONF must not be overridden: it got: $c"; fi
 
 if [ "$fail" -ne 0 ]; then echo "check_start_memory_knobs: FAILED"; exit 1; fi
 echo "check_start_memory_knobs: all arms passed"
