@@ -35,7 +35,7 @@ export const metadata: Metadata = {
  */
 export default function SignInPage() {
   return (
-    <main className="mx-auto flex min-h-[60vh] w-full max-w-md flex-col justify-center gap-4 px-4 py-12">
+    <div className="mx-auto flex min-h-[60vh] w-full max-w-md flex-col justify-center gap-4 px-4 py-12">
       <h1 className="text-xl font-semibold">Sign in</h1>
       <p className="text-sm text-[var(--color-ink-300)]">
         Signing in carries your Pro entitlement across devices. Forgotten your password? Enter
@@ -49,6 +49,6 @@ export default function SignInPage() {
         </a>
         .
       </p>
-    </main>
+    </div>
   );
 }

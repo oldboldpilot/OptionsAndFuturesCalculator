@@ -20,7 +20,7 @@ export function LegalPage({
   children: React.ReactNode;
 }) {
   return (
-    <main
+    <div
       style={{
         maxWidth: '46rem',
         margin: '0 auto',
@@ -32,7 +32,7 @@ export function LegalPage({
     >
       <Link
         href="/"
-        style={{ fontSize: '0.8125rem', color: 'var(--color-accent)', textDecoration: 'none' }}
+        style={{ fontSize: '0.8125rem', color: 'var(--color-accent-text)', textDecoration: 'none' }}
       >
         ← Back to the calculator
       </Link>
@@ -69,7 +69,7 @@ export function LegalPage({
           Contact
         </a>
       </nav>
-    </main>
+    </div>
   );
 }
 

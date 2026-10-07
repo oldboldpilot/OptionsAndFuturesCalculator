@@ -45,6 +45,12 @@ const visibleText = (file) =>
     .replace(/\s+/g, ' ')
     .trim();
 
+/** The page's HTML with scripts and styles removed, TAGS KEPT -- for adjacency checks. */
+const visibleTextWithTags = (file) =>
+  html(file)
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ');
+
 if (!existsSync(OUT)) {
   console.error(`check-export: ${OUT}/ does not exist — run \`npm run build\` first.`);
   process.exit(1);
@@ -431,6 +437,60 @@ for (const page of CONTENT_PAGES) {
       fail('structured-data', `${page} emits unparseable JSON-LD: ${error.message}`);
     }
   }
+}
+
+/* ---- 7. No words run together across an inline tag ----------------------- */
+
+/*
+ * `<strong>The probability curve</strong> is derived ...` shipped as
+ * `</strong>is derived`, on the guides index ("curveis derived", "Greeksdescribe").
+ * The source carried the space. JSX drops whitespace at a line boundary around an
+ * element, and the compiler does not warn: the sentence reads fine in the editor
+ * and wrong in the page, so only the emitted bytes can see it. A closing inline
+ * tag followed IMMEDIATELY by a lowercase letter is that defect; legitimate
+ * adjacency -- punctuation, a closing tag, an uppercase start inside the tag's own
+ * trailing space -- never matches.
+ */
+const RUN_TOGETHER = /<\/(?:strong|em|b|code)>[a-z]{2,}/;
+for (const page of ALL_PAGES) {
+  const hit = visibleTextWithTags(page).match(RUN_TOGETHER);
+  if (hit) fail('run-together', `${page} has "${hit[0]}": no space between an inline tag and the word after it`);
+}
+
+/* ---- 8. One <main> landmark on every page --------------------------------- */
+
+/*
+ * The strategy guides had none (Lighthouse `landmark-one-main`), which leaves a
+ * screen-reader user no way to jump past the navigation, and the pages that did
+ * have one each brought their own -- so it was a coincidence rather than a rule.
+ * The page-group layouts own it now (`app/(site)/layout.tsx` and
+ * `app/widget/layout.tsx`; the 404 supplies its own), and this keeps it that
+ * way: exactly one, on every page the export emits, the 404 included.
+ */
+for (const page of ALL_PAGES) {
+  const mains = (html(page).match(/<main[\s>]/g) ?? []).length;
+  if (mains !== 1) fail('landmark-main', `${page} has ${mains} <main> elements, expected exactly 1`);
+}
+
+/* ---- 9. The embeddable widget carries none of the site's chrome ----------- */
+
+/*
+ * `/widget` is iframed into other people's pages. It inherited the root layout's
+ * broker block, 26-link directory and legal footer, which took it to 1,987px tall
+ * and put this site's affiliate links inside a third party's page. The chrome
+ * lives in the `(site)` route group now and the widget sits outside it; this
+ * asserts the BYTES, because a layout that quietly re-adds the footer would pass
+ * every unit test there is. It also needs a heading: a frame with no h1 has no
+ * name for a screen reader to announce on entry.
+ */
+if (existsSync(join(OUT, 'widget.html'))) {
+  const widget = visibleText('widget.html');
+  for (const chrome of ['Where to trade these', 'All Strategy Calculators', 'Not investment advice', 'Knobugsoft LLC']) {
+    if (widget.includes(chrome)) fail('widget-chrome', `widget.html carries site chrome ("${chrome}")`);
+  }
+  if (!/<h1[\s>]/.test(html('widget.html'))) fail('widget-heading', 'widget.html has no <h1>');
+} else {
+  fail('missing-page', 'widget.html');
 }
 
 /* ------------------------------------------------------------------------- */

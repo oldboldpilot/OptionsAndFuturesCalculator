@@ -3,6 +3,7 @@ import Link from 'next/link';
 import { STRATEGY_SLUGS } from '@/config/strategies';
 import { getStrategyGuide } from '@/content/strategy-guides';
 import { pageTitle } from '@/lib/seo-title';
+import SiteFooter from '@/components/SiteFooter';
 
 /**
  * The 404 screen.
@@ -21,7 +22,7 @@ import { pageTitle } from '@/lib/seo-title';
  * alerts.
  *
  * The ad code is gone from the shared layout — it now ships only from
- * `app/guides/[strategy]/layout.tsx` — so this page cannot carry ads no matter
+ * `app/(site)/guides/[strategy]/layout.tsx` — so this page cannot carry ads no matter
  * what its pathname is. This file exists for the OTHER half of that finding:
  * the screen was also useless. A visitor who mistypes a URL, or follows a link
  * to a strategy page that was renamed, should land somewhere that gets them
@@ -49,7 +50,12 @@ export default function NotFound() {
   const popular = POPULAR.filter((slug) => (STRATEGY_SLUGS as readonly string[]).includes(slug));
 
   return (
-    <main
+    <>
+    {/* Its own landmark and footer, because it lives outside the `(site)` group
+        whose layout normally supplies both. A dead end should still have the
+        directory of calculators, and it must still have exactly one <main>. */}
+    <main id="main" tabIndex={-1}>
+    <div
       style={{
         maxWidth: '48rem',
         margin: '0 auto',
@@ -101,7 +107,7 @@ export default function NotFound() {
           const guide = getStrategyGuide(slug);
           return (
             <li key={slug}>
-              <Link href={`/guides/${slug}`} style={{ color: 'var(--color-accent)' }}>
+              <Link href={`/guides/${slug}`} style={{ color: 'var(--color-accent-text)' }}>
                 {guide?.name ?? slug}
               </Link>
               {guide ? <span style={{ color: 'var(--color-ink-400)' }}> — {guide.outlook}</span> : null}
@@ -113,6 +119,9 @@ export default function NotFound() {
           );
         })}
       </ul>
+    </div>
     </main>
+    <SiteFooter />
+    </>
   );
 }

@@ -6,6 +6,7 @@ import { StrategySelector } from '../../components/StrategySelector';
 import OptionChain from '../../components/OptionChain';
 import ProbabilityCurve from '../../components/ProbabilityCurve';
 import StrategyMetrics from '../../components/StrategyMetrics';
+import ResultsStrip from '../../components/ResultsStrip';
 import { useCalculatorStore } from '../../store/useCalculatorStore';
 
 /**
@@ -56,9 +57,9 @@ function WidgetContent() {
           borderBottom: '1px solid var(--color-line)',
         }}
       >
-        <span style={{ fontSize: 'var(--text-base)', fontWeight: 600, color: 'var(--color-ink-100)' }}>
+        <h1 style={{ fontSize: 'var(--text-base)', fontWeight: 600, color: 'var(--color-ink-100)' }}>
           Strategy Modeler
-        </span>
+        </h1>
         {/*
           Was "Powered by sensen". This widget is embedded on other people's
           sites, so it is the most externally visible surface here, and the name
@@ -66,6 +67,11 @@ function WidgetContent() {
         */}
         <span className="chip">Live market data</span>
       </div>
+
+      {/* The headline numbers, as on the full calculator -- and the one place the
+          entitlement notice is shown, which every panel below points at. In an
+          embed it links out rather than starting a checkout inside the frame. */}
+      <ResultsStrip embedded />
 
       <div
         className="stagger"
@@ -93,7 +99,20 @@ function WidgetContent() {
 
 export default function WidgetPage() {
   return (
-    <Suspense fallback={<div className="empty-state">Loading widget…</div>}>
+    // The fallback is what the static export ships, because the real content
+    // reads the query string and so renders only in the browser. It names the
+    // frame for a screen reader from the first byte, rather than the page having
+    // no heading at all until scripts have run.
+    <Suspense
+      fallback={
+        <div style={{ padding: '0.625rem' }}>
+          <h1 style={{ fontSize: 'var(--text-base)', fontWeight: 600, color: 'var(--color-ink-100)' }}>
+            Strategy Modeler
+          </h1>
+          <div className="empty-state">Loading widget…</div>
+        </div>
+      }
+    >
       <WidgetContent />
     </Suspense>
   );

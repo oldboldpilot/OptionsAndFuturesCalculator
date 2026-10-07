@@ -117,13 +117,15 @@ export function SiteGuide() {
           volatility changes appear and where a payoff diagram tells you nothing.
         </li>
         <li style={li}>
-          <strong>The probability curve</strong> is derived from the implied volatility of the chain
+          <strong>The probability curve</strong>{' '}
+          is derived from the implied volatility of the chain
           you are pricing against. It is the market&rsquo;s distribution, not a forecast, and it is
           only as good as the assumption that returns are lognormal — which is least true in exactly
           the tails people use it to assess.
         </li>
         <li style={li}>
-          <strong>The Greeks</strong> describe the position&rsquo;s sensitivity right now. Delta and
+          <strong>The Greeks</strong>{' '}
+          describe the position&rsquo;s sensitivity right now. Delta and
           gamma move fastest near a short strike close to expiry, which is where most defined-risk
           income strategies actually go wrong.
         </li>

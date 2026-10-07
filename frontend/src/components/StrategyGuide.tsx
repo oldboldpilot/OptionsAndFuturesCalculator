@@ -52,6 +52,18 @@ export function StrategyGuide({ guide }: { guide: Guide }) {
         <Row term="Breakeven" def={guide.breakeven} />
       </dl>
 
+      {/* The way to the tool, where the reader has just been told what the
+          numbers ARE. It used to appear once, about 2,600px down, after the
+          FAQs -- by which point a reader who came to price one had mostly left. */}
+      <p style={{ margin: '0 0 1.5rem' }}>
+        <Link
+          href={`/calculator/${guide.slug}`}
+          style={{ color: 'var(--color-accent-text)', fontWeight: 600, textDecoration: 'none' }}
+        >
+          Price a {guide.name} on live market data →
+        </Link>
+      </p>
+
       <h2 style={h2}>How it is built</h2>
       <ul style={list}>
         {guide.construction.map((leg) => (

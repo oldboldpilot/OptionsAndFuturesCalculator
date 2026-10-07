@@ -3,6 +3,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { usePathname } from 'next/navigation';
 import { adsOnRoute } from '@/config/ad-routes';
+import { AD_FILL_TIMEOUT_MS, resolveAdSlot } from '@/lib/adSlotState';
 
 /**
  * An advertising unit that reserves its space before it fills it.
@@ -72,7 +73,7 @@ export function AdSlot({
   /*
    * Belt to the loader's braces, and it is genuinely the belt now.
    *
-   * The AdSense loader ships only from `app/guides/[strategy]/layout.tsx`, so
+   * The AdSense loader ships only from `app/(site)/guides/[strategy]/layout.tsx`, so
    * outside that subtree there is no script to fill an `<ins>` anyway. This
    * check stops one being rendered at all — an empty `<ins class="adsbygoogle">`
    * on a page with no loader is a permanently blank reserved box, and on a page
@@ -85,6 +86,13 @@ export function AdSlot({
    */
   const suppressed = !adsOnRoute(pathname);
   const pushed = useRef(false);
+  const insRef = useRef<HTMLModElement | null>(null);
+  // What AdSense reported on the <ins> (`data-ad-status`), or null. Together with
+  // `timedOut` this decides whether the reserved box is kept or given back --
+  // see lib/adSlotState.ts. Only ever consulted for a slot the route already
+  // allowed; nothing here adds ad code anywhere new.
+  const [adStatus, setAdStatus] = useState<string | null>(null);
+  const [timedOut, setTimedOut] = useState(false);
   // The <ins> is rendered only after mount. This is a static export served from
   // a CDN, so markup produced at build time must match the first client render;
   // injecting the ad tag during render would be a hydration mismatch.
@@ -115,6 +123,23 @@ export function AdSlot({
     }
   }, [mounted, slot, suppressed]);
 
+  // Watch the unit for AdSense's verdict, and start the clock on a script that
+  // may never run (ad-blocked, offline). The attribute is written by Google's
+  // script onto the <ins>, so a MutationObserver is the only way to hear it.
+  useEffect(() => {
+    const ins = insRef.current;
+    if (!mounted || !slot || suppressed || !ins) return;
+    const read = () => setAdStatus(ins.getAttribute('data-ad-status'));
+    read();
+    const mo = new MutationObserver(read);
+    mo.observe(ins, { attributes: true, attributeFilter: ['data-ad-status'] });
+    const t = setTimeout(() => setTimedOut(true), AD_FILL_TIMEOUT_MS);
+    return () => {
+      mo.disconnect();
+      clearTimeout(t);
+    };
+  }, [mounted, slot, suppressed]);
+
   // Multiplex must not be clamped: `maxWidth: 0` would collapse it to nothing,
   // and a fixed height would crop the recommendation grid it exists to show. It
   // is the one format here that legitimately sizes itself.
@@ -141,6 +166,11 @@ export function AdSlot({
   };
 
   if (suppressed) return null;
+
+  // A slot that was reserved and then never filled gives its space back, label
+  // included. (The `!slot` placeholder below is a different case -- a build with
+  // no unit configured -- and is left exactly as it was.)
+  if (slot && resolveAdSlot(adStatus, timedOut ? AD_FILL_TIMEOUT_MS : 0) === 'collapse') return null;
 
   if (!slot) {
     return (
@@ -203,6 +233,7 @@ export function AdSlot({
       </span>
       {mounted && (
         <ins
+          ref={insRef}
           className="adsbygoogle"
           style={
             isFluid
