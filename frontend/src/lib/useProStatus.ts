@@ -3,7 +3,6 @@
 import { useEffect } from 'react';
 import { create } from 'zustand';
 import { claimLicence, clearLicence, isPro, loadLicence, saveLicence, type LicenceInfo } from './licence';
-import { createClient } from './supabase/client';
 
 /**
  * Reads `app_metadata.tier` out of a Supabase access token WITHOUT verifying
@@ -84,28 +83,27 @@ export const useProStore = create<ProState>((set, get) => ({
     if (get().initialised) return;
     set({ initialised: true, licence: loadLicence() });
 
-    // Wrapped so a missing Supabase env var or an unreachable auth host
-    // degrades to "no account tier" instead of throwing -- the licence path
-    // above must keep working even when sign-in is not configured at all.
-    try {
-      const supabase = createClient();
-      supabase.auth.onAuthStateChange((_event, session) => {
-        set({ accountTier: session?.access_token ? decodeAccountTier(session.access_token) : null });
-      });
-      // onAuthStateChange's INITIAL_SESSION fires asynchronously on its own;
-      // priming with getSession() closes the brief window on first load
-      // where an already-signed-in visitor would otherwise flash "not Pro".
-      supabase.auth
-        .getSession()
-        .then(({ data }) => {
+    // Imported when needed, not at module load: the Supabase client is a ~250KB
+    // chunk and a visitor who never signs in should not pay for it before the
+    // page paints. Anything that goes wrong -- a missing env var, an unreachable
+    // auth host -- degrades to "no account tier", so the licence path above keeps
+    // working even when sign-in is not configured at all.
+    void import('./supabase/client')
+      .then(({ createClient }) => {
+        const supabase = createClient();
+        supabase.auth.onAuthStateChange((_event, session) => {
+          set({ accountTier: session?.access_token ? decodeAccountTier(session.access_token) : null });
+        });
+        // onAuthStateChange's INITIAL_SESSION fires asynchronously on its own;
+        // priming with getSession() closes the brief window on first load
+        // where an already-signed-in visitor would otherwise flash "not Pro".
+        return supabase.auth.getSession().then(({ data }) => {
           set({
             accountTier: data.session?.access_token ? decodeAccountTier(data.session.access_token) : null,
           });
-        })
-        .catch(() => set({ accountTier: null }));
-    } catch {
-      set({ accountTier: null });
-    }
+        });
+      })
+      .catch(() => set({ accountTier: null }));
 
     const params = new URLSearchParams(window.location.search);
     if (params.get('checkout') !== 'success') return;
