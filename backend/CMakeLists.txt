@@ -21,7 +21,7 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/ToolchainBMIGuard.cmake)
 #
 # The failure it avoided needs TWO std modules built from two flag sets. This
 # tree now builds exactly one -- sensen's std_module_precompile, from
-# ${CMAKE_CXX_FLAGS}, which is CANONICAL_FLAGS below and therefore the union of
+# ${CMAKE_CXX_FLAGS}, which is CANONICAL_FLAGS (sensen_canonical_flags(), below) and therefore the union of
 # what every subdirectory compiles with. SGEE imports that same file rather than
 # building its own (SGEE_EXTERNAL_STD_PCM), and so does this directory. One BMI
 # cannot disagree with itself.
@@ -38,140 +38,14 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/ToolchainBMIGuard.cmake)
 # `import std;` consumer interoperate, because std::string from a textual header
 # and from the std module are the same entity.
 
-# libc++ tags most of its inline, header-only functions with
-# __attribute__((__abi_tag__(<odr-signature>))) so that two objects built
-# against different libc++ configurations cannot silently share a definition.
-# The tag is part of the mangled name. That is exactly why this define has to be
-# set HERE, at the top level, rather than left to whoever happens to set it:
-# sensen/CMakeLists.txt:351 defines it unconditionally for everything in its own
-# directory scope, so fastjson and the logger get it, while proto_lib,
-# sensen_slim, calculator_engine, smoke_client, sgee and the whole FetchContent'd
-# gRPC subtree would not. Half a binary mangling std:: inline functions with an
-# ABI tag and half without is an ODR violation between objects that otherwise
-# look interchangeable -- the linker either fails on a symbol that plainly
-# should exist, or picks one definition arbitrarily and the mismatch survives to
-# runtime. Under libstdc++ this define was inert, which is why it was previously
-# safe to leave to sensen alone; that is no longer true.
-add_compile_definitions(_LIBCPP_NO_ABI_TAG)
-
-# Enforce C++23 (and prepare for C++26)
-set(CMAKE_CXX_STANDARD 23)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
-
-# Enable C++23 modules scanning
-set(CMAKE_EXPERIMENTAL_CXX_MODULE_CMAKE_API "2182bf5c-ef0d-489a-91da-49dbc3090d2a")
-set(CMAKE_CXX_SCAN_FOR_MODULES ON)
-
-# Canonical build flags from config/cpp_details.txt
-# NO fast-math, NO native march
-#
-# -stdlib=libc++ is the standard library for this ENTIRE binary, which is what
-# sensen's own code policy (config/cpp_details.txt rule 50) has always required
-# and what this tree previously could not give it. It belongs in CANONICAL_FLAGS
-# rather than in an add_compile_options() call for a reason that is easy to get
-# wrong: CMAKE_CXX_FLAGS is what CMake's configure-time probes
-# (check_cxx_source_compiles, check_include_file_cxx, try_compile) are run with,
-# and add_compile_options() is not. Setting it here means every feature the
-# build detects is detected against the standard library the build will actually
-# use. Put it anywhere else and configure can conclude a header exists, or a
-# snippet compiles, under libstdc++ and then hand that answer to a libc++ build.
-#
-# It is also set BEFORE FetchContent_MakeAvailable(grpc) further down, which is
-# the whole mechanism by which gRPC, protobuf, abseil, re2 and upb are built
-# against libc++ too: CMAKE_CXX_FLAGS is inherited by every subdirectory added
-# after it, so those ~3000 translation units need no per-target treatment.
-#
-# The flag deliberately does NOT go into the C flags. c-ares and zlib are C, and
-# a C compilation has no standard library to select; clang would only warn that
-# the argument went unused.
-#
-# -fexperimental-library was already here and is now load-bearing rather than
-# inert: under libc++ it defines _LIBCPP_ENABLE_EXPERIMENTAL and links
-# libc++experimental. Because it sits in the same global CMAKE_CXX_FLAGS as
-# everything else, it is uniform across the C++23 side and the C++17 gRPC side,
-# which is what matters -- an experimental-library split across a link boundary
-# would be its own ABI hazard.
-#
-# _GLIBCXX_USE_TBB_PAR_BACKEND=0 used to be defined alongside these flags. It was
-# a libstdc++ macro, telling libstdc++'s parallel algorithms not to route through
-# TBB; with libstdc++ out of the picture it names nothing and has been dropped
-# rather than left as a define that only looks meaningful.
-#
-# -maes -mpclmul ARE DELIBERATELY *NOT* HERE, AND THIS BLOCK RECORDS A MISTAKE
-# RATHER THAN A RULE, because the reasoning that put them here for one commit was
-# wrong in a way that reads as careful.
-#
-# The mismatch they were added to fix is real: sensen appends the pair to
-# CMAKE_CXX_FLAGS in SENSEN's directory scope and declares std_module_precompile
-# afterwards, so the single std.pcm recorded "+aes"/"+pclmul" while every TU here
-# was built from CANONICAL_FLAGS without them, and clang refuses such a consumer
-# per translation unit ("compiled with the target feature '+aes' but the current
-# translation unit is not" -- a diagnostic naming the BMI, not the flag).
-#
-# ADDING THEM HERE MADE THAT GO AWAY AND INTRODUCED A WORSE PROBLEM. Three
-# measurements, none of which the original audit made:
-#
-#   1. The justification was "every v3-class CPU has both", which is true of real
-#      silicon and FALSE of the architecture level -- and a floor states the
-#      level. The x86-64 psABI puts AES and PCLMULQDQ in NO micro-architecture
-#      level; both are independent CPUID bits, and `clang -march=x86-64-v3 -dM -E`
-#      defines __AVX__/__AVX2__/__BMI2__/__F16C__/__FMA__/__LZCNT__ and neither
-#      __AES__ nor __PCLMUL__.
-#   2. A floor flag is NOT inert metadata even when this project's own code emits
-#      nothing. It defines __PCLMUL__ for every dependency built with the floor,
-#      and abseil's CRC32 gates on exactly that -- `#if defined(__x86_64__) &&
-#      defined(__SSE4_2__) && defined(__PCLMUL__)` -> ABSL_CRC_INTERNAL_HAVE_X86_SIMD
-#      -> ABSL_INTERNAL_CAN_USE_SIMD_CRC32C. __SSE4_2__ is already set two flags
-#      to the left, so __PCLMUL__ was the only missing term, and 756 vpclmul*
-#      instructions duly appeared in crc_x86_arm_combined.cc.o, which does not
-#      pass -mpclmul on its own target. (randen_hwaes.cc.o does, carrying -maes
-#      twice, and was unaffected -- which is what makes this attributable.)
-#   3. abseil's x86 dispatch has NO runtime guard for it: its `default:` case
-#      returns an accelerated implementation for any unrecognised CPU, where the
-#      aarch64 `default:` asks SupportsArmCRC32PMULL() first and may return
-#      nullptr. On a host without PCLMUL those instructions are reachable, so the
-#      failure mode is SIGILL, not a slow path.
-#
-# THE FIRST AUDIT "PROVED" THE OPPOSITE WITH A BROKEN GREP, which is the part
-# worth keeping. It counted `\baesenc\b` and `\bpclmul` and found zero -- but
-# under -mavx/-mavx2 the assembler emits VEX forms, `vaesenc` and
-# `vpclmullqlqdq`, and \b cannot match between 'v' and 'a'. The correct pattern
-# finds 32 and 756. A negative grep needs a positive control, which this file
-# already says elsewhere and which was not done here.
-#
-# FIXED AT THE SOURCE INSTEAD. sensen's own comment says the pair is there for
-# the embedded ThinButQuickWebFramework build, and TBQWF is NOT embedded here
-# (external/tbqwf has 0 entries and the generated build has 0 tbqwf targets), so
-# the flags were buying nothing. sensen now gates the append on TBQWF actually
-# being present and ANNOUNCES which arm it took at configure time ("SIMD floor:
-# ..."), so this tree's std.pcm no longer records the features and no consumer
-# needs them. Do not add them back to work around a BMI mismatch; check what
-# sensen's configure line says about the SIMD floor first.
-set(CANONICAL_FLAGS "-stdlib=libc++ -fPIC -O3 -march=x86-64-v3 -mtune=generic -mavx -mavx2 -mfma -msse2 -msse3 -mssse3 -msse4.1 -msse4.2 -pthread -fstack-protector-strong -DNDEBUG -Wno-error=stringop-overflow -Wno-error=array-bounds -Wno-error=unused-variable -Wno-error=unused-parameter -Wno-error=unused-but-set-variable -Wno-error=pedantic -Wno-error=global-module -Wno-unknown-warning-option -fexperimental-library")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${CANONICAL_FLAGS}")
-
-# The linker needs to be told as well, and separately: -stdlib= is a driver
-# option, and the driver only puts -lc++ (and the libc++abi it depends on) on the
-# link line if it sees the flag at LINK time. Compiling every object against
-# libc++ headers and then linking without it produces a link against libstdc++
-# that fails on std::__1:: symbols nothing defines.
-#
-# -lc++abi is NOT listed explicitly. It does not need to be: libc++.so.1 carries
-# libc++abi.so.1 as its own DT_NEEDED, so the dynamic linker pulls it in
-# transitively -- verified directly by linking a trivial program with nothing but
-# -stdlib=libc++ and reading its NEEDED list. Naming it by hand is how a build
-# ends up ordering it wrongly on a static link.
-#
-# No -L or -Wl,-rpath to a libc++ directory either, deliberately. sensen's own
-# CMakeLists auto-detects a libc++ lib path and bakes an rpath to it, which is
-# right for a library that may be installed next to an unusual toolchain and
-# wrong here: an absolute host path baked into the engine is a path that does not
-# exist inside the deploy container. The toolchain's own default search path
-# resolves libc++ in both places, and the container carries its libc++ the same
-# way it already carries everything else the binary needs.
-set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -stdlib=libc++")
-set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -stdlib=libc++")
+# The canonical compile flags -- libc++, the x86-64-v3 floor, the ABI-tag define, C++23, module
+# scanning, the linker's -stdlib -- are sensen's, not this file's: one copy for every service built
+# on this engine's tree, with the reasons for each flag beside them. Every translation unit in this
+# build (gRPC, protobuf, abseil, sensen, SGEE, this engine) must agree on them, because a BMI records
+# its flags and clang refuses a consumer whose flags differ. Called HERE, before any target or probe,
+# so CMAKE_CXX_FLAGS reaches every directory added below.
+include(${CMAKE_CURRENT_SOURCE_DIR}/sensen/cmake/SensenCanonicalFlags.cmake)
+sensen_canonical_flags()
 
 # ON, and it has to be: this is the switch that decides whether TBB is built
 # from source at all. sensen guards its FetchContent TBB block with
@@ -500,7 +374,7 @@ add_subdirectory(sensen EXCLUDE_FROM_ALL)
 #
 # The BMI they import is the ONE sensen precompiles. There is deliberately no
 # second std.pcm for this directory: sensen builds it from ${CMAKE_CXX_FLAGS},
-# which at that point IS this file's CANONICAL_FLAGS, so a single BMI is
+# which at that point IS sensen_canonical_flags()'s CANONICAL_FLAGS, so a single BMI is
 # compatible with every consumer here by construction.
 #
 # sensen_use_shared_std_module() points every C++ target declared AFTER it in this
@@ -571,7 +445,7 @@ sensen_add_slim_library(sensen_slim GROUPS ALL)
 # The right answer is ONE std module built from the UNION of the flags, which is
 # what SGEE_EXTERNAL_STD_PCM below supplies:
 #
-#   * CANONICAL_FLAGS goes into CMAKE_CXX_FLAGS at the top of this file, BEFORE
+#   * sensen_canonical_flags() puts CANONICAL_FLAGS into CMAKE_CXX_FLAGS at the top of this file, BEFORE
 #     every add_subdirectory, so it is a prefix of what sensen, SGEE and this
 #     directory each compile with. It is already the union.
 #   * sensen precompiles std.pcm from exactly ${CMAKE_CXX_FLAGS}, so that one
@@ -2023,7 +1897,7 @@ if(ENABLE_LLAMACPP_BACKEND)
     # the Railway builder image (backend/Dockerfile's apt-get list), and a
     # CMake option silently probing for a tool the reproducible build does
     # not promise to provide is the kind of environment-dependent branch
-    # CANONICAL_FLAGS's own comments (this file's top) already go out of
+    # CANONICAL_FLAGS's own comments (cmake/SensenCanonicalFlags.cmake) already go out of
     # their way to avoid elsewhere.
     set(GGML_CCACHE OFF CACHE BOOL "" FORCE)
 
