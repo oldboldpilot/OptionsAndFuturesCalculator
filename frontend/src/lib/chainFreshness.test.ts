@@ -19,7 +19,11 @@ import {
   CLOCK_SKEW_TOLERANCE_SECONDS,
 } from './chainFreshness';
 
-const SERVER_PRINT = '2026-08-11T21:00:00Z';
+// 11:00 ET on a Tuesday, mid-session. This was 21:00Z -- 17:00 ET, an hour
+// AFTER the close -- which was harmless while the rule was only "under a minute
+// old", and became wrong the moment LIVE also had to mean "the market is open":
+// every case below that expects LIVE needs a session that is actually open.
+const SERVER_PRINT = '2026-08-11T15:00:00Z';
 const printMs = Date.parse(SERVER_PRINT);
 
 describe('chainFreshness', () => {
@@ -83,5 +87,42 @@ describe('chainFreshness', () => {
     // LIVE on its own once enough wall clock has elapsed.
     expect(chainFreshness(SERVER_PRINT, printMs + 10 * 1_000).isLive).toBe(true);
     expect(chainFreshness(SERVER_PRINT, printMs + 120 * 1_000).isLive).toBe(false);
+  });
+});
+
+describe('chainFreshness: the market has to be open for LIVE to mean anything', () => {
+  // A print can be one second old and still be the last trade of a session that
+  // ended hours ago. Observed live at 01:12 ET: LIVE, over a closed market.
+  const AFTER_HOURS_PRINT = '2026-10-07T05:12:00Z'; // 01:12 EDT Wednesday
+  const afterMs = Date.parse(AFTER_HOURS_PRINT);
+
+  it('is NOT live when the print is a second old but the exchange is closed', () => {
+    const f = chainFreshness(AFTER_HOURS_PRINT, afterMs + 1_000);
+    expect(f.isLive).toBe(false);
+    expect(f.state).toBe('closed');
+  });
+
+  it('says when the last quote was, on the exchange clock', () => {
+    // 15:59:40 ET, 20 seconds before the close, read at 16:00:30.
+    const lastTrade = '2026-10-06T19:59:40Z';
+    const f = chainFreshness(lastTrade, Date.parse('2026-10-06T20:00:30Z'));
+    expect(f.state).toBe('closed');
+    expect(f.lastQuoteLabel).toBe('3:59 PM ET');
+  });
+
+  it('is live only when BOTH fresh and open', () => {
+    expect(chainFreshness(SERVER_PRINT, printMs + 5_000).state).toBe('live');
+    // Open but old: delayed, not closed -- the cache is stale, the market is not.
+    expect(chainFreshness(SERVER_PRINT, printMs + 400_000).state).toBe('delayed');
+  });
+
+  it('is unknown, not closed, when the timestamp cannot be read', () => {
+    expect(chainFreshness(null, printMs).state).toBe('unknown');
+    expect(chainFreshness('garbage', printMs).state).toBe('unknown');
+  });
+
+  it('stays closed over a weekend however fresh the print', () => {
+    const saturday = '2026-10-10T15:00:00Z';
+    expect(chainFreshness(saturday, Date.parse(saturday) + 2_000).state).toBe('closed');
   });
 });
