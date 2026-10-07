@@ -263,7 +263,7 @@ Contains `bool deleted` (false if ID did not exist or belonged to another user; 
 - `CalculateStrategy` matrix price bounds: Non-finite bounds or negative bounds refused with `INVALID_ARGUMENT` (`backend/src/modules/calculator_service.cpp:695-703`); `matrix_price_max <= matrix_price_min` refused with `INVALID_ARGUMENT` (`backend/src/modules/calculator_service.cpp:708-713`).
 - `CalculateStrategy` entitlement: Multi-leg strategies checked against Pro tier when `PRO_GATE_MODE` is active; unentitled calls return `PERMISSION_DENIED` (`backend/src/modules/calculator_service.cpp:1214-1218`).
 - Market data failures: Upstream feed unavailability returns `UNAVAILABLE` (`backend/src/modules/calculator_service.cpp:1378-1380, 1437-1439, 1504-1506`).
-- Saved scenarios authentication & capacity: Unauthenticated calls or missing bearer token return `UNAUTHENTICATED` (`backend/src/modules/calculator_service.cpp:1701, 1845-1850`). Exceeding per-user scenario cap (50) returns `RESOURCE_EXHAUSTED` ("You have reached the limit of 50 saved scenarios...") (`backend/src/modules/calculator_service.cpp:1837-1840`). Missing database connection returns `FAILED_PRECONDITION` ("Saved scenarios are not available on this deployment.") (`backend/src/modules/calculator_service.cpp:1827-1829`).
+- Saved scenarios authentication & capacity: Unauthenticated calls or missing bearer token return `UNAUTHENTICATED` (`backend/src/modules/calculator_service.cpp:1701, 1845-1850`). Exceeding the per-user scenario cap (100) returns `RESOURCE_EXHAUSTED` ("You have reached the limit of 100 saved scenarios...") (`backend/src/modules/calculator_service.cpp:1837-1840`). Missing database connection returns `FAILED_PRECONDITION` ("Saved scenarios are not available on this deployment.") (`backend/src/modules/calculator_service.cpp:1827-1829`).
 
 ### Gotchas
 - Multi-expiry curve horizon: For calendar and diagonal spreads, `StrategyResponse.curve_days_to_expiration` represents the EARLIEST leg expiry, not the latest. At far expiry, near legs are expired and structures collapse to debit lines (`backend/proto/calculator.proto:182-194`).
@@ -280,52 +280,54 @@ Exposes general-purpose financial mathematics: time value of money (TVM), mortga
 
 | RPC name | Request message | Response message | Description |
 | --- | --- | --- | --- |
-| `ComputePayment` | `PaymentRequest` | `DecimalResponse` | Periodic annuity payment (PMT) (`backend/proto/finance.proto:42`). |
-| `ComputePresentValue` | `PresentValueRequest` | `DecimalResponse` | Present value of an annuity (PV) (`backend/proto/finance.proto:43`). |
-| `ComputeFutureValue` | `FutureValueRequest` | `DecimalResponse` | Future value of an annuity (FV) (`backend/proto/finance.proto:44`). |
-| `ComputeFutureValueDetailed` | `FutureValueDetailedRequest` | `FutureValueDetailedResponse` | Investment future value with contributions and inflation adjustments (`backend/proto/finance.proto:45`). |
-| `ComputeInterestPayment` | `PeriodPaymentRequest` | `DecimalResponse` | Interest portion of a specific period's payment (IPMT) (`backend/proto/finance.proto:46`). |
-| `ComputePrincipalPayment` | `PeriodPaymentRequest` | `DecimalResponse` | Principal portion of a specific period's payment (PPMT) (`backend/proto/finance.proto:47`). |
-| `ComputeRate` | `RateRequest` | `DecimalResponse` | Solves for per-period interest rate (RATE) (`backend/proto/finance.proto:48`). |
-| `ComputePeriods` | `PeriodsRequest` | `DecimalResponse` | Solves for number of payment periods (NPER) (`backend/proto/finance.proto:49`). |
-| `ConvertInterestRate` | `RateConversionRequest` | `DoubleResponse` | Nominal to effective or effective to nominal rate conversion (`backend/proto/finance.proto:50`). |
-| `ComputeFisherRate` | `FisherRequest` | `DoubleResponse` | Exact Fisher equation rate conversion (`backend/proto/finance.proto:51`). |
-| `ComputeAmortization` | `AmortizationRequest` | `AmortizationResponse` | Full mortgage amortization schedule and summary (`backend/proto/finance.proto:54`). |
-| `ComputeDetailedAmortization` | `DetailedAmortizationRequest` | `DetailedAmortizationResponse` | Amortization schedule including tax savings breakdown (`backend/proto/finance.proto:55`). |
-| `ComputeAmortizationBatch` | `AmortizationBatchRequest` | `AmortizationBatchResponse` | High-throughput batch amortization summaries (`backend/proto/finance.proto:56`). |
-| `ComputeHeloc` | `HelocRequest` | `HelocResponse` | HELOC available borrowing equity and payments (`backend/proto/finance.proto:57`). |
-| `ComputeRefinance` | `RefinanceRequest` | `RefinanceResponse` | Mortgage refinance comparison and breakeven horizons (`backend/proto/finance.proto:58`). |
-| `ComputePayoffTiming` | `PayoffTimingRequest` | `PayoffTimingResponse` | Accelerated mortgage payoff timeline with extra payments (`backend/proto/finance.proto:59`). |
-| `ComputeMortgageRecast` | `MortgageRecastRequest` | `MortgageRecastResponse` | Loan recast payment reduction following lump-sum principal reduction (`backend/proto/finance.proto:60`). |
-| `ComputeNpv` | `NpvRequest` | `DoubleResponse` | Net present value for periodic cash flows (`backend/proto/finance.proto:63`). |
-| `ComputeIrr` | `IrrRequest` | `DoubleResponse` | Internal rate of return for periodic cash flows (`backend/proto/finance.proto:64`). |
-| `ComputeXnpv` | `DatedCashFlowRequest` | `DoubleResponse` | Net present value for irregularly dated cash flows (`backend/proto/finance.proto:65`). |
-| `ComputeXirr` | `DatedCashFlowRequest` | `DoubleResponse` | Internal rate of return for irregularly dated cash flows (`backend/proto/finance.proto:66`). |
-| `ComputePaybackPeriod` | `PaybackRequest` | `DoubleResponse` | Plain or discounted payback period (`backend/proto/finance.proto:67`). |
-| `ComputeCumulative` | `CumulativeRequest` | `DoubleResponse` | Cumulative principal or interest paid between periods (`backend/proto/finance.proto:68`). |
-| `ComputeDepreciation` | `DepreciationRequest` | `DoubleResponse` | Depreciation charges (SLN, SYD, DDB, MACRS) (`backend/proto/finance.proto:71`). |
-| `AnalyzeBond` | `BondRequest` | `BondResponse` | Bond pricing, yield to maturity, duration, and convexity (`backend/proto/finance.proto:74`). |
-| `AnalyzeTreasuryBill` | `TreasuryBillRequest` | `TreasuryBillResponse` | T-bill pricing and yields (BEY, MMY, BDY) (`backend/proto/finance.proto:75`). |
-| `PriceFutures` | `FuturesPricingRequest` | `DoubleResponse` | Cost-of-carry futures price (`backend/proto/finance.proto:78`). |
-| `ValueFutures` | `FuturesValuationRequest` | `DoubleResponse` | Mark-to-market futures contract valuation (`backend/proto/finance.proto:79`). |
-| `SimulateMarginAccount` | `MarginSimulationRequest` | `MarginSimulationResponse` | Simulates daily margin path and margin call triggers (`backend/proto/finance.proto:80`). |
-| `ComputeHedge` | `HedgeRequest` | `HedgeResponse` | Minimum-variance hedge ratio and contract sizing (`backend/proto/finance.proto:81`). |
-| `ComputeCommoditySpread` | `CommoditySpreadRequest` | `DoubleResponse` | Crack, spark, or crush commodity spread processing margin (`backend/proto/finance.proto:82`). |
-| `ComputeRentalRoi` | `RentalRoiRequest` | `RentalRoiResponse` | Real estate NOI, cash flow, cap rate, and CoC return (`backend/proto/finance.proto:85`). |
-| `ComputeHomeFutureValue` | `HomeFutureValueRequest` | `HomeFutureValueResponse` | Projected property value, remaining balance, and equity (`backend/proto/finance.proto:86`). |
-| `ComputeRentVsBuy` | `RentVsBuyRequest` | `RentVsBuyResponse` | Rent vs buy wealth and cost comparison (`backend/proto/finance.proto:87`). |
-| `ComputeRentVsBuyBatch` | `RentVsBuyBatchRequest` | `RentVsBuyBatchResponse` | Batch rent vs buy scenarios for corpus generation (`backend/proto/finance.proto:88`). |
-| `ComputeHomeNpv` | `HomeNpvRequest` | `HomeNpvResponse` | Lifetime homeownership NPV and IRR (`backend/proto/finance.proto:89`). |
-| `ComputeClosingCosts` | `ClosingCostsRequest` | `ClosingCostsResponse` | Itemized buyer closing costs, prepaids, escrow, and cash to close (`backend/proto/finance.proto:90`). |
-| `RefreshStateAssumptions` | `RefreshStateAssumptionsRequest` | `RefreshStateAssumptionsResponse` | Triggers automated US Census ACS state housing data refresh (`backend/proto/finance.proto:91`). |
-| `GetStateAssumptions` | `GetStateAssumptionsRequest` | `GetStateAssumptionsResponse` | Reads state housing and tax reference assumptions (`backend/proto/finance.proto:92`). |
-| `PriceOptionTree` | `OptionTreeRequest` | `OptionPricingResponse` | Trinomial tree pricer for American, Bermudan, and Asian options (`backend/proto/finance.proto:95`). |
-| `PriceBlackScholes` | `BlackScholesRequest` | `BlackScholesResponse` | Closed-form European option value and complete 1st-3rd order Greeks (`backend/proto/finance.proto:96`). |
-| `PriceOptionMonteCarlo` | `MonteCarloRequest` | `DoubleResponse` | Monte Carlo pricing for European and Asian options (`backend/proto/finance.proto:97`). |
-| `ComputeProbabilityTree` | `ProbabilityTreeRequest` | `ProbabilityTreeResponse` | Trinomial probability distribution tree (`backend/proto/finance.proto:98`). |
-| `ComputePortfolioStats` | `PortfolioStatsRequest` | `PortfolioStatsResponse` | Sharpe, Sortino, Treynor, alpha, beta, and historical/parametric VaR/CVaR (`backend/proto/finance.proto:101`). |
-| `OptimizePortfolio` | `PortfolioOptimizeRequest` | `PortfolioOptimizeResponse` | Mean-variance or maximum Sharpe portfolio optimization (`backend/proto/finance.proto:102`). |
-| `ComputeRiskContributions` | `RiskContributionRequest` | `RiskContributionResponse` | Marginal component risk contributions decomposing portfolio risk (`backend/proto/finance.proto:103`). |
+| `ComputePayment` | `PaymentRequest` | `DecimalResponse` | Periodic annuity payment (PMT) (`backend/proto/finance.proto:45`). |
+| `ComputePresentValue` | `PresentValueRequest` | `DecimalResponse` | Present value of an annuity (PV) (`backend/proto/finance.proto:46`). |
+| `ComputeFutureValue` | `FutureValueRequest` | `DecimalResponse` | Future value of an annuity (FV) (`backend/proto/finance.proto:47`). |
+| `ComputeFutureValueDetailed` | `FutureValueDetailedRequest` | `FutureValueDetailedResponse` | Investment future value with contributions and inflation adjustments (`backend/proto/finance.proto:48`). |
+| `ComputeInterestPayment` | `PeriodPaymentRequest` | `DecimalResponse` | Interest portion of a specific period's payment (IPMT) (`backend/proto/finance.proto:49`). |
+| `ComputePrincipalPayment` | `PeriodPaymentRequest` | `DecimalResponse` | Principal portion of a specific period's payment (PPMT) (`backend/proto/finance.proto:50`). |
+| `ComputeRate` | `RateRequest` | `DecimalResponse` | Solves for per-period interest rate (RATE) (`backend/proto/finance.proto:51`). |
+| `ComputePeriods` | `PeriodsRequest` | `DecimalResponse` | Solves for number of payment periods (NPER) (`backend/proto/finance.proto:52`). |
+| `ConvertInterestRate` | `RateConversionRequest` | `DoubleResponse` | Nominal to effective or effective to nominal rate conversion (`backend/proto/finance.proto:53`). |
+| `ComputeFisherRate` | `FisherRequest` | `DoubleResponse` | Exact Fisher equation rate conversion (`backend/proto/finance.proto:54`). |
+| `ComputeAmortization` | `AmortizationRequest` | `AmortizationResponse` | Full mortgage amortization schedule and summary (`backend/proto/finance.proto:57`). |
+| `ComputeDetailedAmortization` | `DetailedAmortizationRequest` | `DetailedAmortizationResponse` | Amortization schedule including tax savings breakdown (`backend/proto/finance.proto:58`). |
+| `ComputeAmortizationBatch` | `AmortizationBatchRequest` | `AmortizationBatchResponse` | High-throughput batch amortization summaries (`backend/proto/finance.proto:59`). |
+| `ComputeHeloc` | `HelocRequest` | `HelocResponse` | HELOC available borrowing equity and payments (`backend/proto/finance.proto:60`). |
+| `ComputeRefinance` | `RefinanceRequest` | `RefinanceResponse` | Mortgage refinance comparison and breakeven horizons (`backend/proto/finance.proto:61`). |
+| `ComputePayoffTiming` | `PayoffTimingRequest` | `PayoffTimingResponse` | Accelerated mortgage payoff timeline with extra payments (`backend/proto/finance.proto:62`). |
+| `ComputeMortgageRecast` | `MortgageRecastRequest` | `MortgageRecastResponse` | Loan recast payment reduction following lump-sum principal reduction (`backend/proto/finance.proto:63`). |
+| `ComputeNpv` | `NpvRequest` | `DoubleResponse` | Net present value for periodic cash flows (`backend/proto/finance.proto:66`). |
+| `ComputeIrr` | `IrrRequest` | `DoubleResponse` | Internal rate of return for periodic cash flows (`backend/proto/finance.proto:67`). |
+| `ComputeXnpv` | `DatedCashFlowRequest` | `DoubleResponse` | Net present value for irregularly dated cash flows (`backend/proto/finance.proto:68`). |
+| `ComputeXirr` | `DatedCashFlowRequest` | `DoubleResponse` | Internal rate of return for irregularly dated cash flows (`backend/proto/finance.proto:69`). |
+| `ComputePaybackPeriod` | `PaybackRequest` | `DoubleResponse` | Plain or discounted payback period (`backend/proto/finance.proto:70`). |
+| `ComputeCumulative` | `CumulativeRequest` | `DoubleResponse` | Cumulative principal or interest paid between periods (`backend/proto/finance.proto:71`). |
+| `ComputeDepreciation` | `DepreciationRequest` | `DoubleResponse` | Depreciation charges (SLN, SYD, DDB, MACRS) (`backend/proto/finance.proto:74`). |
+| `AnalyzeBond` | `BondRequest` | `BondResponse` | Bond pricing, yield to maturity, duration, and convexity (`backend/proto/finance.proto:77`). |
+| `AnalyzeTreasuryBill` | `TreasuryBillRequest` | `TreasuryBillResponse` | T-bill pricing and yields (BEY, MMY, BDY) (`backend/proto/finance.proto:78`). |
+| `PriceFutures` | `FuturesPricingRequest` | `DoubleResponse` | Cost-of-carry futures price (`backend/proto/finance.proto:81`). |
+| `ValueFutures` | `FuturesValuationRequest` | `DoubleResponse` | Mark-to-market futures contract valuation (`backend/proto/finance.proto:82`). |
+| `SimulateMarginAccount` | `MarginSimulationRequest` | `MarginSimulationResponse` | Simulates daily margin path and margin call triggers (`backend/proto/finance.proto:83`). |
+| `ComputeHedge` | `HedgeRequest` | `HedgeResponse` | Minimum-variance hedge ratio and contract sizing (`backend/proto/finance.proto:84`). |
+| `ComputeCommoditySpread` | `CommoditySpreadRequest` | `DoubleResponse` | Crack, spark, or crush commodity spread processing margin (`backend/proto/finance.proto:85`). |
+| `ComputeRentalRoi` | `RentalRoiRequest` | `RentalRoiResponse` | Real estate NOI, cash flow, cap rate, and CoC return (`backend/proto/finance.proto:88`). |
+| `ComputeRentalCashFlow` | `RentalCashFlowRequest` | `RentalCashFlowResponse` | Multi-year rental cash flow, vacancy, operating expenses, debt service, equity accumulation, and sale proceeds (`backend/proto/finance.proto:89`). |
+| `ComputeHomeFutureValue` | `HomeFutureValueRequest` | `HomeFutureValueResponse` | Projected property value, remaining balance, and equity (`backend/proto/finance.proto:90`). |
+| `ComputeRentVsBuy` | `RentVsBuyRequest` | `RentVsBuyResponse` | Rent vs buy wealth and cost comparison (`backend/proto/finance.proto:91`). |
+| `ComputeRentVsBuyBatch` | `RentVsBuyBatchRequest` | `RentVsBuyBatchResponse` | Batch rent vs buy scenarios for corpus generation (`backend/proto/finance.proto:92`). |
+| `ComputeHomeNpv` | `HomeNpvRequest` | `HomeNpvResponse` | Lifetime homeownership NPV and IRR (`backend/proto/finance.proto:93`). |
+| `ComputeClosingCosts` | `ClosingCostsRequest` | `ClosingCostsResponse` | Itemized buyer closing costs, prepaids, escrow, and cash to close (`backend/proto/finance.proto:94`). |
+| `ExplainMortgage` | `ExplainMortgageRequest` | `ExplainMortgageResponse` | Itemised plain-language points explaining a mortgage scenario: PMI facts, then the scenario's totals (`backend/proto/finance.proto:95`). |
+| `RefreshStateAssumptions` | `RefreshStateAssumptionsRequest` | `RefreshStateAssumptionsResponse` | Triggers automated US Census ACS state housing data refresh (`backend/proto/finance.proto:96`). |
+| `GetStateAssumptions` | `GetStateAssumptionsRequest` | `GetStateAssumptionsResponse` | Reads state housing and tax reference assumptions (`backend/proto/finance.proto:97`). |
+| `PriceOptionTree` | `OptionTreeRequest` | `OptionPricingResponse` | Trinomial tree pricer for American, Bermudan, and Asian options (`backend/proto/finance.proto:100`). |
+| `PriceBlackScholes` | `BlackScholesRequest` | `BlackScholesResponse` | Closed-form European option value and complete 1st-3rd order Greeks (`backend/proto/finance.proto:101`). |
+| `PriceOptionMonteCarlo` | `MonteCarloRequest` | `DoubleResponse` | Monte Carlo pricing for European and Asian options (`backend/proto/finance.proto:102`). |
+| `ComputeProbabilityTree` | `ProbabilityTreeRequest` | `ProbabilityTreeResponse` | Trinomial probability distribution tree (`backend/proto/finance.proto:103`). |
+| `ComputePortfolioStats` | `PortfolioStatsRequest` | `PortfolioStatsResponse` | Sharpe, Sortino, Treynor, alpha, beta, and historical/parametric VaR/CVaR (`backend/proto/finance.proto:106`). |
+| `OptimizePortfolio` | `PortfolioOptimizeRequest` | `PortfolioOptimizeResponse` | Mean-variance or maximum Sharpe portfolio optimization (`backend/proto/finance.proto:107`). |
+| `ComputeRiskContributions` | `RiskContributionRequest` | `RiskContributionResponse` | Marginal component risk contributions decomposing portfolio risk (`backend/proto/finance.proto:108`). |
 
 ### Message and field inventory
 
@@ -362,6 +364,9 @@ Exposes general-purpose financial mathematics: time value of money (TVM), mortga
 - `PayoffTimingResponse`: `original_months_remaining` (`int32`), `new_months_remaining` (`int32`), `months_saved` (`int32`), `total_interest_saved` (`string`).
 - `MortgageRecastRequest`: `current_loan_balance` (`string`), `current_monthly_payment` (`string`), `lump_sum_payment` (`string`), `annual_rate` (`string`), `remaining_months` (`int32`), `payments_per_year` (`int32`, 0 rejected).
 - `MortgageRecastResponse`: `new_monthly_payment` (`string`), `monthly_savings` (`string`).
+- `ExplainMortgageRequest`: `loan_amount` (`string`), `annual_rate` (`string`), `term_months` (`int32`), `monthly_overpayment` (`string`), `pmi_annual_rate` (`string`), `original_home_value` (`string`), `annual_tax_rate` (`string`), `annual_repairs` (`string`), `annual_insurance` (`string`), `annual_cost_growth` (`string`), `heloc_drawn_amount` (`string`), `heloc_annual_rate` (`string`), `heloc_term_years` (`int32`), `pmi_drop_off_ltv` (`string`), `annual_appreciation` (`string`) (`backend/proto/finance.proto:1429-1449`).
+- `ExplanationPoint`: `topic` (`string`, stable dotted identifier, e.g. "pmi.termination"), `text` (`string`, explanation prose), `item` (`int32`, 1-based display ordinal), `field` (`string`, the output line the point is about), `value` (`string`, exact computed figure string) (`backend/proto/finance.proto:1451-1463`).
+- `ExplainMortgageResponse`: `points` (`repeated ExplanationPoint`) (`backend/proto/finance.proto:1465-1467`).
 
 #### Cash Flow & Depreciation Messages (`backend/proto/finance.proto:418-492`)
 - `NpvRequest`: `rate` (`double`), `values` (`repeated double`).
@@ -386,9 +391,12 @@ Exposes general-purpose financial mathematics: time value of money (TVM), mortga
 - `HedgeResponse`: `hedge_ratio` (`double`), `contracts` (`double`, 0 if sizing unstated), `contracts_computed` (`bool`).
 - `CommoditySpreadRequest`: `spread` (`Spread`: `CRACK_321=0`, `SPARK=1`, `CRUSH=2`), `a` (`double`), `b` (`double`), `c` (`double`). For Crack: a=crude, b=gasoline, c=heating oil; for Spark: a=power, b=gas, c=heat rate; for Crush: a=soybean, b=oil, c=meal (`backend/proto/finance.proto:615-620`).
 
-#### Real Estate Messages (`backend/proto/finance.proto:627-856`)
+#### Real Estate Messages
 - `RentalRoiRequest`: `property_value` (`string`), `total_cash_invested` (`string`), `periodic_gross_rent` (`string`), `periodic_operating_expenses` (`string`, non-debt expenses only), `periodic_mortgage_payment` (`string`), `periods_per_year` (`int32`).
 - `RentalRoiResponse`: `net_operating_income` (`string`), `annual_cash_flow` (`string`), `cash_on_cash_return` (`string`), `cap_rate` (`string`), `gross_rent_multiplier` (`string`).
+- `RentalCashFlowRequest`: `property_price` (`string`), `down_payment` (`string`), `closing_costs` (`string`), `loan_annual_rate` (`string`), `loan_term_years` (`int32`), `monthly_gross_rent` (`string`), `annual_rent_increase` (`string`), `occupancy_rate` (`string`, 0 means fully occupied / 100% occupancy), `annual_property_tax` (`string`), `annual_insurance` (`string`), `annual_repairs` (`string`), `annual_capex_reserve` (`string`), `monthly_hoa` (`string`), `management_fee_rate` (`string`, share of collected rent), `annual_other_expenses` (`string`), `annual_expense_increase` (`string`), `annual_appreciation` (`string`), `selling_cost_percent` (`string`), `years` (`int32`), `heloc_drawn_amount` (`string`), `heloc_annual_rate` (`string`), `heloc_term_years` (`int32`) (`backend/proto/finance.proto:871-908`).
+- `RentalCashFlowRow`: `year` (`int32`), `gross_scheduled_rent` (`string`), `vacancy_loss` (`string`), `effective_gross_income` (`string`), `operating_expenses` (`string`), `net_operating_income` (`string`), `mortgage_debt_service` (`string`), `heloc_debt_service` (`string`), `cash_flow` (`string`), `cumulative_cash_flow` (`string`), `loan_balance` (`string`), `property_value` (`string`), `equity` (`string`) (`backend/proto/finance.proto:910-927`).
+- `RentalCashFlowResponse`: `rows` (`repeated RentalCashFlowRow`), `own_cash_invested` (`string`), `total_cash_to_close` (`string`), `year_one_noi` (`string`), `cap_rate` (`string`), `cash_on_cash` (`string`), `cash_on_cash_defined` (`bool`), `debt_service_coverage` (`string`), `debt_service_coverage_defined` (`bool`), `total_cash_flow` (`string`), `sale_price` (`string`), `sale_proceeds` (`string`), `total_profit` (`string`), `any_year_negative` (`bool`) (`backend/proto/finance.proto:929-949`).
 - `HomeFutureValueRequest`: `current_property_value` (`string`), `annual_appreciation_rate` (`string`), `current_loan_balance` (`string`), `annual_mortgage_rate` (`string`), `current_monthly_payment` (`string`), `target_years` (`int32`), `payments_per_year` (`int32`, 0 rejected).
 - `HomeFutureValueResponse`: `future_property_value` (`double`), `future_loan_balance` (`string`), `future_equity` (`string`).
 - `RentVsBuyRequest`: `property_price` (`string`), `down_payment` (`string`), `monthly_piti_and_maintenance` (`string`, legacy aggregate; triggers legacy model if used alone, `backend/proto/finance.proto:670-679`), `annual_home_appreciation` (`string`), `current_monthly_rent` (`string`), `annual_rent_increase` (`string`), `annual_investment_return` (`string`), `years` (`int32`), `loan_annual_rate` (`string`, defaults to 0), `loan_term_years` (`int32`, omitted defaults to 30, `backend/proto/finance.proto:693-696`), `loan_amount` (`string`), `monthly_taxes_ins_maintenance` (`string`), `closing_costs_buy` (`string`), `selling_cost_percent` (`string`, omitted defaults to 0, `backend/proto/finance.proto:711-718`), `annual_inflation_rate` (`string`).
@@ -548,7 +556,7 @@ Contains `reason` (`Reason`: `REASON_UNSPECIFIED=0`, `UNSUPPORTED_OPERATION=1`, 
 
 ## HTTP edge mapping (JSON transcoder paths)
 
-All 55 gRPC RPCs across the four services are accessible through Envoy's `grpc_json_transcoder` filter (`backend/envoy.yaml:154-170`) using HTTP `POST` at `https://api.optionsandfuturescalculator.com`.
+All 57 gRPC RPCs across the four services are accessible through Envoy's `grpc_json_transcoder` filter (`backend/envoy.yaml`) using HTTP `POST` at `https://api.optionsandfuturescalculator.com`.
 
 | Package / Service | RPC Method | HTTP Method and Transcoder Path |
 | --- | --- | --- |
@@ -591,11 +599,13 @@ All 55 gRPC RPCs across the four services are accessible through Envoy's `grpc_j
 | `sensen.finance.Finance` | `ComputeHedge` | `POST /sensen.finance.Finance/ComputeHedge` |
 | `sensen.finance.Finance` | `ComputeCommoditySpread` | `POST /sensen.finance.Finance/ComputeCommoditySpread` |
 | `sensen.finance.Finance` | `ComputeRentalRoi` | `POST /sensen.finance.Finance/ComputeRentalRoi` |
+| `sensen.finance.Finance` | `ComputeRentalCashFlow` | `POST /sensen.finance.Finance/ComputeRentalCashFlow` |
 | `sensen.finance.Finance` | `ComputeHomeFutureValue` | `POST /sensen.finance.Finance/ComputeHomeFutureValue` |
 | `sensen.finance.Finance` | `ComputeRentVsBuy` | `POST /sensen.finance.Finance/ComputeRentVsBuy` |
 | `sensen.finance.Finance` | `ComputeRentVsBuyBatch` | `POST /sensen.finance.Finance/ComputeRentVsBuyBatch` |
 | `sensen.finance.Finance` | `ComputeHomeNpv` | `POST /sensen.finance.Finance/ComputeHomeNpv` |
 | `sensen.finance.Finance` | `ComputeClosingCosts` | `POST /sensen.finance.Finance/ComputeClosingCosts` |
+| `sensen.finance.Finance` | `ExplainMortgage` | `POST /sensen.finance.Finance/ExplainMortgage` |
 | `sensen.finance.Finance` | `RefreshStateAssumptions` | `POST /sensen.finance.Finance/RefreshStateAssumptions` |
 | `sensen.finance.Finance` | `GetStateAssumptions` | `POST /sensen.finance.Finance/GetStateAssumptions` |
 | `sensen.finance.Finance` | `PriceOptionTree` | `POST /sensen.finance.Finance/PriceOptionTree` |

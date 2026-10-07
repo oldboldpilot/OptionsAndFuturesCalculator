@@ -26,12 +26,16 @@ Configuration, all environment variables read at startup:
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `MODEL_PATH` | none | Absolute path to the Q8_0 GGUF. Unset ⇒ the assistant returns a Refusal on every call. |
+| `MODEL_PATH` | none | Absolute path to the Q8_0 GGUF decoder weights. Unset ⇒ the assistant returns a Refusal on every call (unless served via a shared inference queue). |
 | `ASSISTANT_BACKEND` | `sensen` | `sensen` or `llamacpp`. Production runs `sensen`. |
-| `ASSISTANT_CONTEXT_TOKENS` | 4096 | KV cache is F16/Q8; see CLAUDE.md. |
-| `ASSISTANT_INFERENCE_THREADS` | 4 | |
-| `ASSISTANT_MAX_CONCURRENT` | 4 | Scheduler slots, not threads. |
-| `ASSISTANT_QUEUE_DEPTH` | 8 | |
+| `ASSISTANT_DEVICE` | `cpu` | `cpu` or `cuda`. Requesting `cuda` on a build without CUDA leaves the assistant unavailable (a Refusal on every call); on a CUDA build with no usable device it logs an error and serves on CPU. |
+| `STRATEGY_WEIGHT_STORE` | `dense` | Weight storage format: `dense`, `llq`, or `llq-fused`. An unrecognised value stops the engine at boot. |
+| `ASSISTANT_MODEL` | `qwen3` | `qwen3` (fine-tuned decoder) or `encoder` (small bidirectional encoder). An unrecognised value stops the engine at boot. |
+| `STRATEGY_ENCODER_PATH` | none | Absolute path to the encoder GGUF when `ASSISTANT_MODEL=encoder`. |
+| `ASSISTANT_CONTEXT_TOKENS` | 4096 | KV cache is F16/Q8; sized per concurrent slot. |
+| `ASSISTANT_INFERENCE_THREADS` | 4 | Internal thread fan-out per forward pass. |
+| `ASSISTANT_MAX_CONCURRENT` | 4 | Concurrent decoding scheduler slots. |
+| `ASSISTANT_QUEUE_DEPTH` | 8 | How many requests may wait for a slot. |
 
 The backend selection is deliberately not self-correcting: asking for a backend
 that fails to initialise leaves the assistant unavailable rather than quietly

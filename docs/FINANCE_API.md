@@ -4,7 +4,7 @@
 ## Scope
 
 This document covers the public API surface, wire conventions, validation rules, authentication, quotas, and integration patterns for the financial calculation service defined across:
-- `backend/proto/finance.proto` (package `sensen.finance`, service `Finance`: 46 RPCs)
+- `backend/proto/finance.proto` (package `sensen.finance`, service `Finance`: 48 RPCs)
 - `backend/src/modules/finance_service.cppm` and `backend/src/modules/finance_service.cpp` (service implementation, validation bounds, shape dispatch, and error mapping)
 - `backend/src/modules/quota.cppm` and `backend/src/modules/quota.cpp` (quota policy, metering, and cost calculation)
 - `backend/src/modules/api_key.cppm` and `backend/src/modules/api_key.cpp` (API key authentication, origin validation, and entitlement gating)
@@ -277,17 +277,17 @@ can tell an absent beta from a measured beta of zero.
 
 ## 6. What is available
 
-Roughly fifty functions. — *Correction: The service declares exactly 46 RPCs (`backend/proto/finance.proto:40-104`). The inventory below previously omitted eight home-finance and real estate methods (`ComputeRefinance`, `ComputePayoffTiming`, `ComputeMortgageRecast`, `ComputeHomeFutureValue`, `ComputeRentVsBuy`, `ComputeRentVsBuyBatch`, `ComputeHomeNpv`, `ComputeClosingCosts`) that were added to the contract; they are restored in place below.* See `backend/proto/finance.proto` for the full list.
+Roughly fifty functions: the service declares exactly 48 RPCs, and the inventory below lists all of them. See `backend/proto/finance.proto` for the full contract.
 
 | Area | RPCs |
 | --- | --- |
 | Time value of money | `ComputePayment` `ComputePresentValue` `ComputeFutureValue` `ComputeFutureValueDetailed` `ComputeInterestPayment` `ComputePrincipalPayment` `ComputeRate` `ComputePeriods` `ConvertInterestRate` `ComputeFisherRate` |
-| Mortgages, HELOC, Refinance | `ComputeAmortization` `ComputeDetailedAmortization` (tax deductions) `ComputeAmortizationBatch` `ComputeHeloc` `ComputeRefinance` `ComputePayoffTiming` `ComputeMortgageRecast` |
+| Mortgages, HELOC, Refinance | `ComputeAmortization` `ComputeDetailedAmortization` (tax deductions) `ComputeAmortizationBatch` `ComputeHeloc` `ComputeRefinance` `ComputePayoffTiming` `ComputeMortgageRecast` `ExplainMortgage` |
 | Cash flow | `ComputeNpv` `ComputeIrr` `ComputeXnpv` `ComputeXirr` `ComputePaybackPeriod` `ComputeCumulative` |
 | Depreciation | `ComputeDepreciation` (SLN, SYD, DDB, MACRS) |
 | Fixed income | `AnalyzeBond` (price, yield, duration, convexity) `AnalyzeTreasuryBill` (price + BEY/MMY/BDY) |
 | Futures | `PriceFutures` `ValueFutures` `SimulateMarginAccount` `ComputeHedge` `ComputeCommoditySpread` |
-| Real estate | `ComputeRentalRoi` `ComputeHomeFutureValue` `ComputeRentVsBuy` `ComputeRentVsBuyBatch` `ComputeHomeNpv` `ComputeClosingCosts` |
+| Real estate | `ComputeRentalRoi` `ComputeRentalCashFlow` `ComputeHomeFutureValue` `ComputeRentVsBuy` `ComputeRentVsBuyBatch` `ComputeHomeNpv` `ComputeClosingCosts` |
 | State assumptions | `GetStateAssumptions` (open) `RefreshStateAssumptions` (**partner only — the one write on this service**) |
 | Options | `PriceOptionTree` (American/Bermudan/Asian) `PriceBlackScholes` (11 Greeks) `PriceOptionMonteCarlo` `ComputeProbabilityTree` |
 | Portfolio | `ComputePortfolioStats` `OptimizePortfolio` `ComputeRiskContributions` |
@@ -321,7 +321,7 @@ apart from "the RPC did not happen", and a status code collapses those. See
 
 ### Extended home finance and real estate RPCs
 
-Eight methods in `sensen.finance.Finance` provide mortgage refinancing, acceleration timing, recasting, real estate forecasting, rent-vs-buy comparison, and itemized closing cost analysis.
+Ten methods in `sensen.finance.Finance` provide mortgage refinancing, acceleration timing, recasting, mortgage explanation, real estate forecasting, rental cash flow, rent-vs-buy comparison, and itemized closing cost analysis.
 
 #### `ComputeRefinance`
 
@@ -927,7 +927,129 @@ curl -X POST https://api.optionsandfuturescalculator.com/sensen.finance.Finance/
 - `FAILED_PRECONDITION`:
   - Engine calculation failure inside `sensen::calculate_closing_costs` returns `FAILED_PRECONDITION` via `fail(r)` (`:3406`).
 
+#### `ComputeRentalCashFlow`
+
+Generates a multi-year rental property projection: year-by-year cash flow, equity accumulation, and investor return metrics including Net Operating Income (NOI), capitalization rate, cash-on-cash return, debt service coverage ratio (DSCR), and net exit proceeds.
+
+Priced in quota via `quota::cost_default()`.
+
+**Required fields:**
+- `property_price`: Purchase price of the investment property (decimal string, must be positive).
+- `monthly_gross_rent`: Initial monthly scheduled rent (decimal string).
+- `years`: Projection period in years (`int32`, 1 to 100).
+- `loan_term_years`: Primary mortgage duration in years (`int32`). The service admits 0 to 100 but the engine refuses anything below 1, so send 1 to 100.
+
+**Optional fields** (an omitted decimal is `0`):
+- `down_payment`: Cash paid towards the purchase (cannot exceed `property_price`).
+- `closing_costs`: Buyer acquisition and settlement costs.
+- `loan_annual_rate`: Primary mortgage nominal annual interest rate.
+- `annual_rent_increase`: Annual rent growth rate (e.g. `"0.03"`).
+- `occupancy_rate`: Share of the year the unit is let (e.g. `"0.92"` for 8% vacancy; between 0 and 1). `0` means **fully occupied (100%)**, so an unstated occupancy cannot produce worst-case zero rental income.
+- `annual_property_tax`, `annual_insurance`, `annual_repairs`, `annual_capex_reserve`, `monthly_hoa`, `annual_other_expenses`: Operating expenses.
+- `management_fee_rate`: Property management fee as a share of *collected* rent (between 0 and 1).
+- `annual_expense_increase`: Annual escalation rate applied to operating expenses (not to debt service).
+- `annual_appreciation`: Annual property value appreciation rate.
+- `selling_cost_percent`: Selling costs at exit, as a share of the sale price.
+- `heloc_drawn_amount`, `heloc_annual_rate`, `heloc_term_years`: A HELOC on *another* property that funds part of the cash to close. It adds a second debt service and reduces the investor's own cash, and never touches this loan's balance or this property's equity. `heloc_term_years` is `0` to `100`; the engine amortises the draw over that term, so a draw sent with no term carries no debt service.
+
+**Output fields (`RentalCashFlowResponse`):**
+- `rows`: One `RentalCashFlowRow` per year: `year`, `gross_scheduled_rent`, `vacancy_loss`, `effective_gross_income`, `operating_expenses`, `net_operating_income`, `mortgage_debt_service`, `heloc_debt_service`, `cash_flow`, `cumulative_cash_flow`, `loan_balance`, `property_value`, and `equity`.
+- `own_cash_invested`: `down_payment + closing_costs - heloc_drawn_amount`, floored at zero.
+- `total_cash_to_close`: `down_payment + closing_costs`.
+- `year_one_noi`: Year-one NOI, which excludes debt service.
+- `cap_rate`: `year_one_noi / property_price`.
+- `cash_on_cash`: Year-one cash flow divided by `own_cash_invested`.
+- `cash_on_cash_defined`: `false` when `own_cash_invested` is not positive (a fully funded purchase), where a return on zero is not a number.
+- `debt_service_coverage`: Year-one NOI divided by year-one total debt service (mortgage plus HELOC).
+- `debt_service_coverage_defined`: `false` when year-one debt service is zero.
+- `total_cash_flow`: Cumulative cash flow over the projection.
+- `sale_price`, `sale_proceeds`, `total_profit`: Final-year property value; that value less selling costs less the remaining loan balance; and `sale_proceeds + total_cash_flow - total_cash_to_close`.
+- `any_year_negative`: `true` when any year's cash flow is negative.
+
+**Refusals and validation errors (`INVALID_ARGUMENT`):**
+- `years <= 0 || years > 100`: `"years must be positive and at most 100"`.
+- `loan_term_years < 0 || loan_term_years > 100`: `"loan_term_years must be between 0 and 100"`.
+- `heloc_term_years < 0 || heloc_term_years > 100`: `"heloc_term_years must be between 0 and 100"`.
+- A missing or malformed `property_price` or `monthly_gross_rent`, or any malformed decimal.
+- A loan or HELOC rate and term whose compounding factor is too extreme to price.
+- Engine refusals, returned verbatim: `property_price must be positive`, `loan_term_years must be between 1 and 100`, `occupancy_rate must be between 0 and 1`, `management_fee_rate must be between 0 and 1`, `down_payment cannot exceed property_price`.
+
+```bash
+curl -X POST https://api.optionsandfuturescalculator.com/sensen.finance.Finance/ComputeRentalCashFlow \
+  -H "Content-Type: application/json" \
+  -d '{
+    "property_price": "450000",
+    "down_payment": "90000",
+    "closing_costs": "12000",
+    "loan_annual_rate": "0.065",
+    "loan_term_years": 30,
+    "monthly_gross_rent": "3200",
+    "annual_rent_increase": "0.03",
+    "occupancy_rate": "0.95",
+    "annual_property_tax": "5400",
+    "annual_insurance": "1800",
+    "annual_repairs": "2500",
+    "annual_capex_reserve": "2000",
+    "management_fee_rate": "0.08",
+    "annual_expense_increase": "0.025",
+    "annual_appreciation": "0.035",
+    "selling_cost_percent": "0.06",
+    "years": 10
+  }'
+```
+
 ---
+
+#### `ExplainMortgage`
+
+Takes the same scenario as `ComputeDetailedAmortization` and returns an itemised list of plain-language points: first the PMI facts (when it ends, what it costs in total, and what an overpayment changes), then the scenario's totals (interest over the life of the loan, repairs, your own insurance cover, tax saved on the interest deduction, HELOC interest, and total cost of ownership), with the empty columns left out. Every figure in a sentence is a figure the amortisation computed.
+
+Priced in quota via `quota::cost_amortization(term_months)`.
+
+**Required fields:**
+- `loan_amount`: Total principal borrowed (decimal string).
+- `annual_rate`: Nominal annual interest rate (decimal string).
+- `term_months`: Amortization duration in months (`int32`, 1 to 1200).
+
+**Optional fields** (an omitted decimal is `0`):
+- `monthly_overpayment`: Regular monthly principal prepayment.
+- `pmi_annual_rate`: Annual private mortgage insurance premium rate.
+- `original_home_value`: The value PMI drop-off is measured against.
+- `pmi_drop_off_ltv`: Loan-to-value threshold at which PMI ends (e.g. `"0.80"`).
+- `annual_appreciation`: Home price growth rate; when positive, PMI is measured against the appreciated value.
+- `annual_tax_rate`: Tax rate used for the interest-deduction saving.
+- `annual_repairs`, `annual_insurance`, `annual_cost_growth`: Carrying cost assumptions.
+- `heloc_drawn_amount`, `heloc_annual_rate`, `heloc_term_years`: A HELOC, amortised independently of the loan, whose interest is itemised and included in total cost of ownership.
+
+**Output fields (`ExplainMortgageResponse`):**
+- `points`: Repeated list of `ExplanationPoint` records:
+  - `topic`: Stable machine-readable identifier to key on instead of the sentence: `pmi.none`, `pmi.termination`, `pmi.full_term`, `pmi.cost` or `pmi.overpayment` for the PMI points, and `ComputeDetailedAmortization.<field>` for the totals (for example `ComputeDetailedAmortization.total_interest_paid`).
+  - `text`: The explanatory sentence.
+  - `item`: 1-based display ordinal across all points.
+  - `field`: The output line the point is about.
+  - `value`: That line's figure, exactly as computed.
+
+**Refusals and validation errors (`INVALID_ARGUMENT`):**
+- `term_months <= 0 || term_months > 1200`: `"term_months must be between 1 and 1200"`.
+- `heloc_drawn_amount < 0 || heloc_annual_rate < 0`: `"HELOC amount and rate cannot be negative"`.
+- `heloc_term_years < 0 || heloc_term_years > 100`: `"heloc_term_years must be between 0 and 100"`.
+- `heloc_drawn_amount > 0 && heloc_term_years == 0`: `"heloc_drawn_amount needs heloc_term_years: a draw with no repayment term costs nothing, which makes borrowing look free"`.
+- An `annual_rate` and term whose compounding factor is too extreme to price.
+- A missing `loan_amount` or `annual_rate`, or any malformed decimal.
+
+```bash
+curl -X POST https://api.optionsandfuturescalculator.com/sensen.finance.Finance/ExplainMortgage \
+  -H "Content-Type: application/json" \
+  -d '{
+    "loan_amount": "320000",
+    "annual_rate": "0.0625",
+    "term_months": 360,
+    "original_home_value": "400000",
+    "pmi_annual_rate": "0.0075",
+    "pmi_drop_off_ltv": "0.80",
+    "monthly_overpayment": "200"
+  }'
+```
 
 ---
 

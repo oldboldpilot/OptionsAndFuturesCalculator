@@ -73,16 +73,16 @@ The calculator frontend is structured around a centralized reactive store (`fron
 
 ## 2. Finance service features
 
-The general-purpose sensen financial engine is exposed via `sensen.finance.Finance` (`backend/proto/finance.proto`). It comprises **46 RPCs** categorized across 12 distinct functional domains. 
+The general-purpose sensen financial engine is exposed via `sensen.finance.Finance` (`backend/proto/finance.proto`). It comprises **48 RPCs** categorized across 12 distinct functional domains. 
 
 All money values in `finance.proto` are represented as decimal `string`s mapping directly to `sensen::BigDecimal` (`Int256` fixed-point scaled by $10^{38}$ since 2026-09-23; `__int128` at $10^{18}$ before), preventing binary float compounding errors over multi-decade amortizations.
 
 ```
-Domain Breakdown (46 RPCs):
+Domain Breakdown (48 RPCs):
 ├── Time value of money (10 RPCs)
-├── Mortgages & Amortisation (5 RPCs)
+├── Mortgages & Amortisation (6 RPCs)
 ├── HELOC & Refinance (2 RPCs)
-├── Real Estate & Rent-vs-Buy (5 RPCs)
+├── Real Estate & Rent-vs-Buy (6 RPCs)
 ├── Cash-Flow Analysis, NPV & IRR (6 RPCs)
 ├── Depreciation (1 RPC)
 ├── Fixed Income, Bonds & T-Bills (2 RPCs)
@@ -106,26 +106,28 @@ Domain Breakdown (46 RPCs):
 - **`ComputeFisherRate`** (`FisherRequest` $\to$ `DoubleResponse`)
 *Summary*: Computes discrete and continuous compounding, annuity cash flows, principal/interest period allocations, Newton-Raphson interest rate and term solves, and inflation-adjusted Fisher real rates.
 
-### 2. Amortisation and mortgage (5 RPCs)
+### 2. Amortisation and mortgage (6 RPCs)
 - **`ComputeAmortization`** (`AmortizationRequest` $\to$ `AmortizationResponse`)
 - **`ComputeDetailedAmortization`** (`DetailedAmortizationRequest` $\to$ `DetailedAmortizationResponse`)
 - **`ComputeAmortizationBatch`** (`AmortizationBatchRequest` $\to$ `AmortizationBatchResponse`)
 - **`ComputePayoffTiming`** (`PayoffTimingRequest` $\to$ `PayoffTimingResponse`)
 - **`ComputeMortgageRecast`** (`MortgageRecastRequest` $\to$ `MortgageRecastResponse`)
-*Summary*: Computes full periodic loan amortization schedules with PMI elimination, tax deduction schedules, parallel multi-offer comparison batches, early extra-payment payoff timelines, and post-lump-sum recast re-amortizations.
+- **`ExplainMortgage`** (`ExplainMortgageRequest` $\to$ `ExplainMortgageResponse`)
+*Summary*: Computes full periodic loan amortization schedules with PMI elimination, tax deduction schedules, parallel multi-offer comparison batches, early extra-payment payoff timelines, post-lump-sum recast re-amortizations, and plain-language explanatory summaries anchoring payment milestones, PMI cancellation, and interest savings directly to scheduled figures.
 
 ### 3. HELOC and refinance (2 RPCs)
 - **`ComputeHeloc`** (`HelocRequest` $\to$ `HelocResponse`)
 - **`ComputeRefinance`** (`RefinanceRequest` $\to$ `RefinanceResponse`)
 *Summary*: Computes two-phase home equity lines of credit (draw period with interest-only options followed by repayment amortisation) and loan refinance breakeven economics accounting for closing fees.
 
-### 4. Rent-vs-buy and real estate valuation (5 RPCs)
+### 4. Rent-vs-buy and real estate valuation (6 RPCs)
 - **`ComputeRentVsBuy`** (`RentVsBuyRequest` $\to$ `RentVsBuyResponse`)
 - **`ComputeRentVsBuyBatch`** (`RentVsBuyBatchRequest` $\to$ `RentVsBuyBatchResponse`)
 - **`ComputeRentalRoi`** (`RentalRoiRequest` $\to$ `RentalRoiResponse`)
+- **`ComputeRentalCashFlow`** (`RentalCashFlowRequest` $\to$ `RentalCashFlowResponse`)
 - **`ComputeHomeFutureValue`** (`HomeFutureValueRequest` $\to$ `HomeFutureValueResponse`)
 - **`ComputeHomeNpv`** (`HomeNpvRequest` $\to$ `HomeNpvResponse`)
-*Summary*: Computes multi-decade net wealth differences between homeownership and renting with capital reinvestment, property capitalization rates and cash-on-cash ROI, home appreciation trajectories, and housing net present values.
+*Summary*: Computes multi-decade net wealth differences between homeownership and renting with capital reinvestment, property capitalization rates and cash-on-cash ROI, multi-year rental cash flow schedules modeling scheduled rent, vacancy loss, operating expenses, capex reserve, primary debt service, secondary HELOC down-payment financing, cumulative equity, and terminal sale proceeds, home appreciation trajectories, and housing net present values.
 
 ### 5. NPV/IRR and dated cash flows (6 RPCs)
 - **`ComputeNpv`** (`NpvRequest` $\to$ `DoubleResponse`)
@@ -435,7 +437,7 @@ The following features were specified in initial architecture proposals (`docs/P
 ### Sensen Finance Service
 
 - **Files**: `backend/proto/finance.proto`, `backend/src/modules/finance_service.cppm`, `backend/src/modules/finance_service.cpp`.
-- **Purpose**: Serves the 46 financial mathematics, mortgage, bond, real estate, and portfolio RPCs wrapping `sensen` library algorithms.
+- **Purpose**: Serves the 48 financial mathematics, mortgage, bond, real estate, and portfolio RPCs wrapping `sensen` library algorithms.
 
 | Symbol / Category | Exported Handlers | Behavior & Numerical Discipline |
 | --- | --- | --- |
