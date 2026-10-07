@@ -5636,6 +5636,20 @@ chain. Measured after: chain body 204 → **462px**, probability distribution
   Railway's own `/up` endpoint has been exceeding for any real payload; the
   script's header carries the three disproved hypotheses.
 
+  **THE UPLOAD IS ONE IMPLEMENTATION, AND IT IS NOT IN THIS FILE.**
+  `scripts/railway_deploy.sh` is a thin caller of
+  `backend/sensen/tools/railway_upload.sh` (sensen, gated by
+  `policy_railway_upload_selftest`), which every repository that deploys a
+  service by upload shares -- mortgage-nest-egg's `mfv-assistant` is the second.
+  Railway's GitHub builder does not fetch submodules, so any service whose image
+  needs sensen has to ship this way. The tool owns the curl upload, the
+  destination guard, the tracked-files-kept rule, the required-path check and the
+  RAILPACK wait; this file keeps only what is the engine's: the parameters, the
+  configure PREFLIGHT, and the cutover advice. Proven equivalent: `--dry-run`
+  produces the identical archive (3635 members, same modes and contents) as the
+  script it replaced. The destination-check paragraph just below describes the
+  tool's behaviour, now in one place.
+
   **It checks the DESTINATION, and you should understand why before reaching
   for `railway up` instead.** The service comes from `~/.railway/config.json` —
   whatever `railway link` last pointed at — which is ambient state with no

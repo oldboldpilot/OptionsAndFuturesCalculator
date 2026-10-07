@@ -1,151 +1,76 @@
 #!/usr/bin/env bash
 #
-# Deploy the backend to Railway without `railway up`.
+# Deploy the engine (options-calculator-backend) to Railway without `railway up`.
 #
-# WHY THIS EXISTS
-#
-# `railway up` enforces a fixed ~30 s deadline on the POST that uploads the
-# source archive. Railway's /up endpoint has been answering in ~25 s even for a
-# 1-byte body (measured), so any real payload pushes the request past the
-# deadline. The CLI then aborts mid-transfer and prints:
-#
-#     error sending request for url (.../up?serviceId=...)
-#     Caused by: operation timed out
-#
-# which is misleading twice over. First, the request has already reached
-# Railway — a deployment record exists. Second, the outcome is a coin flip: if
-# enough of the archive arrived, the deploy proceeds and SUCCEEDS despite the
-# error (deployment 30647b56 did exactly that); if it did not, Railway finds no
-# railway.json, silently falls back to its RAILPACK auto-detector, finds nothing
-# it can build, and the deployment FAILS with no build attached.
-#
-# That fallback is the reliable diagnostic, with one wrinkle worth stating
-# because it is easy to misread: `builder` reads RAILPACK on EVERY deployment at
-# first. It is the placeholder Railway shows while the archive is still being
-# extracted, and it flips to DOCKERFILE once railway.json is found. So RAILPACK
-# is only evidence of a truncated upload once the deployment has stopped moving
-# — a deployment that sits at INITIALIZING/RAILPACK and then FAILS never
-# received a complete archive. This script waits for the transition rather than
-# sampling once, and trusts that over any exit code.
-#
-# Three hypotheses were tested and disproved before landing here: slow indexing
-# of the 16 GB tree (parked the 13 GB backend/build — no change), an expired
-# credential (re-authenticated — no change), and payload size (trimmed 62 MB to
-# 36 MB — no change, still 32 s). The latency is server-side and not ours to fix.
-#
-# THE FIX
-#
-# Upload the same archive to the same endpoint with curl, which has no such
-# deadline. This is what `railway up` does minus the timeout, so it is not a
-# workaround of Railway's API — it is the same call, allowed to finish.
-#
-#     scripts/railway_deploy.sh [--dry-run] [--service-name NAME]
+#     scripts/railway_deploy.sh [--dry-run] [--service-name NAME] [--keep-archive FILE]
 #
 # --dry-run builds and validates the archive without uploading.
-# --service-name overrides the destination check below. Say it out loud.
+# --service-name overrides the destination check. Say it out loud.
+# --keep-archive leaves the verified .tar.gz at FILE.
 #
-# THE DESTINATION IS CHECKED, NOT ASSUMED
+# THE UPLOAD IS NOT HERE. It is backend/sensen/tools/railway_upload.sh, shared with every other
+# repository that deploys a service by upload (the mortgage assistant is the second). It carries
+# why `railway up` is not used (a fixed ~30 s deadline on the POST), the destination guard (the
+# linked service is resolved to its NAME and must be the engine's -- on 2026-08-12 the CLI was
+# linked to a queue node), the tracked-files-kept archive rule, the required-path check and the
+# wait for Railway to pick the Dockerfile builder. This file is what is the ENGINE's alone:
 #
-# Everything below verifies the ARCHIVE — railway.json, the Dockerfile, the
-# sensen closure — and until 2026-08-12 nothing verified WHERE it was going. The
-# service came from `~/.railway/config.json`, i.e. from whatever `railway link`
-# last pointed at, which is ambient state with no relationship to what is being
-# deployed. This project has four services in one environment: the engine and
-# three SGEE queue nodes. Running this while linked to `sgee-queue-3` — which is
-# what it was linked to during the 2026-08-12 session — would have uploaded a
-# verified, perfectly-formed ENGINE archive onto a queue node, and every check
-# in this file would have passed while doing it.
+#   * the parameters: .railwayignore, the paths the engine cannot build without, no weights;
+#   * the PREFLIGHT, which has to run after the destination is known and before the archive is
+#     built (hence the tool's --check-destination);
+#   * the CUTOVER advice, which is about this service's two assistants.
 #
-# The engine's railway.json at the repo root would then have replaced that
-# node's image and `numReplicas`, and Railway forbids volumes on a service with
-# replicas, so the failure would not even have been a clean one.
-#
-# So: resolve the linked service id to its NAME and require it to be the
-# engine's. `deploy/queue-node/deploy.sh` is the other direction of the same
-# rule — it stages its own tree and passes `--service` explicitly, precisely
-# because the root railway.json describes the engine.
+# The tool is a submodule file, so a checkout without `git submodule update --init backend/sensen`
+# has no deploy script. That is a refusal below and not a fallback to a second copy.
 
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
-# The one service this script is allowed to deploy to. This archive is an engine
-# archive; sending it anywhere else is a mistake, not a configuration.
+# The one service this script is allowed to deploy to. This archive is an engine archive; sending
+# it anywhere else is a mistake, not a configuration.
 EXPECTED_SERVICE_NAME="options-calculator-backend"
 
-DRY_RUN=0
+DRY_RUN=()
+KEEP_ARCHIVE=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --dry-run)      DRY_RUN=1; shift ;;
+        --dry-run)      DRY_RUN=(--dry-run); shift ;;
         --service-name) EXPECTED_SERVICE_NAME="${2:?--service-name needs a value}"; shift 2 ;;
-        *) echo "usage: $0 [--dry-run] [--service-name NAME]" >&2; exit 2 ;;
+        --keep-archive) KEEP_ARCHIVE=(--keep-archive "${2:?--keep-archive needs a value}"); shift 2 ;;
+        *) echo "usage: $0 [--dry-run] [--service-name NAME] [--keep-archive FILE]" >&2; exit 2 ;;
     esac
 done
 
-CONFIG="${HOME}/.railway/config.json"
-[[ -f "$CONFIG" ]] || { echo "ERROR: $CONFIG not found — run 'railway login'." >&2; exit 1; }
+UPLOAD="${REPO_ROOT}/backend/sensen/tools/railway_upload.sh"
+[[ -f "$UPLOAD" ]] || {
+    echo "ERROR: ${UPLOAD} not found -- run 'git submodule update --init backend/sensen'." >&2
+    exit 1; }
 
-read -r PROJECT ENVIRONMENT SERVICE < <(python3 -c "
-import json, os, sys
-d = json.load(open(os.path.expanduser('~/.railway/config.json')))
-p = d.get('projects', {}).get(os.getcwd())
-if not p:
-    sys.exit('ERROR: this directory is not linked to a Railway project.')
-print(p['project'], p['environment'], p['service'])
-")
+# What the engine's image cannot be built without. railway.json is what selects the Dockerfile
+# builder; without it Railway falls back to RAILPACK and the deploy fails with no build. The sensen
+# modules are what the engine imports, and the logger's BMI guard is a TRACKED file a .gitignore
+# matches (`*.cmake`), the one the tracked-files-kept rule exists for. No model weights ship: the
+# engine fetches its encoders at image build time, and `**/*.gguf` in .railwayignore is the rule
+# that keeps them out -- --forbid is the tripwire if that rule ever stops working.
+UPLOAD_ARGS=(
+    --expect-service "$EXPECTED_SERVICE_NAME"
+    --ignore .railwayignore
+    --require railway.json
+    --require backend/Dockerfile
+    --require backend/CMakeLists.txt
+    --require backend/src/main.cpp
+    --require backend/sensen/external/cpp23-logger/cmake/ToolchainBMIGuard.cmake
+    --require backend/sensen/src/options.cppm
+    --require backend/sensen/src/portfolio.cppm
+    --forbid '*.gguf'
+)
 
-# --------------------------------------------------------------------------
-# Destination check. See the header: this runs BEFORE the archive is built, so
-# a wrong link costs a message rather than a 36 MB upload onto a queue node.
-# --------------------------------------------------------------------------
-LINKED_NAME="$(railway status --json 2>/dev/null | SERVICE_ID="$SERVICE" python3 -c "
-import json, os, sys
-try:
-    d = json.load(sys.stdin)
-except Exception:
-    sys.exit(0)          # print nothing; the check below reports it
-want = os.environ['SERVICE_ID']
-for e in d.get('services', {}).get('edges', []):
-    n = e.get('node', {})
-    if n.get('id') == want:
-        print(n.get('name', ''))
-        break
-")"
-
-if [[ -z "$LINKED_NAME" ]]; then
-    echo "ERROR: could not resolve the linked service id to a name." >&2
-    echo "       Refusing to upload an engine archive to an unidentified service." >&2
-    echo "       Check 'railway status', then 'railway link'." >&2
-    exit 1
-fi
-
-if [[ "$LINKED_NAME" != "$EXPECTED_SERVICE_NAME" ]]; then
-    echo "ERROR: linked service is '${LINKED_NAME}', expected '${EXPECTED_SERVICE_NAME}'." >&2
-    echo "" >&2
-    echo "       This builds an ENGINE archive: the repo-root railway.json names" >&2
-    echo "       backend/Dockerfile and numReplicas. Deploying it to any other" >&2
-    echo "       service replaces that service's image with the engine's." >&2
-    echo "" >&2
+# The destination first: a wrong link must cost a message, not a configure or a 36 MB upload.
+"$UPLOAD" "${UPLOAD_ARGS[@]}" --check-destination || {
     echo "       Queue nodes have their own path: deploy/queue-node/deploy.sh" >&2
-    echo "       Otherwise: railway link   (or pass --service-name to override)" >&2
-    exit 1
-fi
-
-echo "destination: ${LINKED_NAME} (environment ${ENVIRONMENT})"
-
-# The CLI refreshes this token lazily and only on demand, so poke it first: a
-# read command forces a refresh if the access token has expired, and the token
-# we then read from the config is current.
-railway whoami >/dev/null 2>&1 || true
-TOKEN="$(python3 -c "
-import json, os, sys
-u = json.load(open(os.path.expanduser('~/.railway/config.json')))['user']
-t = u.get('accessToken')
-if not t:
-    sys.exit('ERROR: no accessToken in ~/.railway/config.json — run railway login.')
-print(t)
-")"
+    exit 1; }
 
 # --------------------------------------------------------------------------
 # PREFLIGHT: does this repository still CONFIGURE without the trees the upload
@@ -169,24 +94,28 @@ print(t)
 # It SKIPS LOUDLY, never silently: an unconfigured build directory means the
 # check did not run, and a skip that reads like a pass is the failure mode this
 # whole script is written against.
+#
+# A SUBSHELL, so its EXIT trap (restore the parked trees) is its own.
 # --------------------------------------------------------------------------
-# DERIVED FROM .railwayignore, not written out here. A hand-kept list beside a
-# hand-kept exclude list is two things to forget, and forgetting one of them is
-# what this preflight exists to catch. Every excluded path that is a directory
-# INSIDE the build's source root is parked; a path that no longer exists, or
-# that names a file, is skipped.
-mapfile -t PARKED_TREES < <(
-    grep -vE '^\s*(#|$)' .railwayignore \
-    | sed -E 's#/+$##' \
-    | grep -E '^backend/' \
-    | grep -vE '[*?\[]' \
-    | while read -r cand; do [[ -d "$cand" ]] && printf '%s\n' "$cand"; done
-)
-if [[ ! -f backend/build/CMakeCache.txt ]]; then
-    echo "PREFLIGHT SKIPPED: backend/build is not configured, so the"
-    echo "  'does it configure without the excluded trees' check did NOT run."
-    echo "  Configure it once (cmake -B backend/build -S backend) to enable this."
-else
+(
+    # DERIVED FROM .railwayignore, not written out here. A hand-kept list beside a
+    # hand-kept exclude list is two things to forget, and forgetting one of them is
+    # what this preflight exists to catch. Every excluded path that is a directory
+    # INSIDE the build's source root is parked; a path that no longer exists, or
+    # that names a file, is skipped.
+    mapfile -t PARKED_TREES < <(
+        grep -vE '^\s*(#|$)' .railwayignore \
+        | sed -E 's#/+$##' \
+        | grep -E '^backend/' \
+        | grep -vE '[*?\[]' \
+        | while read -r cand; do [[ -d "$cand" ]] && printf '%s\n' "$cand"; done
+    )
+    if [[ ! -f backend/build/CMakeCache.txt ]]; then
+        echo "PREFLIGHT SKIPPED: backend/build is not configured, so the"
+        echo "  'does it configure without the excluded trees' check did NOT run."
+        echo "  Configure it once (cmake -B backend/build -S backend) to enable this."
+        exit 0
+    fi
     PARK_DIR="$(mktemp -d -t railway-parked-XXXXXX)"
     # THE KEY IS THE WHOLE PATH, NOT THE BASENAME, AND THAT IS NOT A TIDY-UP.
     #
@@ -252,183 +181,40 @@ else
     # Put the build directory back the way a local build expects it.
     cmake -B backend/build -S backend -DCMAKE_BUILD_TYPE=Release >/dev/null 2>&1
     echo "preflight: configures cleanly without the excluded trees (${#PARKED_TREES[@]} parked)."
-fi
+)
 
-# --------------------------------------------------------------------------
-# Build the archive, honouring .railwayignore.
-# --------------------------------------------------------------------------
-ARCHIVE="$(mktemp -t railway-upload-XXXXXX.tar.gz)"
-EXCLUDES="$(mktemp -t railway-excludes-XXXXXX)"
-trap 'rm -f "$ARCHIVE" "$EXCLUDES"' EXIT
+ID_FILE="$(mktemp -t railway-deployment-id-XXXXXX)"
+trap 'rm -f "$ID_FILE"' EXIT
+"$UPLOAD" "${UPLOAD_ARGS[@]}" "${DRY_RUN[@]}" "${KEEP_ARCHIVE[@]}" --deployment-id-file "$ID_FILE"
 
-grep -vE '^\s*(#|$)' .railwayignore > "$EXCLUDES"
+DEPLOY_ID="$(cat "$ID_FILE")"
+[[ -n "$DEPLOY_ID" ]] || exit 0     # a dry run uploaded nothing, so there is nothing to confirm
 
-# --exclude-vcs-ignores drops every path a .gitignore MATCHES, and a file can be
-# tracked while matching one: cpp23-logger ignores `*.cmake` and tracks
-# cmake/ToolchainBMIGuard.cmake, so deployment 36b1d4e0 (2026-10-07) failed at
-# configure with "include could not find requested file". What ships is decided
-# by git, so every TRACKED file that .railwayignore does not exclude is put back.
-TARBALL="${ARCHIVE%.gz}"
-trap 'rm -f "$ARCHIVE" "$TARBALL" "$EXCLUDES"' EXIT
-tar --exclude-from="$EXCLUDES" --exclude-vcs-ignores -cf "$TARBALL" . 2>/dev/null || \
-tar --exclude-from="$EXCLUDES" -cf "$TARBALL" .
-DROPPED="$(mktemp -t railway-dropped-XXXXXX)"
-trap 'rm -f "$ARCHIVE" "$TARBALL" "$EXCLUDES" "$DROPPED"' EXIT
-comm -23 <(git ls-files --recurse-submodules | sed 's#^#./#' | sort -u) \
-         <(tar -tf "$TARBALL" | sort -u) > "$DROPPED.all"
-# Keep only paths that exist and that .railwayignore does not exclude: tar applies
-# the same exclude list to names given with -T, so one pass decides both.
-: > "$DROPPED"
-while IFS= read -r f; do [[ -f "$f" ]] && printf '%s\n' "$f"; done < "$DROPPED.all" > "$DROPPED"
-rm -f "$DROPPED.all"
-if [[ -s "$DROPPED" ]]; then
-    # CREATE mode with literal names: append mode (-r) reads `[strategy]` in a Next.js
-    # route path as a wildcard and fails; create mode does not, and still applies the
-    # exclude list to names given with -T.
-    EXTRA="${TARBALL}.extra"
-    tar --exclude-from="$EXCLUDES" --no-recursion --verbatim-files-from -cf "$EXTRA" -T "$DROPPED"
-    n=$(tar -tf "$EXTRA" | wc -l)
-    if [[ $n -gt 0 ]]; then
-        tar -Af "$TARBALL" "$EXTRA"
-        echo "archive: re-added ${n} tracked file(s) a .gitignore had matched:"
-        tar -tf "$EXTRA" | head -10 | sed 's/^/    /'
-    fi
-    rm -f "$EXTRA"
-fi
-gzip -c "$TARBALL" > "$ARCHIVE"
-
-SIZE=$(stat -c %s "$ARCHIVE")
-printf 'archive: %.1f MB\n' "$(echo "$SIZE/1048576" | bc -l)"
-
-# railway.json is what selects the Dockerfile builder. If it is not in the
-# archive, Railway falls back to RAILPACK and the deploy fails with no build —
-# so verify it is present before spending the upload.
-#
-# The listing is materialised once rather than piped per check. `tar … | grep -q`
-# looks obvious and is wrong here: grep -q exits at the first match, tar takes
-# SIGPIPE, and under `set -o pipefail` the pipeline reports failure even though
-# the match succeeded. Whether it bites depends on whether tar has finished
-# writing, so it fails intermittently and on a different entry each time.
-LIST="$(mktemp -t railway-list-XXXXXX)"
-trap 'rm -f "$ARCHIVE" "$EXCLUDES" "$LIST"' EXIT
-tar -tzf "$ARCHIVE" > "$LIST"
-
-for required in ./railway.json ./backend/Dockerfile ./backend/CMakeLists.txt ./backend/src/main.cpp \
-                ./backend/sensen/external/cpp23-logger/cmake/ToolchainBMIGuard.cmake; do
-    grep -qxF "$required" "$LIST" || {
-        echo "ERROR: $required missing from the archive." >&2; exit 1; }
-done
-
-# The engine cannot build without the sensen modules it imports.
-for required in ./backend/sensen/src/options.cppm ./backend/sensen/src/portfolio.cppm; do
-    grep -qxF "$required" "$LIST" || {
-        echo "ERROR: $required missing from the archive." >&2; exit 1; }
-done
-
-echo "archive verified: $(wc -l < "$LIST") entries, railway.json + Dockerfile + sensen closure present"
-
-if [[ $DRY_RUN -eq 1 ]]; then
-    echo "dry run — not uploading."
-    exit 0
-fi
-
-# --------------------------------------------------------------------------
-# Upload. No --max-time: letting it finish is the entire point.
-# --------------------------------------------------------------------------
-URL="https://backboard.railway.com/project/${PROJECT}/environment/${ENVIRONMENT}/up?serviceId=${SERVICE}"
-echo "uploading to Railway (no client deadline)..."
-
-RESPONSE="$(curl -sS -X POST "$URL" \
-    -H "Authorization: Bearer ${TOKEN}" \
-    -H "Content-Type: multipart/form-data" \
-    --data-binary "@${ARCHIVE}" \
-    -w '\n%{http_code} %{time_total}')"
-
-HTTP_CODE="$(tail -1 <<<"$RESPONSE" | cut -d' ' -f1)"
-ELAPSED="$(tail -1 <<<"$RESPONSE" | cut -d' ' -f2)"
-BODY="$(sed '$d' <<<"$RESPONSE")"
-
-echo "http=${HTTP_CODE} elapsed=${ELAPSED}s"
-[[ -n "$BODY" ]] && echo "response: ${BODY:0:400}"
-
-if [[ "$HTTP_CODE" != "200" ]]; then
-    echo "ERROR: upload rejected." >&2
-    exit 1
-fi
-
-# --------------------------------------------------------------------------
-# Confirm the archive actually landed. RAILPACK here means truncated upload.
-# --------------------------------------------------------------------------
-echo "confirming the deployment picked up the Dockerfile builder..."
-for _ in $(seq 1 20); do
-    INFO="$(railway deployment list --json 2>/dev/null | python3 -c "
-import json, sys
-try:
-    d = json.load(sys.stdin)[0]
-except Exception:
-    sys.exit(0)
-m = d.get('meta', {})
-b = (m.get('serviceManifest') or m.get('fileServiceManifest') or {}).get('build', {}).get('builder', '?')
-print(d['id'], d['status'], b)
-")"
-    [[ -n "$INFO" ]] && { echo "  $INFO"; }
-    case "$INFO" in
-        *DOCKERFILE*)
-            DEPLOY_ID="${INFO%% *}"
-            echo "upload landed intact — Railway is building."
-            echo ""
-            echo "Deployment id: ${DEPLOY_ID}"
-            echo ""
-            echo "  Follow THIS build (the id is not optional):"
-            echo "      railway logs --service ${LINKED_NAME} --build ${DEPLOY_ID}"
-            echo ""
-            # Said here because it has already cost 25 minutes of believing a
-            # deploy had landed. `railway logs --build` WITHOUT a deployment id
-            # shows the newest deployment Railway has a build log for, which
-            # while a new build is running is the PREVIOUS one -- so it prints
-            # "[3/3] Healthcheck succeeded!" describing the deploy you are
-            # replacing. It looks exactly like success.
-            # Derive the expected count from railway.json rather than stating a
-            # number here. This line said "numReplicas 3 => 3 mortgage + 3
-            # strategy" for four days after numReplicas dropped to 2, which
-            # makes the gate pass at 4 while telling the reader to expect 6.
-            _replicas="$(sed -n 's/.*"numReplicas"[[:space:]]*:[[:space:]]*\([0-9]\+\).*/\1/p' \
-                          "${REPO_ROOT}/railway.json" 2>/dev/null | head -1)"
-            _replicas="${_replicas:-1}"
-            echo "  Then confirm the CUTOVER, which the build log cannot tell you."
-            echo "  Name the deployment -- 'railway logs --service' REPLAYS THE LAST"
-            echo "  DEAD SESSION'S SCROLLBACK when nothing is running, so grepping it"
-            echo "  passes against the container you are replacing:"
-            echo "      railway logs --deployment ${DEPLOY_ID} | grep -c 'model is LOADED'"
-            echo ""
-            echo "  A green healthcheck is not evidence the new image is serving."
-            echo "  A fresh boot sequence is. Expect one 'model is LOADED' line per"
-            echo "  replica per assistant -- numReplicas ${_replicas} => $((_replicas * 2)) lines"
-            echo "  (${_replicas} mortgage + ${_replicas} strategy) -- timestamped after this upload."
-            echo ""
-            # 'model is LOADED' COUNTS weights and does not say WHICH model, which is
-            # the distinction `local_model_loaded()` exists for -- it is true of a
-            # decoder and of an ENCODER alike, deliberately, so the count above stays
-            # correct across a backend change. It is therefore blind to the one thing a
-            # backend flip needs to confirm. This second line names the model, and it
-            # is the check that would have caught serving a decoder from an image whose
-            # variables asked for an encoder:
-            echo "  Then confirm WHICH model answered -- the count above cannot:"
-            echo "      railway logs --deployment ${DEPLOY_ID} | grep 'assistant ready'"
-            echo "  An ENCODER prints 'ENCODER assistant ready: ... N operations, vocab N'"
-            echo "  beside its LOADED line; a decoder prints neither of those fields."
-            echo ""
-            echo "  And assert the NEGATIVE: 0 '[ERROR' lines. An assistant whose weights"
-            echo "  are missing reports itself UNAVAILABLE while the other three services"
-            echo "  serve perfectly, so a half-loaded fleet looks green. Note the logger"
-            echo "  PADS the level, so the text is '[WARN ]' -- grep '\[WARN *\]' and"
-            echo "  assert a positive control on the same pattern family before quoting a"
-            echo "  zero, which this repo has already had read wrongly once."
-            exit 0 ;;
-    esac
-    sleep 10
-done
-
-echo "WARNING: newest deployment is not using the Dockerfile builder." >&2
-echo "         That means the archive did not arrive intact. Re-run." >&2
-exit 1
+# Derive the expected count from railway.json rather than stating a number here. This line said
+# "numReplicas 3 => 3 mortgage + 3 strategy" for four days after numReplicas dropped to 2, which
+# makes the gate pass at 4 while telling the reader to expect 6.
+_replicas="$(sed -n 's/.*"numReplicas"[[:space:]]*:[[:space:]]*\([0-9]\+\).*/\1/p' \
+              "${REPO_ROOT}/railway.json" 2>/dev/null | head -1)"
+_replicas="${_replicas:-1}"
+echo ""
+echo "  Expect one 'model is LOADED' line per replica per assistant --"
+echo "  numReplicas ${_replicas} => $((_replicas * 2)) lines (${_replicas} mortgage + ${_replicas} strategy) --"
+echo "  timestamped after this upload:"
+echo "      railway logs --deployment ${DEPLOY_ID} | grep -c 'model is LOADED'"
+echo ""
+# 'model is LOADED' COUNTS weights and does not say WHICH model, which is the distinction
+# `local_model_loaded()` exists for -- it is true of a decoder and of an ENCODER alike, deliberately,
+# so the count above stays correct across a backend change. It is therefore blind to the one thing a
+# backend flip needs to confirm. This second line names the model, and it is the check that would
+# have caught serving a decoder from an image whose variables asked for an encoder:
+echo "  Then confirm WHICH model answered -- the count above cannot:"
+echo "      railway logs --deployment ${DEPLOY_ID} | grep 'assistant ready'"
+echo "  An ENCODER prints 'ENCODER assistant ready: ... N operations, vocab N'"
+echo "  beside its LOADED line; a decoder prints neither of those fields."
+echo ""
+echo "  And assert the NEGATIVE: 0 '[ERROR' lines. An assistant whose weights"
+echo "  are missing reports itself UNAVAILABLE while the other three services"
+echo "  serve perfectly, so a half-loaded fleet looks green. Note the logger"
+echo "  PADS the level, so the text is '[WARN ]' -- grep '\[WARN *\]' and"
+echo "  assert a positive control on the same pattern family before quoting a"
+echo "  zero, which this repo has already had read wrongly once."
