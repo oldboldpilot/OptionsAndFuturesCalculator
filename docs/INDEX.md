@@ -4,12 +4,13 @@
 
 ## Core
 
+- [Repository Overview](../README.md) — architecture, gRPC services, directory layout, and operator scripts
 - [Root CLAUDE Guide](../CLAUDE.md) — architecture, gRPC surface, deployment, DNS
 - [Product Requirements Document](PRD_OPTIONS_AND_FUTURES_CALCULATOR.md)
 
 ## API
 
-- [Finance API](FINANCE_API.md) — the `sensen.finance.Finance` service: ~50 functions
+- [Finance API](FINANCE_API.md) — the `sensen.finance.Finance` service: 48 functions
   across time value of money, mortgages, bonds, futures, options and portfolio
   statistics. Note the `QUOTA_POLICY` example in this document omits the `pro`
   tier; an unknown tier silently falls back to the *anonymous* allowance, so a
