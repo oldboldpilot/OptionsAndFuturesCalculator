@@ -788,17 +788,35 @@ figure; a no-deposit purchase (`$900,000, no down payment`) lost its home value;
 stated annual rate or a non-monthly compounding (`40 years compounded yearly`) as months, turning 40 years into 480
 periods beside an annual rate. Each has a test and a mutation arm; all 27 arms are RED against the final tree
 (`docs/evidence/visitor-regression/mutation/arms_all_final.txt`). Counts at this tree: `test_mortgage_verification`
-398, `test_mortgage_derivation` 84, `test_finance_service_validation` 351, `test_mortgage_assistant_service` 27, each 0
+398 (431 after the 2026-10-07 residue fixes), `test_mortgage_derivation` 84 (87), `test_finance_service_validation` 351, `test_mortgage_assistant_service` 27, each 0
 failures.
 
-**WHAT THOSE SWEEPS STILL FIND, written down because they are not fixed** (`corpus_sweeps.txt`, and the "Open" section of
-`RESULTS.md`): at n=6,000 one ask probe of 17,245 asks about a stated figure (`ComputeDepreciation`, `depreciation: cost
-96,500 year 2 macrs 15-year`); at n=25,000 a typo'd `vaancy` is refused, a typo'd `paymentts` makes the service ask
-about and drop the stated `start_period`/`end_period` of a `ComputeCumulative` (the insertion gap this file already
-records below), and THREE derivation rewrites replace a correct emitted value with a wrong one
-(`extra_monthly_payment` 250 -> 1,809.29, `monthly_overpayment` 750 -> 886,600, `property_price` 300,000 -> 1,400).
-The last is the only one that serves a wrong value rather than refusing or asking, and its utterances are not printed by
-the sweep. The n=500 gate is green; do not read that as these being closed.
+**WHAT THOSE SWEEPS FOUND, AND THAT IT IS NOW CLOSED (2026-10-07, branch `fix/derivation-residue`)** -- every residue row the
+n=6,000 and n=25,000 samples printed is fixed at its cause, and both samples are clean (`corpus_sweeps.txt`, "AFTER lane
+derivres"): 0 refused, 0 asked wrongly, 0 stated figures dropped, 0 rows corrupted, and the n=25,000 ask sweep (72,225
+probes, which the first FAIL had always stopped short of) 0 asked wrongly. Five causes, none of them the model:
+
+- **THREE DERIVATION REWRITES WERE ONE LEXER RULE, an increment word handed to the wrong figure.** `+250 extra $1,809.29`
+  flagged BOTH figures as the increment (the word is one word from each), `886.6K loan extra 750` flagged the loan (two
+  words before the word) and not only the 750, and `am i overpaying?\n$300,000 home` read 'overpaying' across the question
+  mark (`prev_word` skipped up to three non-letters, and `?\n$` is three). The derivation layer then read the payment, the
+  loan and the rent as the overpayment and rewrote the stated 250, 750 and 300,000. Now ONE WORD BELONGS TO ONE FIGURE, the
+  nearest, a tie going to the figure before the word (as `+1000 extra $300 HOA` already had it), and a sentence break ends
+  the look-back (`is_sentence_break`, one list, replacing two inline copies of it).
+- **THE INSERTION GAP BELOW IS CLOSED FOR A DOUBLED AND A DROPPED LETTER** (`one_letter_slip_of`, inside `names_concept`, so
+  every concept list has it). Measured over the 415,830-word dictionary and our corpus vocabulary: a doubled interior
+  letter on gold of five or more letters collides with **0** English words; a dropped interior letter on gold of six or more
+  collides with 6 (`anther`, `chare`, `chares`, `moths`, `monts`, `pament`), and at five letters with 12, which is why the
+  floor is six. Every word of our corpus it newly accepts is a typo of a concept word. A substitution is still not a match.
+  Two lists the sweep exposed were not going through `names_concept` at all: the vacancy words (`vaancy`) and the counting
+  words that make "payments 1 to 13" a window rather than a range (`paymentts`, `monts`, and even the swap `monhts`).
+- **A UNIT WORD IS BELIEVED ONLY INSIDE THE HORIZON THE VERIFIER ADMITS FOR THAT UNIT.** `cost 96,500 year 2 macrs` tagged
+  96,500 as YEARS ('year' labels the 2), so the cost looked unstated and would have been asked about.
+- **A BARE FIGURE IS CLAIMED ONLY WHEN NO FIGURE TAGGED FOR THE SLOT EXPLAINS THE VALUE.** In `payment 6; at a 6% rate` the
+  rate took the bare 6 and left the 6% unclaimed, so the payment number looked unstated and was asked about.
+- `dbg_derivation` now prints the utterance beside each `CORRUPT` line and `dbg_grounding` lists every asked row with
+  `GROUNDING_ASKED=1`, so two builds can be diffed row for row (1,287 -> 1,283 at n=25,000: four rows stopped asking, none
+  started).
 
 **The existing holdout cannot be scored with the old comparator any more, and that is the point rather than a
 regression.** Against `agent/dataset/data_mortgage/val.jsonl` (559 params rows in the copy in this tree, not the 560
@@ -938,8 +956,9 @@ rule still does not reach an insertion. `HOA duess` grounds because the lexer's
 scan needs only ONE concept word and `HOA` itself is spelled correctly;
 `condos fee` grounds on `fee`, which is in the same word list; and `extras a
 month` never needed the guard because the model claimed the 150 directly. So
-the insertion gap is still real as a PROPERTY of the matcher -- it is simply not
-reachable from these utterances. A corpus that cannot exhibit a failure is not a
+the insertion gap WAS real as a PROPERTY of the matcher -- it was simply not
+reachable from these utterances. It is closed for a doubled and a dropped letter as of 2026-10-07 (see the sweep
+section above); `paymentts` and `vaancy` were the rows that reached it. A corpus that cannot exhibit a failure is not a
 control for it, which this file records four times elsewhere.
 
 ### The solver layer: recency in the graph, and two logical defects in `reconcile`

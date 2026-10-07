@@ -253,26 +253,34 @@ and derivation fixes of this lane), passes too. The two "Not Run" are the same t
 them in its failed list and they are not tests that ran and failed. Counts of the four new or extended test binaries are in
 the mutation table above.
 
-## Open: what the larger corpus sweeps still find (NOT fixed, deliberately)
+## Closed: what the larger corpus sweeps found (fixed 2026-10-07, branch `fix/derivation-residue`)
 
-The gate runs the grounding and derivation sweeps at n=500 (466 rows): 0 refused, 0 asked wrongly, 0 stated figures
-dropped, 0 rows corrupted. The defects fixed in this lane (spaced hyphen, `down to`, HOA claims, vacancy before its
-figure, annual-cadence periods) were found at n=6,000 and n=25,000, and those two samples still find a residue.
-Full output, regenerated against the final tree, is `corpus_sweeps.txt`. Honest account, in the order of the sweeps:
+The first version of this section listed a residue the n=6,000 and n=25,000 sweeps still found and said it was not fixed.
+All of it is fixed at its cause. Every number below is regenerated against the final tree (`corpus_sweeps.txt`, "AFTER lane
+derivres"); sizes and seeds are unchanged, so the before and after columns are the same rows.
 
-| sample | finding | what it is |
-| --- | --- | --- |
-| n=6,000 (5,589 rows) | **1 of 17,245 ask probes asked wrongly** | `depreciation: cost 96,500 year 2 macrs 15-year`: with the cost mutated off-corpus the layer asks `What did the asset cost?` instead of refusing the mutated value. The utterance states the cost, so this is the direction `refine_unstated` promises never to go (a question where a corrupted value should be refused). One probe in 17,245; not diagnosed past the row |
-| n=25,000 (23,270 rows) | **1 refused** | `... rent is $5,600 7% vaancy at 6.13% APR`: a typo'd `vacancy` is not a role word, so `occupancy_rate = 0.93` is ungrounded and refused (the refusal direction: a wrong answer was not served) |
-| n=25,000 | **3 asked wrongly, 6 stated figures dropped** | the sweep prints one example, `in paymentts 1 to 13?`: a typo'd role word that is an INSERTION away from the real one (an earlier n=25,000 run also recorded a `hoouse` row; it is not in the printed example of this one). The transposition rule of 2026-10-05 reaches `hoa`/`hao`, not an insertion, which the project guide records as the known gap. `ComputeCumulative.start_period = 1` is asked about and `start_period`/`end_period` (1 and 13) are dropped though the words state them |
-| n=25,000 | **3 derivation corruptions of 23,270 rows** | `ComputePayoffTiming.extra_monthly_payment` 250 -> 1,809.29; `ComputeAmortization.monthly_overpayment` 750 -> 886,600; `ComputeRentalCashFlow.property_price` 300,000 -> 1,400. Each is a correct emitted value overwritten by a derived one. The utterances are not printed by the sweep and these were not diagnosed |
+| sample | finding (before) | cause | fix | after |
+| --- | --- | --- | --- | --- |
+| n=25,000 | `extra_monthly_payment` 250 -> 1,809.29 (`how soon am I done: from 4.625% 321000 +250 extra $1,809.29 per month Am I overpaying?`) | the lexer handed the word 'extra' to BOTH figures it stands between, so the payment was flagged an increment | one increment word belongs to ONE figure, the nearest; a tie goes to the figure before the word | 0 corrupt |
+| n=25,000 | `monthly_overpayment` 750 -> 886,600 (`amortization schedule 886.6K loan extra 750 ...`) | the loan, two words before 'extra', also claimed it, and the layer read the loan as the overpayment | the nearer figure takes the word and the farther one loses it | 0 corrupt |
+| n=25,000 | `property_price` 300,000 -> 1,400 (`... am i overpaying?` then a new line, `$300,000 home`) | `prev_word` skips up to three non-letters, and `?` newline `$` is three, so 'overpaying' in one sentence named the figure opening the next | a sentence break ends the look-back | 0 corrupt |
+| n=25,000 | 3 rows asked wrongly, 6 stated figures dropped (`in paymentts 1 to 13`, `monts 1 to 12`, `monhts 3 through 15`) | the counting words that make `X to Y` a window were an EXACT list, so the typo turned the window into a range and both ends were masked | the list goes through `names_concept`, which now also tolerates one doubled and one dropped letter | 0 asked wrongly, 0 dropped |
+| n=25,000 | 1 refused (`7% vaancy`) | the vacancy words were three exact comparisons | one `is_vacancy_word` list through `names_concept` | 0 refused |
+| n=6,000 | 1 of 17,245 ask probes asked wrongly (`cost 96,500 year 2 macrs 15-year`) | 'year' labels the 2, but the lexer tagged 96,500 as YEARS, so the cost looked unstated | a unit word is believed only inside the horizon the verifier admits for that unit | 0 of 17,246 |
+| n=25,000 | (not previously visible) 1 of 72,225 ask probes asked wrongly (`in payment 6; at a 6% rate`) | the first FAIL had always ended the run before the ask sweep; the rate claimed the bare 6 and left the 6% unclaimed, so the payment number looked unstated | a figure tagged for the slot is claimed before a bare one | 0 of 72,225 |
 
-Why these are written down and not fixed: the n=500 gate that guards the tree is green, none of the four is a
-regression against production (production serves the zero-filled complete answer for all of them), each is a rate
-of roughly one row in several thousand, and the two typo findings are the documented insertion gap rather than a new
-defect. The three derivation corruptions are the one item that serves a wrong value rather than refusing or asking,
-which is why they lead the owner decisions in the report. The smallest next step is to print the utterance beside each
-`CORRUPT` line in `dbg_derivation --sweep` and bisect the rule; none of it needs a retrain.
+The typo rule is measured, not chosen: over `/usr/share/dict/words` (415,830 words) and this corpus's vocabulary a doubled
+interior letter on gold of five or more letters collides with 0 English words, and a dropped interior letter on gold of six
+or more with 6 (`anther`, `chare`, `chares`, `moths`, `monts`, `pament`; at five letters 12, which is why the floor is six).
+Every word of the corpus it newly accepts is a typo of a concept word. Row-level: the rows the service would ASK about at
+n=25,000 went 1,287 -> 1,283 and the four that stopped are exactly the four above; none started.
+
+What this did to the visitor regression: **265 / 272, unchanged**, and the failing rows are the same ones
+(`after_derivres.txt` against `after_local_v5e.txt`: the per-case report is byte-identical; the jsonl differs only in
+its recorded timings). Measured on a local engine started
+from this tree with the adopted v5e encoder on a private port, one listener on it, 0 `[ERROR]`, stopped by pid.
+Gates on the final tree: `test_mortgage_verification` 409 -> 431 checks, `test_mortgage_derivation` 84 -> 87, both 0
+failures; ctest 218 tests, 208 passed, 8 skipped, 2 not run, 0 failed (the same counts as before the change).
 
 ## Reproduce
 
@@ -334,5 +342,6 @@ flock /home/muyiwa/.cache/lanes/test.lock ctest --test-dir backend/build-lane -j
   RPC boundary.
 - The visitor corpus was written by the same lane that built the generator and has not been seen by anyone
   else; the 97.4% is a regression gate, not an estimate of production accuracy.
-- The sweeps at n=6,000 and n=25,000 still find a residue (above, "Open"), including three derivation rewrites that
-  replace a correct value with a wrong one. The gate size n=500 is green.
+- The sweeps at n=500, n=6,000 and n=25,000 are all clean after the 2026-10-07 fixes (above, "Closed"). They are a corpus the
+  generator wrote, so "clean" means the layer no longer disagrees with its own corpus, not that visitors cannot find
+  another phrasing.

@@ -3380,6 +3380,30 @@ auto main() -> int {
               "...and not an overpayment, though 'extra' stands before it");
         check(flag("$1,003,000 4.875% +1000 extra $300 HOA tax rate 28%", "1000", false, true) == 1,
               "...while the +1000 that 'extra' follows is the overpayment (the control)");
+        // ONE INCREMENT WORD, ONE FIGURE: the nearest, a tie going to the figure before it (as '+1000 extra $300 HOA'
+        // already has it). Found 2026-10-07 by the n=25000 derivation sweep, where the flag MOVES the wrong figure into
+        // the overpayment slot and the layer rewrote a correct stated value to it.
+        const std::string tie = "how soon am I done: from 4.625% 321000 +250 extra $1,809.29 per month Am I overpaying?";
+        check(flag(tie, "250", false, true) == 1, "'+250 extra $1,809.29': the 250 the word follows is the increment");
+        check(flag(tie, "1809.29", false, true) == 0, "...and the payment it merely precedes is not");
+        const std::string loan_extra = "amortization schedule 886.6K loan extra 750 rate 4.5% 30 years term?";
+        check(flag(loan_extra, "750", false, true) == 1, "'886.6K loan extra 750': the 750 beside 'extra' is the increment");
+        check(flag(loan_extra, "886.6", false, true) == 0, "...and the loan two words before it is not");
+        check(flag("a $300,000 loan extra $250 a month", "300000", false, true) == 0,
+              "'$300,000 loan extra $250': the nearer figure takes the word (a dollar sign on both)");
+        check(flag("a $300,000 loan extra $250 a month", "250", false, true) == 1, "...and it is the $250");
+        check(flag("$300/month extra, for 12 months", "300", false, true) == 1,
+              "'$300/month extra' is still an increment two words on (the control)");
+        check(flag("$300 extra 12 months", "300", false, true) == 1,
+              "'$300 extra 12 months': a count of months after the word does not take it (the control)");
+        check(flag("a $1,500 payment extra $250 a month", "1500", false, true) == 0,
+              "'$1,500 payment extra $250': the payment two words before the word is not an increment");
+        // A sentence ends the look-back: 'overpaying' in one sentence does not name the figure that opens the next.
+        const std::string next_sentence = "it would rent for 1.4k, a 6.27% rate. am i overpaying?\n$300,000 home";
+        check(flag(next_sentence, "300000", false, true) == 0,
+              "'am i overpaying?' then a new line: the '$300,000 home' is not an increment");
+        check(flag("am i overpaying? adding $250 a month", "250", false, true) == 1,
+              "...while 'adding $250' in that next sentence still is (the control)");
         // The word BEFORE a percent: "vacancy 10%" is as ordinary as "10% vacancy".
         check(flag("cash flow on 461K buy-to-let, 6% mgmt $1,900 rent 7 years vacancy 10%", "10", true) == 1,
               "'vacancy 10%' names the vacancy");
@@ -3412,6 +3436,109 @@ auto main() -> int {
         const auto shaped2 = mv::shape_stated_params(bare, "5.125% interest rate for 20 yrs on $900,000");
         check(std::ranges::find(shaped2.kept, "original_home_value") == shaped2.kept.end(),
               "...while the same figure with no 'no down payment' is still the loan counted twice (the control)");
+    }
+
+    section("A typed slip -- a DOUBLED or a DROPPED letter, like a swapped pair -- still names the concept");
+    {
+        // Found by the n=25000 corpus sweeps (2026-10-07). The sweep's typo generator makes three slips: a swap
+        // (already tolerated), a doubled letter and a dropped one. One row each of the other two survived to the
+        // 25,000-row sample: "in paymentts 1 to 13" read as a RANGE (so the stated start and end were dropped and
+        // the start asked about), and "7% vaancy" named no vacancy (so the occupancy was refused).
+        const auto cumulative = params("ComputeCumulative", {{"component", "INTEREST"}, {"rate", "0.005208"},
+                                                              {"periods", "180"}, {"present_value", "549700.00"},
+                                                              {"start_period", "1"}, {"end_period", "13"},
+                                                              {"timing", "END_OF_PERIOD"}});
+        const auto window = [&](std::string_view word) {
+            return mv::shape_stated_params(cumulative, "a $549,700 mortgage; with 6.25% interest; paid over 180 months; in " +
+                                                           std::string{word} + " 1 to 13? Is most of it interest? What's the total?");
+        };
+        const auto keeps_window = [](const mv::ShapedParams& shaped) {
+            return std::ranges::find(shaped.kept, "start_period") != shaped.kept.end() &&
+                   std::ranges::find(shaped.kept, "end_period") != shaped.kept.end() && shaped.missing_field.empty();
+        };
+        check(keeps_window(window("payments")), "'in payments 1 to 13' is a window of two stated figures (the control)");
+        check(keeps_window(window("paymentts")), "'in paymentts 1 to 13': a doubled letter is still the counting word");
+        check(keeps_window(window("paymnts")), "'in paymnts 1 to 13': a dropped letter is too");
+        check(keeps_window(window("monts")), "'in monts 1 to 13': a dropped letter from a six-letter word is (the n=25000 row)");
+        check(keeps_window(window("monhts")), "'in monhts 1 to 13': a swapped pair is tolerated here too -- this list was an exact match until now");
+        check(keeps_window(window("paymentt")) == false,
+              "...an EDGE letter is not a slip: 'paymentt 1 to 13' stays a range (the limit)");
+        check(keeps_window(window("pymnts")) == false,
+              "...but two dropped letters are not a slip -- 'pymnts 1 to 13' stays a range (the limit)");
+        const auto term = params("ComputeAmortization", {{"loan_amount", "300000.00"}, {"annual_rate", "0.06"}, {"term_months", "300"}});
+        const auto ranged = mv::shape_stated_params(term, "amortize $300,000 at 6% over 25 to 30 years");
+        check(std::ranges::find(ranged.kept, "term_months") == ranged.kept.end(),
+              "'25 to 30 years' is still a range -- tolerating the typo does not stop a range being one (the control)");
+
+        const auto occupancy = params("ComputeRentalCashFlow", {{"occupancy_rate", "0.9300"}});
+        const std::string vaancy = "a 364k rental with a $319,000 loan 30 year rent is $5,600 7% vaancy at 6.13% APR: does it pay for itself?";
+        check(mv::ground_emitted_values(occupancy, "a 364k rental with a $319,000 loan 30 year rent is $5,600 7% vacancy at 6.13% APR: does it pay for itself?")
+                      .outcome == mv::Outcome::Proven,
+              "a 7% vacancy grounds occupancy 0.93 (the control)");
+        check(mv::ground_emitted_values(occupancy, vaancy).outcome == mv::Outcome::Proven,
+              "...and so does '7% vaancy': a dropped letter is still the vacancy word");
+        check(mv::ground_emitted_values(params("ComputeRentalCashFlow", {{"occupancy_rate", "0.9300"}}),
+                                        "a 364k rental, rent is $5,600 7% vaccancy at 6.13% APR").outcome == mv::Outcome::Proven,
+              "...as is '7% vaccancy', a doubled one");
+
+        const auto flag_increment = [](std::string_view text, std::string_view figure) -> int {
+            for (const auto& l : mv::lex_numeric_literals(text)) {
+                std::string digits;
+                for (const char c : l.text) { if (c != ',' && c != '$') digits += c; }
+                if (digits == figure) { return l.names_increment ? 1 : 0; }
+            }
+            return -1;
+        };
+        check(flag_increment("paying an exxtra $250 a month", "250") == 1, "'an exxtra $250': a doubled letter in 'extra' still names the increment");
+        check(flag_increment("putting in $250 additonal a month", "250") == 1, "'$250 additonal': a dropped letter in 'additional' does too");
+        check(flag_increment("paying an extre $250 a month", "250") == 0,
+              "...while a SUBSTITUTED letter ('extre') still does not -- that is where the real words are (the limit)");
+    }
+
+    section("A duration word that labels the NEXT figure does not make this one a duration");
+    {
+        // "depreciation: cost 96,500 year 2 macrs 15-year": 'year' labels the 2 that follows it, and tagging 96,500
+        // as YEARS made the cost look unstated, so the layer would have ASKED "What did the asset cost?" of someone
+        // who had just said. No loan runs 96,500 years; the tag is believed only inside the horizon the verifier
+        // itself admits for that unit.
+        const auto tag_of = [](std::string_view text, std::string_view figure) -> int {
+            for (const auto& l : mv::lex_numeric_literals(text)) {
+                std::string digits;
+                for (const char c : l.text) { if (c != ',' && c != '$') digits += c; }
+                if (digits == figure) { return static_cast<int>(l.tag); }
+            }
+            return -1;
+        };
+        const auto years = tag_of("over 30 years", "30");
+        check(years == static_cast<int>(mv::LiteralTag::Years), "'30 years' is still a count of years (the control)");
+        check(tag_of("a 300 month schedule", "300") == static_cast<int>(mv::LiteralTag::Months), "'300 month' is still months (the control)");
+        check(tag_of("after 372 days", "372") == static_cast<int>(mv::LiteralTag::Days), "'372 days' is still days (the control)");
+        check(tag_of("depreciation: cost 96,500 year 2 macrs 15-year", "96500") != static_cast<int>(mv::LiteralTag::Years),
+              "'96,500 year' is not 96,500 years");
+        check(tag_of("depreciation: cost 96,500 year 2 macrs 15-year", "96500") == static_cast<int>(mv::LiteralTag::Untagged),
+              "...it is a bare figure, which every slot may take");
+        const auto dep = params("ComputeDepreciation", {{"method", "MACRS"}, {"cost", "132205.00"}, {"factor", "2.0"},
+                                                        {"recovery_period", "15"}, {"year", "2"}});
+        check(!mv::utterance_states_nothing_for("cost", "depreciation: cost 96,500 year 2 macrs 15-year", dep),
+              "the utterance states the cost, so a mangled cost is a REFUSAL and is never asked about");
+    }
+
+    section("A bare figure is claimed by a field only when no figure TAGGED for that field explains the value");
+    {
+        // "in payment 6; at a 6% rate": the rate (6%/12 = 0.005) was matched to the FIRST figure that could
+        // explain it, the bare 6 after 'payment', and the 6% that actually states it was left unclaimed -- so
+        // the payment number looked unstated and the layer ASKED "Which payment number?" of someone who had
+        // just said (the n=25000 ask sweep, 2026-10-07). A percent is the figure a rate is read from.
+        const std::string text = "My loan is $595,200 loan; in payment 6; at a 6% rate; 15 year mortgage. How much principal is in it?";
+        const auto principal = params("ComputePrincipalPayment", {{"rate", "0.005000"}, {"period", "8"}, {"periods", "180"},
+                                                                    {"present_value", "595200.00"}});
+        check(!mv::utterance_states_nothing_for("period", text, principal),
+              "'payment 6' states the payment number even though the 6% rate could also have been read from it");
+        // The control: when the bare figure IS the only thing the rate could come from, the payment number is unstated.
+        const auto bare_rate = params("ComputePrincipalPayment", {{"rate", "0.005000"}, {"period", "8"}, {"periods", "180"},
+                                                                    {"present_value", "595200.00"}});
+        check(mv::utterance_states_nothing_for("period", "$595,200 loan at 6 over 15 years, how much principal?", bare_rate),
+              "'at 6' alone is the rate, so the payment number was never stated and is asked about (the control)");
     }
 
     section("A ROUND FIGURE IS RENDERED AS A PLAIN DECIMAL, never as an exponent");

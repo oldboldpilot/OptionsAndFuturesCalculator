@@ -74,9 +74,12 @@ auto main(int argc, char** argv) -> int {
                 // is the layer overwriting a correct value.
                 ++corrupted_fields;
                 bad = true;
-                std::println("CORRUPT\t{}\t{}\tgold={}\tderived={}\tlatest={}", f[0], r.field,
+                // The utterance is printed because a CORRUPT row is only
+                // diagnosable from the words the layer actually read.
+                std::println("CORRUPT\t{}\t{}\tgold={}\tderived={}\tlatest={}\tutterance={}",
+                             f[0], r.field,
                              gold.count(r.field) ? gold.at(r.field) : std::string{"?"},
-                             r.values.front(), f[2]);
+                             r.values.front(), f[2], f[1]);
             }
             // ADVISORY ONLY. `mortgage_assistant_service.cpp` does not consume
             // `Reconciliation::ambiguous` -- an ambiguous field is simply left

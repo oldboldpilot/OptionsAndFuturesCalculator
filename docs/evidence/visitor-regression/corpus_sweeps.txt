@@ -46,3 +46,43 @@ CORRUPT	ComputePayoffTiming	extra_monthly_payment	gold=250.00	derived=1809.29	la
 CORRUPT	ComputeAmortization	monthly_overpayment	gold=750.00	derived=886600.00	latest=
 CORRUPT	ComputeRentalCashFlow	property_price	gold=300000.00	derived=1400.00	latest=
 23270 rows swept, 3 rows the layer would CORRUPT, 3 fields (8861 ambiguous, advisory)
+
+## AFTER lane derivres, 2026-10-07 (same seeds: n=500 -> 466 rows, n=6000 -> 5,589, n=25000 -> 23,270)
+# regenerated with the tree that fixes the three derivation rewrites, the doubled/dropped-letter slips, the unit-tag horizon and the claim order
+
+## n=500
+-- dbg_grounding
+swept 466 rows: 0 refused, 0 excused (declared generator findings)
+shaping: 24 rows the service would ASK about, 0 asked wrongly, 0 stated figures dropped
+PASS: every generated label grounds against its own utterance.
+ask sweep: 1429 probes, 0 asked wrongly, 3 unusable (mutation still grounded)
+PASS: no clarifying question is asked about a field the utterance states.
+-- dbg_derivation
+466 rows swept, 0 rows the layer would CORRUPT, 0 fields (206 ambiguous, advisory)
+
+## n=6000
+-- dbg_grounding
+swept 5589 rows: 0 refused, 0 excused (declared generator findings)
+shaping: 308 rows the service would ASK about, 0 asked wrongly, 0 stated figures dropped
+PASS: every generated label grounds against its own utterance.
+ask sweep: 17246 probes, 0 asked wrongly, 59 unusable (mutation still grounded)
+PASS: no clarifying question is asked about a field the utterance states.
+-- dbg_derivation
+5589 rows swept, 0 rows the layer would CORRUPT, 0 fields (2097 ambiguous, advisory)
+
+## n=25000
+-- dbg_grounding
+swept 23270 rows: 0 refused, 0 excused (declared generator findings)
+shaping: 1283 rows the service would ASK about, 0 asked wrongly, 0 stated figures dropped
+PASS: every generated label grounds against its own utterance.
+ask sweep: 72225 probes, 0 asked wrongly, 258 unusable (mutation still grounded)
+PASS: no clarifying question is asked about a field the utterance states.
+-- dbg_derivation
+23270 rows swept, 0 rows the layer would CORRUPT, 0 fields (8861 ambiguous, advisory)
+
+## row-level change in the rows the service would ASK about, n=25000 (GROUNDING_ASKED=1, baseline 7e9956d against this tree: 1287 -> 1283)
+# four rows stopped asking about a figure the words state; no row started asking
+  no longer asked: ASKED	ComputeCumulative	start_period	a $549,700 mortgage; with 6.25% interest; paid over 180 months; in paymentts 1 to 13? Is most of it interest? What's the total?
+  no longer asked: ASKED	ComputeCumulative	start_period	borrowing $767,000, for monhts 3 through 15, at 5.5 percent interest, how much interest do i pay? a 360 months term
+  no longer asked: ASKED	ComputeCumulative	start_period	interest paid: monts 1 to 12 $328,000 mortgage 4.125 percent 20-year Does that seem right?
+  no longer asked: ASKED	ComputeDepreciation	cost	depreciation: cost 96,500 year 2 macrs 15-year

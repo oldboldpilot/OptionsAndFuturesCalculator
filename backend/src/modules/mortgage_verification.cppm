@@ -3360,7 +3360,9 @@ inline constexpr std::array<std::string_view, 2> kNettedLoanFields{"present_valu
  *
  * The looser rule's one extra catch was `exta`~`extra`, and production already
  * answers that utterance correctly -- so it buys nothing measured and costs a
- * word that appears 22 times. Hence transposition only.
+ * word that appears 22 times. Hence transposition only, THEN: a doubled and a
+ * dropped letter were added on 2026-10-07 under their own, separately measured
+ * limits -- see `one_letter_slip_of`.
  *
  * A SINGLE DIFFERING POSITION IS DELIBERATELY NOT A MATCH. That is a
  * substitution, and substitutions are what the dense neighbourhood is made of:
@@ -3394,7 +3396,51 @@ inline constexpr std::array<std::string_view, 2> kNettedLoanFields{"present_valu
 }
 
 /**
- * Exact match against any member of `set`, or one adjacent transposition of one.
+ * One DOUBLED letter, or one DROPPED letter -- the other two slips of the finger, beside the swap.
+ *
+ * Found 2026-10-07 by the n=25000 corpus sweeps, whose typo generator makes exactly three slips (swap,
+ * drop, double): the swap was tolerated and the other two were not, so "in paymentts 1 to 13" read as a
+ * RANGE (the stated start and end were dropped, the start asked about) and "7% vaancy" named no vacancy
+ * (the occupancy was refused). `one_transposition_of`'s own note called this "the documented gap".
+ *
+ * THE LIMITS ARE MEASURED, the way that note measured the swap, over /usr/share/dict/words (415,830
+ * words) and our own corpus vocabulary (1,182 words, 416,362 tokens), against every concept list here:
+ *
+ *   | rule                                       | English words that collide        |
+ *   | doubled interior letter, gold >= 5 letters | 0                                 |
+ *   | dropped interior letter, gold >= 6 letters | 6: anther, chare, chares, moths,  |
+ *   |                                            |    monts, pament                  |
+ *   | dropped interior letter, gold >= 5 letters | 12: adds moth, yeas, wees, codo,  |
+ *   |                                            |    exta, etra                     |
+ *
+ * Both are INTERIOR -- the first and last letters must survive -- because a doubled or dropped edge
+ * letter is where a real word sits (`chargee`, `budge`). A dropped letter needs SIX letters of gold
+ * because at five the collisions double and reach `moth`, `yeas` and `wees`; at six the six that remain
+ * are an obsolete plural, a flower part, a rare noun and three misspellings, and none of them is a word
+ * a mortgage question puts beside a figure. Every word of OUR corpus these rules newly accept is a typo
+ * of a concept word (`paymnt`, `yearrs`, `exxtra`, `monts`), and the swap's own collision count over the
+ * two new lists (vacancy, counting) is 0.
+ *
+ * A SUBSTITUTION IS STILL NOT A MATCH, for the reason the swap note gives: the real words live there.
+ * Two slips in one word are not either -- `pymnts` stays what it is.
+ */
+[[nodiscard]] constexpr auto one_letter_slip_of(std::string_view w, std::string_view gold) noexcept -> bool {
+    const bool doubled = gold.size() >= 5 && w.size() == gold.size() + 1;
+    const bool dropped = gold.size() >= 6 && w.size() + 1 == gold.size();
+    if (!doubled && !dropped) { return false; }
+    // `longer` becomes `shorter` by losing ONE letter. The first mismatch is where it sits.
+    const auto longer = doubled ? w : gold;
+    const auto shorter = doubled ? gold : w;
+    std::size_t at = 0;
+    while (at < shorter.size() && longer[at] == shorter[at]) { ++at; }
+    if (at == 0 || at + 1 >= longer.size()) { return false; }      // an edge letter is not a slip
+    if (longer.substr(at + 1) != shorter.substr(at)) { return false; }
+    return !doubled || longer[at] == longer[at - 1];                // a doubled letter repeats its neighbour
+}
+
+/**
+ * Exact match against any member of `set`, or one slip of one: an adjacent transposition, a doubled
+ * letter or a dropped one.
  *
  * EVERY CONCEPT LIST GOES THROUGH HERE, which is this file's own
  * sweep-the-class rule. Teaching only the HOA list to tolerate a typo would
@@ -3409,7 +3455,7 @@ template <std::size_t N>
 [[nodiscard]] constexpr auto names_concept(const std::array<std::string_view, N>& set,
                                            std::string_view w) noexcept -> bool {
     for (const auto entry : set) {
-        if (entry == w || one_transposition_of(w, entry)) { return true; }
+        if (entry == w || one_transposition_of(w, entry) || one_letter_slip_of(w, entry)) { return true; }
     }
     return false;
 }
@@ -3434,6 +3480,21 @@ template <std::size_t N>
  */
 [[nodiscard]] inline auto is_condo_word(std::string_view w) -> bool {
     static constexpr std::array<std::string_view, 2> kWords{"condo", "condominium"};
+    return names_concept(kWords, w);
+}
+
+/** The words that name a VACANCY. One list, so the lexer's two scans (the word before a figure and the
+ *  word after it) cannot disagree about which spellings count. */
+[[nodiscard]] inline auto is_vacancy_word(std::string_view w) -> bool {
+    static constexpr std::array<std::string_view, 3> kWords{"vacancy", "vacant", "vacancies"};
+    return names_concept(kWords, w);
+}
+
+/** The words that say a figure COUNTS something -- a payment, a month, a period -- so that "payments 1 to
+ *  13" is a window of two figures and not a range to choose from. */
+[[nodiscard]] inline auto is_counting_word(std::string_view w) -> bool {
+    static constexpr std::array<std::string_view, 10> kWords{"month", "months", "payment", "payments", "period",
+                                                             "periods", "year", "years", "week", "weeks"};
     return names_concept(kWords, w);
 }
 
@@ -3565,9 +3626,21 @@ auto utterance_states_none_for(std::string_view field, std::string_view user_tex
 
 namespace detail {
 
-/** Reads the word immediately following `pos` (skipping spaces and a single
- * hyphen, so "30-year" and "30 years" both find "year"), lower-cased. */
-[[nodiscard]] inline auto next_word(std::string_view text, std::size_t pos) -> std::string {
+/** A character that ENDS a sentence, and with it the reach of any role word before it. One list, because
+ *  "does this word govern that figure?" has the same answer whichever scan asks it. */
+[[nodiscard]] constexpr auto is_sentence_break(char c) noexcept -> bool {
+    return c == '.' || c == ';' || c == '?' || c == '!' || c == '\n';
+}
+
+/** Where a word sits in the text: `[begin, end)`. */
+struct WordSpan {
+    std::size_t begin = 0;
+    std::size_t end = 0;
+};
+
+/** The word immediately following `pos` (skipping spaces and a single hyphen, so "30-year" and
+ *  "30 years" both find "year"). Empty span when none. */
+[[nodiscard]] inline auto next_word_span(std::string_view text, std::size_t pos) -> WordSpan {
     std::size_t i = pos;
     bool hyphen_used = false;
     while (i < text.size() && (text[i] == ' ' || (text[i] == '-' && !hyphen_used))) {
@@ -3576,26 +3649,86 @@ namespace detail {
     }
     const std::size_t start = i;
     while (i < text.size() && is_alpha(text[i])) ++i;
-    return to_lower_copy(text.substr(start, i - start));
+    return {start, i};
 }
 
-/** The alphabetic word immediately BEFORE `pos`, lowercased; empty if none.
- *  Skips at most three non-alphabetic characters, which covers " $", "(" and
- *  a hyphen without letting the scan wander into the previous clause -- the
- *  same tight-window reasoning the down-payment adjacency records. */
-[[nodiscard]] inline auto prev_word(std::string_view text, std::size_t pos) -> std::string {
+/** The lower-cased text of a word span. */
+[[nodiscard]] inline auto word_text(std::string_view text, WordSpan w) -> std::string {
+    return to_lower_copy(text.substr(w.begin, w.end - w.begin));
+}
+
+/** Reads the word immediately following `pos`, lower-cased. */
+[[nodiscard]] inline auto next_word(std::string_view text, std::size_t pos) -> std::string {
+    return word_text(text, next_word_span(text, pos));
+}
+
+/** The alphabetic word immediately BEFORE `pos`; nothing if there is none. Skips at most three
+ *  non-alphabetic characters, which covers " $", "(" and a hyphen without letting the scan wander
+ *  into the previous clause -- the same tight-window reasoning the down-payment adjacency records.
+ *
+ *  A SENTENCE BREAK ENDS THE SCAN. Three characters is enough to cross "?\n$" and "overpaying?\n$300,000
+ *  home" then read as an overpayment word beside the price -- found by the n=25000 derivation sweep,
+ *  where the layer rewrote the stated price to the rent. */
+[[nodiscard]] inline auto prev_word_span(std::string_view text, std::size_t pos) -> std::optional<WordSpan> {
     std::size_t i = pos;
     for (int skipped = 0; i > 0 && !is_alpha(text[i - 1]) && skipped < 3; ++skipped) {
+        if (is_sentence_break(text[i - 1])) {
+            return std::nullopt;
+        }
         --i;
     }
     if (i == 0 || !is_alpha(text[i - 1])) {
-        return {};
+        return std::nullopt;
     }
     const std::size_t end = i;
     while (i > 0 && is_alpha(text[i - 1])) {
         --i;
     }
-    return to_lower_copy(text.substr(i, end - i));
+    return WordSpan{i, end};
+}
+
+/** `prev_word_span`'s word, lower-cased; empty if none. */
+[[nodiscard]] inline auto prev_word(std::string_view text, std::size_t pos) -> std::string {
+    const auto w = prev_word_span(text, pos);
+    return w ? word_text(text, *w) : std::string{};
+}
+
+/** An increment word found AFTER a figure: where it begins, and how many words from the figure it
+ *  stands (1 is the very next word). */
+struct IncrementWord {
+    std::size_t begin = 0;
+    int words = 0;
+};
+
+/**
+ * The increment word within two words AFTER `pos` ("$750 more a month", "$300/month extra"), if any.
+ *
+ * Two words forward at most -- a wider window starts matching an increment mentioned in a different
+ * clause, and the flag MOVES a literal to another slot, so a false positive is a wrong answer rather
+ * than a refused one. TYPO-TOLERANT, and this is the one list where that needed its own argument:
+ * `names_concept` admits one adjacent transposition only, and over 415,830 English words NOTHING
+ * collides with {more, extra, additional, another} -- the tightest list of the ten. `extar` is the live
+ * spelling it recovers.
+ *
+ * It returns WHERE the word is, not merely whether it was found, because one word can be reached from
+ * two figures and the lexer has to decide whose it is.
+ */
+[[nodiscard]] inline auto increment_word_after(std::string_view text, std::size_t pos)
+    -> std::optional<IncrementWord> {
+    static constexpr std::array<std::string_view, 3> kAfter{"more", "extra", "additional"};
+    std::size_t j = pos;
+    for (int step = 0; step < 2; ++step) {
+        while (j < text.size() && text[j] == '/') ++j;
+        const auto span = next_word_span(text, j);
+        const std::string w = word_text(text, span);
+        if (names_concept(kAfter, w)) {
+            return IncrementWord{span.begin, step + 1};
+        }
+        if (w.empty()) break;
+        while (j < text.size() && (text[j] == ' ' || text[j] == '-' || text[j] == '/')) ++j;
+        while (j < text.size() && is_alpha(text[j])) ++j;
+    }
+    return std::nullopt;
 }
 
 }  // namespace detail
@@ -3831,11 +3964,19 @@ auto lex_numeric_literals(std::string_view text) -> std::vector<NumericLiteral> 
             } else if (word == "dollars" || word == "dollar" || word == "usd") {
                 lit.tag = LiteralTag::Money;
             } else if (!currency_prefix) {
-                if (word == "year" || word == "years" || word == "yr" || word == "yrs") {
+                // A UNIT WORD IS BELIEVED ONLY INSIDE THE HORIZON THE VERIFIER ITSELF ADMITS FOR THAT UNIT.
+                // "depreciation: cost 96,500 year 2 macrs 15-year" -- 'year' labels the 2 that follows it, and
+                // tagging 96,500 as YEARS made the cost look unstated, so the layer would have ASKED "What did
+                // the asset cost?" of someone who had just said (the n=6000 ask sweep, 2026-10-07). Past the
+                // bound the figure is left bare, which every slot may take; a term that truly is out of range is
+                // still refused, on its VALUE, by the bounds check -- not by this tag.
+                const auto within = [&](__int128 horizon) { return lit.value.units() <= horizon; };
+                if ((word == "year" || word == "years" || word == "yr" || word == "yrs") && within(detail::kMaxYearUnits)) {
                     lit.tag = LiteralTag::Years;
-                } else if (word == "month" || word == "months" || word == "mo" || word == "mos") {
+                } else if ((word == "month" || word == "months" || word == "mo" || word == "mos") &&
+                           within(detail::kMaxMonthUnits)) {
                     lit.tag = LiteralTag::Months;
-                } else if (word == "day" || word == "days") {
+                } else if ((word == "day" || word == "days") && within(detail::kMaxDayUnits)) {
                     lit.tag = LiteralTag::Days;
                 }
             }
@@ -3853,7 +3994,7 @@ auto lex_numeric_literals(std::string_view text) -> std::vector<NumericLiteral> 
         // the form the failing production utterance used.
         {
             const std::string w1 = detail::next_word(text, i);
-            if (w1 == "vacancy" || w1 == "vacant" || w1 == "vacancies") {
+            if (detail::is_vacancy_word(w1)) {
                 // The word FOLLOWS the figure in the phrasing the corpus teaches:
                 // "8% vacancy", "budget 5% vacancy". One word, no window --
                 // this flag removes candidates, so a false positive refuses a
@@ -3874,7 +4015,7 @@ auto lex_numeric_literals(std::string_view text) -> std::vector<NumericLiteral> 
                     if (crossed_figure) break;
                     const std::string wp = detail::prev_word(text, back);
                     if (wp.empty()) break;
-                    if (wp == "vacancy" || wp == "vacant" || wp == "vacancies") {
+                    if (detail::is_vacancy_word(wp)) {
                         // ...unless a figure of its own already stands right before the word:
                         // "a 5% vacancy rate at 7.75% fixed" is the 5's, and the 7.75 is a loan rate.
                         std::size_t word_end = back;
@@ -3961,35 +4102,33 @@ auto lex_numeric_literals(std::string_view text) -> std::vector<NumericLiteral> 
         // window stays at TWO words forward and is not widened with the tag.
         if ((lit.tag == LiteralTag::Money || lit.tag == LiteralTag::Untagged) &&
             !lit.names_down_payment) {
-            std::size_t j = i;
-            for (int step = 0; step < 2; ++step) {
-                while (j < text.size() && text[j] == '/') ++j;
-                const std::string w = detail::next_word(text, j);
-                // TYPO-TOLERANT, and this is the one list where that needed
-                // its own argument, because the comment above says a false
-                // positive HERE is a wrong answer rather than a refusal.
-                // `names_concept` admits one adjacent transposition only, and
-                // over 415,830 English words NOTHING collides with {more,
-                // extra, additional, another} -- the tightest list of the ten.
-                // `extar` is the live spelling it recovers.
-                static constexpr std::array<std::string_view, 3> kAfter{"more", "extra",
-                                                                        "additional"};
-                if (detail::names_concept(kAfter, w)) {
-                    lit.names_increment = true;
-                    break;
-                }
-                if (w.empty()) break;
-                while (j < text.size() && (text[j] == ' ' || text[j] == '-' || text[j] == '/')) ++j;
-                while (j < text.size() && detail::is_alpha(text[j])) ++j;
-            }
+            lit.names_increment = detail::increment_word_after(text, i).has_value();
             if (!lit.names_increment) {
-                const std::string wp = detail::prev_word(text, lit.offset);
+                const auto word = detail::prev_word_span(text, lit.offset);
+                const std::string wp = word ? detail::word_text(text, *word) : std::string{};
                 static constexpr std::array<std::string_view, 7> kBefore{
                     "extra", "additional", "another", "add", "adding", "overpay", "overpaying"};
                 // "+1000 extra $300 HOA": the 'extra' belongs to the +1000 that precedes it, and the
                 // HOA word right after the 300 says what that is.
                 if (detail::names_concept(kBefore, wp) && !detail::is_hoa_word(detail::next_word(text, i))) {
                     lit.names_increment = true;
+                    // ONE WORD, ONE FIGURE -- the NEAREST, and a tie goes to the figure BEFORE the word, as the
+                    // "+1000 extra $300 HOA" case above already has it. The word can be reached from both
+                    // sides: "+250 extra $1,809.29" (each figure is its neighbour) and "886.6K loan extra 750"
+                    // (the loan sees it two words on, the 750 one word back). Both flagged, the derivation
+                    // layer read the payment and the loan as the OVERPAYMENT and rewrote the stated 250 and 750
+                    // to them -- a correct answer made wrong, with no refusal and no question (the n=25000
+                    // derivation sweep, 2026-10-07).
+                    if (!out.empty() && out.back().names_increment) {
+                        const auto held = detail::increment_word_after(text, out.back().end);
+                        if (held && held->begin == word->begin) {
+                            if (held->words == 1) {
+                                lit.names_increment = false;          // a tie: the figure before keeps it
+                            } else {
+                                out.back().names_increment = false;   // this figure is nearer: it takes it
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -4103,7 +4242,7 @@ auto lex_numeric_literals(std::string_view text) -> std::vector<NumericLiteral> 
                                            text[j] == '-' || text[j] == ',')) {
                     ++j;
                 }
-                if (j < text.size() && (text[j] == '.' || text[j] == ';' || text[j] == '?' || text[j] == '!' || text[j] == '\n')) break;
+                if (j < text.size() && detail::is_sentence_break(text[j])) break;
                 const std::string w = detail::next_word(text, j);
                 if (w.empty()) break;
                 if (detail::is_condo_word(w)) {
@@ -4191,8 +4330,7 @@ auto lex_numeric_literals(std::string_view text) -> std::vector<NumericLiteral> 
                         break;
                     }
                     while (back > 0 && !detail::is_alpha(text[back - 1])) {
-                        if (text[back - 1] == '.' || text[back - 1] == ';' || text[back - 1] == '?' ||
-                            text[back - 1] == '!' || text[back - 1] == '\n') { back = 0; break; }
+                        if (detail::is_sentence_break(text[back - 1])) { back = 0; break; }
                         --back;
                     }
                     while (back > 0 && detail::is_alpha(text[back - 1])) --back;
@@ -4775,6 +4913,32 @@ namespace detail {
     return field == "down_payment" || field == "down_payment_percent";
 }
 
+/**
+ * Whether a literal's TAG is the one a slot of this kind is read from: a percent for a rate or a ratio,
+ * a currency figure for money, a duration for a count, a day count for a date. An untagged figure is
+ * compatible with every slot and is NOT native to any of them. Kinds this does not list answer true, so
+ * the callers keep the permissive reading they had.
+ */
+[[nodiscard]] constexpr auto tag_belongs_to(SlotKind kind, LiteralTag tag) noexcept -> bool {
+    switch (kind) {
+        case SlotKind::Money:
+            return tag == LiteralTag::Money;
+        case SlotKind::Rate:
+        case SlotKind::Ratio:
+        case SlotKind::Dimensionless:
+            return tag == LiteralTag::Percent;
+        case SlotKind::MonthCount:
+        case SlotKind::YearCount:
+        case SlotKind::PeriodIndex:
+        case SlotKind::Frequency:
+            return tag == LiteralTag::Years || tag == LiteralTag::Months;
+        case SlotKind::DayOffsets:
+            return tag == LiteralTag::Days;
+        default:
+            return true;
+    }
+}
+
 [[nodiscard]] inline auto claimed_literals(const MortgageParamsInput& input,
                                            std::string_view failing_field,
                                            const std::vector<NumericLiteral>& literals,
@@ -4819,20 +4983,23 @@ namespace detail {
                 continue;
             }
 
-            for (std::size_t i = 0; i < literals.size(); ++i) {
-                bool hit = false;
-                for (const auto& candidate :
-                     expand_candidates(literals[i], kind, emitted.name, periods_per_year)) {
-                    if (parsed->within(candidate, tolerance)) {
-                        hit = true;
-                        break;
-                    }
-                }
-                if (hit) {
-                    claimed[i] = true;
-                    break;
-                }
-            }
+            // A FIGURE TAGGED FOR THIS SLOT IS READ BEFORE A BARE ONE. "in payment 6; at a 6% rate" has two
+            // figures that can explain a rate of 0.005 (6/12): the bare 6 after 'payment' and the 6% that
+            // actually states it. Taking whichever came first left the 6% unclaimed and the payment number
+            // looking unstated, so the layer asked "Which payment number?" of someone who had just said (the
+            // n=25000 ask sweep, 2026-10-07). A bare figure is claimed only when no tagged one explains the value.
+            const auto claims = [&](std::size_t i) {
+                return std::ranges::any_of(
+                    expand_candidates(literals[i], kind, emitted.name, periods_per_year),
+                    [&](const Decimal& candidate) { return parsed->within(candidate, tolerance); });
+            };
+            const auto native = [&](std::size_t i) { return tag_belongs_to(kind, literals[i].tag); };
+            const auto indices = std::views::iota(std::size_t{0}, literals.size());
+            const auto first_tagged = std::ranges::find_if(indices, [&](std::size_t i) { return native(i) && claims(i); });
+            const auto first_any = first_tagged != indices.end()
+                                       ? first_tagged
+                                       : std::ranges::find_if(indices, claims);
+            if (first_any != indices.end()) { claimed[*first_any] = true; }
         }
     }
     return claimed;
@@ -4879,29 +5046,7 @@ auto utterance_states_nothing_for(std::string_view field, std::string_view user_
         // is ambiguous, and the ambiguous case must fall through to the refusal
         // this function exists to NARROW rather than to widen.
         if (lit.tag == LiteralTag::Untagged) { return false; }
-        switch (kind) {
-            case SlotKind::Money:
-                if (lit.tag == LiteralTag::Money) { return false; }
-                break;
-            case SlotKind::Rate:
-            case SlotKind::Ratio:
-            case SlotKind::Dimensionless:
-                if (lit.tag == LiteralTag::Percent) { return false; }
-                break;
-            case SlotKind::MonthCount:
-            case SlotKind::YearCount:
-            case SlotKind::PeriodIndex:
-            case SlotKind::Frequency:
-                if (lit.tag == LiteralTag::Years || lit.tag == LiteralTag::Months) {
-                    return false;
-                }
-                break;
-            case SlotKind::DayOffsets:
-                if (lit.tag == LiteralTag::Days) { return false; }
-                break;
-            default:
-                return false;
-        }
+        if (detail::tag_belongs_to(kind, lit.tag)) { return false; }
     }
     return true;
 }
@@ -5389,9 +5534,7 @@ namespace detail {
             range = has("between");
         } else if (core == "to" || core == "-" || core == "\xE2\x80\x93" || core == "\xE2\x80\x94" ||
                    core == "through" || core == "thru") {
-            const bool counted = has("month") || has("months") || has("payment") || has("payments") ||
-                                 has("period") || has("periods") || has("year") || has("years") ||
-                                 has("week") || has("weeks");
+            const bool counted = std::ranges::any_of(words, [](const std::string& w) { return is_counting_word(w); });
             range = !has("from") && !counted &&
                     a.value.units() * static_cast<__int128>(a.scale) < b.value.units() * static_cast<__int128>(b.scale);
         }

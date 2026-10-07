@@ -593,6 +593,32 @@ auto main() -> int {
         check(md::reconcile(c, annual).replace.empty(), "an annual rate is not rewritten to a monthly one when the horizon was misspelt");
     }
 
+    // An increment word belongs to ONE figure, the nearest, and the derivation sweep at n=25000 found three
+    // rows where the layer overwrote a correct stated value because the lexer had handed the word to the
+    // wrong one. Each is the corpus row as the sweep printed it; gold is what the model emitted perfectly.
+    std::printf("\n19. an increment word moves ONE figure, so the layer never rewrites the stated value\n");
+    {
+        const auto kept = [](std::string_view op, std::string_view text,
+                             const std::map<std::string, std::string>& gold) -> bool {
+            return md::reconcile(md::derive_candidates(op, text), gold).replace.empty();
+        };
+        check(kept("ComputePayoffTiming",
+                   "how soon am I done: from 4.625% 321000 +250 extra $1,809.29 per month Am I overpaying?",
+                   {{"current_loan_balance", "321000.00"}, {"annual_rate", "0.04625"},
+                    {"current_monthly_payment", "1809.29"}, {"extra_monthly_payment", "250.00"}}),
+              "'+250 extra $1,809.29 per month': the 250 is the extra, not rewritten to the payment 1809.29");
+        check(kept("ComputeAmortization", "amortization schedule 886.6K loan extra 750 rate 4.5% 30 years term?",
+                   {{"loan_amount", "886600.00"}, {"annual_rate", "0.0450"}, {"term_months", "360"},
+                    {"monthly_overpayment", "750.00"}}),
+              "'886.6K loan extra 750': the 750 is the extra, not rewritten to the 886,600 loan");
+        const auto price = md::reconcile(
+            md::derive_candidates("ComputeRentalCashFlow",
+                                  "it would rent for 1.4k with a $62,000 down payment hold for 7 years. am i overpaying?\n$300,000 home"),
+            {{"property_price", "300000.00"}, {"down_payment", "62000.00"}, {"monthly_gross_rent", "1400.00"}});
+        check(price.replace.empty(),
+              "'am i overpaying?' ends a sentence: the '$300,000 home' after it is the price, not rewritten to the 1.4k rent");
+    }
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

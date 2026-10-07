@@ -186,6 +186,9 @@ auto main(int argc, char** argv) -> int {
     }
 
     const bool why = std::getenv("GROUNDING_WHY") != nullptr;
+    // GROUNDING_ASKED lists every row the service would ASK about, one TSV line each, so two builds can be
+    // diffed row for row: a count that stays equal can hide one row gained and another lost.
+    const bool list_asked = std::getenv("GROUNDING_ASKED") != nullptr;
     int rows = 0;
     int refused = 0;
     int excused = 0;
@@ -334,6 +337,11 @@ auto main(int argc, char** argv) -> int {
         // SHAPE FIRST, EXACTLY AS THE SERVICE DOES, then verify what is KEPT.
         // ===================================================================
         const auto shaped = mv::shape_stated_params(input, text);
+        if (list_asked && !shaped.missing_field.empty()) {
+            std::string one_line = text;
+            std::ranges::replace(one_line, '\n', ' ');
+            std::printf("ASKED\t%s\t%s\t%s\n", f[0].c_str(), shaped.missing_field.c_str(), one_line.c_str());
+        }
         const auto is_kept = [&](std::string_view name) {
             return std::ranges::find(shaped.kept, name) != shaped.kept.end();
         };
