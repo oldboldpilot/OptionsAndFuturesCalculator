@@ -109,7 +109,7 @@ downstream lie, which is worse than being visibly stale.
 
 **Requires the partner key — the one you already hold.** The key issued to
 mortgagefv on 2026-08-10 (`tier partner`, `scopes finance, assistant`) is the
-same credential you send on `ParseOperation`, and it works here unchanged. There
+same partner credential mortgagefv sends on every call, and it works here unchanged. There
 is no new secret to provision.
 
 This is the one write on the finance surface and it is a server-side call. Do

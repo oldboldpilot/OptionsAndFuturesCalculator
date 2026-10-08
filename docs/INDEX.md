@@ -57,12 +57,14 @@
   retrain for a regression that did not exist (13/16 measured correctly).
 - [Strategy assistant pipeline](STRATEGY_ASSISTANT_PIPELINE.md) — dataset
   generation through QLoRA, merge/export/quantize, and the serving constraints
-- [Mortgage assistant pipeline](MORTGAGE_ASSISTANT_PIPELINE.md) — the SECOND
-  assistant end to end: proto-derived dataset, QLoRA, conversion, the four
+- [Mortgage assistant pipeline](MORTGAGE_ASSISTANT_PIPELINE.md) — HISTORY (the
+  assistant moved to `mortgage-nest-egg` in 2026-10; its serving code is no longer
+  in this repository). The SECOND assistant end to end: proto-derived dataset, QLoRA, conversion, the four
   serving constraints, the GP-ARA verification gate, and its honest 27.8%
   measured accuracy. Do not quote `evaluate.py`'s 31.7%/36.4% — it measures the
   bf16 intermediate, which is not what ships.
-- [Mortgage assistant model distribution](MORTGAGE_MODEL_DISTRIBUTION.md) — how the
+- [Mortgage assistant model distribution](MORTGAGE_MODEL_DISTRIBUTION.md) — HISTORY
+  (the assistant moved to `mortgage-nest-egg` in 2026-10). How the
   SECOND fine-tuned Qwen3-0.6B is checksummed, pinned and reaches the image.
   Distribution only; the strategy pipeline document is about a different model and
   says so. Neither GGUF can travel through `railway up`. **Its hosting half is

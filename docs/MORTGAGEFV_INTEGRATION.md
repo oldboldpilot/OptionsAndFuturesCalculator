@@ -340,7 +340,7 @@ spell the same intent differently:
 
 - a JSON caller through the transcoder OMITS what it does not use, so the field
   arrives as `""`;
-- the mortgage assistant CANNOT omit — `mortgage_verification.cppm`'s G2b
+- the mortgage assistant (now in `mortgage-nest-egg`) CANNOT omit — its verifier's G2b
   refuses a missing key — so it emits every declared field and says "not this
   shape" with the value `0`.
 

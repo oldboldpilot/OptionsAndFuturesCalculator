@@ -29,7 +29,7 @@ This document outlines the system architecture, build commands, and deployment i
 
 ## gRPC Surface
 
-The engine serves **four** services on one port (`:50051` native, and through
+The engine serves **three** services on one port (`:50051` native, and through
 Envoy's catch-all route as gRPC-Web). They are separate contracts, not separate
 deployments. The route is a catch-all prefix precisely so a new service on this
 port needs no proxy change — but each one must still be added to Envoy's
@@ -40,7 +40,20 @@ port needs no proxy change — but each one must still be added to Envoy's
 | `calculator.OptionsCalculator` | `backend/proto/calculator.proto` | This application's own API — strategies, legs, payoff curves, market data |
 | `sensen.finance.Finance` | `backend/proto/finance.proto` | The general-purpose sensen financial library, exposed for reuse by other applications |
 | `calculator.assistant.StrategyAssistant` | `backend/proto/assistant.proto` | Natural-language strategy parsing, served by a fine-tuned Qwen3-0.6B running in-process |
-| `mortgage.assistant.MortgageAssistant` | `backend/proto/mortgage_assistant.proto` | Natural-language MORTGAGE / time-value-of-money parsing, served by a SECOND, different fine-tuned Qwen3-0.6B in the same process |
+
+> **MOVED 2026-10: the former fourth service, `mortgage.assistant.MortgageAssistant`, is no
+> longer served by this engine.** It runs as the separate `mfv-assistant` Railway service built
+> from the `mortgage-nest-egg` repository (`services/mortgage-assistant`), which also holds the
+> canonical `mortgage_assistant.proto`; `mortgagefvcalculator.com` has called it there since the
+> client flip on 2026-10-08. Its sources, tests, Envoy transcoder entry, descriptor entry,
+> Dockerfile fetch and `MORTGAGE_*` environment reads were deleted from this repository in one
+> change, and `ParseOperation` on `api.optionsandfuturescalculator.com` no longer answers.
+> **Every other passage of this file that describes the mortgage assistant records what ran HERE
+> before the move. It is history, and the file paths it names (`mortgage_assistant_service.cpp`,
+> `mortgage_verification.cppm`, `mortgage_derivation.cppm`, `mortgage_grammar.cppm`,
+> `proto/mortgage_assistant.proto`, `scripts/score_visitor_regression.py` and the rest of that set)
+> no longer exist in this tree.** `git show --diff-filter=D --name-only 7d2a5a7` (the deleting commit, as
+> committed on `lane/ofc-delete-mortgage`) lists every one, and its parent still holds them.
 
 `sensen.finance.Finance` covers roughly fifty functions across sensen's
 `financial.cppm`, `options.cppm` and `portfolio.cppm`: time value of money,
@@ -205,7 +218,7 @@ grpc-status: 0                      <- SURVIVES; the HTTP edge strips this
 body: -1798.651575458257198999
 ```
 
-**ALL FOUR SERVICES ARE ON IT, not just Finance.** There is one engine and one
+**ALL FOUR SERVICES WERE ON IT, not just Finance (the mortgage row below predates its move out of this engine).** There is one engine and one
 Envoy, and the native listener routes `domains: ["*"]` / `prefix: "/"` to the
 single `backend_grpc_service` cluster -- so enabling the endpoint once covered
 optionsandfuturescalculator.com's own API as well as mortgagefvcalculator.com's.
@@ -725,6 +738,14 @@ scores identically because the refusal comes from the verification layer, not th
 model — score `[assistant] raw model output`, which is logged before it runs.
 
 ## Mortgage assistant
+
+> **THIS SECTION IS HISTORY (2026-10).** The mortgage assistant moved to the `mortgage-nest-egg`
+> repository (`services/mortgage-assistant`, Railway service `mfv-assistant`) and was deleted from
+> this engine; see the note under "gRPC Surface". What follows records how it was built, measured
+> and broken while it lived here, and the lessons stand, but nothing below describes a service
+> this repository builds, tests or deploys. The corpus builders and trainer that fed its encoder
+> (`agent/train/encoder_*.py`, the parity gates) remain here; the builders that needed the
+> verifier's source (`agent/dataset/build_mortgage_dataset.py` and friends) left with it.
 
 ### The assistant returns what the visitor STATED, and asks only for what it cannot do without
 
@@ -3280,7 +3301,7 @@ Two gates, both live, **both verified against production in both directions**:
 | gate | free | Pro |
 | --- | --- | --- |
 | `check_strategy_entitlement` (`CalculateStrategy`) | 1 leg | 2+ legs |
-| `check_assistant_entitlement` (both assistants) | — | every call |
+| `check_assistant_entitlement` (the strategy assistant; the mortgage assistant's own gate left with it, 2026-10) | — | every call |
 
 Anonymous 2-leg → `PERMISSION_DENIED`. The same request with a signed licence →
 `maxProfit 1275, maxLoss -725, breakEven 587.25` on a 580/600 bull call spread,
@@ -3289,11 +3310,12 @@ not only the refuse direction** — a gate that refuses everyone passes a
 refuse-only test, and this one stands in front of the product's entire reason to
 exist.
 
-`check_assistant_entitlement` is shared by both assistants on purpose: its
+`check_assistant_entitlement` was shared by two assistants on purpose: its
 rationale is the cost asymmetry of running a 0.6B model at all, which is not a
 property of which model it is. Only the copy and the log label are per-surface
-(`kStrategySurface` / `kMortgageSurface`) — see that struct's comment for why
-the message is stored whole rather than templated.
+(`kStrategySurface`, and `kMortgageSurface` until it left with that service in
+2026-10; `kStrategySurface` is the only instance now) — see the struct's comment for
+why the message is stored whole rather than templated.
 
 What enforce means at the two client surfaces, neither of which is a backend
 concern and both of which are now user-visible:
@@ -3305,11 +3327,11 @@ concern and both of which are now user-visible:
   under "Unavailable" in loss red, which is what it did until 2026-08-06.
   `useCalculatorStore` discriminates on the gRPC **status code** (7), never on
   the message text, which was reworded twice in a single day.
-- mortgagefvcalculator.com gets `PERMISSION_DENIED` on every anonymous
-  `ParseOperation`, so that integration needs a Pro credential before the
-  assistant does anything at all. The `sensen.finance.Finance` RPCs it would
-  otherwise call are ungated — which is exactly what `kMortgageSurface`'s
-  refusal points the caller at.
+- mortgagefvcalculator.com USED to get `PERMISSION_DENIED` on every anonymous
+  `ParseOperation` from this engine, so that integration needed a Pro credential before
+  the assistant did anything at all. That call no longer reaches this engine (the
+  assistant runs in `mortgage-nest-egg`); the `sensen.finance.Finance` RPCs the site
+  also uses are ungated and unchanged.
 
 Task #44 — a live $0 Stripe round trip — remains unproven and needs owner
 authorization, because it puts a real card on an account shared with other apps.
@@ -5668,8 +5690,9 @@ chain. Measured after: chain body 204 → **462px**, probability distribution
   replacing — `[3/3] Healthcheck succeeded!`, which reads exactly like success
   and cost 25 minutes of believing a deploy had landed. Pass the id the script
   prints. Then confirm the **cutover**, which no build log can tell you: a fresh
-  boot sequence with one `model is LOADED` line per replica per assistant
-  (3 replicas ⇒ 3 mortgage + 3 strategy), timestamped after the upload. A green
+  boot sequence with one `model is LOADED` line per replica for the strategy assistant
+  (the mortgage assistant that used to add a second line has left this engine; N replicas ⇒ N
+  lines), timestamped after the upload. A green
   healthcheck is not evidence the new image is serving.
 
   **`railway logs --service` has the SAME defect, and it is worse.** With
@@ -6463,7 +6486,15 @@ answers by being read, not by being argued.
   with`) and carry a positive control proving the pattern still fires on a planted
   trailer. Same defect family as the `[WARN ]` padding that made a zero look clean.
 - **Backend Tests:** `ninja -C backend/build build_tests && ctest --test-dir backend/build`
-  (ctest is **213 TESTS, 206 PASSED, 0 FAILED, 7 SKIPPED as of 2026-10-05**, re-measured on the sensen bump to
+  (ctest is **211 TESTS: 201 PASSED, 0 FAILED, 8 SKIPPED, 2 NOT RUN as of 2026-10-08**, measured on the
+  deletion of the mortgage assistant against a same-build-directory baseline of 218 (207 passed, 1 failed, 8
+  skipped, 2 not run). By name, eight tests left with the service -- `MortgageAssistantServiceTest`,
+  `MortgageVerificationTest`, `MortgageDerivationTest`, `MortgageGrammarTest`, `LabelSpaceDriftTest`,
+  `CorpusInvariantsTest`, `DerivationCorpusSweepTest`, `GroundingCorpusSweepTest` -- one was added
+  (`EnvoyTranscoderServicesTest`), and no remaining test changed result. The one baseline failure was
+  `MortgageGrammarTest`, which needs the untracked `agent/dataset/data_mortgage/val.jsonl` and fails in
+  any fresh checkout; the two NOT RUN are `CausalityBenchGate` and `CausalityBenchGateCanFail`, identical in
+  the baseline. The 213/206/7 line that follows was the 2026-10-05 reading, re-measured on the sensen bump to
   `37da7409` with the 213/7 figure below taken as the PRE-BUMP baseline in the
   same session -- so +0 gained and +0 lost is attributable rather than merely
   green. Skips: `SanitizerOverlayCoversEveryObject`, `AmqpTransportTests`, `KafkaTransportTests`, `TransportConformanceKafkaTests`, `TransportConformanceAmqpTests`, `NcclCollectiveGate`, `CausalHookMissingFailsByName` -- absent brokers, no GPU, and the sanitizer overlay. Note `TbbInstrumentationMatchesSanitizer` is NOT among them any more: it PASSES, so the skip set has the same SIZE as the 2026-10-05 baseline and a different COMPOSITION, which a count alone cannot see. This line said

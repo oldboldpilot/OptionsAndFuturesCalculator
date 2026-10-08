@@ -344,7 +344,7 @@ Configures self-hosted open-source Supabase services (GoTrue auth, PostgREST dat
 - **Success Gate and Verification**:
   - Asserts deployment status via `railway deployment list --service assistant-worker` (`deploy/assistant-worker/deploy.sh:127-128`).
   - Checks log output for loaded model weights: `railway logs --service assistant-worker --deployment <id> | grep 'model is LOADED'` (`deploy/assistant-worker/deploy.sh:130-131`).
-  - Invariant: `assistant-worker` must have `MODEL_URL` and `MORTGAGE_MODEL_URL` configured and log "model is LOADED"; the main engine (`options-calculator-backend`) must have them unset and log "NOT LOCAL -- submitting to the shared inference queue" (`deploy/assistant-worker/README.md:33-44`).
+  - Invariant: `assistant-worker` must have `MODEL_URL` and `STRATEGY_ENCODER_URL` configured and log "model is LOADED"; the main engine (`options-calculator-backend`) must have them unset and log "NOT LOCAL -- submitting to the shared inference queue" (`deploy/assistant-worker/README.md:33-44`).
 
 ### MortgageFV Gateway (`deploy/mfv-gateway/`)
 - **Purpose**: Minimal Caddy-based API reverse proxy presenting GoTrue and PostgREST behind a single origin matching Supabase client URL expectations (`deploy/mfv-gateway/Caddyfile:1-9`).
@@ -386,7 +386,7 @@ Configures Envoy as the public ingress proxy fronting the C++ calculation engine
   2. `envoy.filters.http.grpc_web`: Decodes gRPC-Web framing into native gRPC (`backend/envoy.yaml:128-130`).
   3. `envoy.filters.http.grpc_json_transcoder`:
      - Must follow `grpc_web`: Translates HTTP JSON requests to gRPC against descriptor `/etc/envoy/api_descriptor.pb` (`backend/envoy.yaml:137-157`).
-     - Registered services: `calculator.OptionsCalculator`, `sensen.finance.Finance`, `calculator.assistant.StrategyAssistant`, `mortgage.assistant.MortgageAssistant` (`backend/envoy.yaml:158-162`).
+     - Registered services: `calculator.OptionsCalculator`, `sensen.finance.Finance`, `calculator.assistant.StrategyAssistant` (`backend/envoy.yaml:158-162`). `mortgage.assistant.MortgageAssistant` was removed from the list in 2026-10 together with its descriptor entry; `EnvoyTranscoderServicesTest` keeps the list and the descriptor equal.
      - Settings: `auto_mapping: true`, `convert_grpc_status: true`, `print_options: { always_print_primitive_fields: true }` (`backend/envoy.yaml:163-169`).
   4. `envoy.filters.http.cors`: Handles CORS preflight and headers (`backend/envoy.yaml:170-172`).
   5. `envoy.filters.http.router`: Terminal routing filter (`backend/envoy.yaml:173-175`).
@@ -398,7 +398,7 @@ Configures Envoy as the public ingress proxy fronting the C++ calculation engine
   - TLS Configuration: If `GRPC_TLS_CERT` and `GRPC_TLS_KEY` are provided, writes `/etc/envoy/tls/tls.crt` and `/etc/envoy/tls/tls.key` (chmod 600) and configures `envoy.transport_sockets.tls` with ALPN `["h2"]` (`backend/start.sh:45-66`).
   - Plaintext Fallback: If TLS material is absent and `GRPC_ALLOW_PLAINTEXT=1`, logs warning and runs plaintext (`backend/start.sh:68-75`). If `GRPC_ALLOW_PLAINTEXT` is not set, terminates with fatal exit code 1 (`backend/start.sh:76-83`).
   - Listener Appended: Appends `listener_grpc_native` on `:GRPC_NATIVE_PORT` with `codec_type: http2`, route timeout `120s`, cluster `backend_grpc_service`, and no `grpc_web` or transcoder filters (`backend/start.sh:85-129`).
-- **Model Path Verification**: Iterates over `MODEL_PATH` and `MORTGAGE_MODEL_PATH`; unsets the variable if the target file does not exist on disk, ensuring the service cleanly reports models unavailable rather than crashing on dangling paths (`backend/start.sh:142-148`).
+- **Model Path Verification**: Checks `MODEL_PATH`; unsets the variable if the target file does not exist on disk, ensuring the service cleanly reports models unavailable rather than crashing on dangling paths (`backend/start.sh:142-148`).
 - **Line Buffering**: Launches `/app/calculator_engine` using `stdbuf -oL -eL` so stdout/stderr are line-buffered across container pipes, avoiding 4 KB block buffering of startup telemetry (`backend/start.sh:165-171`).
 - **Process Supervision**: Starts Envoy (`backend/start.sh:174`). Traps SIGTERM and SIGINT (`backend/start.sh:182`). Uses `wait -n "${BACKEND_PID}" "${ENVOY_PID}"` to detect process termination and stops the entire container immediately if either process exits (`backend/start.sh:185-189`).
 

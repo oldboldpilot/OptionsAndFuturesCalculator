@@ -8,12 +8,12 @@ This document covers the public API surface, wire conventions, validation rules,
 - `backend/src/modules/finance_service.cppm` and `backend/src/modules/finance_service.cpp` (service implementation, validation bounds, shape dispatch, and error mapping)
 - `backend/src/modules/quota.cppm` and `backend/src/modules/quota.cpp` (quota policy, metering, and cost calculation)
 - `backend/src/modules/api_key.cppm` and `backend/src/modules/api_key.cpp` (API key authentication, origin validation, and entitlement gating)
-- Test coverage in `backend/tests/test_finance_service_validation.cpp`, `backend/src/smoke_client.cpp`, `backend/tests/test_mortgage_verification.cpp`, and `backend/tests/test_vendored_proto_drift.cpp`.
+- Test coverage in `backend/tests/test_finance_service_validation.cpp`, `backend/src/smoke_client.cpp`, and `backend/tests/test_vendored_proto_drift.cpp`.
 
 > [!NOTE]
 > **Companion contract reference:**
 > - [`docs/FINANCE_API.md`](FINANCE_API.md) (this document) is the practical integration guide and operational manual for external callers reaching `sensen.finance.Finance` over gRPC-Web and Envoy's gRPC-JSON transcoder. It details hostnames, protocol routing, CORS configuration, exact decimal formatting rules, authentication credentials, quota tiers, and worked call examples.
-> - [`docs/api/GRPC_SURFACE.md`](api/GRPC_SURFACE.md) is the exhaustive wire contract specification and per-message field reference for all four canonical protobuf schemas (`calculator.proto`, `finance.proto`, `assistant.proto`, `mortgage_assistant.proto`). It defines every field tag, wire type, presence rule, numerical bound, and error mapping in detail across the entire system.
+> - [`docs/api/GRPC_SURFACE.md`](api/GRPC_SURFACE.md) is the exhaustive wire contract specification and per-message field reference for all three canonical protobuf schemas (`calculator.proto`, `finance.proto`, `assistant.proto`). It defines every field tag, wire type, presence rule, numerical bound, and error mapping in detail across the entire system.
 
 The sensen financial library is served at:
 
@@ -1436,7 +1436,6 @@ The financial calculation service, protobuf contracts, input bounds, quota enfor
 | --- | --- | --- | --- |
 | `FinanceServiceValidationTest` | `backend/tests/test_finance_service_validation.cpp` | In-process gRPC boundary harness hosting `options_calculator::finance::RegisterFinanceService`. Tests all 46 RPCs for input validation, numerical bounds, magnitude overflows, compound-growth limits, unbounded iterations, and NaN bypass guards. | - Section 23: Closing costs bounds, bases, and optionality (`:1955-2145`)<br>- Section 24: Rent vs buy shape dispatch and signal classification (`:2148-2334`)<br>- Section 25: XNPV/XIRR day scaling (`dates_to_seconds`) (`:2335-2518`)<br>- Section 26: TVM cash flow opposite signs (`check_tvm_solvable`) (`:2519-2635`)<br>- Section 27: MACRS depreciation class whitelist (`:2636-2720`) |
 | `smoke_client` / `probe_finance_service.py` | `backend/src/smoke_client.cpp`, `scripts/probe_finance_service.py` | Live integration gate testing deployment health against independent closed-form mathematical identities (annuity formulas, put-call parity, schedule closure). | - `check_finance`: Comprehensive RPC verification (`:771-2800`)<br>- `ComputeRefinance` no-op identity (`:1280-1395`)<br>- `ComputePayoffTiming` (`:1458-1502`)<br>- `ComputeMortgageRecast` (`:1504-1550`)<br>- `ComputeHomeFutureValue` (`:1552-1600`)<br>- `ComputeRentVsBuy` (`:1602-1778`)<br>- `ComputeHomeNpv` (`:1780-1900`)<br>- `ComputeClosingCosts` itemization and credits (`:2400-2650`)<br>- `check_quota`: Rate and budget limits (`:3024-3130`)<br>- `check_auth`: Origin and key type enforcement (`:3132-3243`)<br>- `check_key_limit`: Anonymous pool fallback (`:3245-3328`) |
-| `MortgageVerificationTest` | `backend/tests/test_mortgage_verification.cpp` | Offline verifier tests for mortgage calculation parameters, ensuring strict input validation, discrimination between valid and corrupted requests, and drift detection. | - Proto label-space drift check against `backend/proto/finance.proto` (`:34-36`)<br>- Slot-kind totality check (`:37-40`)<br>- Discrimination pairs for `ComputeRefinance`, `ComputeRentVsBuy`, and `ComputeHomeFutureValue` (`:22-31`) |
 | `VendoredProtoDriftTest` | `backend/tests/test_vendored_proto_drift.cpp` | Compares contract bodies between `backend/proto/finance.proto` and `clients/mortgagefv/proto/finance.proto`. Ensures vendored client copies do not diverge from the canonical service definition. | - Body comparison logic excluding metadata headers (`:57-80`) |
 | `ApiKeyEntitlementTest` | `backend/tests/test_api_key_entitlement.cpp` | Evaluates API key authentication outcomes (`api_key::Identity::outcome`) and verifies distinct status codes for unauthenticated, origin mismatch, expired, or malformed requests. | - Direct invocation of `check_assistant_entitlement` and `check_strategy_entitlement` without network overhead (`:19-28`) |
 | `QuotaTierLabelTest` | `backend/tests/test_quota_tier_label.cpp` | Verifies that quota exhaustion errors report the tier whose limits were actually enforced (e.g. anonymous fallback for undefined tiers) rather than the requested tier name. | - Fallback verification and discrimination testing (`:6-30`) |
@@ -1452,7 +1451,6 @@ None. Every RPC, message field, default value, validation bound, status code, re
 - `backend/src/modules/api_key.cppm` and `backend/src/modules/api_key.cpp`
 - `backend/tests/test_finance_service_validation.cpp`
 - `backend/src/smoke_client.cpp`
-- `backend/tests/test_mortgage_verification.cpp`
 - `backend/tests/test_vendored_proto_drift.cpp`
 - `backend/tests/test_api_key_entitlement.cpp`
 - `backend/tests/test_quota_tier_label.cpp`

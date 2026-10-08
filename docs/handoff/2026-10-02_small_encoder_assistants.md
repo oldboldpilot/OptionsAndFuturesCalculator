@@ -1,5 +1,12 @@
 # Handoff — replacing the two Qwen3-0.6B assistants with a small model
 
+> **HISTORY (2026-10).** The mortgage assistant this document describes moved to the
+> `mortgage-nest-egg` repository (`services/mortgage-assistant`) and was deleted from this one. The
+> source paths it names (`mortgage_assistant_service.cpp`, `mortgage_verification.cppm`,
+> `mortgage_derivation.cppm`, `mortgage_grammar.cppm`, `proto/mortgage_assistant.proto`, and the
+> mortgage scorers, probes and corpus builders under `scripts/` and `agent/`) no longer exist here and
+> are not current. Read it as a dated record; the deleting commit's parent still holds every file.
+
 @author Olumuyiwa Oluwasanmi
 Session date: 2026-10-02
 Branch: `claude/finetune-bert-models-quantization-ngwmnd`

@@ -16,7 +16,7 @@ This document provides a comprehensive inventory, architectural analysis, and op
 - **Backend Pricing & Core Services** (`backend/tests/test_calculator_service.cpp`, `backend/tests/test_option_pricing_service.cpp`, `backend/tests/test_market_data_resilience.cpp`, `backend/tests/test_option_chain_cache.cpp`).
 - **Backend Financial Mathematics & Census Demographics** (`backend/tests/test_finance_service_validation.cpp`, `backend/tests/test_state_refresh.cpp`).
 - **Backend SGEE, Local Admission & Distributed Queue** (`backend/tests/test_sgee_automated_reasoning.cpp`, `backend/tests/test_inference_admission.cpp`, `backend/tests/test_sgee_queue_client.cpp`, `backend/tests/test_inference_admission_pg.cpp`, `backend/tests/test_inference_queue_pg.cpp`, `backend/tests/integration/queue_node_entrypoint_test.sh`).
-- **Backend Assistant Verification, Grammar Decoding & LLM Defense** (`backend/tests/test_assistant_service.cpp`, `backend/tests/test_assistant_verification.cpp`, `backend/tests/test_mortgage_assistant_service.cpp`, `backend/tests/test_mortgage_verification.cpp`, `backend/tests/test_mortgage_grammar.cpp`).
+- **Backend Assistant Verification & LLM Defense** (`backend/tests/test_assistant_service.cpp`, `backend/tests/test_assistant_verification.cpp`).
 - **Backend Entitlements, Security Gates & Persistence** (`backend/tests/test_api_key_entitlement.cpp`, `backend/tests/test_quota_tier_label.cpp`, `backend/tests/test_state_assumptions_gate.cpp`, `backend/tests/test_strategy_store_pg.cpp`).
 - **Build-Time Gate Scripts, Linters & Proto Drift** (`backend/tests/test_vendored_proto_drift.cpp`, `backend/tests/test_python_bindings.py`, `scripts/code_policy_check.sh`, `frontend/scripts/check-export.mjs`).
 - **Frontend Store & UI Gate Suites** (`frontend/src/config/ad-routes.test.ts`, `frontend/src/content/strategy-guides.test.ts`, `frontend/src/lib/chainFreshness.test.ts`, `frontend/src/store/asian-leg.test.ts`, `frontend/src/store/assistant-apply.test.ts`, `frontend/src/store/assistant-outcomes.test.ts`, `frontend/src/store/calculate-guards.test.ts`, `frontend/src/store/calculator-not-ready.test.ts`, `frontend/src/store/calculator-race.test.ts`, `frontend/src/store/chain.test.ts`, `frontend/src/store/entitlement.test.ts`, `frontend/src/store/harness.canary.test.ts`, `frontend/src/store/matrix-bounds.test.ts`, `frontend/src/store/model-limit.test.ts`, `frontend/src/store/saved-scenarios.test.ts`, `frontend/src/store/ticket.test.ts`, `frontend/src/store/tree-pricer-not-ready.test.ts`).
@@ -31,20 +31,18 @@ The table below records every test binary, script, and suite across the backend,
 | `test_runner` (`CoreEngineTest`) | `backend/src/test_main.cpp`, `backend/src/modules/testing_framework.cppm` | Yes (`backend/CMakeLists.txt:1314`) | In-process C++ | 1 test case | Fundamental failure of `calculator::calculate_strategy` or ROP execution flow |
 | `test_calculator_service` (`CalculatorServiceTest`) | `backend/tests/test_calculator_service.cpp`, `backend/tests/strategy_store_stub.cpp` | Yes (`backend/CMakeLists.txt:1561`) | In-process gRPC / SGEE runner | 7 sections (40 checks) | SGEE graph execution breaks, DID-COMPUTE silent halts, Asian leg FAILED_PRECONDITION drops, matrix windowing corrupts max profit |
 | `test_assistant_service` (`AssistantServiceTest`) | `backend/tests/test_assistant_service.cpp` | Yes (`backend/CMakeLists.txt:1729`) | In-process gRPC / SGEE runner | 6 sections (24 checks) | Strategy assistant DID-COMPUTE silent halts, missing CheckModel node, Asian option handoff failure |
-| `test_mortgage_assistant_service` (`MortgageAssistantServiceTest`) | `backend/tests/test_mortgage_assistant_service.cpp` | Yes (`backend/CMakeLists.txt:1759`) | In-process gRPC / SGEE runner | 5 sections (14 checks) | Mortgage assistant DID-COMPUTE silent halts, missing CheckModel node, intent extraction failure, advice carve-out regressions |
 | `test_state_assumptions_gate` (`StateAssumptionsGateTest`) | `backend/tests/test_state_assumptions_gate.cpp` | Yes (`backend/CMakeLists.txt:1519`) | In-process gRPC runner | 3 sections (7 checks) | Unentitled callers writing state assumptions; failure of Partner tier authorization gate |
 | `test_strategy_store_pg` | `backend/tests/test_strategy_store_pg.cpp` | **No** (Target built `backend/CMakeLists.txt:1771-1781`) | PostgreSQL instance (`DATABASE_URL`) | 9 sections (45 checks) | RLS posture dropped on `saved_strategies`, cross-user data leakage, SQL injection via user IDs, transaction rollback failures |
 | `test_option_chain_cache` (`OptionChainCacheTest`) | `backend/tests/test_option_chain_cache.cpp` | Yes (`backend/CMakeLists.txt:1341`) | In-process C++ | 5 sections (11 checks) | Cache serving stale data past 15-min TTL or past 1-hour hard cap on upstream outage; cold miss failure handling |
 | `test_api_key_entitlement` (`ApiKeyEntitlementTest`) | `backend/tests/test_api_key_entitlement.cpp` | Yes (`backend/CMakeLists.txt:1589`) | In-process C++ | 6 sections (35 checks) | Entitlement gate failing to discriminate malformed, unknown, revoked, and missing keys; generic copy misdiagnosing bad keys |
 | `test_quota_tier_label` (`QuotaTierLabelTest`) | `backend/tests/test_quota_tier_label.cpp` | Yes (`backend/CMakeLists.txt:1610`) | In-process C++ | 4 sections (10 checks) | Undefined quota tiers granting unlimited access; refusal messages failing to label anonymous fallback |
 | `test_sgee_automated_reasoning` (`SgeeAutomatedReasoningTest`) | `backend/tests/test_sgee_automated_reasoning.cpp` | Yes (`backend/CMakeLists.txt:1445`) | Z3 SMT solver (`Z3::z3`) | 5 safety proofs (P1–P5) | SGEE workflow graphs violating action bindings, node reachability, path termination, error route completeness, or mortgage safety |
+| `check_envoy_services.py` (`EnvoyTranscoderServicesTest`) | `scripts/check_envoy_services.py` | Yes (`backend/CMakeLists.txt`, the `EnvoyTranscoderServicesTest` block) | python3 and the build's own `protoc` | 7 self-test checks, then one equality check of `envoy.yaml`'s transcoder services against `api_descriptor.pb` | An `envoy.yaml` that names a service the descriptor lacks (Envoy refuses the config and every replica crash-loops), or a descriptor service with no JSON route. |
 | `test_sgee_queue_client` (`SgeeQueueClientTest`) | `backend/tests/test_sgee_queue_client.cpp` | Yes (`backend/CMakeLists.txt:1834`) | In-process C++ | 5 sections (14 checks) | SGEE queue client blocking the engine, buffer overflow beyond 256 KiB cap, circuit breaker failure, leader redirection failure |
 | `test_finance_service_validation` (`FinanceServiceValidationTest`) | `backend/tests/test_finance_service_validation.cpp` | Yes (`backend/CMakeLists.txt:1496`) | In-process gRPC runner | 27 sections (~120 checks) | Memory corruption on empty spans, IEEE 754 NaN UB, infinite TVM loops, negative closing cost exploits, Black-Scholes divide-by-zero |
 | `test_state_refresh` (`StateRefreshTest`) | `backend/tests/test_state_refresh.cpp` | Yes (`backend/CMakeLists.txt:1405`) | In-process C++ | 6 sections (17 checks) | Out-of-bound Census ACS demographic data accepted into database; tax rate derivation overflow; hardcoded candidate years |
 | `test_option_pricing_service` (`OptionPricingServiceTest`) | `backend/tests/test_option_pricing_service.cpp` | Yes (`backend/CMakeLists.txt:1473`) | In-process gRPC runner | 5 sections (~100 checks) | Binomial tree no-arbitrage bound violation, American early exercise premium inversion, Bermudan window mislabeling |
 | `test_assistant_verification` (`AssistantVerificationTest`) | `backend/tests/test_assistant_verification.cpp` | Yes (`backend/CMakeLists.txt:1364`) | In-process C++ | 12 sections (~140 checks) | Strategy prompt injections escaping guards, ambiguity signals misrouting, bare futures misclassification |
-| `test_mortgage_verification` (`MortgageVerificationTest`) | `backend/tests/test_mortgage_verification.cpp` | Yes (`backend/CMakeLists.txt:1385`) | In-process C++ | 8 sections (~60 checks) | Mortgage prompt injection, non-total slot-kind extraction, wire enum mutation drift |
-| `test_mortgage_grammar` (`MortgageGrammarTest`) | `backend/tests/test_mortgage_grammar.cpp` | Yes (`backend/CMakeLists.txt:1429`) | In-process C++ | 27 operations, 184 fields | Constrained grammar generation producing invalid JSON/proto payloads, drift from `backend/proto/finance.proto` |
 | `test_inference_admission` (`InferenceAdmissionTest`) | `backend/tests/test_inference_admission.cpp` | Yes (`backend/CMakeLists.txt:1821`) | In-process C++ | 4 sections (18 checks) | Local queue starvation, FIFO inversion, ungraceful thread shutdown, device selection fallback failure |
 | `test_inference_queue_pg` | `backend/tests/test_inference_queue_pg.cpp` | **No** (Target built `backend/CMakeLists.txt:1783-1793`) | PostgreSQL instance (`DATABASE_URL`) | 7 sections (~30 checks) | Distributed queue lease hijacking, fencing token bypass, stale task reaper failure, concurrent worker races |
 | `test_inference_admission_pg` | `backend/tests/test_inference_admission_pg.cpp` | **No** (Target built `backend/CMakeLists.txt:1855-1869`) | PostgreSQL instance (`DATABASE_URL`) | 6 sections (~25 checks) | Distributed admission deadlock, fallback to local admission failing under DB partition, fencing token collisions |
@@ -215,17 +213,16 @@ The table below records every test binary, script, and suite across the backend,
 ## Backend SGEE, Inference Admission, and Distributed Queue
 
 ### `backend/tests/test_sgee_automated_reasoning.cpp`
-- **Purpose**: Uses the Z3 SMT solver via sensen GP-ARA (`sensen::gp_ara::Z3Reasoner`, `backend/sensen/src/gp_ara_interfaces.cppm`) to formally verify 5 architectural safety properties across 4 SGEE workflow graphs:
+- **Purpose**: Uses the Z3 SMT solver via sensen GP-ARA (`sensen::gp_ara::Z3Reasoner`, `backend/sensen/src/gp_ara_interfaces.cppm`) to formally verify 5 architectural safety properties across 3 SGEE workflow graphs:
   1. `OptionsWorkflow` (`backend/src/modules/calculator_service.cpp ~:940`).
   2. `FinanceRequestLifecycle` (`backend/src/modules/finance_service.cpp ~:943`).
   3. `StrategyAssistantWorkflow` (`backend/src/modules/assistant_service.cpp ~:2848`).
-  4. `MortgageAssistantWorkflow` (`backend/src/modules/mortgage_assistant_service.cpp ~:2598`).
 - **Formally Proved Safety Properties**:
   - `P1. Action Binding Completeness`: Every `Execute(name)` in a graph has a corresponding bound action in `ActionRegistry`.
   - `P2. Node Reachability`: Every node in a graph is reachable from the workflow entry node.
   - `P3. Path Termination`: Every execution path terminates at a node marked terminal (no dead ends, no infinite loops).
   - `P4. Error Route Completeness`: Every action that can fail has an `OnError` fallback route reaching a terminal node.
-  - `P5. Mortgage Safety Invariant`: `response.mutable_params()` is populated **only** when the GP-ARA verification verdict is `Proven`. `Unsafe` and `Indeterminate` verdicts provably reach the `Refused` terminal node.
+  - `P5. Assistant Safety Invariant` (checked on `StrategyAssistantWorkflow`; it was checked on the mortgage graph until that assistant left in 2026-10): `response.mutable_params()` is populated **only** when the GP-ARA verification verdict is `Proven`. `Unsafe` and `Indeterminate` verdicts provably reach the `Refused` terminal node.
 - **Invariants & Build Configuration**:
   - Compiles with definition `SENSEN_HAS_Z3` and links `${Z3_LIBRARY}` (`backend/CMakeLists.txt:1441-1443`). Negation of each property is checked for `z3::unsat`.
 
@@ -267,7 +264,7 @@ The table below records every test binary, script, and suite across the backend,
 
 ---
 
-## Backend Assistant Verification, Grammar, and LLM Defense
+## Backend Assistant Verification and LLM Defense
 
 ### `backend/tests/test_assistant_service.cpp`
 - **Purpose**: Exercises `calculator.assistant.StrategyAssistant/ProcessQuery`, SGEE `StrategyAssistantWorkflow`, DID-COMPUTE verification, and Asian option routing.
@@ -287,32 +284,6 @@ The table below records every test binary, script, and suite across the backend,
     - Section 4: Bare commodity futures symbols disambiguated from equity tickers.
     - Section 5: Exercise style and Asian option classification.
 
-### `backend/tests/test_mortgage_assistant_service.cpp`
-- **Purpose**: Exercises `mortgage.assistant.MortgageAssistant/ProcessMortgageQuery`, SGEE `MortgageAssistantWorkflow`, oversized utterance guards, prompt injection defense, and specified calculation advice carve-outs.
-- **Sections & Checks (5 Sections, 14 Checks, Lines 1-360)**:
-  - `Section 1: ADMISSION -> CHECKMODEL, end to end, through the real graph` (`backend/tests/test_mortgage_assistant_service.cpp:181-198`).
-  - `Section 2: Admission's OnError edge, hard-error flavour: oversized utterance` (`backend/tests/test_mortgage_assistant_service.cpp:200-217`): 1001-character prompt returns `grpc::StatusCode::INVALID_ARGUMENT`.
-  - `Section 3: Admission's OnError edge, refusal flavour: prompt injection` (`backend/tests/test_mortgage_assistant_service.cpp:219-251`).
-  - `Section 3c: ...but a SPECIFIED CALCULATION wearing an advice phrase is admitted` (`backend/tests/test_mortgage_assistant_service.cpp:254-300`): Fully specified rent-vs-buy query opening with "Should I rent" is admitted via density of specification, while unspecified questions remain refused `OUT_OF_SCOPE`.
-  - `Section 4: THE DISCRIMINATING PROOF: a server missing the CheckModel action must NOT return an empty OK response` (`backend/tests/test_mortgage_assistant_service.cpp:302-334`): Fixture missing `CheckModel` returns `grpc::StatusCode::INTERNAL`.
-  - `Section 5: CONTROL: the same fixture machinery with the FULL action set still succeeds` (`backend/tests/test_mortgage_assistant_service.cpp:337-356`).
-
-### `backend/tests/test_mortgage_verification.cpp`
-- **Purpose**: Standalone GP-ARA verification stage for mortgage loan assistant output (`mortgage_verification.cppm`).
-- **Structure & Checks (8 Sections, ~60 Checks, Lines 1-1601)**:
-  - Half One: Every measured failure class of the mortgage fine-tune reproduces and refuses with exact Outcome and ReasonCode (`backend/tests/test_mortgage_verification.cpp:9-12`).
-  - Half Two: Non-vacuous control set of legitimate requests passes end-to-end (`backend/tests/test_mortgage_verification.cpp:13-31`).
-  - Structural Gates: Label-space drift check re-parses `backend/proto/finance.proto`; Slot-kind totality check asserts every field classifies to a known `SlotKind` (`backend/tests/test_mortgage_verification.cpp:32-40`).
-
-### `backend/tests/test_mortgage_grammar.cpp`
-- **Purpose**: Validates character-by-character constrained grammar decoding (`sensen::IGrammar`) for the mortgage assistant's `<params>` output (`backend/src/modules/mortgage_grammar.cppm`).
-- **Coverage**:
-  - Re-parses `backend/proto/finance.proto` directly, asserting coverage across 27 operations and 184 fields (`backend/tests/test_mortgage_grammar.cpp:9-19`).
-  - Asserts unrepresentability of invalid characters, malformed JSON, and wrong field names at the exact character boundary (`backend/tests/test_mortgage_grammar.cpp:20-27`).
-  - Non-vacuous control set: verifies all gold params in `agent/dataset/data_mortgage/val.jsonl` are accepted into the completed state (`backend/tests/test_mortgage_grammar.cpp:28-35`).
-
----
-
 ## Backend Entitlements, Security Gates, and Persistence
 
 ### `backend/tests/test_api_key_entitlement.cpp`
@@ -330,7 +301,6 @@ The table below records every test binary, script, and suite across the backend,
     - Free-tier identity: Code 7, generic Pro feature copy, names leg count ("3 legs").
   - `Section 2: check_strategy_entitlement: ADMIT path is unchanged` (`backend/tests/test_api_key_entitlement.cpp:194-223`): Pro and Partner admitted on 4-leg condor; single-leg request unconditionally admitted even with malformed key.
   - `Section 3: check_assistant_entitlement (kStrategySurface): message class per outcome` (`backend/tests/test_api_key_entitlement.cpp:226-272`).
-  - `Section 4: check_assistant_entitlement (kMortgageSurface): the ACTUAL incident` (`backend/tests/test_api_key_entitlement.cpp:275-306`): Proves malformed key on `ParseOperation` receives `kMortgageSurface.malformed_message`, not generic copy.
   - `Section 5: check_assistant_entitlement: ADMIT path is unchanged` (`backend/tests/test_api_key_entitlement.cpp:309-329`).
   - `Section 6: GateMode::Off: every outcome is admitted, matching pre-existing behaviour` (`backend/tests/test_api_key_entitlement.cpp:332-345`): Unsetting `PRO_GATE_MODE` admits all requests.
 
@@ -535,7 +505,6 @@ All frontend tests run under Vitest (`npm test` in `frontend/`). They verify sto
 | **Financial Mathematics Core** | `backend/sensen/src/financial.cppm` | `test_finance_service_validation` | XNPV span safety, TVM iteration bounds, IEEE 754 NaN immunity, closing costs credit clamping |
 | **Option Chain & Market Data** | `backend/src/modules/market_data.cppm` | `test_market_data_resilience`, `test_option_chain_cache`, `chain.test.ts`, `chainFreshness.test.ts` | Circuit breaker 5xx tripping, non-retryable 4xx bypass, 15-min TTL / 1-hr serve-stale cap, LIVE vs DELAYED badge |
 | **Strategy Assistant (LLM & SGEE)** | `backend/src/modules/assistant_service.cpp` | `test_assistant_service`, `test_assistant_verification`, `assistant-outcomes.test.ts`, `assistant-apply.test.ts` | Strategy assistant DID-COMPUTE postcondition, jailbreak / prompt injection defense, financial advice disclaimers |
-| **Mortgage Assistant (LLM & SGEE)** | `backend/src/modules/mortgage_assistant_service.cpp` | `test_mortgage_assistant_service`, `test_mortgage_verification`, `test_mortgage_grammar.cpp` | Mortgage assistant DID-COMPUTE postcondition, slot-kind totality, character-by-character constrained grammar |
 | **Inference Admission & Queue Cluster** | `backend/src/modules/inference_admission.cpp`, `backend/src/modules/inference_queue.cppm` | `test_inference_admission`, `test_sgee_queue_client`, `test_inference_queue_pg`, `test_inference_admission_pg`, `QueueNodeEntrypointTest` | FIFO scheduling, 256 KiB cap, leader redirection, distributed Postgres lease fencing tokens, mTLS entrypoint gate |
 | **Entitlements & Auth Middleware** | `backend/src/modules/api_key.cppm`, `backend/src/modules/api_key.cpp`, `backend/src/modules/quota.cppm` | `test_api_key_entitlement`, `test_quota_tier_label`, `test_state_assumptions_gate`, `entitlement.test.ts`, `model-limit.test.ts` | Key format validation, revoked key rejection, Free vs Pro vs Partner authorization gates, code-based refusal discrimination |
 | **Scenario Persistence (PostgreSQL)** | `backend/src/modules/strategy_store.cpp` | `test_strategy_store_pg`, `saved-scenarios.test.ts` | Row-Level Security (RLS) catalog posture, multi-tenant isolation, save/list round-trip, reopening fidelity |
@@ -634,9 +603,6 @@ Ten specific mutation arms are verified across the test suites:
 6. **SGEE DID-COMPUTE in Strategy Assistant** (`test_assistant_service.cpp:283-306`):
    - *Mutation*: Remove `CheckModel` node from assistant workflow (`kMissingCheckModel`).
    - *Result*: Returns `Status::INTERNAL` naming unpopulated payload on terminal node `Refused`.
-7. **SGEE DID-COMPUTE in Mortgage Assistant** (`test_mortgage_assistant_service.cpp:312-334`):
-   - *Mutation*: Remove `CheckModel` action from mortgage assistant workflow (`kMissingCheckModel`: `"Admission"`, `"Generate"`, `"ParseAndVerify"`).
-   - *Result*: Catches unpopulated response and returns `Status::INTERNAL`.
 8. **PostgreSQL RLS Application WHERE Clause Bypass** (`test_strategy_store_pg.cpp:106-149`, `Section 4`):
    - *Mutation*: Delete `WHERE user_id = $1` from SQL `SELECT` in `backend/src/modules/strategy_store.cpp`.
    - *Result*: Before RLS, User A read User B's strategies. With PostgreSQL RLS enabled, RLS blocks cross-tenant reads at the database engine level; test proves cross-user leakage is prevented.

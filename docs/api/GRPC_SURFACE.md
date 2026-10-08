@@ -12,11 +12,18 @@
 
 ## Scope
 
-This document provides reference documentation for the wire contract of the four canonical protobuf schemas defining the gRPC surface of the application:
+This document provides reference documentation for the wire contract of the three canonical protobuf schemas defining the gRPC surface of the application:
 - `backend/proto/calculator.proto`
 - `backend/proto/finance.proto`
 - `backend/proto/assistant.proto`
-- `backend/proto/mortgage_assistant.proto`
+
+> **Removed 2026-10: `mortgage.assistant.MortgageAssistant` (`ParseOperation`).** The mortgage
+> assistant is no longer served from this engine or from `api.optionsandfuturescalculator.com`;
+> `POST /mortgage.assistant.MortgageAssistant/ParseOperation` there no longer answers. It runs as the
+> separate `mfv-assistant` service built from the `mortgage-nest-egg` repository, where
+> `clients/mortgagefv/proto/mortgage_assistant.proto` is now the canonical copy of its contract and the
+> only place to read it. Callers that held an OFC-issued key for `ParseOperation` must move to that
+> service; nothing in this repository answers that call any more.
 
 It documents every service, RPC, and message, including wire types, units, presence rules, invariants, validation bounds, failure codes, HTTP JSON-transcoder routes, and corresponding test targets.
 
@@ -55,26 +62,11 @@ In `DatedCashFlowRequest` (`backend/proto/finance.proto:443-448`) used by `Compu
 - Wire semantics:
   - Absent (unset): Directs the engine to use the default convention of 15 days (half-month prepaid interest) (`backend/proto/finance.proto:1075-1077`, `backend/src/modules/finance_service.cpp:4254-4258`).
   - Explicit `0`: Means zero days of prepaid interest, representing a closing on the final day of the month where no prepaid interest is owed (`backend/proto/finance.proto:1077-1078`, `backend/src/modules/finance_service.cpp:4256-4258`).
-- Text-level parser defect: Standard proto3 fields collapse unset and zero. Because proto3 explicit presence was introduced in protoc 3.15, text-level proto regex parsers that stripped `repeated` but did not capture `optional` (e.g. `agent/dataset/build_mortgage_dataset.py:107-114`, `backend/tests/test_mortgage_grammar.cpp:127-133`) misclassified `optional` as part of the field type or treated it as required. This prevented omitting the field to invoke the 15-day convention, causing schema validators to reject valid convention calls.
+- Text-level parser defect: Standard proto3 fields collapse unset and zero. Because proto3 explicit presence was introduced in protoc 3.15, text-level proto regex parsers that stripped `repeated` but did not capture `optional` (e.g. the mortgage corpus builder and grammar test that were parsing this proto, both since removed with the mortgage assistant) misclassified `optional` as part of the field type or treated it as required. This prevented omitting the field to invoke the 15-day convention, causing schema validators to reject valid convention calls.
 
 ### Mortgage assistant label-space exclusions
-The mortgage assistant service (`backend/proto/mortgage_assistant.proto`) maps natural language utterances to `sensen.finance.Finance` RPCs. Out of 46 RPCs defined in `backend/proto/finance.proto:40-104`, the assistant's label space covers 26 operations in the deployed v2 production model (`backend/proto/mortgage_assistant.proto:183-186`, `docs/CLOSING_COSTS_CLIENT_NOTICE.md:156-158`) and 27 in the verification grammar (`backend/src/modules/mortgage_verification.cppm:384`, `backend/tests/test_mortgage_grammar.cpp:553`).
-
-The excluded RPCs and rationale are:
-1. Out-of-scope functional sections (`agent/dataset/build_mortgage_dataset.py:196-202`):
-   - Fixed income: `AnalyzeBond`, `AnalyzeTreasuryBill`
-   - Futures and hedging: `PriceFutures`, `ValueFutures`, `SimulateMarginAccount`, `ComputeHedge`, `CommoditySpread`
-   - Options: `PriceOptionTree`, `PriceBlackScholes`, `PriceOptionMonteCarlo`, `ComputeProbabilityTree`
-   - Portfolio: `ComputePortfolioStats`, `OptimizePortfolio`, `ComputeRiskContributions`
-2. Rate-theory utilities (`agent/dataset/build_mortgage_dataset.py:206-207`, `backend/tests/test_mortgage_grammar.cpp:248-251`):
-   - `ConvertInterestRate`, `ComputeFisherRate`: Theoretical rate conversion utilities not phrased as consumer mortgage or cash flow requests.
-3. Batch APIs (`agent/dataset/build_mortgage_dataset.py:209-217`, `backend/tests/test_mortgage_grammar.cpp:248-251`):
-   - `ComputeAmortizationBatch`, `ComputeRentVsBuyBatch`: High-throughput bulk APIs accepting repeated arrays (up to 1,000 scenarios) for offline batching; no single conversational utterance can ground parameters for a batch.
-4. Administrative and reference operations (`agent/dataset/build_mortgage_dataset.py:221-225`, `backend/tests/test_mortgage_grammar.cpp:248-251`):
-   - `RefreshStateAssumptions`: Operational maintenance mutation triggering external Census ACS fetches and database writes.
-   - `GetStateAssumptions`: Reference data lookup for state housing parameters.
-5. Deployed model status of `ComputeClosingCosts`:
-   - Included in the 27-operation grammar and C++ verification rules (`backend/src/modules/mortgage_verification.cppm:384`), but excluded from the active deployed v2 model label space (26 operations, 160 fields). The v3 candidate model achieved only 16.7% accuracy on closing cost utterances and regressed existing operations, so v2 remains deployed without natural language closing cost parsing (`docs/CLOSING_COSTS_CLIENT_NOTICE.md:152-160`). Direct calls to `Finance/ComputeClosingCosts` via gRPC or JSON transcoder are fully operational (`docs/CLOSING_COSTS_CLIENT_NOTICE.md:117-145`).
+Moved with the service (2026-10): which `sensen.finance.Finance` RPCs the mortgage assistant can name,
+and why the rest are excluded, is documented where the assistant now lives, in `mortgage-nest-egg`.
 
 ---
 
@@ -502,61 +494,19 @@ Contains `reason` (`Reason`: `REASON_UNSPECIFIED=0`, `UNSUPPORTED_STRATEGY=1`, `
 
 ---
 
-## Service: `mortgage.assistant.MortgageAssistant` (`backend/proto/mortgage_assistant.proto`)
+## Service: `mortgage.assistant.MortgageAssistant` -- REMOVED 2026-10
 
-### Purpose
-Parses unstructured natural language mortgage, loan, and financial calculation queries into structured parameters matching `sensen.finance.Finance` RPCs.
-
-### RPC inventory
-
-| RPC name | Request message | Response message | Description |
-| --- | --- | --- | --- |
-| `ParseOperation` | `ParseRequest` | `ParseResponse` | Translates a loan or cash flow query into structured arguments for a specific Finance RPC (`backend/proto/mortgage_assistant.proto:75`). |
-
-### Message and field inventory
-
-#### `ParseRequest` (`backend/proto/mortgage_assistant.proto:78-164`)
-| Field name | Wire type | Units / Convention | Presence / Restriction |
-| --- | --- | --- | --- |
-| `utterance` | `string` | Free text | Required; max 1,000 chars (`backend/src/modules/mortgage_assistant_service.cpp:225, 3096`). |
-| `prior_clarification` | `string` | Prior answer | Optional; max 400 chars (`backend/src/modules/mortgage_assistant_service.cpp:226, 3102`). |
-| `prior_question` | `string` | Question being answered | Optional; retained for backward compatibility (`backend/proto/mortgage_assistant.proto:104-163`). |
-
-#### `ParseResponse` (`backend/proto/mortgage_assistant.proto:166-174`)
-| Field name | Wire type | Units / Convention | Presence / Restriction |
-| --- | --- | --- | --- |
-| `outcome` | `oneof` | Mutual exclusion | Exactly one of `params`, `clarification`, or `refusal` (`backend/proto/mortgage_assistant.proto:169-173`). |
-| `params` | `FinanceParams` | Structured output | Set when the request resolves to an executable Finance RPC (`backend/proto/mortgage_assistant.proto:170`). |
-| `clarification` | `Clarification` | Clarifying question | Set when a required input parameter is missing (`backend/proto/mortgage_assistant.proto:171`). |
-| `refusal` | `Refusal` | Refusal diagnostic | Set when the query is out of scope or invalid (`backend/proto/mortgage_assistant.proto:172`). |
-
-#### `FinanceParams` (`backend/proto/mortgage_assistant.proto:226-270`)
-| Field name | Wire type | Units / Convention | Presence / Restriction |
-| --- | --- | --- | --- |
-| `operation` | `string` | Exact RPC name on `sensen.finance.Finance` | E.g. "ComputeAmortization", "ComputeRefinance" (`backend/proto/mortgage_assistant.proto:228-237`). |
-| `params` | `map<string, string>` | Field name to string literal | Every field declared by the operation's request message is present (`backend/proto/mortgage_assistant.proto:242-269`). |
-
-#### `Clarification` (`backend/proto/mortgage_assistant.proto:277-279`)
-Contains string `question` (capped at 400 chars, `backend/src/modules/mortgage_assistant_service.cpp:211`).
-
-#### `Refusal` (`backend/proto/mortgage_assistant.proto:284-322`)
-Contains `reason` (`Reason`: `REASON_UNSPECIFIED=0`, `UNSUPPORTED_OPERATION=1`, `INVALID_PARAMETERS=2`, `OUT_OF_SCOPE=3`, `MODEL_UNAVAILABLE=4`) and human-readable string `message`.
-
-### Invariants, refusals, and failure modes
-- Complete field mapping: `params` must carry all fields declared by the request message; missing fields are refused with `INVALID_PARAMETERS` to prevent proto3 default zero-injection (`backend/proto/mortgage_assistant.proto:262-268`).
-- String encoding of values: Values in `params` are formatted as: exact decimal string for BigDecimal, decimal digits for int32, shortest decimal text for double, `"true"`/`"false"` for bool, enum constant name for enums, and JSON arrays for repeated values (`backend/proto/mortgage_assistant.proto:245-260`).
-- Text bounds: Utterances $> 1,000$ chars or prior clarifications $> 400$ chars return `INVALID_ARGUMENT` (`backend/src/modules/mortgage_assistant_service.cpp:3096-3108`). Decimal strings in values are capped at 48 chars, array lengths at 512, and absolute magnitudes at $10^{15}$ (`backend/src/modules/mortgage_assistant_service.cpp:240-242`).
-- Five verification gates: Gated through `mortgage_verification.cppm`: G1 (closed operation vocabulary), G2 (declared field set & enum names), G3 (utterance grounding), G4 (presence check), and G5 (plausibility bounds). Only `Proven` outputs are served (`backend/src/modules/mortgage_verification.cppm:48-67`).
-
-### Gotchas
-- Model label-space vs. verification schema: The schema and verification code support 27 operations, but the active production model was trained on 26 operations (`docs/CLOSING_COSTS_CLIENT_NOTICE.md:156-158`). Utterances asking for closing costs yield a refusal in production rather than parameters.
-- Opposite signs in annuity solvers: `ComputeRate` and `ComputePeriods` require cash flows with opposite signs (borrowing vs paying). Natural language queries describing positive loan and payment amounts are signed by the service layer before dispatch (`backend/src/modules/mortgage_verification.cppm:1360-1380`).
+No longer part of this surface. The service, its proto, its Envoy transcoder entry and its descriptor
+entry were deleted from this repository when the assistant moved to `mortgage-nest-egg`
+(`services/mortgage-assistant`, Railway service `mfv-assistant`); its contract is
+`mortgage-nest-egg:clients/mortgagefv/proto/mortgage_assistant.proto`. A request to
+`/mortgage.assistant.MortgageAssistant/ParseOperation` on this host is not routed to any service.
 
 ---
 
 ## HTTP edge mapping (JSON transcoder paths)
 
-All 57 gRPC RPCs across the four services are accessible through Envoy's `grpc_json_transcoder` filter (`backend/envoy.yaml`) using HTTP `POST` at `https://api.optionsandfuturescalculator.com`.
+All 56 gRPC RPCs across the three services are accessible through Envoy's `grpc_json_transcoder` filter (`backend/envoy.yaml`) using HTTP `POST` at `https://api.optionsandfuturescalculator.com`.
 
 | Package / Service | RPC Method | HTTP Method and Transcoder Path |
 | --- | --- | --- |
@@ -616,7 +566,6 @@ All 57 gRPC RPCs across the four services are accessible through Envoy's `grpc_j
 | `sensen.finance.Finance` | `OptimizePortfolio` | `POST /sensen.finance.Finance/OptimizePortfolio` |
 | `sensen.finance.Finance` | `ComputeRiskContributions` | `POST /sensen.finance.Finance/ComputeRiskContributions` |
 | `calculator.assistant.StrategyAssistant` | `ParseStrategy` | `POST /calculator.assistant.StrategyAssistant/ParseStrategy` |
-| `mortgage.assistant.MortgageAssistant` | `ParseOperation` | `POST /mortgage.assistant.MortgageAssistant/ParseOperation` |
 
 ---
 
@@ -633,10 +582,8 @@ Every service, verification module, and validation rule has corresponding automa
 | `backend/tests/test_state_assumptions_gate.cpp` | Tests write gate on `RefreshStateAssumptions`, proving `PERMISSION_DENIED` for anonymous and Pro callers, and admission for partner credentials. |
 | `backend/tests/test_assistant_service.cpp` | In-process gRPC tests for `calculator.assistant.StrategyAssistant/ParseStrategy` over `StrategyAssistantWorkflow`: admission limits (1,000 char utterance, 400 char clarification), prompt injection rejection, model availability refusal, and did-compute postconditions. |
 | `backend/tests/test_assistant_verification.cpp` | Standalone verification unit tests for `assistant_verification.cppm`: closed-vocabulary strategy validation (48 strategies), ticker validation, quantity and expiration limits, and keyword extraction. |
-| `backend/tests/test_mortgage_assistant_service.cpp` | In-process gRPC tests for `mortgage.assistant.MortgageAssistant/ParseOperation` over `MortgageAssistantWorkflow`: length bounds, injection checks, model availability gating, and verdict routing. |
-| `backend/tests/test_mortgage_grammar.cpp` | Proves grammar label-space matches `finance.proto` (27 operations, 184 fields in declaration order), verifies enum tables, and tests character-level automaton rejection and non-vacuous gold validation. |
-| `backend/tests/test_mortgage_verification.cpp` | Standalone tests for the 5 mortgage verification gates: operation vocabulary, field totality, utterance value grounding, absent-params detection, and plausibility bounds. |
 | `backend/tests/test_vendored_proto_drift.cpp` | Compares vendored client protos in `clients/mortgagefv/proto/` and `frontend/src/grpc/` against canonical backend protos in `backend/proto/`. |
+| `scripts/check_envoy_services.py` (ctest `EnvoyTranscoderServicesTest`) | The services `backend/envoy.yaml` lists under `grpc_json_transcoder` must equal the services in the generated `api_descriptor.pb`. A name Envoy cannot find in the descriptor makes it refuse the configuration (every replica crash-loops); a descriptor service missing from the list has no JSON route. |
 
 ---
 
