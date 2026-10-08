@@ -139,6 +139,18 @@ export [[nodiscard]] constexpr auto resolve_device(std::string_view requested, b
 }
 
 /**
+ * The value of an environment variable, or nothing when it is unset or empty. A COPY, not the
+ * pointer `std::getenv` hands back: that points into storage the next `setenv` may move, and the one
+ * place this tree crosses into the C environment should not leak the pointer to anyone.
+ */
+export [[nodiscard]] inline auto environment_text(std::string_view name) -> std::optional<std::string> {
+    const std::string key{name};  // getenv needs a terminated string
+    const char* const raw = std::getenv(key.c_str());
+    if (raw == nullptr || *raw == '\0') return std::nullopt;
+    return std::string{raw};
+}
+
+/**
  * What a shared-queue task is ROUTED on: the surface it belongs to, and -- for work whose answer
  * depends on the build that computes it -- a fingerprint of that build.
  *

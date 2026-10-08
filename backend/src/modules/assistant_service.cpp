@@ -1682,7 +1682,8 @@ class AssistantWorker {
             return;
         }
 
-        if (runtime_.decoder() == nullptr) {
+        const auto decoder = runtime_.decoder();
+        if (!decoder.has_value()) {
             logger::Logger::getInstance().error(
                 "The \"{}\" assistant backend failed to initialise from MODEL_PATH ({}) -- the "
                 "strategy assistant will return a Refusal on every call. The calculator and "
@@ -1694,7 +1695,7 @@ class AssistantWorker {
         logger::Logger::getInstance().info(
             "Strategy assistant ready: backend={} device={} model={} inference_threads={} "
             "max_concurrent={} queue_depth={} context_tokens={}",
-            runtime_.decoder()->name(), runtime_.decoder()->device(), *path, threads,
+            decoder->get().name(), decoder->get().device(), *path, threads,
             max_concurrent, queue_depth, kv_max_seq_len);
 
         // configure_queue() MUST run before the decoder's start(): it is
@@ -1706,7 +1707,7 @@ class AssistantWorker {
         // lease source is ever installed), so this reordering changes
         // nothing observable about that path.
         runtime_.configure_queue();
-        runtime_.decoder()->start();
+        decoder->get().start();
     }
 
     assistant_runtime::AssistantRuntime runtime_{inference_queue::Surface::Strategy,
@@ -2821,7 +2822,7 @@ inline constexpr std::array<std::string_view, 4> kAllActionNames{
     // No params block for an unrecognised operation, deliberately: that is what the decoder
     // produces when it will not name a strategy, and the existing non-params path is what
     // turns it into a clarification or an honest refusal.
-    if ((AssistantWorker::instance().runtime().encoder() != nullptr)) {
+    if (AssistantWorker::instance().runtime().encoder().has_value()) {
         // BOTH TURNS, for the same reason `build_prompt` takes both: the reply to this
         // service's own clarifying question, and a revision ("change the expiry to 7 days"),
         // arrive ONLY in `prior_clarification`. A model handed just `utterance` re-reads the

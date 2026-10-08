@@ -62,15 +62,22 @@ class AssistantRuntime {
         encoder_ = std::move(encoder);
     }
 
-    [[nodiscard]] auto decoder() const noexcept -> inference_admission::QueuedBackend* {
-        return decoder_.get();
+    /** A view of the decoder this runtime OWNS, or nothing. The view is valid for as long as the
+     *  runtime is, which is the life of the process: every Worker holds its runtime as a member of a
+     *  function-local static. */
+    [[nodiscard]] auto decoder() const noexcept
+        -> std::optional<std::reference_wrapper<inference_admission::QueuedBackend>> {
+        if (decoder_ == nullptr) return std::nullopt;
+        return std::ref(*decoder_);
     }
 
     /** Non-null only when the small encoder was selected and loaded. Asked for one engine and
      *  unable to provide it, an assistant is UNAVAILABLE rather than quietly served by the other
      *  (the `ASSISTANT_BACKEND=llamacpp` rule), so a caller tests this rather than assuming. */
-    [[nodiscard]] auto encoder() const noexcept -> encoder_queue::EncoderService* {
-        return encoder_.get();
+    [[nodiscard]] auto encoder() const noexcept
+        -> std::optional<std::reference_wrapper<encoder_queue::EncoderService>> {
+        if (encoder_ == nullptr) return std::nullopt;
+        return std::ref(*encoder_);
     }
 
     // ---- answering --------------------------------------------------------------------------
@@ -123,9 +130,10 @@ class AssistantRuntime {
 
     /** One encoder exchange: through the shared queue when configured and a slot is free, in this
      *  process otherwise. Either way `EncoderBackend::answer()` decides what the chain's outcome
-     *  means, so the two cannot disagree. Thread-safe. Only valid when `encoder()` is non-null. */
+     *  means, so the two cannot disagree. Thread-safe. Only valid when an encoder was adopted. */
     [[nodiscard]] auto answer(const encoder_queue::EncoderRequest& request) -> encoder_queue::Answer {
-        return encoder_->answer(admission_.get(), request);
+        if (admission_ != nullptr) return encoder_->answer(*admission_, request);
+        return encoder_->answer(request);
     }
 
     // ---- joining the shared queue -----------------------------------------------------------
@@ -145,8 +153,7 @@ class AssistantRuntime {
      * executing, and it has nothing to execute with.
      */
     auto configure_queue() -> void {
-        const char* const raw = std::getenv("INFERENCE_QUEUE");
-        const std::string mode = (raw != nullptr && *raw != '\0') ? raw : "local";
+        const std::string mode = inference_admission::environment_text("INFERENCE_QUEUE").value_or("local");
         if (mode == "sgee") {
             configure_sgee();
         } else if (mode == "postgres") {
@@ -175,9 +182,11 @@ class AssistantRuntime {
     }
 
     /** The backend that EXECUTES here, or null on a submit-only replica. */
-    [[nodiscard]] auto local_executor() noexcept -> inference_admission::InferenceBackend* {
-        if (decoder_ != nullptr) return decoder_.get();
-        return encoder_ != nullptr ? &encoder_->backend() : nullptr;
+    [[nodiscard]] auto local_executor() noexcept
+        -> std::optional<std::reference_wrapper<inference_admission::InferenceBackend>> {
+        if (decoder_ != nullptr) return std::ref<inference_admission::InferenceBackend>(*decoder_);
+        if (encoder_ != nullptr) return std::ref<inference_admission::InferenceBackend>(encoder_->backend());
+        return std::nullopt;
     }
 
     /** How long a submitter waits on the shared queue before answering for itself: 90 s for a
@@ -201,7 +210,7 @@ class AssistantRuntime {
     /** What an admission object degrades to. Executing replicas hand back their own executor;
      *  a replica with none gets the stand-in, which fails honestly instead of hanging. */
     [[nodiscard]] auto local_or_stand_in() -> inference_admission::InferenceBackend& {
-        if (auto* local = local_executor(); local != nullptr) return *local;
+        if (const auto local = local_executor(); local.has_value()) return local->get();
         no_local_ = std::make_unique<inference_admission::NoLocalBackend>();
         return *no_local_;
     }
@@ -227,7 +236,7 @@ class AssistantRuntime {
         // visibility, matching the admission deadline for a decode: a shorter window would let the
         // cluster reclaim a task this worker is still decoding and hand it to someone else,
         // paying for the same inference twice and fencing out the answer that arrives first.
-        const bool executes = local_executor() != nullptr;
+        const bool executes = local_executor().has_value();
         if (executes) {
             install_lease_source(std::make_shared<inference_admission::SgeeLeaseSource>(
                 *client, route_tag(), worker_id(), /*visibility_ms=*/90000));
@@ -243,8 +252,8 @@ class AssistantRuntime {
     }
 
     auto configure_postgres() -> void {
-        const char* const url = std::getenv("DATABASE_URL");
-        if (url == nullptr || *url == '\0') {
+        const auto url = inference_admission::environment_text("DATABASE_URL");
+        if (!url.has_value()) {
             logger::Logger::getInstance().warn(
                 "INFERENCE_QUEUE=postgres was requested but DATABASE_URL is unset -- the {} "
                 "degrades to local-only inference (its own decode loop, no shared queue).",
@@ -256,7 +265,7 @@ class AssistantRuntime {
         // restated, not overridden, so this is self-documenting against the mandated bounds
         // rather than a silent reliance on a default that could drift later.
         pg::PoolConfig pool_config;
-        pool_config.conninfo = url;
+        pool_config.conninfo = *url;
         pool_config.connect_timeout = std::chrono::milliseconds(2000);
         pool_config.statement_timeout = std::chrono::milliseconds(2000);
         // 16, not PoolConfig's own default of 4: this ONE pool is shared by every submitter's
@@ -286,7 +295,7 @@ class AssistantRuntime {
 
         const std::string worker = std::string(inference_queue::to_string(surface_)) + "-" +
                                    std::to_string(::getpid());
-        const bool executes = local_executor() != nullptr;
+        const bool executes = local_executor().has_value();
         if (executes) {
             install_lease_source(std::make_shared<inference_admission::PostgresLeaseSource>(
                 queue_, route_tag(), worker));

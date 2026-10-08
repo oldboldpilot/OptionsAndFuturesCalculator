@@ -16,7 +16,13 @@ import sensen.encoder_assistant;
  * service called `EncoderAssistant::parse()` in-process, and `admission_` was consulted only for
  * decoder prompts. Measured in production on 2026-10-07, ~120 assistant calls advanced the three
  * nodes' `last_applied` by 10 -- housekeeping. The owner's decision is that the queue is how the
- * service scales across backends, so an encoder parse is now a task like any other.
+ * service scales across backends, so an encoder parse can be a task like any other.
+ *
+ * WHEN A REQUEST GOES THERE (decided 2026-10-07, after the first routing was measured): a request
+ * is answered IN-PROCESS and spills to the queue only when the replica is BUSY -- its own chain
+ * already has `kDefaultLocalMaxInFlight` executions in flight. The first routing sent every request
+ * to the queue first; at the deployed 300 ms Raft heartbeat that was ~570 ms per request against
+ * ~1 ms in-process, for sharing no caller was waiting on. See `EncoderService::answer`.
  *
  * ONE RULE, ONE PLACE. `EncoderBackend::answer()` is the only code that runs the chain and
  * decides what its outcome means. Local mode calls it directly; the queue's worker calls it
@@ -166,10 +172,60 @@ namespace detail {
 }
 
 /**
- * Bounds how many of THIS assistant's requests (on this replica) are on the shared queue at once;
- * the rest are answered in-process.
+ * How many things are executing right now, with an atomic "enter only if there is room".
  *
- * WHY A BOUND AT ALL. Every queue operation is a replicated write and the leader serialises
+ * ONE counter type for the two bounds this module keeps, because each is the same question -- "is
+ * this many already in flight?" -- asked of a different thing:
+ *
+ *  - the CHAIN on this replica (`EncoderBackend`): how many parses are executing in this process,
+ *    whether for this replica's own requests or for work leased from the shared queue. That count
+ *    is what "busy" means, and it is measured rather than configured: it is the thing that rises
+ *    when the replica is loaded.
+ *  - the SHARED QUEUE (`EncoderService`): how many of this assistant's requests are outstanding on
+ *    it. See `kDefaultMaxInFlight` for why that one is bounded at all.
+ *
+ * `try_enter(limit)` is exact (a compare-exchange loop), so a bound of N is never exceeded by a
+ * race, and a limit of 0 admits nothing.
+ */
+class InFlightCount {
+  public:
+    [[nodiscard]] auto try_enter(std::size_t limit) noexcept -> bool {
+        auto current = count_.load(std::memory_order_relaxed);
+        while (current < limit) {
+            if (count_.compare_exchange_weak(current, current + 1, std::memory_order_acquire,
+                                             std::memory_order_relaxed)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Enters unconditionally: work that has to run whatever the bound says still has to be COUNTED,
+     *  or the next arrival would read an idle replica that is not. */
+    auto enter() noexcept -> void { count_.fetch_add(1, std::memory_order_acquire); }
+
+    auto leave() noexcept -> void { count_.fetch_sub(1, std::memory_order_release); }
+
+    [[nodiscard]] auto load() const noexcept -> std::size_t {
+        return count_.load(std::memory_order_relaxed);
+    }
+
+  private:
+    std::atomic<std::size_t> count_{0};
+};
+
+namespace detail {
+
+/** Leaves a count it has entered, on every path out of the scope. */
+struct LeaveOnExit {
+    InFlightCount& count;
+    ~LeaveOnExit() { count.leave(); }
+};
+
+}  // namespace detail
+
+/**
+ * THE QUEUE-SIDE BOUND. Every queue operation is a replicated write and the leader serialises
  * them, so the queue has a ceiling -- measured at 30 / 10 / 3 requests per second for Raft
  * heartbeats of 10 / 50 / 300 ms (the deployed value is 300), against several thousand per
  * second for one replica answering for itself. Past that ceiling the queue does not merely
@@ -177,62 +233,73 @@ namespace detail {
  * anyway, and leaves an ORPHAN task that a worker executes later for nobody -- three more
  * writes spent on an answer no one is waiting for, in the one resource that was already
  * saturated, which delays the next request further. Measured at 300 ms with 24 callers: 85
- * deadline expiries in 96 requests. A bound on what each replica may have outstanding keeps the
+ * deadline expiries in 96 requests. A bound on what each assistant may have outstanding keeps the
  * backlog -- and so the wait -- below the deadline at every timing measured.
  *
- * THE OVERFLOW IS NOT A FAILURE and is not logged per request: it is the replica doing the work
- * it was always able to do. Under the bound the queue still carries and shares every request it
- * can; above it the replica answers itself.
+ * Overridable with `ENCODER_QUEUE_MAX_IN_FLIGHT`; 0 means this assistant never submits.
  */
-class QueueSlots {
-  public:
-    explicit QueueSlots(std::size_t limit) noexcept : limit_(limit) {}
-
-    [[nodiscard]] auto try_acquire() noexcept -> bool {
-        auto current = in_flight_.load(std::memory_order_relaxed);
-        while (current < limit_) {
-            if (in_flight_.compare_exchange_weak(current, current + 1, std::memory_order_acquire,
-                                                 std::memory_order_relaxed)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    auto release() noexcept -> void { in_flight_.fetch_sub(1, std::memory_order_release); }
-
-  private:
-    std::size_t limit_;
-    std::atomic<std::size_t> in_flight_{0};
-};
-
-/** The default bound, overridable with `ENCODER_QUEUE_MAX_IN_FLIGHT` for a cluster whose commit
- *  latency is known to be lower. */
 inline constexpr std::size_t kDefaultMaxInFlight{1};
 
 /**
- * What `ENCODER_QUEUE_MAX_IN_FLIGHT` says. Unset or empty is the default. Anything else must be a
- * whole number in base 10 and NOTHING else -- no sign, no space, no suffix -- and ZERO IS A VALUE:
- * `QueueSlots{0}` admits no request, so this replica never submits and answers every request
- * itself, while its runner still executes work other replicas submit. That is the one setting that
- * routes in-process without unwiring the queue, so an operator who reaches for it must get it.
+ * THE LOCAL BOUND, and what "busy" means. A replica answers an encoder request in-process while
+ * fewer than this many chain executions are in flight on it; at this many it is busy and the
+ * request spills to the shared queue (if this assistant has a queue slot free).
+ *
+ * MEASURED, not chosen: `scripts/encoder_local_sweep.sh`, one engine in `local` mode, three rounds
+ * (the order of the concurrencies reversed on alternate rounds), 32-CPU host, medians. Client
+ * concurrency 1 / 2 / 4 / 8 / 16 / 32 / 64:
+ *
+ *     mortgage   p50 0.87 / 0.95 / 1.03 / 1.24 / 2.08 / 4.79 / 8.81 ms    1134 / 2029 / 3636 / 5870 / 6887 / 6284 / 6498 rps
+ *     strategy   p50 0.30 / 0.35 / 0.45 / 0.64 / 1.57 / 3.29 / 7.70 ms    3151 / 5331 / 8102 / 10761 / 9376 / 8847 / 7617 rps
+ *
+ * Throughput stops growing between 8 and 16 (strategy peaks AT 8, mortgage at 16) and latency then
+ * doubles with every doubling of callers, which is a replica with nothing left to give. 8 is the
+ * highest concurrency at which p50 is still about twice its idle value on both surfaces (1.4x and
+ * 2.1x) while throughput is already 85-100% of peak; at 16 the strategy p50 is 5x idle for 87% of
+ * its peak. So below 8 a request is answered in about a millisecond.
+ *
+ * The bound counts chain executions, which is fewer than client concurrency (gRPC framing and the
+ * service's own work run outside the chain), so it is reached rarely: the benchmark with 24 callers
+ * spilled 0 or 1 request in 243 at the default.
+ *
+ * It is NOT lower, because the queue is never faster: even at 64 callers the in-process p50 is
+ * 7-9 ms against 75-150 ms (50 ms heartbeat) to 570 ms (300 ms heartbeat) for a queued parse. A
+ * spill helps a saturated replica by taking work OFF it, not by finishing sooner, so it should
+ * start where the replica stops scaling and no earlier. Re-measure on the real host before trusting
+ * the number there; `ENCODER_LOCAL_MAX_IN_FLIGHT` overrides it, and 0 means every request is busy
+ * (the pre-2026-10-07 routing, queue first): the lever for measuring the queue or forcing a request
+ * through it.
+ */
+inline constexpr std::size_t kDefaultLocalMaxInFlight{8};
+
+/** The two bounds an `EncoderService` routes on. */
+struct Bounds {
+    std::size_t local{kDefaultLocalMaxInFlight};
+    std::size_t queue{kDefaultMaxInFlight};
+};
+
+/**
+ * What an operator's `<variable>` says. Unset or empty is `fallback`. Anything else must be a whole
+ * number in base 10 and NOTHING else -- no sign, no space, no suffix -- and ZERO IS A VALUE
+ * (`zero_means` says what it does for this variable).
  *
  * An unusable value is an ERROR rather than a fallback. This tree's rule for an operator switch
  * (`MORTGAGE_WEIGHT_STORE`, `MORTGAGE_RESTRICTED_PROJECTION`) is that a typo must not silently
  * serve the configuration the operator meant to leave: coercing `=abc` or `=0` to 1 left a replica
  * on a ~0.6 s request path with no line anywhere saying why.
  */
-[[nodiscard]] inline auto parse_max_in_flight(const char* raw)
+[[nodiscard]] inline auto parse_in_flight_bound(std::string_view variable,
+                                                const std::optional<std::string>& raw,
+                                                std::size_t fallback, std::string_view zero_means)
     -> std::expected<std::size_t, std::string> {
-    if (raw == nullptr || *raw == '\0') return kDefaultMaxInFlight;
-    const std::string_view text{raw};
+    if (!raw.has_value() || raw->empty()) return fallback;
+    const std::string_view text{*raw};
     std::size_t parsed = 0;
     const auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), parsed);
     if (ec != std::errc{} || end != text.data() + text.size()) {
         return std::unexpected(std::format(
-            "ENCODER_QUEUE_MAX_IN_FLIGHT=\"{}\" is not a whole number (0 means never submit, "
-            "unset means {})",
-            text, kDefaultMaxInFlight));
+            "{}=\"{}\" is not a whole number (0 means {}, unset means {})", variable, text,
+            zero_means, fallback));
     }
     return parsed;
 }
@@ -305,17 +372,31 @@ class EncoderBackend final : public inference_admission::InferenceBackend {
     EncoderBackend(Chain chain, Render render, std::string label)
         : chain_(std::move(chain)), render_(std::move(render)), label_(std::move(label)) {}
 
-    /** The ONE place the chain runs and its outcome acquires a meaning. Thread-safe: the chain is
-     *  const (`EncoderAssistant` documents it) and nothing here is mutable. */
+    /** The ONE place the chain runs and its outcome acquires a meaning, for work that must run
+     *  whatever the load: a leased job, a degrade, an overflow. Thread-safe: the chain is const
+     *  (`EncoderAssistant` documents it) and the only state here is the atomic in-flight count. */
     [[nodiscard]] auto answer(const EncoderRequest& request) const -> Answer {
-        auto parsed = chain_(request.turns());
-        if (!parsed.has_value()) {
-            return {.verdict = Verdict::Refused, .text = std::move(parsed.error())};
-        }
-        if (!parsed->has_value()) return {.verdict = Verdict::None, .text = {}};
-        return {.verdict = Verdict::Params,
-                .text = "<params>" + render_(**parsed) + "</params>"};
+        in_flight_.enter();
+        const detail::LeaveOnExit leave{in_flight_};
+        return run(request);
     }
+
+    /**
+     * The same, but only while fewer than `limit` chain executions are in flight on this replica;
+     * `nullopt` means BUSY and nothing ran. The count includes work leased from the shared queue,
+     * because a core spent on another replica's parse is a core this replica's own request does
+     * not have -- so "busy" is what the replica is actually doing, measured here, rather than a
+     * rate someone configured. Exact: a race cannot admit one more than `limit`.
+     */
+    [[nodiscard]] auto answer_below(std::size_t limit, const EncoderRequest& request) const
+        -> std::optional<Answer> {
+        if (!in_flight_.try_enter(limit)) return std::nullopt;
+        const detail::LeaveOnExit leave{in_flight_};
+        return run(request);
+    }
+
+    /** Chain executions in flight right now: the measured signal "busy" is read from. */
+    [[nodiscard]] auto in_flight() const noexcept -> std::size_t { return in_flight_.load(); }
 
     /** The queue's entry point: wire request in, wire answer out. Never `nullopt` -- an encoder
      *  has no admission queue to be full -- and `ok == false` only for a prompt that is not an
@@ -334,15 +415,27 @@ class EncoderBackend final : public inference_admission::InferenceBackend {
     [[nodiscard]] auto name() const noexcept -> std::string_view override { return label_; }
 
   private:
+    /** The chain and its meaning. The caller has already entered `in_flight_`. */
+    [[nodiscard]] auto run(const EncoderRequest& request) const -> Answer {
+        auto parsed = chain_(request.turns());
+        if (!parsed.has_value()) {
+            return {.verdict = Verdict::Refused, .text = std::move(parsed.error())};
+        }
+        if (!parsed->has_value()) return {.verdict = Verdict::None, .text = {}};
+        return {.verdict = Verdict::Params,
+                .text = "<params>" + render_(**parsed) + "</params>"};
+    }
+
     Chain chain_;
     Render render_;
     std::string label_;
+    mutable InFlightCount in_flight_;
 };
 
 /**
  * Everything one assistant needs on the encoder side, in one object: the chain as an
- * `InferenceBackend`, the bound on its use of the shared queue, and the runner that executes work
- * leased from that queue.
+ * `InferenceBackend`, the bounds that route a request, and the runner that executes work leased from
+ * the shared queue.
  *
  * ONE OBJECT BECAUSE THEIR LIFETIMES ARE ONE LIFETIME. The runner's thread reads the backend, and
  * the backend's chain reads the encoder; declaration order here is the destruction order that makes
@@ -354,31 +447,44 @@ class EncoderService {
     /** @param fingerprint what the queue routes this service's tasks on (`build_fingerprint`);
      *         empty for a service that is never put on a queue. */
     EncoderService(EncoderBackend::Chain chain, EncoderBackend::Render render, std::string label,
-                   std::size_t max_in_flight, std::string fingerprint = {})
-        : backend_(std::move(chain), std::move(render), std::move(label)), slots_(max_in_flight),
+                   Bounds bounds, std::string fingerprint = {})
+        : backend_(std::move(chain), std::move(render), std::move(label)), bounds_(bounds),
           fingerprint_(std::move(fingerprint)) {}
 
     /**
-     * The service the engine builds: its bound comes from `ENCODER_QUEUE_MAX_IN_FLIGHT`, the
-     * effective value is LOGGED, and an unusable one stops the process. Both assistants build
-     * theirs here, so the rule is written once.
+     * The service the engine builds: its bounds come from `ENCODER_LOCAL_MAX_IN_FLIGHT` and
+     * `ENCODER_QUEUE_MAX_IN_FLIGHT`, the effective values are LOGGED, and an unusable one stops the
+     * process. Both assistants build theirs here, so the rule is written once.
      */
     [[nodiscard]] static auto from_environment(EncoderBackend::Chain chain, EncoderBackend::Render render,
                                                std::string label, const std::filesystem::path& model)
         -> std::unique_ptr<EncoderService> {
-        const char* const raw = std::getenv("ENCODER_QUEUE_MAX_IN_FLIGHT");
-        const auto bound = parse_max_in_flight(raw);
-        if (!bound.has_value()) {
+        const auto raw_local = inference_admission::environment_text("ENCODER_LOCAL_MAX_IN_FLIGHT");
+        const auto raw_queue = inference_admission::environment_text("ENCODER_QUEUE_MAX_IN_FLIGHT");
+        const auto local = parse_in_flight_bound("ENCODER_LOCAL_MAX_IN_FLIGHT", raw_local,
+                                                 kDefaultLocalMaxInFlight,
+                                                 "every request spills to the queue first");
+        const auto queue = parse_in_flight_bound("ENCODER_QUEUE_MAX_IN_FLIGHT", raw_queue,
+                                                 kDefaultMaxInFlight, "never submit");
+        const auto refuse_if_unusable = [](const std::expected<std::size_t, std::string>& bound) {
+            if (bound.has_value()) return;
             logger::Logger::getInstance().error(
                 "{} -- refusing to start rather than guessing which bound was meant.", bound.error());
             std::exit(1);
-        }
+        };
+        refuse_if_unusable(local);
+        refuse_if_unusable(queue);
+        const auto source = [](const std::optional<std::string>& raw) {
+            return raw.has_value() ? "set" : "unset: the default";
+        };
         logger::Logger::getInstance().info(
-            "encoder_queue: {} keeps at most {} request(s) at a time on the shared queue and "
-            "answers the rest in-process (ENCODER_QUEUE_MAX_IN_FLIGHT {})",
-            label, *bound, (raw != nullptr && *raw != '\0') ? "set" : "unset: the default");
+            "encoder_queue: {} answers in-process, and spills to the shared queue only when {} are "
+            "already executing here -- at most {} at a time (ENCODER_LOCAL_MAX_IN_FLIGHT {}, "
+            "ENCODER_QUEUE_MAX_IN_FLIGHT {})",
+            label, *local, *queue, source(raw_local), source(raw_queue));
         return std::make_unique<EncoderService>(std::move(chain), std::move(render), std::move(label),
-                                                *bound, build_fingerprint(model));
+                                                Bounds{.local = *local, .queue = *queue},
+                                                build_fingerprint(model));
     }
 
     /** What the shared queue routes this service's tasks on. */
@@ -394,50 +500,83 @@ class EncoderService {
     }
 
     /**
-     * Answers one request: through the shared queue when there is one and this replica has a free
-     * slot on it, in this process otherwise.
+     * Answers one request: IN THIS PROCESS, unless the replica is busy, in which case it spills to
+     * the shared queue.
      *
-     * `shared` is the service's admission object (`SgeeAdmission` / `PostgresAdmission`), or null in
-     * `local` mode. When it is used, the request is SUBMITTED -- surface-tagged, leasable by any
-     * replica -- and that admission object already degrades to `backend().submit()` on any submit
-     * or poll failure. This adds the one failure it cannot see: an answer that comes back
-     * undecodable. That is also answered locally, and logged, rather than surfacing as an error to a
-     * caller who asked a question the process could answer in a millisecond.
+     * WHY IN-PROCESS FIRST. A parse costs about a millisecond here and a queued one costs about a
+     * Raft heartbeat per replicated write (three of them): 75-150 ms at 50 ms, ~570 ms at the
+     * deployed 300 ms, and the queue saturates near 3 requests a second against thousands for a
+     * replica answering for itself. Routing every request through it first made the one-visitor case
+     * ~600x slower, to share work nobody was waiting on. The queue's value is taking work
+     * OFF a replica that has none to give, so a request goes there only when the replica is BUSY:
+     * `bounds.local` chain executions already in flight (see `kDefaultLocalMaxInFlight`).
      *
-     * Thread-safe: the chain is const and the slot count is atomic.
+     * A busy request is submitted when this assistant has a queue slot free (`bounds.queue`), and
+     * answered in-process anyway when it does not -- the overflow is the replica doing the work it
+     * was always able to do. The submitted request is surface-tagged, build-routed and leasable by
+     * any replica of the same build; the admission object degrades to `backend().submit()` on any
+     * submit or poll failure, and this adds the one failure it cannot see, an answer that comes back
+     * undecodable, which is also answered locally rather than surfaced to a caller who asked a
+     * question the process could answer in a millisecond.
+     *
+     * `shared` is the service's admission object (`SgeeAdmission` / `PostgresAdmission`); in `local`
+     * mode there is none and the other overload is used.
+     *
+     * ONE of three lines is written per request, because "how was this answered" is a count an
+     * operator reads, not an inference: `answered in-process`, `spilled to the queue ...` (the queue
+     * answered) and `answered locally after the shared queue degraded` (it was tried and failed, and
+     * the admission object answered for itself). The last two look identical to the caller -- a
+     * degrade is ok=true with a decodable answer -- so only the layer that knows says. (A queue that
+     * returns NOTHING usable writes a WARN instead of the second or third, and answers locally.)
+     *
+     * Thread-safe: the chain is const and the counts are atomic.
      */
-    [[nodiscard]] auto answer(inference_admission::InferenceBackend* shared,
+    [[nodiscard]] auto answer(inference_admission::InferenceBackend& shared,
                               const EncoderRequest& request) -> Answer {
-        if (shared == nullptr) return backend_.answer(request);
-        if (!slots_.try_acquire()) {
-            // One line per request, like the service's own raw-output line, because this is the
-            // line an operator reads to see HOW a request was answered; it is what makes "the
-            // queue carried N of M" a count rather than an inference.
+        if (auto local = backend_.answer_below(bounds_.local, request); local.has_value()) {
+            logger::Logger::getInstance().info("encoder_queue: {} answered in-process",
+                                               backend_.name());
+            return std::move(*local);
+        }
+        return spill(shared, request);
+    }
+
+    /** `local` mode: no queue exists, so the answer is always in-process, and nothing is logged. */
+    [[nodiscard]] auto answer(const EncoderRequest& request) -> Answer {
+        return backend_.answer(request);
+    }
+
+  private:
+    /** The replica is busy: send the request to the shared queue if this assistant may. */
+    [[nodiscard]] auto spill(inference_admission::InferenceBackend& shared,
+                             const EncoderRequest& request) -> Answer {
+        // The measured signal the decision was made on, in the line that reports the decision: an
+        // operator reading "spilled" can see how busy the replica was without a profiler.
+        const auto busy_at = backend_.in_flight();
+        if (!queue_in_flight_.try_enter(bounds_.queue)) {
             logger::Logger::getInstance().info(
-                "encoder_queue: {} answered in-process: this replica already has its share of "
-                "requests on the shared queue",
-                backend_.name());
+                "encoder_queue: {} answered in-process: busy here ({} in flight), and this assistant's "
+                "share of the shared queue is in use",
+                backend_.name(), busy_at);
             return backend_.answer(request);
         }
-        struct Release {
-            QueueSlots& slots;
-            ~Release() { slots.release(); }
-        } const release{slots_};
+        const detail::LeaveOnExit leave{queue_in_flight_};
 
-        const auto queued = shared->submit(encode_request(request));
+        const auto queued = shared.submit(encode_request(request));
         if (queued.has_value() && queued->ok) {
             if (auto decoded = decode_answer(queued->text); decoded.has_value()) {
                 // The admission object degrades to this replica's own backend on any submit or
                 // poll failure, and that outcome is ok == true like a queue success. Which one this
-                // was is the admission's to say (`degraded`), and the line must say it: the
-                // operator's `queued == executed` accounting is built from these.
+                // was is the admission's to say (`degraded`), and the line must say it.
                 if (queued->degraded) {
                     logger::Logger::getInstance().info(
                         "encoder_queue: {} answered locally after the shared queue degraded",
                         backend_.name());
                 } else {
                     logger::Logger::getInstance().info(
-                        "encoder_queue: {} answered through the shared queue", backend_.name());
+                        "encoder_queue: {} spilled to the queue and was answered by it (busy: {} in "
+                        "flight here)",
+                        backend_.name(), busy_at);
                 }
                 return std::move(*decoded);
             } else {
@@ -455,9 +594,9 @@ class EncoderService {
         return backend_.answer(request);
     }
 
-  private:
     EncoderBackend backend_;
-    QueueSlots slots_;
+    Bounds bounds_;
+    InFlightCount queue_in_flight_;
     std::string fingerprint_;
     /** Declared last: destroyed first, so the thread stops before anything it reads goes. */
     std::unique_ptr<inference_admission::LeaseRunner> runner_;

@@ -45,13 +45,13 @@ eqc_init() {
     trap eqc_cleanup EXIT
 
     local window base i
-    window="$(qn_reserve_ports 14)" || { echo "FAIL: no free port window" >&2; return 1; }
+    window="$(qn_reserve_ports 16)" || { echo "FAIL: no free port window" >&2; return 1; }
     base="${window%% *}"
     declare -gA CPORT QPORT HPORT
     for i in 1 2 3; do
         CPORT[$i]=$(( base + (i - 1) * 3 )); QPORT[$i]=$(( base + (i - 1) * 3 + 1 )); HPORT[$i]=$(( base + (i - 1) * 3 + 2 ))
     done
-    PORT_A=$(( base + 9 )); PORT_B=$(( base + 10 )); PORT_L=$(( base + 11 )); PORT_S=$(( base + 12 ))
+    PORT_A=$(( base + 9 )); PORT_B=$(( base + 10 )); PORT_L=$(( base + 11 )); PORT_S=$(( base + 12 )); PORT_D=$(( base + 13 )); PORT_P=$(( base + 14 ))
     PEERS="1=[::1]:${CPORT[1]},2=[::1]:${CPORT[2]},3=[::1]:${CPORT[3]}"
     CLIENT_PEERS="1=[::1]:${QPORT[1]},2=[::1]:${QPORT[2]},3=[::1]:${QPORT[3]}"
 }
@@ -170,17 +170,27 @@ eqc_raw_since() { grep "$(eqc_raw_tag "$2")" "$WORK/$1.log" | tail -n "+$(( $3 +
 
 # How the SERVICE says it answered each request (EncoderService::answer logs one line per request): the
 # submit-side half of the accounting, independent of the worker-side "executed" count.
-eqc_queued()    { grep -c "$2 answered through the shared queue" "$WORK/$1.log" || true; }      # <engine> <label>
+eqc_queued()    { grep -c "$2 spilled to the queue" "$WORK/$1.log" || true; }                   # <engine> <label>
 eqc_inprocess() { grep -c "$2 answered in-process" "$WORK/$1.log" || true; }                    # <engine> <label>
 # A request the admission layer answered ITSELF after the queue failed it. The queue's outcome and a
 # local fallback's are the same bytes (ok, with an answer), so only the admission can say which this
-# was; before it did, every fallback was logged as "answered through the shared queue" and
+# was; before it did, every fallback was logged as if the queue had answered and
 # `queued == executed` was false by exactly the number of fallbacks.
+#
+# Per request the service writes ONE of three lines: "answered in-process", "spilled to the queue and
+# was answered by it", "answered locally after the shared queue degraded". A request that was busy
+# and found no queue slot is "answered in-process" with a suffix, so the first pattern counts it too.
 eqc_degraded()  { grep -c "$2 answered locally after the shared queue degraded" "$WORK/$1.log" || true; }   # <engine> <label>
 
 # --- the shared accounting checks, used by the SGEE gate and by the Postgres check ----------------
 #
-# SEQUENTIAL ON PURPOSE. A replica keeps at most ENCODER_QUEUE_MAX_IN_FLIGHT (default 1) requests on
+# THE ENGINES THESE RUN AGAINST (A and B) ARE STARTED WITH ENCODER_LOCAL_MAX_IN_FLIGHT=0, which makes
+# every request "busy" and so sends it to the queue first: the routing the service had before
+# 2026-10-07, kept as the lever that exercises the QUEUE PATH (sharing, partitioning, byte identity,
+# degrade) at a concurrency of one. The default routing -- in-process first, spill when busy -- has
+# its own sections in the cluster test, because at the defaults nothing here would reach the queue.
+#
+# SEQUENTIAL ON PURPOSE. An assistant keeps at most ENCODER_QUEUE_MAX_IN_FLIGHT (default 1) requests on
 # the queue and answers the overflow itself, so concurrent callers would be answered partly in-process
 # and "executed + fallen back == sent" would stop being checkable from the log. One caller at a time
 # keeps the bound out of play, which is what makes the accounting exact. The overload run below is
@@ -199,7 +209,7 @@ eqc_burst() {   # <surface> <label> <the other surface's label>
     oa1="$(eqc_executed A "$other_label")"; ob1="$(eqc_executed B "$other_label")"
     f1="$(eqc_fallbacks A)"; l1="$(eqc_applied)"; q1="$(eqc_queued A "$label")"
     eqc_log "$surface: $EQC_BURST requests sent to A: A executed $((a1-a0)), B executed $((b1-b0)), cluster log +$((l1-l0))"
-    check_eq "$surface: A reports every request answered through the shared queue" "$(( q1-q0 ))" "$EQC_BURST"
+    check_eq "$surface: A reports every request spilled to the queue and answered by it" "$(( q1-q0 ))" "$EQC_BURST"
     check_eq "$surface: replicas A + B executed exactly the requests sent" "$(( (a1-a0) + (b1-b0) ))" "$EQC_BURST"
     check_ge "$surface: replica B executed work submitted to A" "$(( b1-b0 ))" 1
     check_ge "$surface: replica A executed some of its own requests too" "$(( a1-a0 ))" 1

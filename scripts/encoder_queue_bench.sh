@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
-# What the shared queue ADDS to an encoder parse: p50/p95 at concurrency 1/8/24, local vs queue,
-# optionally across Raft heartbeats.
+# What the shared queue ADDS to an encoder parse: p50/p95 at concurrency 1/8/24 for three routings,
+# optionally across Raft heartbeats:
+#
+#   L  INFERENCE_QUEUE=local: the chain in-process, no queue anywhere (the floor)
+#   A  INFERENCE_QUEUE=sgee at the DEFAULT bounds: in-process first, spill to the queue only when busy
+#   Q  INFERENCE_QUEUE=sgee with ENCODER_LOCAL_MAX_IN_FLIGHT=0: every request goes to the queue first,
+#      the routing the service had before 2026-10-07 and the one that cost ~570 ms at a 300 ms heartbeat
 #
 # @author Olumuyiwa Oluwasanmi
 #
 #   encoder_queue_bench.sh <sgee_queue_node> <calculator_engine> <out-dir>
 #
-# Boots a three-node SGEE cluster and three engines holding the real encoder weights -- L
-# (INFERENCE_QUEUE=local), A and B (INFERENCE_QUEUE=sgee) -- and drives the SAME request stream at L
-# and at A, interleaved over several rounds, because this repository has already paid for a
-# throughput claim made from one run (the spread across runs exceeded the effect).
+# Boots a three-node SGEE cluster and four engines holding the real encoder weights -- L, A, Q and B
+# (the executor the others spill to) -- and drives the SAME request stream at L, A and Q, interleaved
+# over several rounds, because this repository has already paid for a throughput claim made from one
+# run (the spread across runs exceeded the effect).
 #
 # Environment:
 #   EQB_ROUNDS         rounds per cell (default 3)
@@ -20,9 +25,10 @@
 #   EQB_REQUESTS_SINGLE / EQB_REQUESTS   requests per cell at c=1 / c>1 (default 200 / 480; use
 #                      30 / 96 at a 300 ms heartbeat, where the queue serves ~3 per second)
 #   EQB_ENGINE_ENV     extra "K=V ..." for the queue-mode engines only, e.g.
-#                      ENCODER_QUEUE_MAX_IN_FLIGHT=64 to measure the queue unbounded
+#                      ENCODER_QUEUE_MAX_IN_FLIGHT=64 to measure the queue unbounded, or
+#                      ENCODER_LOCAL_MAX_IN_FLIGHT=2 to make A busy at a lower concurrency
 #
-# Runs under the shared lock (it binds ports): flock /home/muyiwa/.cache/lanes/test.lock <this>.
+# Runs under the repository's lock (it binds ports): flock /home/muyiwa/.cache/lanes/test_ofc.lock <this>.
 set -uo pipefail
 NODE_BIN="${1:?usage: $0 <sgee_queue_node> <calculator_engine> <out-dir>}"
 ENGINE_BIN="${2:?}"; OUT="${3:?}"
@@ -47,6 +53,9 @@ for hb in $HEARTBEATS; do
     eqc_start_engine A "$PORT_A" sgee ${EQB_ENGINE_ENV:-} || exit 1
     # shellcheck disable=SC2086
     eqc_start_engine B "$PORT_B" sgee ${EQB_ENGINE_ENV:-} || exit 1
+    PORT_Q="$PORT_S"
+    # shellcheck disable=SC2086
+    eqc_start_engine Q "$PORT_Q" sgee ${EQB_ENGINE_ENV:-} ENCODER_LOCAL_MAX_IN_FLIGHT=0 || exit 1
     sleep 1
 
     # What the polling costs when nobody is asking: CPU of the nodes and of engines A + B over an
@@ -66,16 +75,20 @@ for hb in $HEARTBEATS; do
       for round in $(seq 1 "$ROUNDS"); do
         for c in 1 8 24; do
           n=$(( c == 1 ? N_SINGLE : N_MANY ))
-          for arm in L A; do
-            port="PORT_$arm"
+          for arm in L A Q; do
+            port="PORT_$arm"; label="$surface encoder"
+            s0="$(eqc_queued "$arm" "$label")"; i0="$(eqc_inprocess "$arm" "$label")"
             python3 -P "$PROBE" latency --target "127.0.0.1:${!port}" --surface "$surface" -c "$c" -n "$n" --warmup 3 \
-              | python3 -P -c 'import json,sys; d=json.loads(sys.stdin.read()); d["arm"],d["round"],d["heartbeat_ms"],d["fallbacks"]=sys.argv[1],int(sys.argv[2]),int(sys.argv[3]),int(sys.argv[4]); print(json.dumps(d))' \
-                "$arm" "$round" "$hb" "$(eqc_fallbacks A)" >> "$OUT/samples.jsonl"
+              > "$OUT/cell.json"
+            # The log counts are read AFTER the cell has finished: expanded inside the pipeline that runs
+            # the probe they would be read before it, and every cell would report zero spills.
+            python3 -P -c 'import json,sys; d=json.load(open(sys.argv[1])); d["arm"],d["round"],d["heartbeat_ms"],d["fallbacks"],d["spilled"],d["in_process"]=sys.argv[2],int(sys.argv[3]),int(sys.argv[4]),int(sys.argv[5]),int(sys.argv[6]),int(sys.argv[7]); print(json.dumps(d))' \
+                "$OUT/cell.json" "$arm" "$round" "$hb" "$(eqc_fallbacks "$arm")" "$(( $(eqc_queued "$arm" "$label") - s0 ))" "$(( $(eqc_inprocess "$arm" "$label") - i0 ))" >> "$OUT/samples.jsonl"
           done
         done
       done
     done
-    echo "executed per engine: A mortgage=$(eqc_executed A 'mortgage encoder') B mortgage=$(eqc_executed B 'mortgage encoder') A strategy=$(eqc_executed A 'strategy encoder') B strategy=$(eqc_executed B 'strategy encoder')"
+    echo "executed per engine: A mortgage=$(eqc_executed A 'mortgage encoder') B mortgage=$(eqc_executed B 'mortgage encoder') Q mortgage=$(eqc_executed Q 'mortgage encoder') A strategy=$(eqc_executed A 'strategy encoder') B strategy=$(eqc_executed B 'strategy encoder') Q strategy=$(eqc_executed Q 'strategy encoder')"
   )
 done
 
@@ -85,11 +98,14 @@ rows = [json.loads(l) for l in open(sys.argv[1])]
 g = collections.defaultdict(list)
 for r in rows:
     g[(r['heartbeat_ms'], r['surface'], r['concurrency'], r['arm'])].append(r)
-print(f"{'hb ms':>6} {'surface':9} {'c':>3} {'arm':>4} {'p50 ms':>9} {'p95 ms':>9} {'rps':>8} {'errors':>6} {'A fallbacks so far':>19}   per-round p50 / p95")
+names = {'L': 'L local', 'A': 'A default', 'Q': 'Q queue-1st'}
+print(f"{'hb ms':>6} {'surface':9} {'c':>3} {'arm':12} {'p50 ms':>9} {'p95 ms':>9} {'max ms':>9} {'rps':>8} {'errors':>6} {'spilled':>8} {'in-proc':>8}   per-round p50/p95")
 for k in sorted(g):
     rs = g[k]
     p50 = statistics.median(r['p50_ms'] for r in rs); p95 = statistics.median(r['p95_ms'] for r in rs)
     rps = statistics.median(r['throughput_rps'] for r in rs); err = sum(r['errors'] for r in rs)
     per = ' '.join(f"{r['p50_ms']}/{r['p95_ms']}" for r in rs)
-    print(f"{k[0]:>6} {k[1]:9} {k[2]:>3} {'L' if k[3]=='L' else 'A(q)':>4} {p50:9.2f} {p95:9.2f} {rps:8.1f} {err:6d} {rs[-1]['fallbacks']:>19}   {per}")
+    sp = statistics.median(r.get('spilled', 0) for r in rs); ip = statistics.median(r.get('in_process', 0) for r in rs)
+    mx = statistics.median(r['max_ms'] for r in rs)
+    print(f"{k[0]:>6} {k[1]:9} {k[2]:>3} {names[k[3]]:12} {p50:9.2f} {p95:9.2f} {mx:9.2f} {rps:8.1f} {err:6d} {sp:8.0f} {ip:8.0f}   {per}")
 PY

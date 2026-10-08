@@ -1487,7 +1487,8 @@ class MortgageAssistantWorker {
 
         runtime_.adopt(SensenBackend::create(*path, max_concurrent, queue_depth, kv_max_seq_len,
                                              threads, device));
-        if (runtime_.decoder() == nullptr) {
+        const auto decoder = runtime_.decoder();
+        if (!decoder.has_value()) {
             logger::Logger::getInstance().error(
                 "The mortgage assistant backend failed to initialise from MORTGAGE_MODEL_PATH ({}) "
                 "-- it will return a Refusal on every call. The calculator, finance and "
@@ -1499,7 +1500,7 @@ class MortgageAssistantWorker {
         logger::Logger::getInstance().info(
             "Mortgage assistant ready: backend={} device={} model={} inference_threads={} "
             "max_concurrent={} queue_depth={} context_tokens={}",
-            runtime_.decoder()->name(), runtime_.decoder()->device(), *path, threads,
+            decoder->get().name(), decoder->get().device(), *path, threads,
             max_concurrent, queue_depth, kv_max_seq_len);
 
         // configure_queue() MUST run before the decoder's start(): it is
@@ -1511,7 +1512,7 @@ class MortgageAssistantWorker {
         // lease source is ever installed), so this reordering changes
         // nothing observable about that path.
         runtime_.configure_queue();
-        runtime_.decoder()->start();
+        decoder->get().start();
     }
 
     assistant_runtime::AssistantRuntime runtime_{inference_queue::Surface::Mortgage,
@@ -3865,7 +3866,7 @@ inline constexpr std::array<std::string_view, 4> kAllActionNames{
  * itself; it does not need to, because the asking lives in the serving layer, which is where
  * this project moved it when the weights lost the capability (0/90 -> 49/90). */
 [[nodiscard]] auto action_generate(Ctx& ctx) -> ExecutionResult<> {
-    if ((MortgageAssistantWorker::instance().runtime().encoder() != nullptr)) {
+    if (MortgageAssistantWorker::instance().runtime().encoder().has_value()) {
         // ALL THREE FIELDS, for the same reason `build_prompt` takes all three on the
         // decoder path: a second turn carries the answer to this service's own question, and
         // a model that cannot see it re-reads the first turn and asks again.

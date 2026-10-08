@@ -180,14 +180,19 @@ auto main() -> int {
                                                                 /*queue_depth=*/1, message);
             backend->close_gate();
 
+            // The helper threads hold a reference to the BACKEND, not to the `backend` variable:
+            // they used to read the unique_ptr itself while `backend.reset()` below wrote it, which
+            // ThreadSanitizer reports as a race (ordered only by the sleeps between them).
+            auto& submitting = *backend;
+
             // One job in flight (dequeued, blocked on the gate)...
             std::optional<InferenceOutcome> held;
-            std::thread hold([&] { held = backend->submit("held"); });
+            std::thread hold([&] { held = submitting.submit("held"); });
             std::this_thread::sleep_for(150ms);
 
             // ...and one still sitting in the local waiting room.
             std::optional<InferenceOutcome> queued;
-            std::thread enqueue([&] { queued = backend->submit("queued"); });
+            std::thread enqueue([&] { queued = submitting.submit("queued"); });
             std::this_thread::sleep_for(100ms);
 
             // Destroying the backend NOW (via reset(), synchronously) runs

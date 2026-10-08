@@ -49,24 +49,33 @@ All three COMPLETE the task. Code: `backend/src/modules/encoder_queue.cppm`.
 `EncoderService` (in `encoder_queue`) owns the encoder side of one assistant. Its `LeaseRunner` (in
 `inference_admission`) polls the surface-filtered `SgeeLeaseSource` every 50 ms when
 idle and executes what it leases through the same `EncoderBackend::submit()` a failed submit degrades
-to. Each assistant on a replica keeps at most `ENCODER_QUEUE_MAX_IN_FLIGHT` (default 1) of its own
-requests on the queue; the rest are answered in-process. `0` means never submit (the replica still
-executes what others submit); a value that is not a whole number stops the engine at boot, naming it.
-The effective bound is logged at boot (`keeps at most N request(s)`). Remote deadline: 2 s, then the
-in-process answer.
+to.
+
+**Routing (owner decision, 2026-10-07): IN-PROCESS FIRST, SPILL WHEN BUSY.** A request is answered in this
+process while fewer than `ENCODER_LOCAL_MAX_IN_FLIGHT` (default 8) chain executions are in flight on the
+replica -- a count `EncoderBackend` keeps itself, including work leased from the queue. At that many the
+replica is busy and the request spills to the queue if the assistant has a slot free
+(`ENCODER_QUEUE_MAX_IN_FLIGHT`, default 1); with none it is answered in-process anyway. So at the defaults
+a single caller NEVER touches the queue: no write, no leased job. `ENCODER_LOCAL_MAX_IN_FLIGHT=0` makes
+every request busy (queue first, the previous routing); `ENCODER_QUEUE_MAX_IN_FLIGHT=0` means never submit
+(the replica still executes what others submit). A value that is not a whole number stops the engine at
+boot, naming the variable and the value, and the effective bounds are logged at boot (`... only when N are
+already executing here -- at most M at a time`). The default local bound is where one replica stops
+scaling on the dev host (`scripts/encoder_local_sweep.sh`); re-measure on the serving host. Remote
+deadline: 2 s, then the in-process answer.
 
 **Reading the cluster.** Per queued request the log moves by three entries (enqueue, lease,
 complete). 96 sequential requests: `last_applied` +289, +290, +291. If real traffic moves it by
-nothing, the encoders are not on the queue. Per replica, the engine logs one line per request
-(`... encoder answered through the shared queue` / `... answered in-process`) and one per executed
-leased job (`... encoder executed leased job #N on this replica`); the sum of the second across
-replicas equals the first on the submitting one. A request the admission layer answered ITSELF after the
-queue failed it is logged as `... encoder answered locally after the shared queue degraded`, never as
-`answered through the shared queue`: the two outcomes are the same bytes, so only the admission can
-say which it was. Those counts are exact only if the engine's stdout is line-buffered -- redirected to
+nothing, the encoders are not on the queue -- which, since the routing decision above, is the CORRECT
+reading for idle traffic and the broken one only when the replicas are busy. Per replica, the engine logs
+ONE line per request: `... encoder answered in-process`, `... encoder spilled to the queue and was
+answered by it`, or `... encoder answered locally after the shared queue degraded`; and one per executed
+leased job (`... encoder executed leased job #N on this replica`). Summed across replicas, executed ==
+spilled. A request the admission layer answered ITSELF after the queue failed it is logged as the third,
+never as the second: the two outcomes are the same bytes, so only the admission can say which it was. Those counts are exact only if the engine's stdout is line-buffered -- redirected to
 a file it is not, and the counts lag by the unflushed block.
 
-**What to do about the cost.** At the deployed heartbeat (300 ms) a queued parse costs ~0.6 s and the
+**What a spill costs** (paid only by a request that arrives at a busy replica). At the deployed heartbeat (300 ms) a queued parse costs ~0.6 s and the
 queue saturates near 3 requests per second; at the 50 ms default ~80-150 ms and ~13 per second; at
 10 ms ~30 ms and ~30 per second. The throughput does not respond to more replicas or more lease lanes
 (writes are serialised at the leader) -- it responds to `SGEE_HEARTBEAT_MS`.
@@ -91,7 +100,8 @@ it is also write capacity spent on nothing, which is why the in-flight bound exi
 
 **Gates.** `test_encoder_queue` (hermetic) and `EncoderQueueClusterTest`
 (`backend/tests/integration/encoder_queue_cluster_test.sh`, shared bring-up in `lib/encoder_cluster.sh`;
-benchmark `scripts/encoder_queue_bench.sh`; client
+benchmark `scripts/encoder_queue_bench.sh` (arms L local, A default routing, Q queue-first) and
+`scripts/encoder_local_sweep.sh` (the measurement behind the local bound); client
 `scripts/encoder_queue_probe.py`).
 
 ## Promoted for inference again on 2026-08-20, with the lease partitioned

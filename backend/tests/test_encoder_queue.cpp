@@ -38,7 +38,8 @@ using options_calculator::encoder_queue::Answer;
 using options_calculator::encoder_queue::EncoderBackend;
 using options_calculator::encoder_queue::EncoderService;
 using options_calculator::encoder_queue::EncoderRequest;
-using options_calculator::encoder_queue::QueueSlots;
+using options_calculator::encoder_queue::Bounds;
+using options_calculator::encoder_queue::InFlightCount;
 using options_calculator::encoder_queue::Verdict;
 using options_calculator::inference_admission::InferenceBackend;
 using options_calculator::inference_admission::InferenceOutcome;
@@ -82,9 +83,11 @@ auto section(const char* title) -> void { std::printf("\n=== %s ===\n", title); 
     return count;
 }
 
-/** The two per-request lines `EncoderService::answer` writes, and the only two a request that
- *  reached the shared queue can produce. */
-constexpr std::string_view kThroughQueue = "answered through the shared queue";
+/** The three per-request lines `EncoderService::answer` writes -- one per request, because "how was
+ *  this answered" is a count an operator reads. The first is also written, with a suffix, when the
+ *  replica was busy and had no queue slot to spill into. */
+constexpr std::string_view kInProcess = "answered in-process";
+constexpr std::string_view kSpilled = "spilled to the queue and was answered by it";
 constexpr std::string_view kDegradedLocally = "answered locally after the shared queue degraded";
 
 using ChainResult = std::expected<std::optional<Parsed>, std::string>;
@@ -93,11 +96,21 @@ using ChainResult = std::expected<std::optional<Parsed>, std::string>;
  *  how many times THIS instance ran -- the only way to say which replica did the work. */
 struct CountingChain {
     std::shared_ptr<std::atomic<int>> runs = std::make_shared<std::atomic<int>>(0);
+    /** How many executions of THIS chain are inside it right now, and the most there ever were: the
+     *  quantity the local bound caps, observed from inside the chain rather than assumed. */
+    std::shared_ptr<std::atomic<int>> active = std::make_shared<std::atomic<int>>(0);
+    std::shared_ptr<std::atomic<int>> peak = std::make_shared<std::atomic<int>>(0);
     std::chrono::milliseconds work{0};
 
     [[nodiscard]] auto make() const -> EncoderBackend::Chain {
-        return [runs = runs, work = work](const Turns& turns) -> ChainResult {
+        return [runs = runs, active = active, peak = peak, work = work](const Turns& turns) -> ChainResult {
             runs->fetch_add(1);
+            const int now = active->fetch_add(1) + 1;
+            for (int seen = peak->load(); now > seen && !peak->compare_exchange_weak(seen, now);) {}
+            struct Done {
+                std::atomic<int>& active;
+                ~Done() { active.fetch_sub(1); }
+            } const done{*active};
             if (work.count() > 0) std::this_thread::sleep_for(work);
             if (turns.utterance == "none") return std::optional<Parsed>{};
             if (turns.utterance.starts_with("refuse")) {
@@ -162,6 +175,46 @@ class InMemoryQueue final : public InferenceBackend, public LeaseSource {
     std::deque<PendingJob> pending_;
     int submitted_{0};
 };
+
+/** Polls `ready` for up to two seconds. A test that waits for a state its code under test is meant to
+ *  produce must not wait FOREVER if the code is wrong: a hang reports nothing, a bounded wait reports
+ *  which expectation failed. */
+template <typename Ready>
+[[nodiscard]] auto wait_until(Ready ready) -> bool {
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    while (!ready()) {
+        if (std::chrono::steady_clock::now() > deadline) return false;
+        std::this_thread::sleep_for(1ms);
+    }
+    return true;
+}
+
+/** A shared queue that answers itself: holds each submission for `work`, records how many were inside
+ *  it at once, and returns an answer that says it came from the queue. */
+class RecordingQueue final : public InferenceBackend {
+  public:
+    explicit RecordingQueue(std::chrono::milliseconds work = 0ms) : work_(work) {}
+    [[nodiscard]] auto submit(std::string) -> std::optional<InferenceOutcome> override {
+        const int now = ++inside_;
+        for (int seen = peak_.load(); now > seen && !peak_.compare_exchange_weak(seen, now);) {}
+        ++submitted_;
+        if (work_.count() > 0) std::this_thread::sleep_for(work_);
+        --inside_;
+        const Answer answer{Verdict::Params, "<params>{\"from\":\"queue\"}</params>"};
+        return InferenceOutcome{.ok = true,
+                                .text = options_calculator::encoder_queue::encode_answer(answer),
+                                .error = {}};
+    }
+    [[nodiscard]] auto name() const noexcept -> std::string_view override { return "recording"; }
+    std::atomic<int> inside_{0};
+    std::atomic<int> peak_{0};
+    std::atomic<int> submitted_{0};
+
+  private:
+    std::chrono::milliseconds work_;
+};
+
+[[nodiscard]] auto from_queue(const Answer& a) -> bool { return a.text.contains("\"from\":\"queue\""); }
 
 /** An admission object that always returns what it was told to, for the degrade paths. */
 class FixedBackend final : public InferenceBackend {
@@ -255,9 +308,9 @@ int main() {
     section("answer() with no queue is today's in-process call");
     {
         CountingChain chain;
-        EncoderService service{chain.make(), &render, "test encoder", 4};
+        EncoderService service{chain.make(), &render, "test encoder", Bounds{.local = 4, .queue = 4}};
         const EncoderRequest request{"pay 1000", "", ""};
-        check(service.answer(nullptr, request) == service.backend().answer(request),
+        check(service.answer(request) == service.backend().answer(request),
               "local mode answers exactly what the backend's answer() gives");
         check(chain.runs->load() == 2, "and it ran the chain in this process, once per call");
     }
@@ -266,12 +319,13 @@ int main() {
     {
         InMemoryQueue queue;
         CountingChain submitter_chain;  // the SUBMITTING replica's own chain: must stay idle
-        EncoderService submitter{submitter_chain.make(), &render, "submitter", 64};  // no bound in play
+        EncoderService submitter{submitter_chain.make(), &render, "submitter",
+                                 Bounds{.local = 0, .queue = 64}};  // busy always; the queue bound is not in play
 
         CountingChain chain_a{.work = 3ms};
         CountingChain chain_b{.work = 3ms};
-        EncoderService replica_a{chain_a.make(), &render, "replica A", 64};
-        EncoderService replica_b{chain_b.make(), &render, "replica B", 64};
+        EncoderService replica_a{chain_a.make(), &render, "replica A", Bounds{.local = 0, .queue = 64}};
+        EncoderService replica_b{chain_b.make(), &render, "replica B", Bounds{.local = 0, .queue = 64}};
         // Non-owning views of the SAME queue object: it is the shared substrate.
         const auto source = std::shared_ptr<LeaseSource>(std::shared_ptr<void>{}, &queue);
         replica_a.serve(source);
@@ -289,7 +343,7 @@ int main() {
                             i % 7 == 0 ? "refuse " + std::to_string(i)
                                        : (i % 5 == 0 ? "none" : "pay " + std::to_string(i)),
                             "q" + std::to_string(i), "r" + std::to_string(i)};
-                        got[i] = submitter.answer(&queue, request);
+                        got[i] = submitter.answer(queue, request);
                         want[i] = submitter.backend().answer(request);
                     }
                 });
@@ -299,7 +353,7 @@ int main() {
         check(got == want,
               "every answer that came back through the queue equals the one the process gives "
               "itself (params, <NONE> and refusals alike)");
-        check(log_lines_containing(kThroughQueue) == kRequests,
+        check(log_lines_containing(kSpilled) == kRequests,
               "and the service SAID so for each of them -- the positive control for the "
               "degraded-path count below, which proves nothing if this line never appears");
         check(queue.submitted() == kRequests,
@@ -318,7 +372,7 @@ int main() {
     {
         InMemoryQueue queue;
         CountingChain chain;
-        EncoderService worker{chain.make(), &render, "replica", 4};
+        EncoderService worker{chain.make(), &render, "replica", Bounds{.local = 0, .queue = 4}};
         worker.serve(std::shared_ptr<LeaseSource>(std::shared_ptr<void>{}, &queue));
         const auto raw = queue.submit(options_calculator::encoder_queue::encode_request(
             {"refuse this", "", ""}));
@@ -333,43 +387,20 @@ int main() {
 
     section("a replica never has more requests on the queue than its bound, and answers the rest itself");
     {
-        // A queue backend that holds each submission for a while and records how many were inside
-        // it at once -- the quantity the bound exists to cap.
-        class SlowCountingQueue final : public InferenceBackend {
-          public:
-            [[nodiscard]] auto submit(std::string) -> std::optional<InferenceOutcome> override {
-                const int now = ++inside_;
-                int seen = peak_.load();
-                while (now > seen && !peak_.compare_exchange_weak(seen, now)) {}
-                ++submitted_;
-                std::this_thread::sleep_for(30ms);
-                --inside_;
-                const Answer answer{Verdict::Params, "<params>{\"from\":\"queue\"}</params>"};
-                return InferenceOutcome{.ok = true,
-                                        .text = options_calculator::encoder_queue::encode_answer(answer),
-                                        .error = {}};
-            }
-            [[nodiscard]] auto name() const noexcept -> std::string_view override { return "slow"; }
-            std::atomic<int> inside_{0};
-            std::atomic<int> peak_{0};
-            std::atomic<int> submitted_{0};
-        };
-
         CountingChain chain;
-        EncoderService service{chain.make(), &render, "test encoder", 2};
-        SlowCountingQueue queue;
+        EncoderService service{chain.make(), &render, "test encoder", Bounds{.local = 0, .queue = 2}};
+        RecordingQueue queue{30ms};
         constexpr int kCallers = 16;
         std::vector<Answer> got(kCallers);
         {
             std::vector<std::jthread> callers;
             for (int i = 0; i < kCallers; ++i) {
                 callers.emplace_back([&, i] {
-                    got[i] = service.answer(&queue, {"pay " + std::to_string(i), "", ""});
+                    got[i] = service.answer(queue, {"pay " + std::to_string(i), "", ""});
                 });
             }
         }
-        const auto queued_answers = std::ranges::count_if(
-            got, [](const Answer& a) { return a.text.contains("\"from\":\"queue\""); });
+        const auto queued_answers = std::ranges::count_if(got, from_queue);
         check(queue.peak_.load() <= 2, "never more than the bound were inside the queue at once");
         check(queue.submitted_.load() >= 1, "and the queue was used while it had room");
         check(queue.submitted_.load() + chain.runs->load() == kCallers,
@@ -377,26 +408,173 @@ int main() {
         check(queued_answers == queue.submitted_.load(),
               "the callers that went through the queue got ITS answer, the rest got their own");
         const int before = queue.submitted_.load();
-        (void)service.answer(&queue, {"pay 99", "", ""});
-        (void)service.answer(&queue, {"pay 100", "", ""});
+        (void)service.answer(queue, {"pay 99", "", ""});
+        (void)service.answer(queue, {"pay 100", "", ""});
         check(queue.submitted_.load() == before + 2,
               "and every slot was released: two more sequential requests both reach the queue -- a "
               "leaked slot is a replica that has quietly stopped using it");
 
         // A slot is released on the failure paths too, or one bad answer would starve the queue.
         FixedBackend failed{InferenceOutcome{.ok = false, .text = {}, .error = "cluster down"}};
-        EncoderService one{chain.make(), &render, "test encoder", 1};
-        for (int i = 0; i < 3; ++i) (void)one.answer(&failed, {"pay 1", "", ""});
+        EncoderService one{chain.make(), &render, "test encoder", Bounds{.local = 0, .queue = 1}};
+        for (int i = 0; i < 3; ++i) (void)one.answer(failed, {"pay 1", "", ""});
         check(failed.calls.load() == 3, "a failed submission releases its slot: all three tried");
-        QueueSlots exact{1};
-        check(exact.try_acquire() && !exact.try_acquire(),
+        InFlightCount exact;
+        check(exact.try_enter(1) && !exact.try_enter(1) && exact.load() == 1,
               "the bound is exact: a bound of one admits one and refuses the second");
+        exact.leave();
+        check(!InFlightCount{}.try_enter(0), "and a bound of zero admits nothing");
+    }
+
+    // ROUTING: a request is answered IN-PROCESS and spills to the queue only when the replica is
+    // BUSY. The first routing sent every request to the queue first, which at the deployed 300 ms
+    // Raft heartbeat made a one-visitor request ~600x slower than answering it.
+    section("an idle replica answers in-process and never touches the queue");
+    {
+        CountingChain chain;
+        EncoderService service{chain.make(), &render, "idle replica", Bounds{.local = 2, .queue = 4}};
+        RecordingQueue queue;
+        const int in_process0 = log_lines_containing(kInProcess);
+        const int spilled0 = log_lines_containing(kSpilled);
+        const int degraded0 = log_lines_containing(kDegradedLocally);
+        constexpr int kRequests = 10;
+        for (int i = 0; i < kRequests; ++i) {
+            const EncoderRequest request{"pay " + std::to_string(i), "", ""};
+            check(service.answer(queue, request) == service.backend().answer(request),
+                  "request " + std::to_string(i) + " answered exactly as the chain gives it");
+        }
+        // The reference answers above ran the chain too: 10 via answer() + 10 as references.
+        check(queue.submitted_.load() == 0,
+              "NOTHING was submitted to the queue: at concurrency 1 a replica is never busy");
+        check(log_lines_containing(kInProcess) - in_process0 == kRequests &&
+                  log_lines_containing(kSpilled) - spilled0 == 0 &&
+                  log_lines_containing(kDegradedLocally) - degraded0 == 0,
+              "and the log says so: " + std::to_string(kRequests) +
+                  " 'answered in-process', no 'spilled', no 'degraded'");
+        check(service.backend().in_flight() == 0, "and nothing is left counted in flight");
+    }
+
+    section("a busy replica spills to the queue, and what it counts as busy is its own chain");
+    {
+        // Busy = `local` chain executions in flight. One long request holds the only local slot;
+        // the next arrival must go to the queue, not wait and not run beside it.
+        CountingChain chain{.work = 80ms};
+        EncoderService service{chain.make(), &render, "busy replica", Bounds{.local = 1, .queue = 4}};
+        RecordingQueue queue;
+        const int in_process0 = log_lines_containing(kInProcess);
+        const int spilled0 = log_lines_containing(kSpilled);
+
+        Answer first;
+        std::jthread holder{[&] { first = service.answer(queue, {"pay 1", "", ""}); }};
+        const bool entered = wait_until([&] { return chain.active->load() != 0; });
+        check(entered, "the first request entered the chain (the replica was idle)");
+        check(service.backend().in_flight() == 1, "the measured signal reads 1 while the chain executes");
+        const auto second = service.answer(queue, {"pay 2", "", ""});
+        holder.join();
+
+        check(from_queue(second) && queue.submitted_.load() == 1,
+              "the second request, arriving while the first held the only local slot, went to the queue");
+        check(!from_queue(first) && first == service.backend().answer({"pay 1", "", ""}),
+              "and the first was answered in-process, by the chain");
+        check(log_lines_containing(kInProcess) - in_process0 == 1 &&
+                  log_lines_containing(kSpilled) - spilled0 == 1,
+              "one line each: 'answered in-process' and 'spilled to the queue'");
+
+        // WORK LEASED FROM THE QUEUE COUNTS: a core spent on another replica's parse is a core this
+        // replica's own request does not have, so "busy" is what the replica is actually doing.
+        CountingChain leased_chain{.work = 80ms};
+        EncoderService leasing{leased_chain.make(), &render, "leasing replica", Bounds{.local = 1, .queue = 4}};
+        RecordingQueue queue2;
+        std::jthread leased{[&] {
+            (void)leasing.backend().submit(options_calculator::encoder_queue::encode_request({"leased", "", ""}));
+        }};
+        check(wait_until([&] { return leased_chain.active->load() != 0; }),
+              "the leased job entered the chain");
+        const auto own = leasing.answer(queue2, {"pay 3", "", ""});
+        leased.join();
+        check(from_queue(own) && queue2.submitted_.load() == 1,
+              "executing a leased job makes the replica busy for its OWN requests too");
+        check(service.backend().in_flight() == 0 && leasing.backend().in_flight() == 0,
+              "and every execution left the count: nothing leaks");
+    }
+
+    section("above the local bound the overflow spills; the local bound is never exceeded");
+    {
+        CountingChain chain{.work = 10ms};
+        EncoderService service{chain.make(), &render, "burst replica", Bounds{.local = 2, .queue = 64}};
+        RecordingQueue queue{5ms};
+        const int in_process0 = log_lines_containing(kInProcess);
+        const int spilled0 = log_lines_containing(kSpilled);
+        constexpr int kCallers = 24;
+        std::vector<Answer> got(kCallers);
+        {
+            // Everyone leaves the gate together: staggered thread start-up on a loaded host could
+            // otherwise let each request finish before the next arrives, and nothing would be busy.
+            std::latch gate{kCallers};
+            std::vector<std::jthread> callers;
+            for (int i = 0; i < kCallers; ++i) {
+                callers.emplace_back([&, i] {
+                    gate.arrive_and_wait();
+                    got[i] = service.answer(queue, {"pay " + std::to_string(i), "", ""});
+                });
+            }
+        }
+        const int in_process = log_lines_containing(kInProcess) - in_process0;
+        const int spilled = log_lines_containing(kSpilled) - spilled0;
+        check(chain.peak->load() <= 2,
+              "never more than the local bound were inside the chain at once (peak " +
+                  std::to_string(chain.peak->load()) + ")");
+        check(in_process >= 1 && spilled >= 1,
+              "and both routes were used: " + std::to_string(in_process) + " in-process, " +
+                  std::to_string(spilled) + " spilled");
+        check(in_process + spilled == kCallers && queue.submitted_.load() == spilled &&
+                  std::ranges::count_if(got, from_queue) == spilled,
+              "every caller was answered exactly once, and the ones who spilled got the QUEUE's answer");
+
+        // Busy with no queue slot: the replica does the work it was always able to do, and still
+        // counts it -- the next arrival must not read an idle replica that is not.
+        CountingChain crowded_chain{.work = 20ms};
+        EncoderService crowded{crowded_chain.make(), &render, "crowded replica", Bounds{.local = 1, .queue = 0}};
+        RecordingQueue unused;
+        {
+            std::latch gate{8};
+            std::vector<std::jthread> callers;
+            for (int i = 0; i < 8; ++i) {
+                callers.emplace_back([&, i] {
+                    gate.arrive_and_wait();
+                    (void)crowded.answer(unused, {"pay " + std::to_string(i), "", ""});
+                });
+            }
+        }
+        check(unused.submitted_.load() == 0 && crowded_chain.runs->load() == 8,
+              "with no queue slot a busy replica answers all 8 itself and submits nothing");
+        check(crowded_chain.peak->load() > 1 && crowded.backend().in_flight() == 0,
+              "(it exceeded its local bound to do so, because there was nowhere else to send them) "
+              "and still left the count at 0");
+    }
+
+    section("0 is a value on both bounds");
+    {
+        CountingChain chain;
+        // local 0: every request is busy, so every request goes to the queue first (the first routing).
+        EncoderService queue_first{chain.make(), &render, "queue-first", Bounds{.local = 0, .queue = 4}};
+        RecordingQueue queue;
+        for (int i = 0; i < 3; ++i) (void)queue_first.answer(queue, {"pay 1", "", ""});
+        check(queue.submitted_.load() == 3 && chain.runs->load() == 0,
+              "a local bound of 0 spills every request: 3 submitted, the chain never ran here");
+
+        // queue 0: this assistant never submits, however busy it is.
+        EncoderService never{chain.make(), &render, "never-submit", Bounds{.local = 0, .queue = 0}};
+        FixedBackend untouched{InferenceOutcome{.ok = false, .text = {}, .error = "must not be called"}};
+        for (int i = 0; i < 3; ++i) (void)never.answer(untouched, {"pay 1", "", ""});
+        check(untouched.calls.load() == 0 && chain.runs->load() == 3,
+              "a queue bound of 0 never submits: the queue is untouched and the chain ran 3 times");
     }
 
     section("a queue that cannot answer costs nothing but the queue");
     {
         CountingChain chain;
-        EncoderService service{chain.make(), &render, "test encoder", 4};
+        EncoderService service{chain.make(), &render, "test encoder", Bounds{.local = 0, .queue = 4}};
         const EncoderRequest request{"pay 1000", "", ""};
 
         // The honest stand-in for "the cluster is unreachable": a client with no peers.
@@ -404,7 +582,7 @@ int main() {
             SgeeQueueClient{}, options_calculator::inference_queue::Surface::Mortgage,
             service.backend(), 90s};
         const auto started = std::chrono::steady_clock::now();
-        const auto answer = service.answer(&unreachable, request);
+        const auto answer = service.answer(unreachable, request);
         const auto elapsed = std::chrono::steady_clock::now() - started;
         check(answer == service.backend().answer(request),
               "an unreachable SGEE cluster still yields the same answer");
@@ -418,19 +596,19 @@ int main() {
         // here used to be logged as "answered through the shared queue", and the operator's
         // `queued == executed` accounting lied by exactly the number of fallbacks.
         constexpr int kFallbacks = 3;
-        const int through_before = log_lines_containing(kThroughQueue);
+        const int through_before = log_lines_containing(kSpilled);
         const int degraded_before = log_lines_containing(kDegradedLocally);
-        for (int i = 0; i < kFallbacks; ++i) (void)service.answer(&unreachable, request);
-        check(log_lines_containing(kThroughQueue) - through_before == 0,
+        for (int i = 0; i < kFallbacks; ++i) (void)service.answer(unreachable, request);
+        check(log_lines_containing(kSpilled) - through_before == 0,
               "with the queue unreachable NO request is reported as answered through it");
         check(log_lines_containing(kDegradedLocally) - degraded_before == kFallbacks,
               "and each of the " + std::to_string(kFallbacks) + " that were answered here says so");
 
         FixedBackend failed{InferenceOutcome{.ok = false, .text = {}, .error = "cluster down"}};
-        check(service.answer(&failed, request) == service.backend().answer(request),
+        check(service.answer(failed, request) == service.backend().answer(request),
               "a queue that reports failure is answered locally");
         FixedBackend garbled{InferenceOutcome{.ok = true, .text = "not an answer", .error = {}}};
-        check(service.answer(&garbled, request) == service.backend().answer(request),
+        check(service.answer(garbled, request) == service.backend().answer(request),
               "a queue that returns an undecodable answer is answered locally");
     }
 
@@ -456,33 +634,39 @@ int main() {
               "an idle runner stops promptly when its owner goes away");
     }
 
-    section("ENCODER_QUEUE_MAX_IN_FLIGHT is read strictly: 0 is a value, a typo is an error");
+    section("the two bounds are read strictly: 0 is a value, a typo is an error");
     {
+        using options_calculator::encoder_queue::kDefaultLocalMaxInFlight;
         using options_calculator::encoder_queue::kDefaultMaxInFlight;
-        using options_calculator::encoder_queue::parse_max_in_flight;
-        const auto parsed = [](const char* raw) { return parse_max_in_flight(raw); };
+        using options_calculator::encoder_queue::parse_in_flight_bound;
+        const auto queue_bound = [](const std::optional<std::string>& raw) {
+            return parse_in_flight_bound("ENCODER_QUEUE_MAX_IN_FLIGHT", raw, kDefaultMaxInFlight,
+                                         "never submit");
+        };
+        const auto local_bound = [](const std::optional<std::string>& raw) {
+            return parse_in_flight_bound("ENCODER_LOCAL_MAX_IN_FLIGHT", raw, kDefaultLocalMaxInFlight,
+                                         "every request spills to the queue first");
+        };
+        using Parsed = std::expected<std::size_t, std::string>;
 
-        check(parsed(nullptr) == std::expected<std::size_t, std::string>{kDefaultMaxInFlight},
-              "unset reads as the default");
-        check(parsed("") == std::expected<std::size_t, std::string>{kDefaultMaxInFlight},
-              "and so does an empty value");
-        check(parsed("0") == std::expected<std::size_t, std::string>{0},
-              "0 is accepted as 'this replica never submits' -- QueueSlots{0} refuses every acquire");
-        check(parsed("64") == std::expected<std::size_t, std::string>{64}, "64 reads as 64");
-        for (const char* bad : {"abc", " 64", "64 ", "-1", "+3", "1.5", "0x10", "6 4", "99999999999999999999"}) {
-            const auto result = parsed(bad);
-            check(!result.has_value() && result.error().contains(std::string("\"") + bad + "\""),
-                  std::string("'") + bad + "' is refused, and the message names the value");
+        check(queue_bound(std::nullopt) == Parsed{kDefaultMaxInFlight}, "unset reads as the queue default");
+        check(local_bound(std::nullopt) == Parsed{kDefaultLocalMaxInFlight}, "and as the local default");
+        check(queue_bound("") == Parsed{kDefaultMaxInFlight}, "an empty value reads as unset");
+        check(queue_bound("0") == Parsed{0},
+              "0 is accepted as 'this assistant never submits' -- a bound of 0 admits nothing");
+        check(local_bound("0") == Parsed{0},
+              "and for the local bound as 'every request is busy' -- the queue-first routing");
+        check(local_bound("64") == Parsed{64}, "64 reads as 64");
+        for (const std::string bad : {"abc", " 64", "64 ", "-1", "+3", "1.5", "0x10", "6 4", "99999999999999999999"}) {
+            const auto result = queue_bound(bad);
+            check(!result.has_value() && result.error().contains(std::string("\"") + bad + "\"") &&
+                      result.error().contains("ENCODER_QUEUE_MAX_IN_FLIGHT"),
+                  "'" + bad + "' is refused, and the message names the variable and the value");
         }
-
-        // A bound of zero must really mean it: not one request reaches the queue, every one is
-        // answered here, and the log says each was answered in-process.
-        CountingChain chain;
-        EncoderService never{chain.make(), &render, "test encoder", 0};
-        FixedBackend untouched{InferenceOutcome{.ok = false, .text = {}, .error = "must not be called"}};
-        for (int i = 0; i < 3; ++i) (void)never.answer(&untouched, {"pay 1", "", ""});
-        check(untouched.calls.load() == 0 && chain.runs->load() == 3,
-              "with a bound of 0 the queue is never submitted to and the chain ran locally 3 times");
+        const auto wrong = local_bound("many");
+        check(!wrong.has_value() && wrong.error().contains("ENCODER_LOCAL_MAX_IN_FLIGHT") &&
+                  wrong.error().contains("spills to the queue first"),
+              "and the local bound's message says what 0 would have meant for it");
     }
 
     section("a build is fingerprinted from its bytes, and an unreadable one isolates itself");
@@ -526,11 +710,13 @@ int main() {
         using options_calculator::inference_queue::Surface;
         const auto encoder_service = [] {
             static CountingChain chain;
-            return std::make_unique<EncoderService>(chain.make(), &render, "test encoder", 4);
+            return std::make_unique<EncoderService>(chain.make(), &render, "test encoder",
+                                                    Bounds{.local = 4, .queue = 4});
         };
 
         AssistantRuntime bare{Surface::Mortgage, "Mortgage assistant"};
-        check(!bare.available() && !bare.holds_model() && !bare.queued() && bare.encoder() == nullptr,
+        check(!bare.available() && !bare.holds_model() && !bare.queued() && !bare.encoder().has_value() &&
+                  !bare.decoder().has_value(),
               "a runtime that adopted nothing is unavailable, holds no model and has no queue");
         const auto refused = bare.submit("a decoder prompt");
         check(refused.has_value() && !refused->ok && refused->error == "model not loaded",
@@ -542,7 +728,7 @@ int main() {
         check(with_encoder.available() && with_encoder.holds_model() && !with_encoder.queued(),
               "an encoder makes it available AND loaded -- the two questions are answered separately "
               "and forgetting either was a measured outage");
-        check(with_encoder.answer(request) == with_encoder.encoder()->backend().answer(request),
+        check(with_encoder.answer(request) == with_encoder.encoder()->get().backend().answer(request),
               "and with no queue it answers in this process, exactly as the backend does");
 
         // Every way of asking for a queue that cannot be built must leave a working local assistant:
