@@ -166,8 +166,8 @@ namespace detail {
 }
 
 /**
- * Bounds how many of THIS replica's requests are on the shared queue at once; the rest are
- * answered in-process.
+ * Bounds how many of THIS assistant's requests (on this replica) are on the shared queue at once;
+ * the rest are answered in-process.
  *
  * WHY A BOUND AT ALL. Every queue operation is a replicated write and the leader serialises
  * them, so the queue has a ceiling -- measured at 30 / 10 / 3 requests per second for Raft
@@ -207,18 +207,84 @@ class QueueSlots {
 };
 
 /** The default bound, overridable with `ENCODER_QUEUE_MAX_IN_FLIGHT` for a cluster whose commit
- *  latency is known to be lower. An unparseable value keeps the default rather than failing the
- *  boot, like every other optional tuning variable in this tree. */
+ *  latency is known to be lower. */
 inline constexpr std::size_t kDefaultMaxInFlight{1};
 
-[[nodiscard]] inline auto max_in_flight_from_env() -> std::size_t {
-    const char* raw = std::getenv("ENCODER_QUEUE_MAX_IN_FLIGHT");
+/**
+ * What `ENCODER_QUEUE_MAX_IN_FLIGHT` says. Unset or empty is the default. Anything else must be a
+ * whole number in base 10 and NOTHING else -- no sign, no space, no suffix -- and ZERO IS A VALUE:
+ * `QueueSlots{0}` admits no request, so this replica never submits and answers every request
+ * itself, while its runner still executes work other replicas submit. That is the one setting that
+ * routes in-process without unwiring the queue, so an operator who reaches for it must get it.
+ *
+ * An unusable value is an ERROR rather than a fallback. This tree's rule for an operator switch
+ * (`MORTGAGE_WEIGHT_STORE`, `MORTGAGE_RESTRICTED_PROJECTION`) is that a typo must not silently
+ * serve the configuration the operator meant to leave: coercing `=abc` or `=0` to 1 left a replica
+ * on a ~0.6 s request path with no line anywhere saying why.
+ */
+[[nodiscard]] inline auto parse_max_in_flight(const char* raw)
+    -> std::expected<std::size_t, std::string> {
     if (raw == nullptr || *raw == '\0') return kDefaultMaxInFlight;
-    std::size_t parsed = 0;
     const std::string_view text{raw};
+    std::size_t parsed = 0;
     const auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), parsed);
-    return (ec == std::errc{} && end == text.data() + text.size() && parsed > 0) ? parsed
-                                                                                 : kDefaultMaxInFlight;
+    if (ec != std::errc{} || end != text.data() + text.size()) {
+        return std::unexpected(std::format(
+            "ENCODER_QUEUE_MAX_IN_FLIGHT=\"{}\" is not a whole number (0 means never submit, "
+            "unset means {})",
+            text, kDefaultMaxInFlight));
+    }
+    return parsed;
+}
+
+namespace detail {
+
+/** A 64-bit digest of a file's bytes, or nullopt when it cannot be read. `std::hash` is enough:
+ *  this identifies a build for routing, it is not a defence against anyone forging one. */
+[[nodiscard]] inline auto file_digest(const std::filesystem::path& path)
+    -> std::optional<std::uint64_t> {
+    std::ifstream in{path, std::ios::binary};
+    if (!in) return std::nullopt;
+    std::string bytes{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
+    if (in.bad() || bytes.empty()) return std::nullopt;
+    return std::hash<std::string_view>{}(bytes);
+}
+
+}  // namespace detail
+
+/**
+ * What identifies the build that will answer an encoder request, for the queue to route on.
+ *
+ * Two digests: the model file the chain loaded (weights, schema, tokenizer, normaliser -- one GGUF),
+ * and the running executable (the chain's code, the lexer, the renderer, every rule between the
+ * model's output and the text a caller reads). Neither alone is enough: a renderer change leaves
+ * the GGUF untouched, and a retrained model leaves the code untouched. And NEITHER IS A NUMBER
+ * SOMEONE BUMPS -- both are DERIVED from the bytes, so a change cannot ship without moving
+ * them, which is why a hand-maintained "renderer version" constant was not used.
+ *
+ * Replicas of one deployment run one image and so share a fingerprint and share work. Across a
+ * blue/green overlap the old and new engines carry different ones and never lease each other's
+ * tasks, which is the point (see `RouteTag`).
+ *
+ * If either file cannot be read the build's identity cannot be established, and the safe answer is
+ * ISOLATION: a fingerprint nobody else can have, so this replica only ever executes what it
+ * submitted itself. It still answers every request; it just stops sharing, and says so.
+ */
+[[nodiscard]] inline auto build_fingerprint(const std::filesystem::path& model,
+                                            const std::filesystem::path& executable = "/proc/self/exe")
+    -> std::string {
+    const auto model_digest = detail::file_digest(model);
+    const auto executable_digest = detail::file_digest(executable);
+    if (model_digest.has_value() && executable_digest.has_value()) {
+        return std::format("{:016x}.{:016x}", *model_digest, *executable_digest);
+    }
+    std::random_device entropy;
+    const auto token = (static_cast<std::uint64_t>(entropy()) << 32) | entropy();
+    logger::Logger::getInstance().warn(
+        "encoder_queue: cannot read {} -- this replica's build cannot be fingerprinted, so it is "
+        "ISOLATED on the shared queue: it answers its own requests and executes no other replica's",
+        model_digest.has_value() ? executable.string() : model.string());
+    return std::format("unshared.{:016x}", token);
 }
 
 /**
@@ -285,9 +351,38 @@ class EncoderBackend final : public inference_admission::InferenceBackend {
  */
 class EncoderService {
   public:
-    explicit EncoderService(EncoderBackend::Chain chain, EncoderBackend::Render render,
-                            std::string label, std::size_t max_in_flight = max_in_flight_from_env())
-        : backend_(std::move(chain), std::move(render), std::move(label)), slots_(max_in_flight) {}
+    /** @param fingerprint what the queue routes this service's tasks on (`build_fingerprint`);
+     *         empty for a service that is never put on a queue. */
+    EncoderService(EncoderBackend::Chain chain, EncoderBackend::Render render, std::string label,
+                   std::size_t max_in_flight, std::string fingerprint = {})
+        : backend_(std::move(chain), std::move(render), std::move(label)), slots_(max_in_flight),
+          fingerprint_(std::move(fingerprint)) {}
+
+    /**
+     * The service the engine builds: its bound comes from `ENCODER_QUEUE_MAX_IN_FLIGHT`, the
+     * effective value is LOGGED, and an unusable one stops the process. Both assistants build
+     * theirs here, so the rule is written once.
+     */
+    [[nodiscard]] static auto from_environment(EncoderBackend::Chain chain, EncoderBackend::Render render,
+                                               std::string label, const std::filesystem::path& model)
+        -> std::unique_ptr<EncoderService> {
+        const char* const raw = std::getenv("ENCODER_QUEUE_MAX_IN_FLIGHT");
+        const auto bound = parse_max_in_flight(raw);
+        if (!bound.has_value()) {
+            logger::Logger::getInstance().error(
+                "{} -- refusing to start rather than guessing which bound was meant.", bound.error());
+            std::exit(1);
+        }
+        logger::Logger::getInstance().info(
+            "encoder_queue: {} keeps at most {} request(s) at a time on the shared queue and "
+            "answers the rest in-process (ENCODER_QUEUE_MAX_IN_FLIGHT {})",
+            label, *bound, (raw != nullptr && *raw != '\0') ? "set" : "unset: the default");
+        return std::make_unique<EncoderService>(std::move(chain), std::move(render), std::move(label),
+                                                *bound, build_fingerprint(model));
+    }
+
+    /** What the shared queue routes this service's tasks on. */
+    [[nodiscard]] auto fingerprint() const noexcept -> const std::string& { return fingerprint_; }
 
     /** The local executor: what an admission object degrades to and what a lease runner executes. */
     [[nodiscard]] auto backend() noexcept -> EncoderBackend& { return backend_; }
@@ -332,8 +427,18 @@ class EncoderService {
         const auto queued = shared->submit(encode_request(request));
         if (queued.has_value() && queued->ok) {
             if (auto decoded = decode_answer(queued->text); decoded.has_value()) {
-                logger::Logger::getInstance().info(
-                    "encoder_queue: {} answered through the shared queue", backend_.name());
+                // The admission object degrades to this replica's own backend on any submit or
+                // poll failure, and that outcome is ok == true like a queue success. Which one this
+                // was is the admission's to say (`degraded`), and the line must say it: the
+                // operator's `queued == executed` accounting is built from these.
+                if (queued->degraded) {
+                    logger::Logger::getInstance().info(
+                        "encoder_queue: {} answered locally after the shared queue degraded",
+                        backend_.name());
+                } else {
+                    logger::Logger::getInstance().info(
+                        "encoder_queue: {} answered through the shared queue", backend_.name());
+                }
                 return std::move(*decoded);
             } else {
                 logger::Logger::getInstance().warn(
@@ -353,6 +458,7 @@ class EncoderService {
   private:
     EncoderBackend backend_;
     QueueSlots slots_;
+    std::string fingerprint_;
     /** Declared last: destroyed first, so the thread stops before anything it reads goes. */
     std::unique_ptr<inference_admission::LeaseRunner> runner_;
 };

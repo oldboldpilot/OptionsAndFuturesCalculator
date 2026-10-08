@@ -5,16 +5,16 @@
 #
 # @author Olumuyiwa Oluwasanmi
 #
-#   flock /home/muyiwa/.cache/lanes/test.lock scripts/encoder_queue_pg_check.sh <calculator_engine>
+#   flock /home/muyiwa/.cache/lanes/test_ofc.lock scripts/encoder_queue_pg_check.sh <calculator_engine>
 #
-# Only the scratch database `sensen_gw_gate_qenc` is created and dropped here; the live
+# Only the scratch database (EQC_PG_DB, default `sensen_gw_gate_qenc`) is created and dropped here; the live
 # `sensen_gw` is never named. The connection string carries a password and is built in this shell
 # and handed to the engines by environment; it is never printed.
 set -uo pipefail
 ENGINE_BIN="${1:?usage: $0 <calculator_engine>}"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NODE_BIN="${EQC_NODE_BIN:-/bin/true}"       # no SGEE nodes are started; the library only needs a path
-DB=sensen_gw_gate_qenc
+DB="${EQC_PG_DB:-sensen_gw_gate_qenc}"
 EQC_QUEUE=postgres
 EQC_BURST=96
 

@@ -469,6 +469,51 @@ auto main() -> int {
               "the encoded tag uses inference_queue::to_string's own spelling");
     }
 
+    // A surface-only tag is exactly right for a decoder, whose every replica runs the same weights,
+    // and wrong for anything whose ANSWER depends on the build that computes it. During Railway's
+    // blue/green overlap the old and new engines share one queue; with a surface-only filter about
+    // half of the old engines' encoder tasks were executed by the new binary. These are the codec
+    // half of the fix -- that a real broker then honours the filter is gated against a real
+    // cluster in encoder_queue_cluster_test.sh, and Postgres's half by test_inference_queue_pg.
+    section("a build rides in the tag, and one build's filter never matches another build's task");
+    {
+        using options_calculator::inference_admission::RouteTag;
+        using options_calculator::inference_queue::Surface;
+        using options_calculator::inference_admission::decode_prompt_payload;
+        using options_calculator::inference_admission::decode_surface_name;
+        using options_calculator::inference_admission::encode_prompt_for_surface;
+        using options_calculator::inference_admission::surface_lease_filter;
+
+        const RouteTag mortgage_a{Surface::Mortgage, "build-A"};
+        const RouteTag mortgage_b{Surface::Mortgage, "build-B"};
+        const RouteTag strategy_a{Surface::Strategy, "build-A"};
+        const std::string prompt = "p";
+        const auto payload_a = encode_prompt_for_surface(mortgage_a, prompt);
+        const auto decoder_payload = encode_prompt_for_surface(Surface::Mortgage, prompt);
+
+        check(payload_a.find(surface_lease_filter(mortgage_a)) != std::string::npos,
+              "a build's own lease filter is literally present in its payload");
+        check(payload_a.find(surface_lease_filter(mortgage_b)) == std::string::npos,
+              "ANOTHER build's filter does not match it -- the property a blue/green overlap needs");
+        check(payload_a.find(surface_lease_filter(strategy_a)) == std::string::npos,
+              "nor does the SAME build on another surface: the route names the surface too, since "
+              "the broker can match only one substring");
+        check(decoder_payload.find(surface_lease_filter(mortgage_a)) == std::string::npos,
+              "a task from a submitter with no build does not match a build's filter");
+        check(payload_a.find(surface_lease_filter(Surface::Mortgage)) != std::string::npos,
+              "asserted in the direction that is true: the SURFACE-only filter still matches a "
+              "routed task, which is why a decoder and an encoder must not share a surface's queue");
+        check(!decoder_payload.contains("route"),
+              "and a build-less payload carries no route member at all -- the decoder's wire "
+              "format is what it was before routes existed");
+        check(decode_prompt_payload(payload_a) == prompt &&
+                  decode_surface_name(payload_a) == std::optional<std::string>("mortgage"),
+              "the prompt and the surface survive beside the route, through the decoders a worker "
+              "built before routes existed also uses");
+        check(surface_lease_filter(mortgage_a) != surface_lease_filter(mortgage_b),
+              "different builds, different filters");
+    }
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

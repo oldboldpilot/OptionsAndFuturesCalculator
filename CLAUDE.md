@@ -3626,6 +3626,17 @@ assistant (backend, bound, runner) so their lifetimes are one lifetime and both 
 one definition. Both assistants are wired; each replica is both a submitter and a worker of its own
 surface.
 
+**`assistant_runtime.cppm` holds how an assistant's Worker joins the queue, ONCE.** The two Worker
+classes carried the same seven members and ~150 lines around them; diffed after substituting the
+surface's name, `configure_sgee_queue` differed by ONE integer (the worker-id parity) and
+`configure_inference_queue` by comments only -- one piece of knowledge written twice, then a third time
+as five more helpers (`local_executor`, `remote_deadline`, `install_lease_source`, `encoder_answer`,
+`encoder_enabled`) added with the encoder. `AssistantRuntime` owns the decoder or the encoder, the
+Postgres pool and queue, the lease source, the stand-in backend of a weightless replica and the
+admission object; a Worker now keeps only what really differs (how its model is chosen and loaded). The
+two services deleted 612 lines and gained 63 (net -549) against a 320-line runtime that is mostly the
+comments both copies carried. #81 lane 7 deletes the mortgage Worker; the runtime stays.
+
 **A chain refusal and `<NONE>` are ANSWERS that complete the task.** They are deterministic, and a
 failed task would burn its attempts on re-leases that cannot change the outcome and leave the submitter
 polling a Dead task -- the defect-3 lesson ("a rejection is an answer") applied at the payload level.
@@ -3639,8 +3650,21 @@ lease, complete. Measured on a local three-node cluster, 96 sequential requests 
 traffic is exactly the 2026-10-07 production finding. The engines say the rest in their own logs, one
 line per request: `<surface> encoder answered through the shared queue` (submit side),
 `<surface> encoder executed leased job #N on this replica` (worker side, `N` is a per-process counter),
-and `<surface> encoder answered in-process` (the bound below). Summed across replicas, executed ==
-queued; and a burst sent to ONE engine was executed 49/47 and 41/55 by the two.
+`<surface> encoder answered in-process` (the bound below) and `<surface> encoder answered locally after
+the shared queue degraded` (the queue failed and the admission object answered for itself). Summed
+across replicas, executed == queued; and a burst sent to ONE engine was executed 49/47 and 41/55 by the
+two.
+
+**THE FIRST VERSION OF THAT LINE LIED, and the review that found it is the reason the fourth exists.**
+Every degrade branch of `SgeeAdmission` / `PostgresAdmission` ends in `return local_.submit(...)`, whose
+outcome for an encoder is `ok = true` with a decodable answer -- the same bytes a queue success has --
+so a request answered right here was logged as `answered through the shared queue`, and `queued ==
+executed` was false by exactly the number of fallbacks, in the one situation (the queue is down) in
+which an operator reads it. The cluster test did not notice: it asserted `fallbacks == 0` beside
+`queued == N`, a second counter covering for the first. `InferenceOutcome::degraded` is now stamped in
+the ONE function each admission degrades through (`degrade_to_local`), and the cluster-down section
+asserts that the through-the-queue count stayed FLAT and that every fallback has a matching degraded
+line. A count of what happened is only as honest as the layer that knows what happened.
 
 **WHAT THE QUEUE COSTS, and it is not the polling.** Every queue operation is a replicated write; the
 leader serialises them and each costs about a Raft heartbeat. Local three-node cluster, mortgage
@@ -3684,13 +3708,43 @@ are serialised at the leader, and more idle CPU. Removed.
 **THE BOUND (`QueueSlots`) EXISTS BECAUSE UNBOUNDED, THE QUEUE COLLAPSES.** Past its ceiling a request
 waits out the 2 s deadline, is answered in-process anyway, and leaves an ORPHAN task that a worker
 executes later for nobody -- three more writes, in the one resource that was already saturated, which
-delays the next request further. So each replica keeps at most `ENCODER_QUEUE_MAX_IN_FLIGHT` (default
-**1**) requests on the queue and answers the overflow itself. Measured: the bound removes every
+delays the next request further. So each assistant on a replica keeps at most
+`ENCODER_QUEUE_MAX_IN_FLIGHT` (default **1**) requests on the queue and answers the overflow itself. Measured: the bound removes every
 deadline expiry at every heartbeat tried, and an overload run (24 callers) moves the cluster log by
 exactly three writes per executed request -- no orphans. The cost is that under concurrency most
 requests are NOT carried by the queue, which is the right outcome for a 1 ms task against a 3-30 rps
 ceiling and the wrong one if the intent is to demonstrate sharing under load: the sharing proof uses
 one caller at a time. `ENCODER_QUEUE_MAX_IN_FLIGHT=64` restores the unbounded behaviour measured above.
+
+**THE SWITCH IS READ STRICTLY, as every operator switch in this tree is.** It was parsed silently:
+`=abc`, `=0` and `= 64` all became 1 with no line anywhere, so an operator who set it had no way to
+learn it had not taken. Now an unset value is the default; `0` is a VALUE -- the replica never submits
+and answers every request itself while its runner still executes what others submit, which is the one
+way to route in-process without unwiring the queue; and anything that is not a whole number stops the
+engine at boot naming it. The effective bound is logged once per assistant (`keeps at most N
+request(s)`).
+
+**BLUE/GREEN MIXED BUILDS ON ONE QUEUE, and nothing could see it.** The lease filter partitioned by
+surface only, which is right for a decoder (every replica of a surface runs the same weights) and wrong
+for anything whose answer is a function of the build that computed it. Railway stands the new containers
+up and health-gates them while the old ones still carry traffic, all against the same queue, so about
+half of the old engines' encoder tasks were executed by the NEW binary before cutover -- and an old
+binary parses a new renderer's keys through an unknown-key rejection that turns the row into a refusal.
+The lane's own cluster test could not see it: every engine in it was one binary. Fixed by routing on
+the build: an encoder task carries `"route":"<surface>/<model digest>.<executable digest>"`, and a
+worker's lease filter is that same string (`RouteTag`, one function writes and matches it), so old and
+new cohorts each lease only their own and same-build replicas still share. **Both digests are DERIVED
+from bytes** -- the GGUF the chain loaded (weights, schema, tokenizer) and `/proc/self/exe` (the chain's
+code and the renderer) -- because the alternative was a hand-bumped "renderer version" constant, and a
+recorded value that must be regenerated by hand is the one that goes stale; the same reasoning that
+makes `check_vendored_protos.sh` compare bytes and `pending_enqueues_in_log()` derive its count. A
+replica that cannot read either file ISOLATES itself behind a random fingerprint rather than falling
+back to sharing: unable to establish what it is, it answers its own requests and executes no one
+else's. The surface is part of the route string because the broker's filter is ONE byte substring; a
+filter naming only the build would let the same build lease another surface's task. The Postgres queue
+applies it in its lease query (`payload->>'route' = $4`, extracted text, because jsonb re-renders its
+input and a byte filter would silently never match). A decoder carries no build, and its payload is
+byte-identical to what it was.
 
 **The remote deadline for an encoder is 2 s, not the decoder's 90 s:** the local answer costs a
 millisecond, so waiting a minute and a half on a stopped cluster would cost the visitor more than the
@@ -3709,15 +3763,33 @@ BEFORE the listener binds -- carried on with a dead engine and reported 120 tran
 `main.cpp` now exits 1 naming the address (`EngineBindFailureTest`, RED on the old engine: status 139),
 and the bring-up waits for a TCP connect to the port, not for the banner.
 
-Gated by `test_encoder_queue` (38 checks, hermetic: codec, one-place semantics, two runners sharing a
-queue, degrade, refusal-completes-task, the bound) and `EncoderQueueClusterTest` (a real three-node
-cluster and real engines with the real weights; ~2 min; exits 77 when the encoder GGUFs or python gRPC
-are absent). Against the pre-change engine the cluster test fails 21 checks. Mutation-checked, each arm
+Gated by `test_encoder_queue` (72 checks, hermetic: codec, one-place semantics, two runners sharing a
+queue, degrade and its accounting lines, refusal-completes-task, the bound, the strict switch, the
+fingerprint, a throwing lease source, `AssistantRuntime`'s availability and its unbuildable-queue paths), `test_inference_admission` (the route codec), the real-Postgres
+`test_inference_queue_pg` (the route in the lease query; not a ctest) and `EncoderQueueClusterTest` (a
+real three-node cluster and real engines with the real weights, now including a second BUILD on the same
+queue; ~3 min; exits 77 when the encoder GGUFs or python gRPC are absent). Against the pre-change engine the cluster test fails 21 checks. Mutation-checked, each arm
 failing exactly the checks that name it: `answer()` ignoring the queue (7), no local fallback (2), a
 refusal reported as a failed task (2), an executor that throws leaving a promise broken (abort), a
 decoder prompt accepted as a task (2), the bound admitting everyone (2), a slot never released (2);
 and at engine level the service not handing the encoder to the queue, the mortgage worker leasing
 under the STRATEGY surface, and neither layer degrading.
+
+The review-fix arms (2026-10-07), each reverted with `CCACHE_DISABLE=1`, rebuilt and restored byte for
+byte: the admission not stamping `degraded` (3 checks: the flag, the through-the-queue count, the
+degraded count); the reader ignoring the flag (2); the lease runner's `fill()` unguarded (abort,
+`fill boom`); a typo coerced to the default (9); `0` coerced to the default (1); the route ignoring the
+build (3); the route dropping the surface (1); the fingerprint ignoring the executable (2), the model
+(1) or sharing when unreadable (1); the Postgres route clause made inert (3 of the 153 real-database
+checks -- a first arm that DELETED the clause left `$4` unreferenced, Postgres refused every lease and
+57 checks failed, which proves the arm and not the filter, so it was thrown away); and, at engine level,
+the runtime tagging with the surface alone, which reproduces the defect in the cluster test as
+`the other build executed 43 of A's 96 tasks` and `A and B executed 52 of the other build's`.
+
+**One thing the cluster test cannot reach:** `SgeeLeaseSource::fill`'s post-lease build check (the
+defence in depth for a broker that ignores the filter) fires only when the broker is wrong, and the
+real broker is right. It is the same branch, extended with `foreign_owner`, that already guarded the
+surface; it is exercised by reading, not by a gate.
 
 ### The queue nodes went FIVE WEEKS stale, and nothing was watching them
 
@@ -5203,6 +5275,15 @@ remotes. Two things about that merge are worth keeping:
   the sensen objects relinked at 07:35 while `calculator_engine` still dated from
   the previous evening. Run plain `ninja -C backend/build` as well before
   deploying, and check the binary's mtime rather than trusting "no work to do".
+
+  **CORRECTION, 2026-10-07: that is no longer true.** `build_tests` now also
+  builds `calculator_engine`, `sgee_queue_node` and `causality_bench`
+  (`backend/CMakeLists.txt`, the loop after the `dbg_derivation` dependency),
+  because `EncoderQueueClusterTest` and the two `CausalityBench` gates run those
+  binaries and a ctest reading a binary that nothing rebuilt passes while proving
+  nothing. The paragraph above is kept because its mechanism is still the reason
+  the loop exists; the check that REMAINS worth making before a deploy is the
+  binary's mtime against the change, not whether `build_tests` was run.
 
 A C++20 module symbol also carries its module in the mangled name —
 `sensen::RotaryEmbedding@sensen.rotary_embedding::shared(...)` — so

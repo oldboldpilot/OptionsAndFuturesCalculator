@@ -45,10 +45,9 @@ import assistant_verification;
 import sensen.encoder_assistant;
 import sensen.utterance_guards;
 import inference_admission;
+import assistant_runtime;
 import encoder_queue;
 import inference_queue;
-import sgee_queue_client;
-import pg;
 
 // SGEE: ParseStrategy's admission/model-availability/generate/parse-and-verify
 // sequence is expressed as a real workflow graph rather than a chain of
@@ -1449,71 +1448,11 @@ class AssistantWorker {
         return worker;
     }
 
-    /** True iff a backend initialised successfully at process start.
-     * Immutable after construction, so no synchronization is needed. */
-    [[nodiscard]] auto available() const noexcept -> bool {
-        // Either this replica can execute (backend_), or it can submit to a
-        // shared queue that will (admission_ in submit-only mode). Both are
-        // immutable after construction, so no synchronization is needed.
-        // encoder_ is listed HERE as well as in local_model_loaded(), and listing it in only
-        // one of them is a defect with a measured cost: on the mortgage service the boot
-        // banner printed "model is LOADED" while every single RPC answered "not available
-        // right now" -- a health signal from the wrong layer, across all 600 holdout rows.
-        return backend_ != nullptr || encoder_ != nullptr || admission_ != nullptr;
-    }
-
-    /**
-     * Whether ASSISTANT_MODEL=encoder selected the small bidirectional ENCODER and it loaded.
-     * Asked for one engine and unable to provide it, this assistant is UNAVAILABLE rather than
-     * quietly served by the other -- the ASSISTANT_BACKEND=llamacpp rule, which exists because
-     * every gate in this repository is defined on one path.
-     */
-    [[nodiscard]] auto encoder_enabled() const noexcept -> bool { return encoder_ != nullptr; }
-
-    /**
-     * Answers one exchange on the encoder: through the shared queue when `INFERENCE_QUEUE`
-     * configured one (any replica holding the weights may execute it), in this process
-     * otherwise. Either way `EncoderBackend::answer()` decides what the chain's outcome means,
-     * so the two modes cannot disagree. Thread-safe.
-     */
-    [[nodiscard]] auto encoder_answer(const encoder_queue::EncoderRequest& request)
-        -> encoder_queue::Answer {
-        return encoder_->answer(admission_.get(), request);
-    }
-
-    /**
-     * Whether THIS process holds the weights, as opposed to being able to
-     * reach something that does.
-     *
-     * Distinct from `available()` on purpose. The startup banner and the
-     * documented cutover check (`grep -c 'model is LOADED'`, one line per
-     * replica per assistant) are asking where the model physically IS -- a
-     * submit-only replica answering "LOADED" would make that count describe a
-     * fleet that does not exist, which is exactly the class of wrong-layer
-     * health signal this project has been bitten by before.
-     */
-    [[nodiscard]] auto local_model_loaded() const noexcept -> bool {
-        return backend_ != nullptr || encoder_ != nullptr;
-    }
-
-    [[nodiscard]] auto submit(std::string prompt) -> std::optional<InferenceOutcome> {
-        if (backend_ == nullptr && admission_ == nullptr) {
-            // Defense in depth: the RPC handler is expected to check
-            // available() first, but if this is ever reached anyway there is
-            // no owner thread to fulfil a queued job's promise and no queue to
-            // hand it to -- returning a populated failure here, rather than
-            // enqueueing, is what stands between this and a permanent hang.
-            return InferenceOutcome{.ok = false, .text = {}, .error = "model not loaded"};
-        }
-        // `admission_` is non-null only in INFERENCE_QUEUE=postgres mode, and
-        // it already falls back to `*backend_` (today's exact in-process
-        // path) on any Postgres-path failure -- see PostgresAdmission::submit.
-        // In `local` mode (the default) `admission_` stays null and this call
-        // goes to `backend_` directly, exactly as before this feature existed.
-        if (admission_ != nullptr) {
-            return admission_->submit(std::move(prompt));
-        }
-        return backend_->submit(std::move(prompt));
+    /** What executes here and how it joins the shared queue. The same class for both assistants:
+     *  see `assistant_runtime.cppm` for why this used to be written twice. */
+    [[nodiscard]] auto runtime() noexcept -> assistant_runtime::AssistantRuntime& { return runtime_; }
+    [[nodiscard]] auto runtime() const noexcept -> const assistant_runtime::AssistantRuntime& {
+        return runtime_;
     }
 
     AssistantWorker(const AssistantWorker&) = delete;
@@ -1583,15 +1522,15 @@ class AssistantWorker {
                 "(slot,map) pairs, {} convention fields, vocab {}",
                 assistant->operation_count(), assistant->pair_count(),
                 assistant->convention_fields(), assistant->vocab_size()));
-            encoder_ = std::make_unique<encoder_queue::EncoderService>(
+            runtime_.adopt(encoder_queue::EncoderService::from_environment(
                 [assistant](const sensen::encoder_assistant::Turns& turns) {
                     return assistant->parse(turns);
                 },
-                &encoder_params_to_json, "strategy encoder");
+                &encoder_params_to_json, "strategy encoder", *enc_path));
             // The encoder rides the same shared queue as the decoder when one is configured:
             // INFERENCE_QUEUE=sgee used to leave it in-process. In `local` mode this is the fast
             // no-op it is for the decoder, and the encoder is called in-process as before.
-            configure_inference_queue();
+            runtime_.configure_queue();
             return;
         }
 
@@ -1600,12 +1539,12 @@ class AssistantWorker {
             // No weights here -- still a supported image, and no longer
             // necessarily a refusal. With a SHARED inference queue configured,
             // this replica accepts the RPC and hands the work to a replica that
-            // does carry the model; configure_inference_queue() builds a
+            // does carry the model; configure_queue() builds a
             // submit-only admission (no lease source, so this process never
             // executes). With INFERENCE_QUEUE=local there is nowhere to submit
             // and it stays a Refusal on every call, exactly as before.
-            configure_inference_queue();
-            if (admission_ == nullptr) {
+            runtime_.configure_queue();
+            if (!runtime_.queued()) {
                 logger::Logger::getInstance().warn(
                     "MODEL_PATH is not set and no shared inference queue is configured -- the "
                     "strategy assistant will return a Refusal on every call. The calculator and "
@@ -1720,12 +1659,12 @@ class AssistantWorker {
         const std::string requested = env_string("ASSISTANT_BACKEND").value_or("sensen");
 
         if (requested == "sensen") {
-            backend_ = SensenBackend::create(*path, max_concurrent, queue_depth, kv_max_seq_len,
-                                             threads, device);
+            runtime_.adopt(SensenBackend::create(*path, max_concurrent, queue_depth,
+                                                 kv_max_seq_len, threads, device));
         } else if (requested == "llamacpp") {
 #ifdef ASSISTANT_HAVE_LLAMACPP
-            backend_ = LlamaCppBackend::create(*path, max_concurrent, queue_depth, kv_max_seq_len,
-                                               threads);
+            runtime_.adopt(LlamaCppBackend::create(*path, max_concurrent, queue_depth,
+                                                   kv_max_seq_len, threads));
 #else
             logger::Logger::getInstance().error(
                 "ASSISTANT_BACKEND=llamacpp was requested, but this binary was built without "
@@ -1743,7 +1682,7 @@ class AssistantWorker {
             return;
         }
 
-        if (backend_ == nullptr) {
+        if (runtime_.decoder() == nullptr) {
             logger::Logger::getInstance().error(
                 "The \"{}\" assistant backend failed to initialise from MODEL_PATH ({}) -- the "
                 "strategy assistant will return a Refusal on every call. The calculator and "
@@ -1755,238 +1694,23 @@ class AssistantWorker {
         logger::Logger::getInstance().info(
             "Strategy assistant ready: backend={} device={} model={} inference_threads={} "
             "max_concurrent={} queue_depth={} context_tokens={}",
-            backend_->name(), backend_->device(), *path, threads, max_concurrent, queue_depth,
-            kv_max_seq_len);
+            runtime_.decoder()->name(), runtime_.decoder()->device(), *path, threads,
+            max_concurrent, queue_depth, kv_max_seq_len);
 
-        // configure_inference_queue() MUST run before backend_->start(): it is
-        // what calls backend_->set_lease_source() in INFERENCE_QUEUE=postgres
+        // configure_queue() MUST run before the decoder's start(): it is
+        // what calls set_lease_source() in INFERENCE_QUEUE=postgres
         // mode, and start() must never be called before that decision is
         // made -- see QueuedBackend::start()'s own doc (inference_admission.
         // cppm) for the startup race this order exists to make impossible.
-        // In `local` mode configure_inference_queue() is a fast no-op (no
+        // In `local` mode configure_queue() is a fast no-op (no
         // lease source is ever installed), so this reordering changes
         // nothing observable about that path.
-        configure_inference_queue();
-        backend_->start();
+        runtime_.configure_queue();
+        runtime_.decoder()->start();
     }
 
-    /**
-     * `INFERENCE_QUEUE` selects `local` (default, or anything unrecognized --
-     * degrades quietly rather than crashing) or `postgres`. This runs AFTER
-     * `backend_` is confirmed non-null above, since postgres mode still needs
-     * a real local backend both as the lease source's decode target and as
-     * PostgresAdmission's fallback.
-     *
-     * Any failure here degrades to `local` behaviour rather than leaving the
-     * process half-configured: a missing DATABASE_URL is logged and this
-     * function simply returns with `admission_`/lease source left null, which
-     * is indistinguishable from INFERENCE_QUEUE=local at every call site.
-     * pg::Pool itself never throws or hard-fails at construction either (see
-     * its own header comment) -- a dead initial connection heals on first
-     * use, or surfaces as a bounded submit_remote()/await_result() failure
-     * that PostgresAdmission already treats as "fall back to local".
-     */
-    /**
-     * `INFERENCE_QUEUE=sgee`: the same admission shape against the SGEE Raft
-     * cluster instead of Postgres.
-     *
-     * Ordering matters and is the same as the Postgres path's: the lease source
-     * is installed BEFORE anything can submit, because `QueuedBackend::start()`
-     * documents `set_lease_source()` as part of construction -- a worker that
-     * starts its decode loop first can sit leasing nothing while jobs pile up on
-     * a queue it is not yet reading.
-     *
-     * Every failure here returns quietly and leaves the assistant on local-only
-     * inference. That is the whole degrade-never-hang contract restated at
-     * configuration time: a cluster that cannot be reached must cost nothing more
-     * than the shared queue it would have provided.
-     */
-    auto configure_sgee_queue() -> void {
-        auto client = SgeeQueueClient::create_for_admission();
-        if (!client.has_value()) {
-            // create_for_admission() has already logged which variable was
-            // missing or unusable.
-            logger::Logger::getInstance().warn(
-                "INFERENCE_QUEUE=sgee was requested but no SGEE client could be built -- the "
-                "strategy assistant degrades to local-only inference.");
-            return;
-        }
-
-        // The worker id only has to be unique among live leaseholders; the pid
-        // is what the Postgres path uses for the same reason. Hashed into the
-        // uint64 the SGEE queue wants, with the surface folded in so the two
-        // assistants in ONE process never collide on it.
-        const auto worker_id = static_cast<std::uint64_t>(::getpid()) * 2ULL + 0ULL;
-
-        // 90s visibility, matching the admission deadline below. A shorter
-        // window would let the cluster reclaim a task this worker is still
-        // decoding and hand it to someone else -- paying for the same inference
-        // twice and, worse, fencing out the answer that arrives first.
-        // A replica with no weights must NEVER install a lease source: leasing
-        // is what commits it to executing, and it has nothing to execute with.
-        InferenceBackend* local = local_executor();
-        if (local != nullptr) {
-            install_lease_source(std::make_shared<inference_admission::SgeeLeaseSource>(
-                *client, inference_queue::Surface::Strategy, worker_id, /*visibility_ms=*/90000));
-        } else {
-            no_local_ = std::make_unique<inference_admission::NoLocalBackend>();
-            local = no_local_.get();
-        }
-
-        // The same 90s ceiling the Postgres path uses, for the same reason: it
-        // is a bound on a genuinely stuck request, not a target latency. The
-        // poll returns the instant the task turns terminal.
-        admission_ = std::make_unique<inference_admission::SgeeAdmission>(
-            *client, inference_queue::Surface::Strategy, *local, remote_deadline());
-
-        logger::Logger::getInstance().info(
-            "Strategy assistant: INFERENCE_QUEUE=sgee -- {} through the SGEE queue cluster "
-            "(worker_id={})",
-            local_executor() != nullptr
-                ? "submitting and leasing, with the local backend as fallback"
-                : "SUBMIT-ONLY (no local weights; never leases)",
-            worker_id);
-    }
-
-    auto configure_inference_queue() -> void {
-        const std::string mode = env_string("INFERENCE_QUEUE").value_or("local");
-        if (mode == "sgee") {
-            configure_sgee_queue();
-            return;
-        }
-        if (mode != "postgres") {
-            if (mode != "local") {
-                logger::Logger::getInstance().warn(
-                    "INFERENCE_QUEUE=\"{}\" is not \"local\" or \"postgres\" -- the strategy "
-                    "assistant stays on local-only inference.",
-                    mode);
-            }
-            return;
-        }
-
-        const auto database_url = env_string("DATABASE_URL");
-        if (!database_url.has_value()) {
-            logger::Logger::getInstance().warn(
-                "INFERENCE_QUEUE=postgres was requested but DATABASE_URL is unset -- the "
-                "strategy assistant degrades to local-only inference (its own decode loop, no "
-                "shared queue).");
-            return;
-        }
-
-        // connect_timeout=2000ms/statement_timeout=2000ms are pg::PoolConfig's
-        // own defaults already -- restated here, not overridden, so this is
-        // self-documenting against the brief's mandated bounds rather than a
-        // silent reliance on a default that could drift later.
-        pg::PoolConfig pool_config;
-        pool_config.conninfo = *database_url;
-        pool_config.connect_timeout = std::chrono::milliseconds(2000);
-        pool_config.statement_timeout = std::chrono::milliseconds(2000);
-        // 16, not PoolConfig's own default of 4: this ONE pool is shared by
-        // every submitter's submit_remote()/await_result() polling AND the
-        // worker's own lease()/complete() calls (this Worker's admission_ and
-        // its backend_'s lease source both hold the SAME queue_/pool_). At
-        // max_concurrent=4 (the default), worst-case simultaneous need is
-        // roughly 4 submitters + up to 4 write-back helper threads + the
-        // worker's own lease loop -- comfortably under 16, with headroom.
-        // Leaving this at 4 lets Pool::acquire()'s own bounded
-        // acquire_timeout (250ms) start silently queuing requests for a
-        // connection under ordinary load, which shows up as added latency,
-        // not as an error -- see this task's own latency breakdown for why
-        // that mattered enough to size explicitly rather than accept the
-        // default. Revisit if MAX_CONCURRENT is raised well beyond 4.
-        pool_config.size = 16;
-        pool_ = std::make_shared<pg::Pool>(std::move(pool_config));
-        queue_ = std::make_shared<inference_queue::Queue>(pool_);
-        // LISTEN/NOTIFY is a wakeup hint only (see inference_queue.cppm's own
-        // banner) -- a failure to start it is logged and otherwise ignored;
-        // await_result()'s poll loop remains correct, just not sped up.
-        if (auto pump = queue_->start_notify_pump(); !pump.has_value()) {
-            logger::Logger::getInstance().warn(
-                "inference_admission: strategy assistant's LISTEN pump failed to start ({}) -- "
-                "await_result() will still work correctly via its poll backstop, just not as "
-                "promptly.",
-                inference_queue::to_string(pump.error()));
-        }
-        // Without this, an abandoned lease or a job that timed out while
-        // still pending sits until some OTHER replica's ticker (or an
-        // operator's manual sweep_once()) happens to reap it -- see
-        // Queue::start_sweep_ticker()'s own doc. Safe to start unconditionally
-        // here even though the mortgage assistant's Worker starts its own
-        // ticker too: sweep_once()'s pg_try_advisory_lock makes every ticker
-        // but one a no-op on any given tick, cluster-wide.
-        queue_->start_sweep_ticker();
-
-        const std::string worker_id = "strategy-" + std::to_string(::getpid());
-        // See the SGEE path: a replica with no weights never leases.
-        InferenceBackend* local = local_executor();
-        if (local != nullptr) {
-            install_lease_source(std::make_shared<inference_admission::PostgresLeaseSource>(
-                queue_, inference_queue::Surface::Strategy, worker_id));
-        } else {
-            no_local_ = std::make_unique<inference_admission::NoLocalBackend>();
-            local = no_local_.get();
-        }
-
-        // 90s, matching this queue's own design (was 20s here, a drift from
-        // that design this task's own measurement caught: a 20s window gave
-        // a healthy worker under transient load far less room than intended
-        // before the caller gave up and fell back). This is a CEILING, not a
-        // target latency: await_result() returns the instant the job reaches
-        // a terminal state, so a healthy worker (one that actually leases --
-        // see the startup-race fix on QueuedBackend::start()) answers in
-        // roughly one decode's worth of time (kMaxNewTokens at ~34 tok/s is
-        // roughly a second), and this bound is only ever fully paid by a
-        // genuinely stuck request, at which point falling back late is still
-        // strictly better than an anonymous MODEL_UNAVAILABLE.
-        admission_ = std::make_unique<inference_admission::PostgresAdmission>(
-            queue_, inference_queue::Surface::Strategy, *local, remote_deadline());
-
-        logger::Logger::getInstance().info(
-            "Strategy assistant: INFERENCE_QUEUE=postgres -- {} the shared queue (worker_id={})",
-            local_executor() != nullptr
-                ? "submitting through and leasing from, with the local backend as fallback"
-                : "SUBMIT-ONLY through (no local weights; never leases)",
-            worker_id);
-    }
-
-    /// The backend that EXECUTES on this replica: the decoder's owner-thread backend, the
-    /// encoder's inline one, or null on a submit-only replica (no weights here).
-    [[nodiscard]] auto local_executor() noexcept -> InferenceBackend* {
-        if (backend_ != nullptr) return backend_.get();
-        return encoder_ != nullptr ? &encoder_->backend() : nullptr;
-    }
-
-    /// How long a submitter waits on the shared queue before answering locally: 90 s for a
-    /// decode, `encoder_queue::kRemoteDeadline` for an encoder parse.
-    [[nodiscard]] auto remote_deadline() const noexcept -> std::chrono::milliseconds {
-        return encoder_ != nullptr ? encoder_queue::kRemoteDeadline
-                                           : std::chrono::milliseconds(90000);
-    }
-
-    /// Hands shared work to whatever executes here. A decoder's owner thread draws it in its own
-    /// loop; an encoder has no owner thread, so a runner drains the source into it.
-    auto install_lease_source(std::shared_ptr<LeaseSource> source) -> void {
-        if (backend_ != nullptr) {
-            backend_->set_lease_source(source);
-        } else {
-            encoder_->serve(source);
-        }
-        lease_source_ = std::move(source);
-    }
-
-    std::unique_ptr<QueuedBackend> backend_;
-    /// Non-null only on ASSISTANT_MODEL=encoder. Loaded once then const, so parse() is safe
-    /// from several threads -- unlike the decoder, whose generate() cannot be called
-    /// concurrently because FeedForwardNetwork holds mutable scratch per instance.
-    std::unique_ptr<encoder_queue::EncoderService> encoder_;
-    std::shared_ptr<pg::Pool> pool_;
-    std::shared_ptr<inference_queue::Queue> queue_;
-    std::shared_ptr<inference_admission::LeaseSource> lease_source_;
-    /// Stand-in local backend for a submit-only replica (no weights here).
-    /// Held because the admission classes take an `InferenceBackend&` that must
-    /// outlive them. Null whenever `backend_` is real.
-    std::unique_ptr<InferenceBackend> no_local_;
-    std::unique_ptr<InferenceBackend> admission_;
+    assistant_runtime::AssistantRuntime runtime_{inference_queue::Surface::Strategy,
+                                                 "Strategy assistant"};
 };
 
 // ---------------------------------------------------------------------------
@@ -3072,7 +2796,7 @@ inline constexpr std::array<std::string_view, 4> kAllActionNames{
  * error, and therefore an OnError edge whose destination still carries
  * ctx->status == OK. */
 [[nodiscard]] auto action_check_model(Ctx& ctx) -> ExecutionResult<> {
-    if (!AssistantWorker::instance().available()) {
+    if (!AssistantWorker::instance().runtime().available()) {
         populate_refusal(ctx->response, calculator::assistant::Refusal::MODEL_UNAVAILABLE,
                          "The strategy assistant is not available right now.");
         return std::unexpected(sgee::ExecutionError::ActionFailed);
@@ -3097,7 +2821,7 @@ inline constexpr std::array<std::string_view, 4> kAllActionNames{
     // No params block for an unrecognised operation, deliberately: that is what the decoder
     // produces when it will not name a strategy, and the existing non-params path is what
     // turns it into a clarification or an honest refusal.
-    if (AssistantWorker::instance().encoder_enabled()) {
+    if ((AssistantWorker::instance().runtime().encoder() != nullptr)) {
         // BOTH TURNS, for the same reason `build_prompt` takes both: the reply to this
         // service's own clarifying question, and a revision ("change the expiry to 7 days"),
         // arrive ONLY in `prior_clarification`. A model handed just `utterance` re-reads the
@@ -3117,7 +2841,7 @@ inline constexpr std::array<std::string_view, 4> kAllActionNames{
         // mismatch for the 278 clarify ones. Adding the field is a wire change reaching the
         // proto, both vendored copies, the client's derived allow-list and the drift gate;
         // the measurement for keeping this as it stands is in the commit that made it.
-        const auto answer = AssistantWorker::instance().encoder_answer(
+        const auto answer = AssistantWorker::instance().runtime().answer(
             {.utterance = ctx->utterance,
              .prior_question = {},
              .prior_clarification = ctx->prior_clarification});
@@ -3155,7 +2879,7 @@ inline constexpr std::array<std::string_view, 4> kAllActionNames{
 
     const std::string prompt = build_prompt(ctx->utterance, ctx->prior_clarification);
 
-    auto outcome = AssistantWorker::instance().submit(prompt);
+    auto outcome = AssistantWorker::instance().runtime().submit(prompt);
     if (!outcome.has_value()) {
         ctx->status = grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED,
                                    "The strategy assistant is at capacity; please retry shortly.");
@@ -3404,8 +3128,8 @@ auto RegisterAssistantService(grpc::ServerBuilder& builder) -> void {
     const auto& worker = AssistantWorker::instance();
     logger::Logger::getInstance().info(
         "Strategy assistant model is {}",
-        worker.local_model_loaded() ? "LOADED"
-        : worker.available()
+        worker.runtime().holds_model() ? "LOADED"
+        : worker.runtime().available()
             ? "NOT LOCAL -- submitting to the shared inference queue (no weights in this replica)"
             : "UNAVAILABLE (set MODEL_PATH to enable)");
 }

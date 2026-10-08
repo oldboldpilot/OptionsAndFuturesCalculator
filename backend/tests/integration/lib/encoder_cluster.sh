@@ -51,7 +51,7 @@ eqc_init() {
     for i in 1 2 3; do
         CPORT[$i]=$(( base + (i - 1) * 3 )); QPORT[$i]=$(( base + (i - 1) * 3 + 1 )); HPORT[$i]=$(( base + (i - 1) * 3 + 2 ))
     done
-    PORT_A=$(( base + 9 )); PORT_B=$(( base + 10 )); PORT_L=$(( base + 11 ))
+    PORT_A=$(( base + 9 )); PORT_B=$(( base + 10 )); PORT_L=$(( base + 11 )); PORT_S=$(( base + 12 ))
     PEERS="1=[::1]:${CPORT[1]},2=[::1]:${CPORT[2]},3=[::1]:${CPORT[3]}"
     CLIENT_PEERS="1=[::1]:${QPORT[1]},2=[::1]:${QPORT[2]},3=[::1]:${QPORT[3]}"
 }
@@ -109,16 +109,36 @@ eqc_applied() {
     printf '%s' "$best"
 }
 
+# The environment an engine under test is started with, as the array EQC_ENGINE_ENV: nothing is
+# inherited (a stray variable in the caller's shell must not decide what is being measured), and
+# later K=V arguments override earlier ones.
+eqc_engine_env() {   # <port> <queue-mode> [K=V ...]
+    local port="$1" mode="$2"; shift 2
+    EQC_ENGINE_ENV=(env -i PATH="$PATH" HOME="${HOME:-/tmp}" ${LD_LIBRARY_PATH:+LD_LIBRARY_PATH="$LD_LIBRARY_PATH"}
+        ENGINE_GRPC_PORT="$port" INFERENCE_QUEUE="$mode" SGEE_PEERS="$CLIENT_PEERS"
+        MORTGAGE_ASSISTANT_BACKEND=encoder MORTGAGE_ENCODER_PATH="$MORTGAGE_GGUF"
+        ASSISTANT_MODEL=encoder STRATEGY_ENCODER_PATH="$STRATEGY_GGUF"
+        PRO_GATE_MODE=off QUOTA_POLICY= DATABASE_URL= "$@")
+}
+
+# eqc_engine_refuses <name> <port> <queue-mode> [K=V ...]: an engine that is expected to REFUSE to
+# boot. Prints its exit status; 124 means it was still running after 30 s (and was stopped, by
+# `timeout`, which signals only the child it started).
+eqc_engine_refuses() {
+    local name="$1" port="$2" mode="$3" rc; shift 3
+    : > "$WORK/$name.log"
+    eqc_engine_env "$port" "$mode" "$@"
+    "${EQC_ENGINE_ENV[@]}" timeout 30 stdbuf -oL -eL "$ENGINE_BIN" >> "$WORK/$name.log" 2>&1
+    rc=$?
+    printf '%s' "$rc"
+}
+
 # eqc_start_engine <name> <port> <queue-mode> [K=V ...]   (extra variables for the engine)
 eqc_start_engine() {
     local name="$1" port="$2" mode="$3"; shift 3
     : > "$WORK/$name.log"
-    env -i PATH="$PATH" HOME="${HOME:-/tmp}" ${LD_LIBRARY_PATH:+LD_LIBRARY_PATH="$LD_LIBRARY_PATH"} \
-        ENGINE_GRPC_PORT="$port" INFERENCE_QUEUE="$mode" SGEE_PEERS="$CLIENT_PEERS" \
-        MORTGAGE_ASSISTANT_BACKEND=encoder MORTGAGE_ENCODER_PATH="$MORTGAGE_GGUF" \
-        ASSISTANT_MODEL=encoder STRATEGY_ENCODER_PATH="$STRATEGY_GGUF" \
-        PRO_GATE_MODE=off QUOTA_POLICY= DATABASE_URL= "$@" \
-        setsid stdbuf -oL -eL "$ENGINE_BIN" >> "$WORK/$name.log" 2>&1 &
+    eqc_engine_env "$port" "$mode" "$@"
+    "${EQC_ENGINE_ENV[@]}" setsid stdbuf -oL -eL "$ENGINE_BIN" >> "$WORK/$name.log" 2>&1 &
     ENGINE_PIDS+=("$!")
     local deadline=$(( SECONDS + 60 )) pid="${ENGINE_PIDS[-1]}"
     while [ "$SECONDS" -lt "$deadline" ]; do
@@ -148,10 +168,15 @@ eqc_raw_tag() { case "$1" in mortgage) printf '%s' '\[mortgage-assistant\] raw m
 eqc_raw_count() { grep -c "$(eqc_raw_tag "$2")" "$WORK/$1.log" || true; }                          # <engine> <surface>
 eqc_raw_since() { grep "$(eqc_raw_tag "$2")" "$WORK/$1.log" | tail -n "+$(( $3 + 1 ))" | sort; }    # <engine> <surface> <count0>
 
-# How the SERVICE says it answered each request (encoder_queue::ask logs one line per request): the
+# How the SERVICE says it answered each request (EncoderService::answer logs one line per request): the
 # submit-side half of the accounting, independent of the worker-side "executed" count.
 eqc_queued()    { grep -c "$2 answered through the shared queue" "$WORK/$1.log" || true; }      # <engine> <label>
 eqc_inprocess() { grep -c "$2 answered in-process" "$WORK/$1.log" || true; }                    # <engine> <label>
+# A request the admission layer answered ITSELF after the queue failed it. The queue's outcome and a
+# local fallback's are the same bytes (ok, with an answer), so only the admission can say which this
+# was; before it did, every fallback was logged as "answered through the shared queue" and
+# `queued == executed` was false by exactly the number of fallbacks.
+eqc_degraded()  { grep -c "$2 answered locally after the shared queue degraded" "$WORK/$1.log" || true; }   # <engine> <label>
 
 # --- the shared accounting checks, used by the SGEE gate and by the Postgres check ----------------
 #

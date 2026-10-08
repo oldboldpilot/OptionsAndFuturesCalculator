@@ -257,7 +257,7 @@ auto Queue::await_result(std::int64_t job_id, std::chrono::system_clock::time_po
 // Worker side
 // ---------------------------------------------------------------------------
 
-auto Queue::lease(Surface surface, std::string_view worker_id)
+auto Queue::lease(Surface surface, std::string_view worker_id, std::string_view route)
     -> std::expected<std::optional<Job>, SubmitError> {
     auto slot = pool_->acquire();
     if (!slot) return std::unexpected(map_pg_error(slot.error()));
@@ -266,6 +266,7 @@ auto Queue::lease(Surface surface, std::string_view worker_id)
     const std::string surface_str{to_string(surface)};
     const std::string worker{worker_id};
     const std::string lease_secs = std::to_string(config_.lease_duration.count());
+    const std::string route_str{route};
 
     // FOR UPDATE SKIP LOCKED on the inner subquery is what makes concurrent
     // lease() calls against the same surface never double-lease: a row
@@ -273,7 +274,7 @@ auto Queue::lease(Surface surface, std::string_view worker_id)
     // invisible to this subquery rather than blocking on it, so N concurrent
     // callers against a queue with fewer than N eligible rows each get a
     // DISTINCT row (or nothing), never the same one.
-    std::array<std::optional<std::string>, 3> params{surface_str, worker, lease_secs};
+    std::array<std::optional<std::string>, 4> params{surface_str, worker, lease_secs, route_str};
     auto res = conn->exec_params(
         "UPDATE inference_jobs j "
         "SET state = 'leased', "
@@ -285,6 +286,7 @@ auto Queue::lease(Surface surface, std::string_view worker_id)
         "WHERE j.id = ( "
         "  SELECT id FROM inference_jobs "
         "  WHERE surface = $1 AND state = 'pending' AND submit_deadline > now() "
+        "    AND ($4::text = '' OR payload->>'route' = $4::text) "
         "  ORDER BY id "
         "  FOR UPDATE SKIP LOCKED "
         "  LIMIT 1 "

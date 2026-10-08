@@ -552,7 +552,7 @@ endif()
 
 # Core engine binary
 add_executable(calculator_engine src/main.cpp src/issue_key.cpp src/modules/calculator_service.cpp src/modules/finance_service.cpp src/modules/quota.cpp src/modules/api_key.cpp src/modules/assistant_service.cpp src/modules/mortgage_assistant_service.cpp src/modules/inference_queue.cpp src/modules/inference_admission.cpp src/modules/sgee_queue_client.cpp src/modules/strategy_store.cpp src/modules/state_refresh.cpp)
-target_sources(calculator_engine PUBLIC FILE_SET CXX_MODULES FILES src/modules/calculator_service.cppm src/modules/market_data.cppm src/modules/finance_service.cppm src/modules/quota.cppm src/modules/api_key.cppm src/modules/fips_mode.cppm src/modules/state_refresh.cppm src/modules/strategy_catalogue.cppm src/modules/assistant_verification.cppm src/modules/assistant_service.cppm src/modules/mortgage_verification.cppm src/modules/mortgage_explanation.cppm src/modules/mortgage_derivation.cppm src/modules/mortgage_grammar.cppm src/modules/mortgage_assistant_service.cppm src/modules/pg.cppm src/modules/inference_queue.cppm src/modules/sgee_queue_client.cppm src/modules/inference_admission.cppm src/modules/encoder_queue.cppm src/modules/strategy_store.cppm src/modules/llq_weight_store.cppm)
+target_sources(calculator_engine PUBLIC FILE_SET CXX_MODULES FILES src/modules/calculator_service.cppm src/modules/market_data.cppm src/modules/finance_service.cppm src/modules/quota.cppm src/modules/api_key.cppm src/modules/fips_mode.cppm src/modules/state_refresh.cppm src/modules/strategy_catalogue.cppm src/modules/assistant_verification.cppm src/modules/assistant_service.cppm src/modules/mortgage_verification.cppm src/modules/mortgage_explanation.cppm src/modules/mortgage_derivation.cppm src/modules/mortgage_grammar.cppm src/modules/mortgage_assistant_service.cppm src/modules/pg.cppm src/modules/inference_queue.cppm src/modules/sgee_queue_client.cppm src/modules/inference_admission.cppm src/modules/encoder_queue.cppm src/modules/assistant_runtime.cppm src/modules/strategy_store.cppm src/modules/llq_weight_store.cppm)
 target_link_libraries(calculator_engine PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto sgee)
 # PostgreSQL::PostgreSQL is linked into calculator_engine further down, right
 # after find_package(PostgreSQL REQUIRED) runs (see that comment block) --
@@ -1489,6 +1489,8 @@ target_sources(test_assistant_service
         src/modules/inference_admission.cppm
         # The service routes its encoder through the shared queue via this module.
         src/modules/encoder_queue.cppm
+        # And joins the shared queue, as the other assistant does, through this one.
+        src/modules/assistant_runtime.cppm
 )
 target_link_libraries(test_assistant_service PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto sgee PostgreSQL::PostgreSQL)
 
@@ -1522,6 +1524,7 @@ target_sources(test_mortgage_assistant_service
         src/modules/sgee_queue_client.cppm
         src/modules/inference_admission.cppm
         src/modules/encoder_queue.cppm
+        src/modules/assistant_runtime.cppm
 )
 target_link_libraries(test_mortgage_assistant_service PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto sgee PostgreSQL::PostgreSQL)
 
@@ -1589,7 +1592,7 @@ target_link_libraries(test_inference_admission PRIVATE PostgreSQL::PostgreSQL fa
 
 add_test(NAME InferenceAdmissionTest COMMAND test_inference_admission)
 
-# The encoder assistants on the shared queue: the wire codec, EncoderBackend, ask() and
+# The encoder assistants on the shared queue: the wire codec, EncoderBackend, answer() and
 # LeaseRunner, against a stub chain and an in-memory double of the queue. No model, no cluster,
 # no Postgres -- what needs a real broker (the surface filter, work-sharing across processes) is
 # tests/integration/encoder_queue_cluster_test.sh.
@@ -1604,6 +1607,7 @@ target_sources(test_encoder_queue
         src/modules/sgee_queue_client.cppm
         src/modules/inference_admission.cppm
         src/modules/encoder_queue.cppm
+        src/modules/assistant_runtime.cppm
 )
 target_sources(test_encoder_queue PRIVATE src/modules/inference_queue.cpp src/modules/sgee_queue_client.cpp src/modules/inference_admission.cpp)
 target_link_libraries(test_encoder_queue PRIVATE sensen_slim PostgreSQL::PostgreSQL fastjson logger sgee)
@@ -2192,7 +2196,13 @@ endif()
 # EncoderQueueClusterTest runs the real engine and a real queue node, neither of which matches the
 # `^test_` filter -- so without this it would exercise whatever binaries happened to be on disk,
 # which is the stale-binary trap again and the one that passes while proving nothing.
-foreach(_t calculator_engine sgee_queue_node)
+#
+# `causality_bench` is the same shape one directory over: CausalityBenchGate and
+# CausalityBenchGateCanFail run `bin/causality_bench`, SGEE builds it EXCLUDE_FROM_ALL, and
+# `sgee_build_tests` does not list it -- so after `ninja build_tests` both read "Not Run", which is
+# indistinguishable from two failures. The root fix belongs in SGEE's aggregate; until it lands
+# here, a gate that ends in two permanent "Not Run" lines trains its reader to skip the summary.
+foreach(_t calculator_engine sgee_queue_node causality_bench)
     if(TARGET ${_t})
         add_dependencies(build_tests ${_t})
     endif()

@@ -139,6 +139,33 @@ export [[nodiscard]] constexpr auto resolve_device(std::string_view requested, b
 }
 
 /**
+ * What a shared-queue task is ROUTED on: the surface it belongs to, and -- for work whose answer
+ * depends on the build that computes it -- a fingerprint of that build.
+ *
+ * WHY THE SURFACE ALONE WAS NOT ENOUGH. The lease filter used to partition by surface and nothing
+ * else, which is exactly right for a decoder (every replica of a surface runs the same weights and
+ * any of them may answer) and wrong for anything whose answer is a function of the code or the
+ * model that produced it. Railway's blue/green deploy stands the new set of containers up and
+ * health-gates them while the old set is still carrying traffic, all against the same queue; with
+ * a surface-only filter about half of the old engines' encoder tasks were executed by the NEW
+ * binary before cutover, and an old binary parses a new renderer's keys through an unknown-key
+ * rejection that turns the row into a refusal. A worker must only lease a task it would answer
+ * identically to the replica that submitted it, so the encoder's tag carries its build.
+ *
+ * `build` EMPTY is the decoder, and the format on the wire is then byte-identical to what it was
+ * before this existed. It converts implicitly from a bare `Surface` for that reason: every decoder
+ * call site, and every test written against the surface-only API, is unchanged.
+ */
+export struct RouteTag {
+    options_calculator::inference_queue::Surface surface{};
+    std::string build;
+
+    // Deliberately implicit: a surface IS a complete tag for work that does not depend on a build.
+    RouteTag(options_calculator::inference_queue::Surface s, std::string b = {})  // NOLINT(google-explicit-constructor)
+        : surface(s), build(std::move(b)) {}
+};
+
+/**
  * What a backend hands back for one generation request.
  *
  * The three timing fields exist because, before they did, nobody could tell
@@ -166,6 +193,15 @@ export struct InferenceOutcome {
     // real number a caller waited, not an isolated-model number).
     double decode_ms = 0.0;
     std::size_t tokens_generated = 0;
+
+    // True iff an ADMISSION object tried the shared queue, could not get an answer from it, and
+    // answered this request itself through its local backend. `ok == true` on such an outcome says
+    // only that SOMEONE answered: the bytes are identical to a queue success, so without this a
+    // caller reporting HOW a request was answered cannot tell the queue working from the queue
+    // being down. Set at the one place each admission class degrades (`degrade_to_local` in
+    // inference_admission.cpp) and false on every other path, so the decoder callers -- which
+    // never read it -- are unchanged.
+    bool degraded = false;
 };
 
 /**
@@ -694,8 +730,7 @@ export class QueuedBackend : public InferenceBackend {
 export class PostgresLeaseSource final : public LeaseSource {
   public:
     PostgresLeaseSource(std::shared_ptr<options_calculator::inference_queue::Queue> queue,
-                         options_calculator::inference_queue::Surface surface,
-                         std::string worker_id);
+                         RouteTag tag, std::string worker_id);
     ~PostgresLeaseSource();
 
     PostgresLeaseSource(const PostgresLeaseSource&) = delete;
@@ -719,7 +754,10 @@ export class PostgresLeaseSource final : public LeaseSource {
     auto reap_finished_locked() -> void;
 
     std::shared_ptr<options_calculator::inference_queue::Queue> queue_;
-    options_calculator::inference_queue::Surface surface_;
+    RouteTag tag_;
+    /** The `route` member's value a leased payload must carry, or empty when the surface alone
+     *  decides. Derived once, from the same function that writes it. */
+    std::string route_;
     std::string worker_id_;
 
     std::mutex helpers_mu_;
@@ -812,8 +850,8 @@ inline auto QueuedBackend::force_take_jobs_symbol_emission() noexcept
 export class PostgresAdmission final : public InferenceBackend {
   public:
     PostgresAdmission(std::shared_ptr<options_calculator::inference_queue::Queue> queue,
-                       options_calculator::inference_queue::Surface surface,
-                       InferenceBackend& local, std::chrono::milliseconds remote_deadline);
+                       RouteTag tag, InferenceBackend& local,
+                       std::chrono::milliseconds remote_deadline);
 
     [[nodiscard]] auto submit(std::string prompt) -> std::optional<InferenceOutcome> override;
     [[nodiscard]] auto name() const noexcept -> std::string_view override { return "postgres"; }
@@ -827,7 +865,8 @@ export class PostgresAdmission final : public InferenceBackend {
 
   private:
     std::shared_ptr<options_calculator::inference_queue::Queue> queue_;
-    options_calculator::inference_queue::Surface surface_;
+    RouteTag tag_;
+    std::string route_;
     InferenceBackend& local_;
     std::chrono::milliseconds remote_deadline_;
     std::optional<SgeeQueueClient> sgee_client_;
@@ -858,8 +897,8 @@ export class PostgresAdmission final : public InferenceBackend {
  * format shared by two processes, and the defect it fixes was invisible to
  * every layer above it.
  */
-export [[nodiscard]] auto encode_prompt_for_surface(
-    options_calculator::inference_queue::Surface surface, const std::string& prompt) -> std::string;
+export [[nodiscard]] auto encode_prompt_for_surface(const RouteTag& tag, const std::string& prompt)
+    -> std::string;
 
 /** The raw `surface` string a payload carries, or nullopt when it carries none.
  *  Deliberately returns the NAME rather than a `Surface`: "no tag" and "a tag
@@ -868,9 +907,11 @@ export [[nodiscard]] auto encode_prompt_for_surface(
 export [[nodiscard]] auto decode_surface_name(std::string_view payload_json)
     -> std::optional<std::string>;
 
-/** The bytes a lease source asks the broker to match against a task's payload. */
-export [[nodiscard]] auto surface_lease_filter(
-    options_calculator::inference_queue::Surface surface) -> std::string;
+/** The bytes a lease source asks the broker to match against a task's payload. For a tag with no
+ *  build that is the surface member; for one with a build it is the `route` member alone, whose
+ *  value names the surface AND the build -- a single contiguous member, because the broker
+ *  matches one byte substring and cannot be asked for two. */
+export [[nodiscard]] auto surface_lease_filter(const RouteTag& tag) -> std::string;
 
 /** The prompt half of the same payload, through the SAME decoder the worker path
  *  uses — so a test can prove a surface-tagged payload still yields its prompt. */
@@ -878,12 +919,11 @@ export [[nodiscard]] auto decode_prompt_payload(std::string_view payload_json) -
 
 export class SgeeLeaseSource final : public LeaseSource {
   public:
-    /** @param surface the ONLY surface this source may execute. The broker applies
+    /** @param tag the ONLY surface (and, for an encoder, build) this source may execute. The broker applies
      *         it as a lease-time payload filter, so a task belonging to somebody
      *         else is never chosen for this worker in the first place. */
-    SgeeLeaseSource(SgeeQueueClient client,
-                     options_calculator::inference_queue::Surface surface,
-                     std::uint64_t worker_id, std::uint64_t visibility_ms);
+    SgeeLeaseSource(SgeeQueueClient client, RouteTag tag, std::uint64_t worker_id,
+                     std::uint64_t visibility_ms);
     ~SgeeLeaseSource() override;
 
     [[nodiscard]] auto fill(std::size_t want) -> std::vector<PendingJob> override;
@@ -894,7 +934,7 @@ export class SgeeLeaseSource final : public LeaseSource {
     auto reap_finished_locked() -> void;
 
     SgeeQueueClient client_;
-    options_calculator::inference_queue::Surface surface_;
+    RouteTag tag_;
     /** The bytes sent as the broker's lease-time payload filter. Built once from
      *  the ENCODER's own serialiser so it cannot drift from what is written. */
     std::string lease_filter_;
@@ -902,9 +942,10 @@ export class SgeeLeaseSource final : public LeaseSource {
     std::uint64_t visibility_ms_;
 
     /** Owner-thread only, like every member here except those under `helpers_mu_`:
-     *  fill() is called solely from QueuedBackend::take_jobs on the backend's own
-     *  worker thread. Both exist only for the broker-not-filtering path, which is
-     *  a deployment fault rather than a routine event. */
+     *  fill() is called from ONE thread -- QueuedBackend::take_jobs on the backend's own
+     *  worker thread for a decoder, LeaseRunner::run for an encoder -- never from two. Both
+     *  exist only for the broker-not-filtering path, which is a deployment fault rather than
+     *  a routine event. */
     std::chrono::steady_clock::time_point foreign_backoff_until_{};
     std::uint64_t foreign_leases_{0};
 
@@ -934,11 +975,10 @@ export class SgeeLeaseSource final : public LeaseSource {
  */
 export class SgeeAdmission final : public InferenceBackend {
   public:
-    /** @param surface stamped into every submitted payload, and the value the
+    /** @param tag stamped into every submitted payload, and the value the
      *         leasing worker's filter matches on. */
-    SgeeAdmission(SgeeQueueClient client,
-                   options_calculator::inference_queue::Surface surface,
-                   InferenceBackend& local, std::chrono::milliseconds remote_deadline);
+    SgeeAdmission(SgeeQueueClient client, RouteTag tag, InferenceBackend& local,
+                   std::chrono::milliseconds remote_deadline);
 
     [[nodiscard]] auto submit(std::string prompt) -> std::optional<InferenceOutcome> override;
     [[nodiscard]] auto name() const noexcept -> std::string_view override { return "sgee"; }
@@ -952,7 +992,7 @@ export class SgeeAdmission final : public InferenceBackend {
 
   private:
     SgeeQueueClient client_;
-    options_calculator::inference_queue::Surface surface_;
+    RouteTag tag_;
     InferenceBackend& local_;
     std::chrono::milliseconds remote_deadline_;
 };
@@ -989,10 +1029,6 @@ export class SgeeAdmission final : public InferenceBackend {
  */
 export class LeaseRunner final {
   public:
-    /** How long an IDLE runner waits between lease attempts. A pass that found work does not wait
-     *  at all, so this bounds only the time a job sits unclaimed on an otherwise idle replica. */
-    static constexpr std::chrono::milliseconds kDefaultPollTick{10};
-
     LeaseRunner(std::shared_ptr<LeaseSource> source, InferenceBackend& executor, std::string label);
 
     LeaseRunner(const LeaseRunner&) = delete;
@@ -1005,11 +1041,16 @@ export class LeaseRunner final {
 
   private:
     auto run(std::stop_token stoken) -> void;
+    /** One lease attempt that cannot throw: an exception from the source is logged and reads as
+     *  "nothing leased", which the loop already answers with a tick's wait. */
+    [[nodiscard]] auto fill_one() -> std::vector<PendingJob>;
+    auto note_fill_failure(std::string_view what) -> void;
 
     std::shared_ptr<LeaseSource> source_;
     InferenceBackend& executor_;
     std::string label_;
-    std::uint64_t executed_{0};  // run()'s thread only; numbers the log line
+    std::uint64_t executed_{0};       // run()'s thread only; numbers the log line
+    std::uint64_t fill_failures_{0};  // likewise
     /** Declared last: destroyed first, so the thread is joined before any member it reads goes. */
     std::jthread thread_;
 };

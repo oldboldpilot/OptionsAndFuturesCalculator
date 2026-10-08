@@ -314,8 +314,16 @@ export class Queue {
     /** Claims the oldest eligible pending row for `surface` via
      *  `FOR UPDATE SKIP LOCKED`, stamping a fresh fencing_token. Returns
      *  std::nullopt (not an error) when there is nothing to lease -- an
-     *  empty queue is the ordinary case, not a failure. */
-    [[nodiscard]] auto lease(Surface surface, std::string_view worker_id)
+     *  empty queue is the ordinary case, not a failure.
+     *
+     *  `route`, when non-empty, restricts the claim to a row whose payload carries exactly that
+     *  `route` member (`payload->>'route' = route`). A worker whose answer depends on the build that
+     *  computes it -- the encoders -- must only take work submitted by the same build; an empty
+     *  `route` claims any row of the surface, as every decoder always has. The comparison is on
+     *  the extracted TEXT, not a substring of the stored JSON, because jsonb re-renders its
+     *  input (`{"a": 1}`) and a byte filter written against the producer's bytes would silently
+     *  never match. */
+    [[nodiscard]] auto lease(Surface surface, std::string_view worker_id, std::string_view route = {})
         -> std::expected<std::optional<Job>, SubmitError>;
 
     /** Extends a held lease's deadline. Returns `false` (not an error) when

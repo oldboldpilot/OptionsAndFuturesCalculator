@@ -1,6 +1,6 @@
 // @author Olumuyiwa Oluwasanmi
 //
-// The encoder assistants on the shared queue: the wire codec, EncoderBackend, ask(), and
+// The encoder assistants on the shared queue: the wire codec, EncoderBackend, answer(), and
 // LeaseRunner -- the pieces that let a request submitted on one replica be executed by another.
 //
 // HERMETIC BY DESIGN: no model, no cluster, no Postgres. The chain is a stub, and the shared
@@ -21,11 +21,15 @@
 // tests/integration/encoder_queue_cluster_test.sh. Plain check()/section() harness, as in every
 // test here (config/cpp_details.txt rule 39).
 #include <cstdio>
+#include <stdlib.h>
+#include <unistd.h>
 
 import std;
+import assistant_runtime;
 import inference_admission;
 import encoder_queue;
 import inference_queue;
+import logger;
 import sgee_queue_client;
 import sensen.encoder_assistant;
 
@@ -60,6 +64,28 @@ auto check(bool condition, const std::string& what) -> void {
 }
 
 auto section(const char* title) -> void { std::printf("\n=== %s ===\n", title); }
+
+/** The file the logger writes to for this run. The logger flushes every line, so a test can count
+ *  what the code under test SAID -- which is the thing an operator's accounting is built from. */
+[[nodiscard]] auto log_path() -> const std::filesystem::path& {
+    static const auto path = std::filesystem::temp_directory_path() /
+                             ("test_encoder_queue_" + std::to_string(::getpid()) + ".log");
+    return path;
+}
+
+[[nodiscard]] auto log_lines_containing(std::string_view needle) -> int {
+    std::ifstream in{log_path()};
+    int count = 0;
+    for (std::string line; std::getline(in, line);) {
+        if (line.contains(needle)) ++count;
+    }
+    return count;
+}
+
+/** The two per-request lines `EncoderService::answer` writes, and the only two a request that
+ *  reached the shared queue can produce. */
+constexpr std::string_view kThroughQueue = "answered through the shared queue";
+constexpr std::string_view kDegradedLocally = "answered locally after the shared queue degraded";
 
 using ChainResult = std::expected<std::optional<Parsed>, std::string>;
 
@@ -164,12 +190,15 @@ class ThrowingBackend final : public InferenceBackend {
 }  // namespace
 
 int main() {
+    logger::Logger::getInstance().initialize(log_path().string(), logger::LogLevel::INFO, false);
+
     section("the wire codec round-trips anything a visitor can type");
     {
         const std::vector<EncoderRequest> requests{
             {"amortize 480000 at 6.5% for 30 years", "", ""},
             {"What's the payment on a $420,000 loan at 6.5%?", "Over how many years?", "30 years"},
             {"quotes \" backslash \\ newline \n tab \t unicode \xC3\xA9\xE2\x82\xAC", "", "x"},
+            {"a bare control byte \x01 and a DEL \x7f", "\x1f", "\x02"},
             {"", "", ""},
         };
         for (const auto& request : requests) {
@@ -270,6 +299,9 @@ int main() {
         check(got == want,
               "every answer that came back through the queue equals the one the process gives "
               "itself (params, <NONE> and refusals alike)");
+        check(log_lines_containing(kThroughQueue) == kRequests,
+              "and the service SAID so for each of them -- the positive control for the "
+              "degraded-path count below, which proves nothing if this line never appears");
         check(queue.submitted() == kRequests,
               "every request was SUBMITTED to the queue -- none bypassed it");
         const int a = chain_a.runs->load();
@@ -376,7 +408,23 @@ int main() {
         const auto elapsed = std::chrono::steady_clock::now() - started;
         check(answer == service.backend().answer(request),
               "an unreachable SGEE cluster still yields the same answer");
+        const auto raw = unreachable.submit(options_calculator::encoder_queue::encode_request(request));
+        check(raw.has_value() && raw->ok && raw->degraded,
+              "and the admission object says the outcome was a DEGRADE, not the queue's answer");
         check(elapsed < 5s, "and promptly, not after the 90 s remote deadline");
+
+        // THE ACCOUNTING LINE. An admission object degrades by returning `local_.submit()`, whose
+        // outcome is ok == true -- the same bytes a queue success has -- so a request answered right
+        // here used to be logged as "answered through the shared queue", and the operator's
+        // `queued == executed` accounting lied by exactly the number of fallbacks.
+        constexpr int kFallbacks = 3;
+        const int through_before = log_lines_containing(kThroughQueue);
+        const int degraded_before = log_lines_containing(kDegradedLocally);
+        for (int i = 0; i < kFallbacks; ++i) (void)service.answer(&unreachable, request);
+        check(log_lines_containing(kThroughQueue) - through_before == 0,
+              "with the queue unreachable NO request is reported as answered through it");
+        check(log_lines_containing(kDegradedLocally) - degraded_before == kFallbacks,
+              "and each of the " + std::to_string(kFallbacks) + " that were answered here says so");
 
         FixedBackend failed{InferenceOutcome{.ok = false, .text = {}, .error = "cluster down"}};
         check(service.answer(&failed, request) == service.backend().answer(request),
@@ -406,6 +454,142 @@ int main() {
         }
         check(std::chrono::steady_clock::now() - started < 2s,
               "an idle runner stops promptly when its owner goes away");
+    }
+
+    section("ENCODER_QUEUE_MAX_IN_FLIGHT is read strictly: 0 is a value, a typo is an error");
+    {
+        using options_calculator::encoder_queue::kDefaultMaxInFlight;
+        using options_calculator::encoder_queue::parse_max_in_flight;
+        const auto parsed = [](const char* raw) { return parse_max_in_flight(raw); };
+
+        check(parsed(nullptr) == std::expected<std::size_t, std::string>{kDefaultMaxInFlight},
+              "unset reads as the default");
+        check(parsed("") == std::expected<std::size_t, std::string>{kDefaultMaxInFlight},
+              "and so does an empty value");
+        check(parsed("0") == std::expected<std::size_t, std::string>{0},
+              "0 is accepted as 'this replica never submits' -- QueueSlots{0} refuses every acquire");
+        check(parsed("64") == std::expected<std::size_t, std::string>{64}, "64 reads as 64");
+        for (const char* bad : {"abc", " 64", "64 ", "-1", "+3", "1.5", "0x10", "6 4", "99999999999999999999"}) {
+            const auto result = parsed(bad);
+            check(!result.has_value() && result.error().contains(std::string("\"") + bad + "\""),
+                  std::string("'") + bad + "' is refused, and the message names the value");
+        }
+
+        // A bound of zero must really mean it: not one request reaches the queue, every one is
+        // answered here, and the log says each was answered in-process.
+        CountingChain chain;
+        EncoderService never{chain.make(), &render, "test encoder", 0};
+        FixedBackend untouched{InferenceOutcome{.ok = false, .text = {}, .error = "must not be called"}};
+        for (int i = 0; i < 3; ++i) (void)never.answer(&untouched, {"pay 1", "", ""});
+        check(untouched.calls.load() == 0 && chain.runs->load() == 3,
+              "with a bound of 0 the queue is never submitted to and the chain ran locally 3 times");
+    }
+
+    section("a build is fingerprinted from its bytes, and an unreadable one isolates itself");
+    {
+        using options_calculator::encoder_queue::build_fingerprint;
+        const auto dir = std::filesystem::temp_directory_path() /
+                         ("test_encoder_queue_fp_" + std::to_string(::getpid()));
+        std::filesystem::create_directories(dir);
+        const auto write = [&](const char* name, std::string_view bytes) {
+            std::ofstream{dir / name, std::ios::binary} << bytes;
+            return dir / name;
+        };
+        const auto model_a = write("a.gguf", "weights, schema and tokenizer of build A");
+        const auto model_a2 = write("a_copy.gguf", "weights, schema and tokenizer of build A");
+        const auto model_b = write("b.gguf", "weights, schema and tokenizer of build B");
+        const auto exe_1 = write("exe1", "code of binary one");
+        const auto exe_2 = write("exe2", "code of binary two");
+
+        check(build_fingerprint(model_a, exe_1) == build_fingerprint(model_a2, exe_1),
+              "the same bytes under another path are the same build -- it is the CONTENT that counts");
+        check(build_fingerprint(model_a, exe_1) != build_fingerprint(model_b, exe_1),
+              "a retrained model (same code) is another build");
+        check(build_fingerprint(model_a, exe_1) != build_fingerprint(model_a, exe_2),
+              "a changed binary (same model) is another build -- the renderer lives in the code");
+        const auto running = build_fingerprint(model_a);
+        check(!running.starts_with("unshared.") && running == build_fingerprint(model_a),
+              "this process's own executable is readable, and fingerprints the same every time");
+
+        const auto isolated_1 = build_fingerprint(model_a, dir / "no-such-binary");
+        const auto isolated_2 = build_fingerprint(model_a, dir / "no-such-binary");
+        check(isolated_1.starts_with("unshared.") && isolated_1 != isolated_2,
+              "a build that cannot be identified shares with NO ONE, not even an identical twin");
+        check(build_fingerprint(dir / "no-such-model", exe_1).starts_with("unshared."),
+              "and so does one whose model cannot be read");
+        std::filesystem::remove_all(dir);
+    }
+
+    section("AssistantRuntime: what executes here, what is available, and a queue that cannot be built stays local");
+    {
+        using options_calculator::assistant_runtime::AssistantRuntime;
+        using options_calculator::inference_queue::Surface;
+        const auto encoder_service = [] {
+            static CountingChain chain;
+            return std::make_unique<EncoderService>(chain.make(), &render, "test encoder", 4);
+        };
+
+        AssistantRuntime bare{Surface::Mortgage, "Mortgage assistant"};
+        check(!bare.available() && !bare.holds_model() && !bare.queued() && bare.encoder() == nullptr,
+              "a runtime that adopted nothing is unavailable, holds no model and has no queue");
+        const auto refused = bare.submit("a decoder prompt");
+        check(refused.has_value() && !refused->ok && refused->error == "model not loaded",
+              "and a decoder prompt is a populated failure, never a wait on a thread that does not exist");
+
+        AssistantRuntime with_encoder{Surface::Strategy, "Strategy assistant"};
+        with_encoder.adopt(encoder_service());
+        const EncoderRequest request{"pay 1", "q", "r"};
+        check(with_encoder.available() && with_encoder.holds_model() && !with_encoder.queued(),
+              "an encoder makes it available AND loaded -- the two questions are answered separately "
+              "and forgetting either was a measured outage");
+        check(with_encoder.answer(request) == with_encoder.encoder()->backend().answer(request),
+              "and with no queue it answers in this process, exactly as the backend does");
+
+        // Every way of asking for a queue that cannot be built must leave a working local assistant:
+        // a cluster that cannot be reached costs the shared queue and nothing else.
+        ::unsetenv("DATABASE_URL");
+        ::unsetenv("SGEE_PEERS");
+        for (const char* mode : {"nonsense", "postgres", "sgee"}) {
+            ::setenv("INFERENCE_QUEUE", mode, 1);
+            AssistantRuntime runtime{Surface::Mortgage, "Mortgage assistant"};
+            runtime.adopt(encoder_service());
+            runtime.configure_queue();
+            check(!runtime.queued() && runtime.available(),
+                  std::string("INFERENCE_QUEUE=") + mode +
+                      " that cannot be configured leaves the assistant on local-only inference");
+        }
+        ::unsetenv("INFERENCE_QUEUE");
+    }
+
+    section("a lease source that throws costs a tick, not the process");
+    {
+        // fill() allocates and spawns a write-back thread for each job it leases; either can throw
+        // under a container's thread or memory limit. The runner's thread is a std::jthread, so an
+        // exception escaping it is std::terminate -- both assistants and the calculator with them.
+        class ThrowOnceSource final : public LeaseSource {
+          public:
+            explicit ThrowOnceSource(LeaseSource& inner) : inner_(inner) {}
+            [[nodiscard]] auto fill(std::size_t want) -> std::vector<PendingJob> override {
+                if (!thrown_.exchange(true)) throw std::runtime_error("fill boom");
+                return inner_.fill(want);
+            }
+            [[nodiscard]] auto thrown() const -> bool { return thrown_.load(); }
+
+          private:
+            LeaseSource& inner_;
+            std::atomic<bool> thrown_{false};
+        };
+
+        InMemoryQueue queue;
+        auto source = std::make_shared<ThrowOnceSource>(queue);
+        CountingChain chain;
+        const auto executor = make_backend(chain);
+        LeaseRunner runner{source, *executor, "fragile replica"};
+        const auto outcome = queue.submit(
+            options_calculator::encoder_queue::encode_request({"pay 1", "", ""}));
+        check(source->thrown(), "the source did throw (the case is real, not vacuous)");
+        check(outcome.has_value() && outcome->ok && chain.runs->load() == 1,
+              "and the runner kept going: the next job was leased and executed");
     }
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
