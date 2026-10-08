@@ -26,7 +26,9 @@ using options_calculator::inference_admission::resolve_device;
 
 namespace {
 
-// What a job still queued at shutdown is told; assistant_service.cpp's wording.
+// What QueuedBackend::submit() answers once shut down (inference_admission.cppm's
+// kShuttingDownMessage). The test hands the same string to drain_and_fail(), so a job
+// still queued at shutdown and a late caller are told the same thing.
 constexpr std::string_view kShuttingDown = "assistant backend is shutting down";
 
 int g_checks = 0;
@@ -74,9 +76,8 @@ class GatedEchoBackend final : public QueuedBackend {
         worker_.join();
         // drain_and_fail()'s reason is a free parameter, not tied to the base's own
         // shutting-down message (used only by submit()'s post-shutdown path), so this
-        // test passes the identical string to prove both call sites agree, exactly as
-        // SensenBackend's real shutdown path does (see assistant_service.cpp's own
-        // drain_and_fail(...) call sites).
+        // test passes the identical string to prove both call sites can agree. The real
+        // service words its drain "assistant worker shutting down" (assistant_service.cpp).
         drain_and_fail(kShuttingDown);
     }
 

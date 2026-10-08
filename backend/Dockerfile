@@ -707,6 +707,17 @@ COPY backend/start.sh   /app/start.sh
 # engine was compiled against.
 COPY --from=builder /src/build/generated/api_descriptor.pb /etc/envoy/api_descriptor.pb
 
+# Validate the configuration with the binary that will run it. Envoy refuses a transcoder that names a
+# service the descriptor does not contain ("Could not find '<service>' in the proto descriptor") and
+# the replica then crash-loops under a SUCCESS deployment, because the healthcheck passes before the
+# throw. This is the one place where envoy.yaml, the descriptor built from backend/proto/*.proto and
+# the Envoy that reads both are present together, so a half-applied change to the service list fails
+# the IMAGE build -- the deploy path -- instead of every replica after the cutover.
+# EnvoyTranscoderServicesTest checks the same property from the source tree, but only under ctest,
+# which this image never runs. start.sh appends the native-gRPC listener at container start; that
+# listener carries no transcoder, so it is outside what this proves.
+RUN /usr/local/bin/envoy --mode validate -c /etc/envoy/envoy.yaml
+
 # The assistant's models -- calculator.assistant.StrategyAssistant's decoder and
 # encoder -- carried over from the `model` stage at the top of this file, which
 # already verified each against its own checksum (or deliberately fetched nothing --
@@ -739,15 +750,19 @@ ARG MODEL_URL
 # Set UNCONDITIONALLY, not gated on the URL, because a model can now also
 # arrive by being staged into the build context -- in which case the URL is
 # empty and the old `${MODEL_URL:+...}` form produced an empty path for a
-# model that is actually present. start.sh unsets whichever of these points
-# at a file that is not there, so the "no model" mode still reports
+# model that is actually present. start.sh unsets this path when it names a
+# file that is not there, so the "no model" mode still reports
 # MODEL_UNAVAILABLE rather than trying to open a path that does not exist.
 ENV MODEL_PATH=/app/model/strategy-assistant.gguf
 
-# The ENCODER's path. Set unconditionally for the same reason the one above is:
-# the engine treats a path naming no file exactly like an unset one, and the
-# basename matches the model stage's encoder step -- if that is renamed, this
-# line moves with it.
+# The ENCODER's path. Set unconditionally for the same reason the one above is, and the
+# basename matches the model stage's encoder step -- if that is renamed, this line moves
+# with it. Unlike MODEL_PATH it is NOT unset by start.sh when the file is absent, and that
+# is deliberate: it is read only when ASSISTANT_MODEL=encoder, and an operator who asked
+# for the encoder on an image that carries none should be told so. Either way the
+# assistant is unavailable and every other service is unaffected (measured against the
+# built engine); a missing file logs an ERROR naming the path, where an unset variable
+# would log a WARN that the variable is not set -- which would be untrue here.
 #
 # ASSISTANT_MODEL is deliberately NOT set here. It defaults to qwen3 in the
 # service, so an image carrying the encoder changes nothing until an operator

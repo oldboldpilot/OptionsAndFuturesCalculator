@@ -344,7 +344,7 @@ Configures self-hosted open-source Supabase services (GoTrue auth, PostgREST dat
 - **Success Gate and Verification**:
   - Asserts deployment status via `railway deployment list --service assistant-worker` (`deploy/assistant-worker/deploy.sh:127-128`).
   - Checks log output for loaded model weights: `railway logs --service assistant-worker --deployment <id> | grep 'model is LOADED'` (`deploy/assistant-worker/deploy.sh:130-131`).
-  - Invariant: `assistant-worker` must have `MODEL_URL` and `STRATEGY_ENCODER_URL` configured and log "model is LOADED"; the main engine (`options-calculator-backend`) must have them unset and log "NOT LOCAL -- submitting to the shared inference queue" (`deploy/assistant-worker/README.md:33-44`).
+  - Invariant (split-fleet design, REVERTED 2026-08-23 and the service deleted; a template only): `assistant-worker` had `MODEL_URL` configured and logged "model is LOADED", while the engine had it unset and logged "NOT LOCAL -- submitting to the shared inference queue" (`deploy/assistant-worker/README.md:38-50`). **This does not describe production:** `options-calculator-backend` serves the strategy encoder in-process and must keep `STRATEGY_ENCODER_URL` / `STRATEGY_ENCODER_SHA256` set.
 
 ### MortgageFV Gateway (`deploy/mfv-gateway/`)
 - **Purpose**: Minimal Caddy-based API reverse proxy presenting GoTrue and PostgREST behind a single origin matching Supabase client URL expectations (`deploy/mfv-gateway/Caddyfile:1-9`).

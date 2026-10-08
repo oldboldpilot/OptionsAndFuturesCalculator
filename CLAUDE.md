@@ -43,11 +43,18 @@ port needs no proxy change — but each one must still be added to Envoy's
 
 > **MOVED 2026-10: the former fourth service, `mortgage.assistant.MortgageAssistant`, is no
 > longer served by this engine.** It runs as the separate `mfv-assistant` Railway service built
-> from the `mortgage-nest-egg` repository (`services/mortgage-assistant`), which also holds the
+> from the `nest-egg-loan` repository (formerly `mortgage-nest-egg`; its local checkout directory
+> keeps the old name) at `services/mortgage-assistant`, which also holds the
 > canonical `mortgage_assistant.proto`; `mortgagefvcalculator.com` has called it there since the
 > client flip on 2026-10-08. Its sources, tests, Envoy transcoder entry, descriptor entry,
 > Dockerfile fetch and `MORTGAGE_*` environment reads were deleted from this repository in one
 > change, and `ParseOperation` on `api.optionsandfuturescalculator.com` no longer answers.
+> **That also retires the client's old rollback.** At `nest-egg-loan` `3850847`, its
+> assistant-backend selector falls back to this engine when `ASSISTANT_API_URL` /
+> `ASSISTANT_SERVICE_TOKEN` are unset or one is unusable, and its docs name "unset the URL" as the
+> rollback; from this deploy on that target answers UNIMPLEMENTED, so unsetting them degrades the
+> assistant instead of restoring it (a fix is under way in that repository). Rolling back means
+> redeploying `mfv-assistant`, or redeploying this engine's previous image (record its deployment id first).
 > **Every other passage of this file that describes the mortgage assistant records what ran HERE
 > before the move. It is history, and the file paths it names (`mortgage_assistant_service.cpp`,
 > `mortgage_verification.cppm`, `mortgage_derivation.cppm`, `mortgage_grammar.cppm`,
@@ -739,13 +746,18 @@ model — score `[assistant] raw model output`, which is logged before it runs.
 
 ## Mortgage assistant
 
-> **THIS SECTION IS HISTORY (2026-10).** The mortgage assistant moved to the `mortgage-nest-egg`
+> **THIS SECTION IS HISTORY (2026-10).** The mortgage assistant moved to the `nest-egg-loan`
 > repository (`services/mortgage-assistant`, Railway service `mfv-assistant`) and was deleted from
 > this engine; see the note under "gRPC Surface". What follows records how it was built, measured
 > and broken while it lived here, and the lessons stand, but nothing below describes a service
-> this repository builds, tests or deploys. The corpus builders and trainer that fed its encoder
-> (`agent/train/encoder_*.py`, the parity gates) remain here; the builders that needed the
-> verifier's source (`agent/dataset/build_mortgage_dataset.py` and friends) left with it.
+> this repository builds, tests or deploys. The trainer and encoder tooling that fed its encoder
+> (`agent/train/encoder_*.py`, the parity gates) remain here. The mortgage corpus builders that
+> needed the verifier's source (`agent/dataset/build_mortgage_dataset.py`, `visitor_phrasing*.py`,
+> `test_corpus_invariants.py`) and the corpus-wide sweeps (`dbg_grounding`, `dbg_derivation`,
+> `scripts/sweep_corpus.py`) were DELETED, not moved: they exist in no other repository yet. They are
+> preserved at `c850701` (`git show c850701:agent/dataset/build_mortgage_dataset.py`) and are being
+> ported to `nest-egg-loan` (task #112); until that lands the mortgage corpus cannot be regenerated
+> from a checkout of either repository.
 
 ### The assistant returns what the visitor STATED, and asks only for what it cannot do without
 

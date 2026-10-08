@@ -409,9 +409,9 @@ enum class GateMode : std::uint8_t { Off, Warn, Enforce };
  * the same "is a Pro feature" text -- true of the 4, misleading for the 206,
  * whose actual problem was a key that failed the `pk_live_`/`sk_live_` + 43
  * character shape check in `api_key.cpp` before ever reaching the registry.
- * `surface.malformed_message` / `.unknown_message` / `.revoked_message` name
- * that distinction; `surface.message` is unchanged and still covers NoKey and
- * a well-formed free-tier identity, which genuinely are the same story.
+ * `kStrategySurface.malformed_message` / `.unknown_message` / `.revoked_message`
+ * name that distinction; `kStrategySurface.message` still covers NoKey and a
+ * well-formed free-tier identity, which genuinely are the same story.
  */
 /**
  * The copy a refusal carries for the assistant surface it describes, plus the RPC name

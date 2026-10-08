@@ -786,8 +786,8 @@ target_link_libraries(bench_finance_compute PRIVATE sensen_slim fastjson logger)
 add_executable(workflow_check tests/workflow_check.cpp)
 target_link_libraries(workflow_check PRIVATE sensen_slim fastjson logger)
 
-# mortgage_explanation: the PMI scenario put into words by the SAME Horn-clause
-# solver the derivation layer uses. It needs no verifier and no proto: it reasons
+# mortgage_explanation: the PMI scenario put into words by sensen's Horn-clause
+# solver (sensen.logic). It needs no verifier and no proto: it reasons
 # over FACTS the amortisation already produced, which is the property that keeps
 # a number out of the prose unless the engine computed it.
 add_executable(test_mortgage_explanation tests/test_mortgage_explanation.cpp)
@@ -933,8 +933,8 @@ target_sources(test_encoder_lexer_parity PRIVATE FILE_SET CXX_MODULES FILES
     sensen/src/numeric_lexer.cppm)
 target_link_libraries(test_encoder_lexer_parity PRIVATE fastjson)
 
-# The small-encoder mortgage assistant, end to end (lex -> tokenize -> encode -> mask ->
-# reconstruct). A probe that runs the WHOLE chain over the 600-row holdout IN PROCESS: it is
+# The small-encoder assistant chain, end to end (lex -> tokenize -> encode -> mask ->
+# reconstruct) over any GGUF and JSONL holdout. A probe that runs the WHOLE chain IN PROCESS: it is
 # the first thing that exercises the four gated pieces together rather than one at a time,
 # and it isolates "does the chain work" from "does the RPC plumbing work". Needs the sensen
 # encoder and tokenizer (sensen_slim), the reconstruct port and the deployed lexer.
@@ -1897,23 +1897,15 @@ endforeach()
 if(TARGET sgee_build_tests)
     add_dependencies(build_tests sgee_build_tests)
 endif()
-# DerivationCorpusSweepTest runs `dbg_derivation`, which does NOT match the
-# `^test_` filter above -- so without this the gate would run whatever binary
-# happened to be on disk. That is precisely the stale-binary trap this file
-# records against `ninja && ctest`, and a gate reading a stale binary passes
-# while proving nothing.
-if(TARGET dbg_derivation)
-    add_dependencies(build_tests dbg_derivation)
-endif()
+# EnvoyTranscoderServicesTest compares envoy.yaml with the descriptor set ON DISK, and the
+# descriptor is not a `^test_` executable, so the filter above never reaches it. Without this
+# edge `ninja build_tests && ctest` reads whatever descriptor an earlier build left behind, and
+# passes in exactly the case the test exists for -- a service dropped from the proto list with
+# envoy.yaml forgotten -- which is the stale-binary trap this block's header records.
+add_dependencies(build_tests proto_descriptor)
 
-# assistant_check / workflow_check are not ctest targets -- each needs a
-# GENERATED facts file, and a check that passes because its input was missing is
-# worse than no check. They are still built here, because a binary nothing
-# compiles rots exactly the way a binary nothing commits does: both of these
-# sat untracked in a worktree while their generators sat in version control,
-# gated by nothing.
-foreach(_t assistant_check workflow_check)
-    if(TARGET ${_t})
-        add_dependencies(build_tests ${_t})
-    endif()
-endforeach()
+# workflow_check is not a ctest target -- it needs a GENERATED facts file, and a check that
+# passes because its input was missing is worse than no check. It is still built here, because
+# a binary nothing compiles rots exactly the way a binary nothing commits does: it sat
+# untracked in a worktree while its generator sat in version control, gated by nothing.
+add_dependencies(build_tests workflow_check)

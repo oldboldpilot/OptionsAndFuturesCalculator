@@ -20,7 +20,7 @@ This document provides reference documentation for the wire contract of the thre
 > **Removed 2026-10: `mortgage.assistant.MortgageAssistant` (`ParseOperation`).** The mortgage
 > assistant is no longer served from this engine or from `api.optionsandfuturescalculator.com`;
 > `POST /mortgage.assistant.MortgageAssistant/ParseOperation` there no longer answers. It runs as the
-> separate `mfv-assistant` service built from the `mortgage-nest-egg` repository, where
+> separate `mfv-assistant` service built from the `nest-egg-loan` repository (formerly `mortgage-nest-egg`), where
 > `clients/mortgagefv/proto/mortgage_assistant.proto` is now the canonical copy of its contract and the
 > only place to read it. Callers that held an OFC-issued key for `ParseOperation` must move to that
 > service; nothing in this repository answers that call any more.
@@ -36,7 +36,7 @@ Numeric fields across this surface use two distinct wire types based on the unde
 
 | Wire type | Native engine type | Scope and rationale | Enforcing citation |
 | --- | --- | --- | --- |
-| `string` | `sensen::BigDecimal` (`Int256` scaled by $10^{38}$, 38 decimal places exact as of 2026-09-23; `__int128`/$10^{18}$/18 before) | Used for currency amounts, mortgage balances, interest rates, property values, contributions, and exact TVM/amortization arithmetic. Preserves the full scale across network boundaries and prevents precision loss in browser JavaScript clients where native `number` is an IEEE 754 `float64` (`backend/proto/finance.proto:33-37`). Also used as the value type in `FinanceParams.params` (`backend/proto/mortgage_assistant.proto:198-219`) to carry numeric literals without floating-point conversion. | `backend/proto/finance.proto:25-28`, `backend/proto/mortgage_assistant.proto:200-209` |
+| `string` | `sensen::BigDecimal` (`Int256` scaled by $10^{38}$, 38 decimal places exact as of 2026-09-23; `__int128`/$10^{18}$/18 before) | Used for currency amounts, mortgage balances, interest rates, property values, contributions, and exact TVM/amortization arithmetic. Preserves the full scale across network boundaries and prevents precision loss in browser JavaScript clients where native `number` is an IEEE 754 `float64` (`backend/proto/finance.proto:33-37`). Also used as the value type in `FinanceParams.params` (a `map<string, string>` in `nest-egg-loan`'s `clients/mortgagefv/proto/mortgage_assistant.proto`, which this repository no longer holds) to carry numeric literals without floating-point conversion. | `backend/proto/finance.proto:25-28`, `FinanceParams` in `nest-egg-loan:clients/mortgagefv/proto/mortgage_assistant.proto` |
 | `double` | IEEE 754 binary64 `double` | Used where computation is natively floating-point: option pricing models (Black-Scholes, trinomial trees, Monte Carlo), Greeks, implied volatilities, probabilities, futures cost-of-carry, bond yield/duration/convexity solvers, portfolio optimization, and empirical return statistics (`backend/proto/finance.proto:29-32`). Widening these to string would claim precision the engine never computed. | `backend/proto/finance.proto:29-32`, `backend/proto/calculator.proto:43-56` |
 
 Notable exceptions where monetary or financial fields are deliberately `double`:
@@ -66,7 +66,7 @@ In `DatedCashFlowRequest` (`backend/proto/finance.proto:443-448`) used by `Compu
 
 ### Mortgage assistant label-space exclusions
 Moved with the service (2026-10): which `sensen.finance.Finance` RPCs the mortgage assistant can name,
-and why the rest are excluded, is documented where the assistant now lives, in `mortgage-nest-egg`.
+and why the rest are excluded, is documented where the assistant now lives, in `nest-egg-loan`.
 
 ---
 
@@ -497,9 +497,9 @@ Contains `reason` (`Reason`: `REASON_UNSPECIFIED=0`, `UNSUPPORTED_STRATEGY=1`, `
 ## Service: `mortgage.assistant.MortgageAssistant` -- REMOVED 2026-10
 
 No longer part of this surface. The service, its proto, its Envoy transcoder entry and its descriptor
-entry were deleted from this repository when the assistant moved to `mortgage-nest-egg`
+entry were deleted from this repository when the assistant moved to `nest-egg-loan`
 (`services/mortgage-assistant`, Railway service `mfv-assistant`); its contract is
-`mortgage-nest-egg:clients/mortgagefv/proto/mortgage_assistant.proto`. A request to
+`nest-egg-loan:clients/mortgagefv/proto/mortgage_assistant.proto`. A request to
 `/mortgage.assistant.MortgageAssistant/ParseOperation` on this host is not routed to any service.
 
 ---
@@ -583,7 +583,7 @@ Every service, verification module, and validation rule has corresponding automa
 | `backend/tests/test_assistant_service.cpp` | In-process gRPC tests for `calculator.assistant.StrategyAssistant/ParseStrategy` over `StrategyAssistantWorkflow`: admission limits (1,000 char utterance, 400 char clarification), prompt injection rejection, model availability refusal, and did-compute postconditions. |
 | `backend/tests/test_assistant_verification.cpp` | Standalone verification unit tests for `assistant_verification.cppm`: closed-vocabulary strategy validation (48 strategies), ticker validation, quantity and expiration limits, and keyword extraction. |
 | `backend/tests/test_vendored_proto_drift.cpp` | Compares vendored client protos in `clients/mortgagefv/proto/` and `frontend/src/grpc/` against canonical backend protos in `backend/proto/`. |
-| `scripts/check_envoy_services.py` (ctest `EnvoyTranscoderServicesTest`) | The services `backend/envoy.yaml` lists under `grpc_json_transcoder` must equal the services in the generated `api_descriptor.pb`. A name Envoy cannot find in the descriptor makes it refuse the configuration (every replica crash-loops); a descriptor service missing from the list has no JSON route. |
+| `scripts/check_envoy_services.py` (ctest `EnvoyTranscoderServicesTest`) | The services `backend/envoy.yaml` lists under `grpc_json_transcoder` must equal the services in the generated `api_descriptor.pb`. A name Envoy cannot find in the descriptor makes it refuse the configuration (every replica crash-loops); a descriptor service missing from the list has no JSON route. The image build also runs `envoy --mode validate` on the same two files (`backend/Dockerfile`), so the first failure stops a deploy rather than the replicas. |
 
 ---
 

@@ -1,13 +1,20 @@
 # assistant-worker
 
+> **A REVERTED TEMPLATE, NOT THE CURRENT TOPOLOGY.** This split fleet was built and verified on
+> 2026-08-22 and reverted on 2026-08-23; the `assistant-worker` service is deleted. Production runs the
+> strategy ENCODER inside `options-calculator-backend` itself (`ASSISTANT_MODEL=encoder`), so that
+> service MUST keep `STRATEGY_ENCODER_URL` and `STRATEGY_ENCODER_SHA256` set. Nothing below is an
+> instruction to empty a variable on it. The text records the design as it was, when the only weights
+> in question were the Qwen3 decoder's (`MODEL_URL`).
+
 The replica that HOLDS the assistant weights. It leases from the shared
 inference queue, decodes, and writes the answer back. Nothing routes to it
 directly: it has no domain and serves no user traffic.
 
 `options-calculator-backend` is the counterpart. It keeps its replicas — that
 is what serves the two live sites' calculator and finance RPCs — but carries
-**no** models: `MODEL_URL` and `STRATEGY_ENCODER_URL` are empty there, so its
-assistants run submit-only, accepting the RPC and handing the work here.
+**no** models: `MODEL_URL` was empty there in this design, so its
+assistant ran submit-only, accepting the RPC and handing the work here.
 
 ## Why this is a separate service, not another replica
 
@@ -30,8 +37,8 @@ reachable from the CLI, so the staged tree carries this directory's
 
 ## The rule that keeps this honest
 
-**This service must NEVER have its model URLs emptied, and the engine must
-NEVER have them set.** If both carry weights the split saves nothing; if
+**In this design the worker must NEVER have `MODEL_URL` emptied, and the engine
+must NEVER have it set.** If both carry weights the split saves nothing; if
 neither does, every assistant request refuses. The startup banner is the check —
 one line per replica:
 

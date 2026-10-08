@@ -29,7 +29,8 @@ st=$(timeout 90 railway deployment list --service "$svc" --json 2>/dev/null \
 
 # 2. THE CHECKSUM INSIDE THE CONTAINER. Not a variable, not a local pin -- this
 #    repository's model-of-record line has been stale three times over, and only
-#    this reading has ever caught it.
+#    this reading has ever caught it. The file is the ENCODER because that is what the engine
+#    serves (ASSISTANT_MODEL=encoder); /app/model holds no decoder since 2026-10-03.
 got=$(timeout 180 railway ssh --service "$svc" -- sha256sum /app/model/strategy-encoder.gguf 2>/dev/null | awk '{print $1}' | tail -1)
 [ "$got" = "$want" ] && note "container sha256" "matches ($got)" || bad "container sha256" "got '$got' want '$want'"
 

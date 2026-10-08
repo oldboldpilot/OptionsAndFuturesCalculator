@@ -105,7 +105,7 @@ frames its trailers into the body and is unaffected.
 
 Native gRPC therefore DOES work over a path with no HTTP edge in it — the
 Railway TCP proxy at `tokaido.proxy.rlwy.net:34513`, TLS, trailers intact, all
-four services. See CLAUDE.md for the measured evidence and the `smoke_client`
+three services. See CLAUDE.md for the measured evidence and the `smoke_client`
 invocation.
 
 ## Code reference
@@ -121,7 +121,7 @@ describes why it is that way and what it cost to find out.
   named in the planning documents that **do not exist in the code**, including
   an edge function that is checked in, has no caller, and writes to a table no
   migration creates.
-- [gRPC surface reference](api/GRPC_SURFACE.md) — all four protos, every RPC and
+- [gRPC surface reference](api/GRPC_SURFACE.md) — all three protos, every RPC and
   message, with the units, the decimal-string rule, the day-offset convention,
   and the JSON-transcoder path for each method.
 - [Backend code map: the gRPC service layer](architecture/CODE_MAP_BACKEND_SERVICES.md)

@@ -15,7 +15,9 @@
 This document provides exhaustive reference documentation for the machine learning data and training pipeline, evaluation harnesses, operational maintenance scripts, backend C++ diagnostic probes, and the end-to-end integration smoke client across the repository:
 
 > The mortgage corpus builder, its gRPC evaluation harness and the mortgage-only probes this map used to
-> cover left this repository in 2026-10 with the mortgage assistant (see `CLAUDE.md`, "gRPC Surface").
+> cover were DELETED from this repository in 2026-10 with the mortgage assistant (see `CLAUDE.md`, "gRPC
+> Surface"); they were not moved. They are preserved at `c850701` and are being ported to
+> `nest-egg-loan` (task #112), so until that lands nothing in either checkout regenerates the mortgage corpus.
 
 - **ML Dataset Generators**:
   - `agent/dataset/build_dataset.py` (Options & Futures strategy extraction dataset)

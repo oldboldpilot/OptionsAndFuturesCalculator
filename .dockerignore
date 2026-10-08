@@ -91,7 +91,10 @@ backend/sensen/docs
 # (model-archive/ holds the bf16 safetensors, not the quantised files), so they
 # stay on disk and stop being copied into a local build context. Widen this back
 # to `*.gguf` the day a DECODER is staged deliberately, and say which one.
-!backend/models/*-encoder*.gguf
+#
+# `mortgage-encoder.gguf` is excluded by name for the same reason: the mortgage assistant it served
+# is gone from this image, and the pattern that admitted every `*-encoder*.gguf` would have copied it.
+!backend/models/strategy-encoder.gguf
 
 # model-archive/ holds MERGED BF16 CHECKPOINTS -- the safetensors a training run
 # produces, ~1.2-1.8 GB each, which are the INPUT to a GGUF conversion and reach
