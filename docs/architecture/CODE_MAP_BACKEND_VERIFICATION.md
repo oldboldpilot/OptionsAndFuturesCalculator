@@ -20,7 +20,7 @@ This document provides reference documentation for the verification, cataloguing
 - `backend/src/modules/testing_framework.cppm`
 
 > `mortgage_verification.cppm` and `mortgage_grammar.cppm`, which this map used to cover, left this
-> repository with the mortgage assistant (2026-10): the verifier now lives in `mortgage-nest-egg`, and
+> repository with the mortgage assistant (2026-10): the verifier now lives in `nest-egg-loan`, and
 > the grammar was decoder-only and was deleted with the Qwen3 path.
 
 ---

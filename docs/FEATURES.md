@@ -7,7 +7,7 @@ This document provides the authoritative, as-built reference inventory of all us
 
 The repository serves two distinct products from a single unified C++23 backend engine:
 1. **optionsandfuturescalculator.com** — The options and futures strategy calculator, risk modeler, and educational guides. Frontend implementation resides in `frontend/`, and backend RPCs are served by `calculator.OptionsCalculator` (`backend/proto/calculator.proto`) and `calculator.assistant.StrategyAssistant` (`backend/proto/assistant.proto`).
-2. **mortgagefvcalculator.com** — The loan amortization, time-value-of-money, real estate, and financial planning engine. Served by `sensen.finance.Finance` (`backend/proto/finance.proto`). Its natural-language assistant (`mortgage.assistant.MortgageAssistant`) moved to the `mortgage-nest-egg` repository in 2026-10 and is no longer served from this engine. **Its web client lives in a different repository** (with stubs and contracts mirrored in `clients/mortgagefv/`); only the backend engine, model runtime, and verification systems are housed here.
+2. **mortgagefvcalculator.com** — The loan amortization, time-value-of-money, real estate, and financial planning engine. Served by `sensen.finance.Finance` (`backend/proto/finance.proto`). Its natural-language assistant (`mortgage.assistant.MortgageAssistant`) moved to the `nest-egg-loan` repository in 2026-10 and is no longer served from this engine. **Its web client lives in a different repository** (with stubs and contracts mirrored in `clients/mortgagefv/`); only the backend engine, model runtime, and verification systems are housed here.
 
 Files covered by this inventory:
 - **Frontend Presentation & Routes**:
@@ -180,7 +180,7 @@ Domain Breakdown (48 RPCs):
 
 ## 3. The assistant
 
-The engine hosts **one in-process assistant** (`calculator.assistant.StrategyAssistant/ParseStrategy`, defined in `backend/proto/assistant.proto`), served by a small model on CPU via `sensen`. A second, mortgage assistant (`mortgage.assistant.MortgageAssistant/ParseOperation`) used to run in this engine; since 2026-10 it is its own service in the `mortgage-nest-egg` repository, and nothing in this section describes it.
+The engine hosts **one in-process assistant** (`calculator.assistant.StrategyAssistant/ParseStrategy`, defined in `backend/proto/assistant.proto`), served by a small model on CPU via `sensen`. A second, mortgage assistant (`mortgage.assistant.MortgageAssistant/ParseOperation`) used to run in this engine; since 2026-10 it is its own service in the `nest-egg-loan` repository, and nothing in this section describes it.
 
 ### Core invariants
 - **The assistant computes nothing**. It is a natural-language semantic decoder, not a math calculator: it converts words into parameters for `calculator.OptionsCalculator/CalculateStrategy`.

@@ -83,7 +83,7 @@ backend/sensen/docs
 #
 # It is still worth narrowing, for the build whose context IS this working tree.
 # Nothing in the image uses those four files -- the mortgage assistant they served
-# now lives in the mortgage-nest-egg repository, and a strategy assistant on its
+# now lives in the nest-egg-loan repository, and a strategy assistant on its
 # ENCODER loads no decoder at all, because the worker constructor returns BEFORE
 # touching one when its backend is `encoder`.
 #

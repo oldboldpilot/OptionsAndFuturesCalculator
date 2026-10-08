@@ -8,8 +8,9 @@
 those names against. The two are edited in different files and nothing connects them:
 
   - A service NAMED in envoy.yaml and ABSENT from the descriptor makes Envoy refuse the
-    whole configuration at startup. Every replica crash-loops while Railway reports the
-    deployment SUCCESS, because the healthcheck passes before the throw.
+    whole configuration at startup, before it binds :8080. /healthz is answered by Envoy
+    itself, so it never responds and the deploy fails its healthcheck while the previous
+    deployment keeps serving (backend/Dockerfile repeats this check at image-build time).
   - A service in the descriptor and NOT named in envoy.yaml is not fatal and is worse:
     its JSON route silently does not exist, and only a caller notices.
 
@@ -90,7 +91,7 @@ def verdict(envoy: set[str], descriptor: set[str]) -> list[str]:
         problems.append(f"compared NOTHING (envoy {len(envoy)}, descriptor {len(descriptor)}) -- "
                         "a parser that finds no services reports a pass on a broken tree")
     problems += [f"envoy.yaml names {s}, which the descriptor does not contain: Envoy refuses "
-                 "the configuration and every replica crash-loops" for s in sorted(envoy - descriptor)]
+                 "the configuration at startup and the deploy fails its healthcheck" for s in sorted(envoy - descriptor)]
     problems += [f"the descriptor contains {s}, which envoy.yaml does not list: its JSON route "
                  "does not exist" for s in sorted(descriptor - envoy)]
     return problems

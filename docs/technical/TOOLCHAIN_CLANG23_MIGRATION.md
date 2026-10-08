@@ -25,7 +25,7 @@ Measured A/B on one module, each compiler with its **own** `std.pcm`:
 | clang-tidy 23 | **5**, with 4 more correctly suppressed as non-user code |
 
 clang-tidy 23 also analyses a real 2,400-line module of ours
-(`backend/src/modules/mortgage_verification.cppm`, since moved to mortgage-nest-egg) and returns 23 actionable
+(`backend/src/modules/mortgage_verification.cppm`, since moved to nest-egg-loan) and returns 23 actionable
 diagnostics with no crash and no flood.
 
 **The first A/B was invalid, and the way it failed is worth keeping.** It scored

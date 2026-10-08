@@ -10,7 +10,7 @@ import sgee_queue_client;
  * The admission-queue/backpressure layer of the strategy assistant
  * (assistant_service.cpp), extracted out of that file's anonymous namespace
  * into one module. It was shared with a second assistant (mortgage) until that
- * service moved to the mortgage-nest-egg repository. `InferenceOutcome`, `PendingJob`,
+ * service moved to the nest-egg-loan repository. `InferenceOutcome`, `PendingJob`,
  * `InferenceBackend` and `QueuedBackend` below are the SAME classes that used
  * to live twice -- once per file -- with the SAME names and the SAME
  * behaviour; only their address changed. `SensenBackend`/`LlamaCppBackend`

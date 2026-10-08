@@ -2381,7 +2381,7 @@ inline constexpr std::array<std::string_view, 3> kStrategyNumericFields{
 /**
  * Render the ENCODER's parsed params as the JSON `validate_and_populate_params` reads.
  *
- * The op key comes from the SCHEMA (`strategy` here; the mortgage surface, now in mortgage-nest-egg, used `operation`) --
+ * The op key comes from the SCHEMA (`strategy` here; the mortgage surface, now in nest-egg-loan, used `operation`) --
  * hardcoding it is what made this service refuse every request with its own
  * "did not name a strategy" message while the chain's answer was right.
  *

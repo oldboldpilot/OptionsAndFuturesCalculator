@@ -31,7 +31,7 @@
 # "a dead entry beside a missing one reads exactly like coverage".
 #
 # mortgage_assistant.proto is deliberately NOT in this set any more. The mortgage
-# assistant moved to the mortgage-nest-egg repository (2026-10), whose copy is now
+# assistant moved to the nest-egg-loan repository (2026-10), whose copy is now
 # the canonical one, so there is no backend/proto/ file here to compare against. The
 # rule above makes that self-enforcing: a vendored copy re-added under clients/
 # fails as "NOT PRESENT" rather than quietly standing in for a contract this

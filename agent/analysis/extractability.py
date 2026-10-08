@@ -224,7 +224,7 @@ def cadence_hit(gold, utterance):
 
 
 # Small-cardinality convention constants the corpus teaches directly
-# (kConventionValues / kUngroundedFields in mortgage-nest-egg's mortgage_verification.cppm).
+# (kConventionValues / kUngroundedFields in nest-egg-loan's mortgage_verification.cppm).
 CONVENTION = {Decimal(0), Decimal(15), Decimal("0.1"), Decimal(1)}
 
 

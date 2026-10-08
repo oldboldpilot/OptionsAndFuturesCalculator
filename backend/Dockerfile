@@ -56,7 +56,7 @@ ARG BUCKET_SECRET_ACCESS_KEY=""
 # calculator.assistant.StrategyAssistant (backend/proto/assistant.proto) runs at
 # inference time -- the fine-tuned Qwen3-0.6B decoder GGUF (Q8_0, ~639 MB) and the
 # small encoder GGUF (~3.9 MB). A mortgage assistant's models used to be fetched here
-# too; that service now lives in the mortgage-nest-egg repository.
+# too; that service now lives in the nest-egg-loan repository.
 # --------------------------------------------------------------------------
 #
 # Everything this comment says about "the model" is true of both files: the reasoning
@@ -708,11 +708,13 @@ COPY backend/start.sh   /app/start.sh
 COPY --from=builder /src/build/generated/api_descriptor.pb /etc/envoy/api_descriptor.pb
 
 # Validate the configuration with the binary that will run it. Envoy refuses a transcoder that names a
-# service the descriptor does not contain ("Could not find '<service>' in the proto descriptor") and
-# the replica then crash-loops under a SUCCESS deployment, because the healthcheck passes before the
-# throw. This is the one place where envoy.yaml, the descriptor built from backend/proto/*.proto and
-# the Envoy that reads both are present together, so a half-applied change to the service list fails
-# the IMAGE build -- the deploy path -- instead of every replica after the cutover.
+# service the descriptor does not contain ("Could not find '<service>' in the proto descriptor") at
+# startup, before it binds :8080. /healthz is answered by Envoy itself (envoy.yaml), so it never
+# responds, start.sh exits the container, and the deploy fails its healthcheck (railway.json: 300 s)
+# while the previous deployment keeps serving. That is not an outage, but it is a five-minute wait and
+# a diagnosis from logs. This RUN turns it into an immediate IMAGE-build failure that prints Envoy's
+# exact message. It is the one place where envoy.yaml, the descriptor built from backend/proto/*.proto
+# and the Envoy that reads both are present together.
 # EnvoyTranscoderServicesTest checks the same property from the source tree, but only under ctest,
 # which this image never runs. start.sh appends the native-gRPC listener at container start; that
 # listener carries no transcoder, so it is outside what this proves.

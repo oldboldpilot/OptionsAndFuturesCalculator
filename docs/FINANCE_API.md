@@ -1139,7 +1139,7 @@ cheap, so take it.
 that per connection rather than relying on the multiplier, because which
 replica you land on is not yours to choose.
 
-Guarded by `src/lib/api-latency-contract.test.ts` in the mortgage-nest-egg
+Guarded by `src/lib/api-latency-contract.test.ts` in the nest-egg-loan
 repository, which asserts p95 stays well inside a second. Its thresholds are
 deliberately ~5x the measured figures: this runs over the public internet
 against a shared ingress, and a tight bound would fail for reasons that are not

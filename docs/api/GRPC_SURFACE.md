@@ -19,7 +19,8 @@ This document provides reference documentation for the wire contract of the thre
 
 > **Removed 2026-10: `mortgage.assistant.MortgageAssistant` (`ParseOperation`).** The mortgage
 > assistant is no longer served from this engine or from `api.optionsandfuturescalculator.com`;
-> `POST /mortgage.assistant.MortgageAssistant/ParseOperation` there no longer answers. It runs as the
+> `POST /mortgage.assistant.MortgageAssistant/ParseOperation` there is answered by no service (see the
+> exact responses below). It runs as the
 > separate `mfv-assistant` service built from the `nest-egg-loan` repository (formerly `mortgage-nest-egg`), where
 > `clients/mortgagefv/proto/mortgage_assistant.proto` is now the canonical copy of its contract and the
 > only place to read it. Callers that held an OFC-issued key for `ParseOperation` must move to that
@@ -499,8 +500,18 @@ Contains `reason` (`Reason`: `REASON_UNSPECIFIED=0`, `UNSUPPORTED_STRATEGY=1`, `
 No longer part of this surface. The service, its proto, its Envoy transcoder entry and its descriptor
 entry were deleted from this repository when the assistant moved to `nest-egg-loan`
 (`services/mortgage-assistant`, Railway service `mfv-assistant`); its contract is
-`nest-egg-loan:clients/mortgagefv/proto/mortgage_assistant.proto`. A request to
-`/mortgage.assistant.MortgageAssistant/ParseOperation` on this host is not routed to any service.
+`nest-egg-loan:clients/mortgagefv/proto/mortgage_assistant.proto`. No route or handler for it remains, so
+a request to `/mortgage.assistant.MortgageAssistant/ParseOperation` on this host reaches the engine's catch-all
+and is refused there. Measured on the image built from the deleting tree (`options-backend:m81j`, 2026-10-08):
+
+| Caller | Response |
+| --- | --- |
+| gRPC-Web (`nest-egg-loan`'s default transport) | HTTP 200, `grpc-status: 12` (UNIMPLEMENTED), empty body |
+| native gRPC, straight to the engine | `UNIMPLEMENTED` (12) (not re-measured through the Railway TCP proxy; same engine and listener) |
+| JSON (`POST` with `application/json`) | HTTP 200, `content-type: application/grpc`, `grpc-status: 2` (UNKNOWN), `grpc-message: Missing :te header`, `content-length: 0` -- the same status, message and empty body as `POST /foo.Bar/Baz` |
+
+It is never a 404 (Envoy's 404 is for GET/HEAD only, `backend/envoy.yaml`) and never a crash. A client that treats an
+empty 200 as an answer will misread the JSON case; check the `grpc-status` header.
 
 ---
 
@@ -583,7 +594,7 @@ Every service, verification module, and validation rule has corresponding automa
 | `backend/tests/test_assistant_service.cpp` | In-process gRPC tests for `calculator.assistant.StrategyAssistant/ParseStrategy` over `StrategyAssistantWorkflow`: admission limits (1,000 char utterance, 400 char clarification), prompt injection rejection, model availability refusal, and did-compute postconditions. |
 | `backend/tests/test_assistant_verification.cpp` | Standalone verification unit tests for `assistant_verification.cppm`: closed-vocabulary strategy validation (48 strategies), ticker validation, quantity and expiration limits, and keyword extraction. |
 | `backend/tests/test_vendored_proto_drift.cpp` | Compares vendored client protos in `clients/mortgagefv/proto/` and `frontend/src/grpc/` against canonical backend protos in `backend/proto/`. |
-| `scripts/check_envoy_services.py` (ctest `EnvoyTranscoderServicesTest`) | The services `backend/envoy.yaml` lists under `grpc_json_transcoder` must equal the services in the generated `api_descriptor.pb`. A name Envoy cannot find in the descriptor makes it refuse the configuration (every replica crash-loops); a descriptor service missing from the list has no JSON route. The image build also runs `envoy --mode validate` on the same two files (`backend/Dockerfile`), so the first failure stops a deploy rather than the replicas. |
+| `scripts/check_envoy_services.py` (ctest `EnvoyTranscoderServicesTest`) | The services `backend/envoy.yaml` lists under `grpc_json_transcoder` must equal the services in the generated `api_descriptor.pb`. A name Envoy cannot find in the descriptor makes it refuse the configuration at startup, so `/healthz` never answers and the deploy fails its healthcheck while the previous deployment keeps serving; a descriptor service missing from the list has no JSON route. The image build also runs `envoy --mode validate` on the same two files (`backend/Dockerfile`), which turns the first failure into an immediate build failure that prints Envoy's message. |
 
 ---
 

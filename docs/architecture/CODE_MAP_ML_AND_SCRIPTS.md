@@ -16,8 +16,8 @@ This document provides exhaustive reference documentation for the machine learni
 
 > The mortgage corpus builder, its gRPC evaluation harness and the mortgage-only probes this map used to
 > cover were DELETED from this repository in 2026-10 with the mortgage assistant (see `CLAUDE.md`, "gRPC
-> Surface"); they were not moved. They are preserved at `c850701` and are being ported to
-> `nest-egg-loan` (task #112), so until that lands nothing in either checkout regenerates the mortgage corpus.
+> Surface"); they were not moved. Where they are preserved and the state of the port are stated once, in the
+> `CLAUDE.md` banner under "Mortgage assistant".
 
 - **ML Dataset Generators**:
   - `agent/dataset/build_dataset.py` (Options & Futures strategy extraction dataset)

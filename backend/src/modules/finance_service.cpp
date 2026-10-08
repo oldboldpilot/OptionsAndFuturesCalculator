@@ -407,7 +407,7 @@ template <typename T>
 //   - A JSON caller through `grpc_json_transcoder` OMITS the field, so it
 //     arrives as "".
 //   - The ASSISTANT must emit every field its operation declares --
-//     the mortgage assistant's verifier (now in mortgage-nest-egg) refuses a missing key outright -- so
+//     the mortgage assistant's verifier (now in nest-egg-loan) refuses a missing key outright -- so
 //     it says "not this shape" with the convention value "0", which
 //     `kConventionValues` exempts from grounding precisely so that it can.
 //
@@ -5174,7 +5174,7 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
      *
      * Three of the four artifacts that describe this field speak days.
      * `finance.proto` documents `dates` as "day offsets from an arbitrary
-     * common epoch"; the mortgage assistant's verifier (now in mortgage-nest-egg) classifies it
+     * common epoch"; the mortgage assistant's verifier (now in nest-egg-loan) classifies it
      * `SlotKind::DayOffsets` and bounds it at 36,525 -- a hundred years IN
      * DAYS; and the training corpus labels "$23,099.61 after 372 days" as
      * 372.0, because the sentence the assistant reads is itself in days.
@@ -5200,7 +5200,7 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
     static constexpr double kSecondsPerDay = 86'400.0;
     /**
      * A hundred years in days -- the same ceiling
-     * the mortgage assistant verifier's `kMaxDayUnits` (now in mortgage-nest-egg) puts on this field, stated
+     * the mortgage assistant verifier's `kMaxDayUnits` (now in nest-egg-loan) puts on this field, stated
      * in the same unit so the two cannot drift apart unnoticed.
      */
     static constexpr double kMaxCashFlowDaySpan = 36'525.0;

@@ -48,11 +48,15 @@ port needs no proxy change — but each one must still be added to Envoy's
 > canonical `mortgage_assistant.proto`; `mortgagefvcalculator.com` has called it there since the
 > client flip on 2026-10-08. Its sources, tests, Envoy transcoder entry, descriptor entry,
 > Dockerfile fetch and `MORTGAGE_*` environment reads were deleted from this repository in one
-> change, and `ParseOperation` on `api.optionsandfuturescalculator.com` no longer answers.
+> change. `ParseOperation` on `api.optionsandfuturescalculator.com` is answered by no service: gRPC-Web
+> and native gRPC get UNIMPLEMENTED (12); JSON gets HTTP 200 with an empty body and `grpc-status: 2`
+> ("Missing :te header") in the headers; it is never a 404 and never a crash (measured on the image
+> built from the deleting tree; the table is under "Service: `mortgage.assistant.MortgageAssistant` --
+> REMOVED" in `docs/api/GRPC_SURFACE.md`).
 > **That also retires the client's old rollback.** At `nest-egg-loan` `3850847`, its
 > assistant-backend selector falls back to this engine when `ASSISTANT_API_URL` /
 > `ASSISTANT_SERVICE_TOKEN` are unset or one is unusable, and its docs name "unset the URL" as the
-> rollback; from this deploy on that target answers UNIMPLEMENTED, so unsetting them degrades the
+> rollback; from this deploy on that target is refused as above, so unsetting them degrades the
 > assistant instead of restoring it (a fix is under way in that repository). Rolling back means
 > redeploying `mfv-assistant`, or redeploying this engine's previous image (record its deployment id first).
 > **Every other passage of this file that describes the mortgage assistant records what ran HERE
@@ -3342,7 +3346,7 @@ concern and both of which are now user-visible:
 - mortgagefvcalculator.com USED to get `PERMISSION_DENIED` on every anonymous
   `ParseOperation` from this engine, so that integration needed a Pro credential before
   the assistant did anything at all. That call no longer reaches this engine (the
-  assistant runs in `mortgage-nest-egg`); the `sensen.finance.Finance` RPCs the site
+  assistant runs in `nest-egg-loan`); the `sensen.finance.Finance` RPCs the site
   also uses are ungated and unchanged.
 
 Task #44 — a live $0 Stripe round trip — remains unproven and needs owner

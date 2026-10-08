@@ -1,7 +1,7 @@
 # Container model hosting: getting two 639 MB GGUFs into every replica, every deploy
 
 > **HISTORY (2026-10).** The mortgage assistant this document describes moved to the
-> `mortgage-nest-egg` repository (`services/mortgage-assistant`) and was deleted from this one. The
+> `nest-egg-loan` repository (`services/mortgage-assistant`) and was deleted from this one. The
 > source paths it names (`mortgage_assistant_service.cpp`, `mortgage_verification.cppm`,
 > `mortgage_derivation.cppm`, `mortgage_grammar.cppm`, `proto/mortgage_assistant.proto`, and the
 > mortgage scorers, probes and corpus builders under `scripts/` and `agent/`) no longer exist here and

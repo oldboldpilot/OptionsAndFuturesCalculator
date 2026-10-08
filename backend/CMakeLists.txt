@@ -687,9 +687,10 @@ add_test(NAME CoreEngineTest COMMAND test_runner)
 
 # EnvoyTranscoderServicesTest: the JSON transcoder's service list in envoy.yaml must
 # equal the services in the descriptor set built above. A service named in envoy.yaml
-# and missing from the descriptor makes Envoy refuse the configuration, so every
-# replica crash-loops under a SUCCESS deployment; a service in the descriptor and not
-# in envoy.yaml silently has no JSON route. The CMake proto list and envoy.yaml are
+# and missing from the descriptor makes Envoy refuse the configuration at startup, so
+# /healthz (which Envoy itself answers) never responds and the deploy fails its
+# healthcheck while the previous deployment keeps serving; a service in the descriptor
+# and not in envoy.yaml silently has no JSON route. The CMake proto list and envoy.yaml are
 # edited in different files and nothing else connects them, which is what this does.
 #
 # Plain `python3`, deliberately NOT ${Python_EXECUTABLE}: that variable only exists when

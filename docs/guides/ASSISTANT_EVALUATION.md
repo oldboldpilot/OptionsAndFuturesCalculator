@@ -95,7 +95,7 @@ argue about whether to retrain. The same weights through the real RPC scored
 number, in either direction.
 
 **Discriminator.** `agent/train/eval_grpc.py` (options) drives the real RPC against a
-running `calculator_engine`. (Its mortgage twin, `eval_grpc_mortgage.py`, left with the
+running `calculator_engine`. (Its mortgage twin, `eval_grpc_mortgage.py`, was deleted with the
 mortgage assistant in 2026-10; the deleting commit's parent still holds it.) `eval_grpc.py`'s own docstring already said this in
 so many words — "evaluate.py measures the merged 16-bit weights straight out of
 training … but NOT what ships" — and was not read.
@@ -516,8 +516,8 @@ turn contains a `<params>` block.
     trade-off — it prints both columns and stops you calling a dead operation
     noise.
 12. **Run the reasoning pass** — this step was `scripts/emit_assistant_facts.py` then
-    `assistant_check`, which read the MORTGAGE harness's output and left with that
-    assistant in 2026-10. No equivalent exists for the options assistant. The lesson
+    `assistant_check`, which read the MORTGAGE harness's output; both were deleted with that
+    assistant in 2026-10 (preserved at `c850701`). No equivalent exists for the options assistant. The lesson
     it encoded stands: a non-zero `feature_absent` meant the corpus change did not take.
 
 ### Steps 8, 10 and 11 exist because step 8 was skipped

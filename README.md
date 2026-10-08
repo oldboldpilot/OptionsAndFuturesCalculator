@@ -21,7 +21,7 @@ The three services in `backend/proto/` declare 56 RPCs:
 | `sensen.finance.Finance` | `finance.proto` | 48: time value of money (10), mortgages and amortization (6), HELOC and refinance (2), real estate and rent-vs-buy (6), cash flow, NPV and IRR (6), depreciation (1), bonds and T-bills (2), futures, margin and hedging (5), option pricing (4), portfolio statistics and optimization (3), closing costs (1), state assumptions (2) |
 | `calculator.assistant.StrategyAssistant` | `assistant.proto` | 1: `ParseStrategy`, a plain-English request turned into strategy legs |
 
-The mortgage assistant (`mortgage.assistant.MortgageAssistant`, `ParseOperation`) is no longer served here: since 2026-10 it runs as its own service from the `mortgage-nest-egg` repository, which holds its contract.
+The mortgage assistant (`mortgage.assistant.MortgageAssistant`, `ParseOperation`) is no longer served here: since 2026-10 it runs as its own service from the `nest-egg-loan` repository, which holds its contract.
 
 Money fields in `finance.proto` are decimal strings backed by an exact fixed-point `BigDecimal`; fields the library computes in `double` are `double`. See [docs/FINANCE_API.md](docs/FINANCE_API.md).
 

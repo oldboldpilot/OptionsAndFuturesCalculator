@@ -421,7 +421,7 @@ enum class GateMode : std::uint8_t { Off, Warn, Enforce };
  * mortgage assistant refused with this surface's text, telling a mortgagefvcalculator.com
  * user to "build your strategy manually with the symbol and strategy selectors" -- controls
  * that do not exist on that site -- and its denials were logged as `rpc=ParseStrategy`.
- * That assistant now runs in the mortgage-nest-egg repository with its own gate; the
+ * That assistant now runs in the nest-egg-loan repository with its own gate; the
  * struct stays because it is where this surface's four complete sentences live, and
  * `check_assistant_entitlement` reads it, so its log line names the call it refused.
  */

@@ -18,7 +18,7 @@ This document covers the implementation, interfaces, invariants, error handling,
 - `backend/src/modules/assistant_service.cppm` and `backend/src/modules/assistant_service.cpp`
 
 > The mortgage assistant service (`mortgage_assistant_service.cppm/.cpp`) that this map used to cover
-> left this repository in 2026-10 and now lives in `mortgage-nest-egg` (`services/mortgage-assistant`).
+> left this repository in 2026-10 and now lives in `nest-egg-loan` (`services/mortgage-assistant`).
 
 ---
 

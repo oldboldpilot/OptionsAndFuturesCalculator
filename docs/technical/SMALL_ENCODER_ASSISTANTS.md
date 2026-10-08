@@ -1,6 +1,6 @@
 # The small-encoder assistants: architecture, training, accuracy, throughput, deployment
 
-> **Update 2026-10.** The mortgage half of this design now runs in the `mortgage-nest-egg` repository
+> **Update 2026-10.** The mortgage half of this design now runs in the `nest-egg-loan` repository
 > (`services/mortgage-assistant`) and was deleted from this engine. Where this document names
 > `mortgage_verification.cppm`, measures production `ParseOperation`, or cites a `MORTGAGE_*` selector, it
 > describes the engine as it was when it was written; those files and variables no longer exist here.
