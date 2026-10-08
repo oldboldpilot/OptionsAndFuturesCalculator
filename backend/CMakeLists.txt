@@ -1621,6 +1621,12 @@ add_test(NAME EncoderQueueClusterTest
                  ${CMAKE_CURRENT_SOURCE_DIR}/..)
 set_tests_properties(EncoderQueueClusterTest PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
 
+# An engine that cannot bind its listener must exit with a message, not SEGV in RunServer().
+add_test(NAME EngineBindFailureTest
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/engine_bind_failure_test.sh
+                 $<TARGET_FILE:calculator_engine>)
+set_tests_properties(EngineBindFailureTest PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+
 add_executable(test_sgee_queue_client
     tests/test_sgee_queue_client.cpp
 )
