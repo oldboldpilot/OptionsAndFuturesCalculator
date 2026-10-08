@@ -45,6 +45,7 @@ import assistant_verification;
 import sensen.encoder_assistant;
 import sensen.utterance_guards;
 import inference_admission;
+import encoder_queue;
 import inference_queue;
 import sgee_queue_client;
 import pg;
@@ -1436,6 +1437,11 @@ class LlamaCppBackend final : public QueuedBackend {
  * a build that was compiled without it is a configuration mistake rather than
  * a runtime failure, and it is reported as such.
  */
+// Defined with the rest of the encoder's rendering far below: the JSON TYPE of a field is a
+// fact about the service's own proto, which this file owns. The encoder backend is handed it at
+// construction.
+[[nodiscard]] auto encoder_params_to_json(const sensen::encoder_assistant::Parsed& parsed) -> std::string;
+
 class AssistantWorker {
   public:
     [[nodiscard]] static auto instance() -> AssistantWorker& {
@@ -1457,13 +1463,22 @@ class AssistantWorker {
     }
 
     /**
-     * The small bidirectional ENCODER, when ASSISTANT_MODEL=encoder selected it. nullptr on
-     * the default decoder path. Asked for one engine and unable to provide it, this assistant
-     * is UNAVAILABLE rather than quietly served by the other -- the ASSISTANT_BACKEND=llamacpp
-     * rule, which exists because every gate in this repository is defined on one path.
+     * Whether ASSISTANT_MODEL=encoder selected the small bidirectional ENCODER and it loaded.
+     * Asked for one engine and unable to provide it, this assistant is UNAVAILABLE rather than
+     * quietly served by the other -- the ASSISTANT_BACKEND=llamacpp rule, which exists because
+     * every gate in this repository is defined on one path.
      */
-    [[nodiscard]] auto encoder() const noexcept -> const sensen::encoder_assistant::EncoderAssistant* {
-        return encoder_.get();
+    [[nodiscard]] auto encoder_enabled() const noexcept -> bool { return encoder_ != nullptr; }
+
+    /**
+     * Answers one exchange on the encoder: through the shared queue when `INFERENCE_QUEUE`
+     * configured one (any replica holding the weights may execute it), in this process
+     * otherwise. Either way `EncoderBackend::answer()` decides what the chain's outcome means,
+     * so the two modes cannot disagree. Thread-safe.
+     */
+    [[nodiscard]] auto encoder_answer(const encoder_queue::EncoderRequest& request)
+        -> encoder_queue::Answer {
+        return encoder_->answer(admission_.get(), request);
     }
 
     /**
@@ -1561,12 +1576,22 @@ class AssistantWorker {
                     *enc_path, built.error()));
                 return;
             }
-            encoder_ = std::move(*built);
+            std::shared_ptr<const sensen::encoder_assistant::EncoderAssistant> assistant =
+                std::move(*built);
             log.info(std::format(
                 "Strategy ENCODER assistant ready: backend=sensen device=cpu, {} operations, {} "
                 "(slot,map) pairs, {} convention fields, vocab {}",
-                encoder_->operation_count(), encoder_->pair_count(),
-                encoder_->convention_fields(), encoder_->vocab_size()));
+                assistant->operation_count(), assistant->pair_count(),
+                assistant->convention_fields(), assistant->vocab_size()));
+            encoder_ = std::make_unique<encoder_queue::EncoderService>(
+                [assistant](const sensen::encoder_assistant::Turns& turns) {
+                    return assistant->parse(turns);
+                },
+                &encoder_params_to_json, "strategy encoder");
+            // The encoder rides the same shared queue as the decoder when one is configured:
+            // INFERENCE_QUEUE=sgee used to leave it in-process. In `local` mode this is the fast
+            // no-op it is for the decoder, and the encoder is called in-process as before.
+            configure_inference_queue();
             return;
         }
 
@@ -1799,12 +1824,10 @@ class AssistantWorker {
         // twice and, worse, fencing out the answer that arrives first.
         // A replica with no weights must NEVER install a lease source: leasing
         // is what commits it to executing, and it has nothing to execute with.
-        InferenceBackend* local = backend_.get();
+        InferenceBackend* local = local_executor();
         if (local != nullptr) {
-            auto lease_source = std::make_shared<inference_admission::SgeeLeaseSource>(
-                *client, inference_queue::Surface::Strategy, worker_id, /*visibility_ms=*/90000);
-            backend_->set_lease_source(lease_source);
-            lease_source_ = std::move(lease_source);
+            install_lease_source(std::make_shared<inference_admission::SgeeLeaseSource>(
+                *client, inference_queue::Surface::Strategy, worker_id, /*visibility_ms=*/90000));
         } else {
             no_local_ = std::make_unique<inference_admission::NoLocalBackend>();
             local = no_local_.get();
@@ -1814,14 +1837,14 @@ class AssistantWorker {
         // is a bound on a genuinely stuck request, not a target latency. The
         // poll returns the instant the task turns terminal.
         admission_ = std::make_unique<inference_admission::SgeeAdmission>(
-            *client, inference_queue::Surface::Strategy, *local,
-            std::chrono::milliseconds(90000));
+            *client, inference_queue::Surface::Strategy, *local, remote_deadline());
 
         logger::Logger::getInstance().info(
             "Strategy assistant: INFERENCE_QUEUE=sgee -- {} through the SGEE queue cluster "
             "(worker_id={})",
-            backend_ != nullptr ? "submitting and leasing, with the local backend as fallback"
-                                : "SUBMIT-ONLY (no local weights; never leases)",
+            local_executor() != nullptr
+                ? "submitting and leasing, with the local backend as fallback"
+                : "SUBMIT-ONLY (no local weights; never leases)",
             worker_id);
     }
 
@@ -1895,12 +1918,10 @@ class AssistantWorker {
 
         const std::string worker_id = "strategy-" + std::to_string(::getpid());
         // See the SGEE path: a replica with no weights never leases.
-        InferenceBackend* local = backend_.get();
+        InferenceBackend* local = local_executor();
         if (local != nullptr) {
-            auto lease_source = std::make_shared<inference_admission::PostgresLeaseSource>(
-                queue_, inference_queue::Surface::Strategy, worker_id);
-            backend_->set_lease_source(lease_source);
-            lease_source_ = std::move(lease_source);
+            install_lease_source(std::make_shared<inference_admission::PostgresLeaseSource>(
+                queue_, inference_queue::Surface::Strategy, worker_id));
         } else {
             no_local_ = std::make_unique<inference_admission::NoLocalBackend>();
             local = no_local_.get();
@@ -1918,21 +1939,46 @@ class AssistantWorker {
         // genuinely stuck request, at which point falling back late is still
         // strictly better than an anonymous MODEL_UNAVAILABLE.
         admission_ = std::make_unique<inference_admission::PostgresAdmission>(
-            queue_, inference_queue::Surface::Strategy, *local, std::chrono::milliseconds(90000));
+            queue_, inference_queue::Surface::Strategy, *local, remote_deadline());
 
         logger::Logger::getInstance().info(
             "Strategy assistant: INFERENCE_QUEUE=postgres -- {} the shared queue (worker_id={})",
-            backend_ != nullptr
+            local_executor() != nullptr
                 ? "submitting through and leasing from, with the local backend as fallback"
                 : "SUBMIT-ONLY through (no local weights; never leases)",
             worker_id);
+    }
+
+    /// The backend that EXECUTES on this replica: the decoder's owner-thread backend, the
+    /// encoder's inline one, or null on a submit-only replica (no weights here).
+    [[nodiscard]] auto local_executor() noexcept -> InferenceBackend* {
+        if (backend_ != nullptr) return backend_.get();
+        return encoder_ != nullptr ? &encoder_->backend() : nullptr;
+    }
+
+    /// How long a submitter waits on the shared queue before answering locally: 90 s for a
+    /// decode, `encoder_queue::kRemoteDeadline` for an encoder parse.
+    [[nodiscard]] auto remote_deadline() const noexcept -> std::chrono::milliseconds {
+        return encoder_ != nullptr ? encoder_queue::kRemoteDeadline
+                                           : std::chrono::milliseconds(90000);
+    }
+
+    /// Hands shared work to whatever executes here. A decoder's owner thread draws it in its own
+    /// loop; an encoder has no owner thread, so a runner drains the source into it.
+    auto install_lease_source(std::shared_ptr<LeaseSource> source) -> void {
+        if (backend_ != nullptr) {
+            backend_->set_lease_source(source);
+        } else {
+            encoder_->serve(source);
+        }
+        lease_source_ = std::move(source);
     }
 
     std::unique_ptr<QueuedBackend> backend_;
     /// Non-null only on ASSISTANT_MODEL=encoder. Loaded once then const, so parse() is safe
     /// from several threads -- unlike the decoder, whose generate() cannot be called
     /// concurrently because FeedForwardNetwork holds mutable scratch per instance.
-    std::unique_ptr<sensen::encoder_assistant::EncoderAssistant> encoder_;
+    std::unique_ptr<encoder_queue::EncoderService> encoder_;
     std::shared_ptr<pg::Pool> pool_;
     std::shared_ptr<inference_queue::Queue> queue_;
     std::shared_ptr<inference_admission::LeaseSource> lease_source_;
@@ -3051,7 +3097,7 @@ inline constexpr std::array<std::string_view, 4> kAllActionNames{
     // No params block for an unrecognised operation, deliberately: that is what the decoder
     // produces when it will not name a strategy, and the existing non-params path is what
     // turns it into a clarification or an honest refusal.
-    if (const auto* enc = AssistantWorker::instance().encoder(); enc != nullptr) {
+    if (AssistantWorker::instance().encoder_enabled()) {
         // BOTH TURNS, for the same reason `build_prompt` takes both: the reply to this
         // service's own clarifying question, and a revision ("change the expiry to 7 days"),
         // arrive ONLY in `prior_clarification`. A model handed just `utterance` re-reads the
@@ -3071,36 +3117,39 @@ inline constexpr std::array<std::string_view, 4> kAllActionNames{
         // mismatch for the 278 clarify ones. Adding the field is a wire change reaching the
         // proto, both vendored copies, the client's derived allow-list and the drift gate;
         // the measurement for keeping this as it stands is in the commit that made it.
-        auto parsed = enc->parse(sensen::encoder_assistant::Turns{
-            .utterance = ctx->utterance,
-            .prior_question = {},
-            .prior_clarification = ctx->prior_clarification});
-        if (!parsed.has_value()) {
-            // UNSUPPORTED_STRATEGY, and the choice is deliberate rather than convenient.
-            // assistant.proto has no code meaning "the serving chain refused", and the five
-            // it does have are UNSUPPORTED_STRATEGY, UNKNOWN_SYMBOL, OUT_OF_SCOPE,
-            // MODEL_UNAVAILABLE and DATA_UNAVAILABLE. Everything the chain can refuse is
-            // DETERMINISTIC -- a literal span that straddles a token boundary, an operation
-            // the schema cannot name, a literal that will not convert -- so
-            // MODEL_UNAVAILABLE would be a lie about retryability, and OUT_OF_SCOPE would
-            // claim the utterance was never about a strategy. UNSUPPORTED_STRATEGY says what
-            // is true: this engine cannot express what was described, and its own comment
-            // gives the reason to refuse rather than approximate -- "inventing the nearest
-            // match would misrepresent structures the trader never asked for".
-            //
-            // A dedicated reason would be better and is NOT added here: a new enumerator
-            // reaches the proto, both vendored copies, the client's derived allow-list and
-            // the drift gate, which is a wire change and not a detail to slip in.
-            populate_refusal(ctx->response, calculator::assistant::Refusal::UNSUPPORTED_STRATEGY,
-                             "The strategy assistant could not interpret this request: " +
-                                 parsed.error());
-            return std::unexpected(sgee::ExecutionError::ActionFailed);
+        const auto answer = AssistantWorker::instance().encoder_answer(
+            {.utterance = ctx->utterance,
+             .prior_question = {},
+             .prior_clarification = ctx->prior_clarification});
+        switch (answer.verdict) {
+            case encoder_queue::Verdict::Refused:
+                // UNSUPPORTED_STRATEGY, and the choice is deliberate rather than convenient.
+                // assistant.proto has no code meaning "the serving chain refused", and the five
+                // it does have are UNSUPPORTED_STRATEGY, UNKNOWN_SYMBOL, OUT_OF_SCOPE,
+                // MODEL_UNAVAILABLE and DATA_UNAVAILABLE. Everything the chain can refuse is
+                // DETERMINISTIC -- a literal span that straddles a token boundary, an operation
+                // the schema cannot name, a literal that will not convert -- so
+                // MODEL_UNAVAILABLE would be a lie about retryability, and OUT_OF_SCOPE would
+                // claim the utterance was never about a strategy. UNSUPPORTED_STRATEGY says what
+                // is true: this engine cannot express what was described, and its own comment
+                // gives the reason to refuse rather than approximate -- "inventing the nearest
+                // match would misrepresent structures the trader never asked for".
+                //
+                // A dedicated reason would be better and is NOT added here: a new enumerator
+                // reaches the proto, both vendored copies, the client's derived allow-list and
+                // the drift gate, which is a wire change and not a detail to slip in.
+                populate_refusal(ctx->response,
+                                 calculator::assistant::Refusal::UNSUPPORTED_STRATEGY,
+                                 "The strategy assistant could not interpret this request: " +
+                                     answer.text);
+                return std::unexpected(sgee::ExecutionError::ActionFailed);
+            case encoder_queue::Verdict::None:
+                ctx->model_text = "The assistant did not identify a strategy for this request.";
+                return {};
+            case encoder_queue::Verdict::Params:
+                break;
         }
-        if (!parsed->has_value()) {
-            ctx->model_text = "The assistant did not identify a strategy for this request.";
-            return {};
-        }
-        ctx->model_text = "<params>" + encoder_params_to_json(**parsed) + "</params>";
+        ctx->model_text = answer.text;
         return {};
     }
 

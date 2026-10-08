@@ -552,7 +552,7 @@ endif()
 
 # Core engine binary
 add_executable(calculator_engine src/main.cpp src/issue_key.cpp src/modules/calculator_service.cpp src/modules/finance_service.cpp src/modules/quota.cpp src/modules/api_key.cpp src/modules/assistant_service.cpp src/modules/mortgage_assistant_service.cpp src/modules/inference_queue.cpp src/modules/inference_admission.cpp src/modules/sgee_queue_client.cpp src/modules/strategy_store.cpp src/modules/state_refresh.cpp)
-target_sources(calculator_engine PUBLIC FILE_SET CXX_MODULES FILES src/modules/calculator_service.cppm src/modules/market_data.cppm src/modules/finance_service.cppm src/modules/quota.cppm src/modules/api_key.cppm src/modules/fips_mode.cppm src/modules/state_refresh.cppm src/modules/strategy_catalogue.cppm src/modules/assistant_verification.cppm src/modules/assistant_service.cppm src/modules/mortgage_verification.cppm src/modules/mortgage_explanation.cppm src/modules/mortgage_derivation.cppm src/modules/mortgage_grammar.cppm src/modules/mortgage_assistant_service.cppm src/modules/pg.cppm src/modules/inference_queue.cppm src/modules/sgee_queue_client.cppm src/modules/inference_admission.cppm src/modules/strategy_store.cppm src/modules/llq_weight_store.cppm)
+target_sources(calculator_engine PUBLIC FILE_SET CXX_MODULES FILES src/modules/calculator_service.cppm src/modules/market_data.cppm src/modules/finance_service.cppm src/modules/quota.cppm src/modules/api_key.cppm src/modules/fips_mode.cppm src/modules/state_refresh.cppm src/modules/strategy_catalogue.cppm src/modules/assistant_verification.cppm src/modules/assistant_service.cppm src/modules/mortgage_verification.cppm src/modules/mortgage_explanation.cppm src/modules/mortgage_derivation.cppm src/modules/mortgage_grammar.cppm src/modules/mortgage_assistant_service.cppm src/modules/pg.cppm src/modules/inference_queue.cppm src/modules/sgee_queue_client.cppm src/modules/inference_admission.cppm src/modules/encoder_queue.cppm src/modules/strategy_store.cppm src/modules/llq_weight_store.cppm)
 target_link_libraries(calculator_engine PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto sgee)
 # PostgreSQL::PostgreSQL is linked into calculator_engine further down, right
 # after find_package(PostgreSQL REQUIRED) runs (see that comment block) --
@@ -1487,6 +1487,8 @@ target_sources(test_assistant_service
         # module is not a header and does not come along with the .cpp.
         src/modules/sgee_queue_client.cppm
         src/modules/inference_admission.cppm
+        # The service routes its encoder through the shared queue via this module.
+        src/modules/encoder_queue.cppm
 )
 target_link_libraries(test_assistant_service PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto sgee PostgreSQL::PostgreSQL)
 
@@ -1519,6 +1521,7 @@ target_sources(test_mortgage_assistant_service
         # sgee_queue_client must be satisfied per target.
         src/modules/sgee_queue_client.cppm
         src/modules/inference_admission.cppm
+        src/modules/encoder_queue.cppm
 )
 target_link_libraries(test_mortgage_assistant_service PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto sgee PostgreSQL::PostgreSQL)
 
@@ -1585,6 +1588,38 @@ target_sources(test_inference_admission PRIVATE src/modules/inference_queue.cpp 
 target_link_libraries(test_inference_admission PRIVATE PostgreSQL::PostgreSQL fastjson logger sgee)
 
 add_test(NAME InferenceAdmissionTest COMMAND test_inference_admission)
+
+# The encoder assistants on the shared queue: the wire codec, EncoderBackend, ask() and
+# LeaseRunner, against a stub chain and an in-memory double of the queue. No model, no cluster,
+# no Postgres -- what needs a real broker (the surface filter, work-sharing across processes) is
+# tests/integration/encoder_queue_cluster_test.sh.
+add_executable(test_encoder_queue
+    tests/test_encoder_queue.cpp
+)
+target_sources(test_encoder_queue
+    PRIVATE
+    FILE_SET CXX_MODULES FILES
+        src/modules/pg.cppm
+        src/modules/inference_queue.cppm
+        src/modules/sgee_queue_client.cppm
+        src/modules/inference_admission.cppm
+        src/modules/encoder_queue.cppm
+)
+target_sources(test_encoder_queue PRIVATE src/modules/inference_queue.cpp src/modules/sgee_queue_client.cpp src/modules/inference_admission.cpp)
+target_link_libraries(test_encoder_queue PRIVATE sensen_slim PostgreSQL::PostgreSQL fastjson logger sgee)
+
+add_test(NAME EncoderQueueTest COMMAND test_encoder_queue)
+
+# The same claims against a REAL three-node SGEE cluster and REAL engines holding the real encoder
+# weights: encoders go through the queue, work is shared between engines, the surface partition
+# holds, served answers are byte-identical to local mode over the 272-row visitor regression and
+# the 1500-row strategy holdout, and a vanished cluster costs only the queue. Exit 77 (a named
+# skip) when the weights or python gRPC are absent -- the encoder GGUFs are not committed.
+add_test(NAME EncoderQueueClusterTest
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/encoder_queue_cluster_test.sh
+                 $<TARGET_FILE:sgee_queue_node> $<TARGET_FILE:calculator_engine>
+                 ${CMAKE_CURRENT_SOURCE_DIR}/..)
+set_tests_properties(EncoderQueueClusterTest PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
 
 add_executable(test_sgee_queue_client
     tests/test_sgee_queue_client.cpp
@@ -2147,6 +2182,15 @@ endif()
 if(TARGET dbg_derivation)
     add_dependencies(build_tests dbg_derivation)
 endif()
+
+# EncoderQueueClusterTest runs the real engine and a real queue node, neither of which matches the
+# `^test_` filter -- so without this it would exercise whatever binaries happened to be on disk,
+# which is the stale-binary trap again and the one that passes while proving nothing.
+foreach(_t calculator_engine sgee_queue_node)
+    if(TARGET ${_t})
+        add_dependencies(build_tests ${_t})
+    endif()
+endforeach()
 
 # assistant_check / workflow_check are not ctest targets -- each needs a
 # GENERATED facts file, and a check that passes because its input was missing is

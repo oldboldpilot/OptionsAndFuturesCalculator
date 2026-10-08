@@ -30,6 +30,7 @@ import sensen.utterance_guards;
 import mortgage_derivation;
 import mortgage_grammar;
 import inference_admission;
+import encoder_queue;
 import inference_queue;
 import sgee_queue_client;
 import pg;
@@ -1301,6 +1302,10 @@ class SensenBackend final : public QueuedBackend {
  * wrong schema, and every answer would be refused by the validator downstream
  * for reasons that describe the parameters rather than the mistake.
  */
+// Defined with the rest of the encoder's rendering far below: the JSON TYPE of a field is a
+// fact about finance.proto, which this file owns. The encoder backend is handed it at construction.
+[[nodiscard]] auto encoder_params_to_json(const sensen::encoder_assistant::Parsed& parsed) -> std::string;
+
 class MortgageAssistantWorker {
   public:
     [[nodiscard]] static auto instance() -> MortgageAssistantWorker& {
@@ -1342,17 +1347,24 @@ class MortgageAssistantWorker {
     }
 
     /**
-     * The small ENCODER assistant, when `MORTGAGE_ASSISTANT_BACKEND=encoder` selected it.
-     *
-     * nullptr on the default Qwen3 path. A caller must test this rather than assume, because
-     * both backends are supported images and neither is a fallback for the other -- the
-     * `ASSISTANT_BACKEND=llamacpp` rule: asked for one engine and unable to provide it, the
-     * assistant is UNAVAILABLE rather than quietly served by the other. Serving Qwen3 when
-     * the operator asked for the encoder would put production on a model no gate in this
-     * session covers, and vice versa.
+     * Whether `MORTGAGE_ASSISTANT_BACKEND=encoder` selected the small ENCODER assistant and it
+     * loaded. A caller must test this rather than assume, because both backends are supported
+     * images and neither is a fallback for the other -- the `ASSISTANT_BACKEND=llamacpp` rule:
+     * asked for one engine and unable to provide it, the assistant is UNAVAILABLE rather than
+     * quietly served by the other. Serving Qwen3 when the operator asked for the encoder would
+     * put production on a model no gate in this session covers, and vice versa.
      */
-    [[nodiscard]] auto encoder() const noexcept -> const sensen::encoder_assistant::EncoderAssistant* {
-        return encoder_.get();
+    [[nodiscard]] auto encoder_enabled() const noexcept -> bool { return encoder_ != nullptr; }
+
+    /**
+     * Answers one exchange on the encoder: through the shared queue when `INFERENCE_QUEUE`
+     * configured one (any replica holding the weights may execute it), in this process
+     * otherwise. Either way it is `EncoderBackend::answer()` that decides what the chain's
+     * outcome means, so the two modes cannot disagree. Thread-safe.
+     */
+    [[nodiscard]] auto encoder_answer(const encoder_queue::EncoderRequest& request)
+        -> encoder_queue::Answer {
+        return encoder_->answer(admission_.get(), request);
     }
 
     [[nodiscard]] auto submit(std::string prompt) -> std::optional<InferenceOutcome> {
@@ -1433,12 +1445,23 @@ class MortgageAssistantWorker {
                     *enc_path, built.error()));
                 return;
             }
-            encoder_ = std::move(*built);
+            std::shared_ptr<const sensen::encoder_assistant::EncoderAssistant> assistant =
+                std::move(*built);
             log.info(std::format(
                 "Mortgage ENCODER assistant ready: backend=sensen device=cpu, {} operations, {} "
                 "(slot,map) pairs, {} convention fields, vocab {}",
-                encoder_->operation_count(), encoder_->pair_count(),
-                encoder_->convention_fields(), encoder_->vocab_size()));
+                assistant->operation_count(), assistant->pair_count(),
+                assistant->convention_fields(), assistant->vocab_size()));
+            encoder_ = std::make_unique<encoder_queue::EncoderService>(
+                [assistant](const sensen::encoder_assistant::Turns& turns) {
+                    return assistant->parse(turns);
+                },
+                &encoder_params_to_json, "mortgage encoder");
+            // The encoder rides the same shared queue as the decoder when one is configured:
+            // INFERENCE_QUEUE=sgee used to leave it in-process, so a deployment that "scaled
+            // across backends" scaled nothing. In `local` mode this is the fast no-op it is for
+            // the decoder, and the encoder is called in-process exactly as before.
+            configure_inference_queue();
             return;
         }
 
@@ -1607,12 +1630,10 @@ class MortgageAssistantWorker {
         // A replica with no weights must NEVER install a lease source: leasing
         // is what commits it to executing, and it has nothing to execute with.
         // It submits only, and some model-carrying replica leases the job.
-        InferenceBackend* local = backend_.get();
+        InferenceBackend* local = local_executor();
         if (local != nullptr) {
-            auto lease_source = std::make_shared<inference_admission::SgeeLeaseSource>(
-                *client, inference_queue::Surface::Mortgage, worker_id, /*visibility_ms=*/90000);
-            backend_->set_lease_source(lease_source);
-            lease_source_ = std::move(lease_source);
+            install_lease_source(std::make_shared<inference_admission::SgeeLeaseSource>(
+                *client, inference_queue::Surface::Mortgage, worker_id, /*visibility_ms=*/90000));
         } else {
             no_local_ = std::make_unique<inference_admission::NoLocalBackend>();
             local = no_local_.get();
@@ -1622,14 +1643,14 @@ class MortgageAssistantWorker {
         // is a bound on a genuinely stuck request, not a target latency. The
         // poll returns the instant the task turns terminal.
         admission_ = std::make_unique<inference_admission::SgeeAdmission>(
-            *client, inference_queue::Surface::Mortgage, *local,
-            std::chrono::milliseconds(90000));
+            *client, inference_queue::Surface::Mortgage, *local, remote_deadline());
 
         logger::Logger::getInstance().info(
             "Mortgage assistant: INFERENCE_QUEUE=sgee -- {} through the SGEE queue cluster "
             "(worker_id={})",
-            backend_ != nullptr ? "submitting and leasing, with the local backend as fallback"
-                                : "SUBMIT-ONLY (no local weights; never leases)",
+            local_executor() != nullptr
+                ? "submitting and leasing, with the local backend as fallback"
+                : "SUBMIT-ONLY (no local weights; never leases)",
             worker_id);
     }
 
@@ -1698,12 +1719,10 @@ class MortgageAssistantWorker {
 
         const std::string worker_id = "mortgage-" + std::to_string(::getpid());
         // See the SGEE path: a replica with no weights never leases.
-        InferenceBackend* local = backend_.get();
+        InferenceBackend* local = local_executor();
         if (local != nullptr) {
-            auto lease_source = std::make_shared<inference_admission::PostgresLeaseSource>(
-                queue_, inference_queue::Surface::Mortgage, worker_id);
-            backend_->set_lease_source(lease_source);
-            lease_source_ = std::move(lease_source);
+            install_lease_source(std::make_shared<inference_admission::PostgresLeaseSource>(
+                queue_, inference_queue::Surface::Mortgage, worker_id));
         } else {
             no_local_ = std::make_unique<inference_admission::NoLocalBackend>();
             local = no_local_.get();
@@ -1722,22 +1741,46 @@ class MortgageAssistantWorker {
         // by a genuinely stuck request, at which point falling back late is
         // still strictly better than an anonymous MODEL_UNAVAILABLE.
         admission_ = std::make_unique<inference_admission::PostgresAdmission>(
-            queue_, inference_queue::Surface::Mortgage, *local,
-            std::chrono::milliseconds(90000));
+            queue_, inference_queue::Surface::Mortgage, *local, remote_deadline());
 
         logger::Logger::getInstance().info(
             "Mortgage assistant: INFERENCE_QUEUE=postgres -- {} the shared queue (worker_id={})",
-            backend_ != nullptr
+            local_executor() != nullptr
                 ? "submitting through and leasing from, with the local backend as fallback"
                 : "SUBMIT-ONLY through (no local weights; never leases)",
             worker_id);
+    }
+
+    /// The backend that EXECUTES on this replica: the decoder's owner-thread backend, the
+    /// encoder's inline one, or null on a submit-only replica (no weights here).
+    [[nodiscard]] auto local_executor() noexcept -> InferenceBackend* {
+        if (backend_ != nullptr) return backend_.get();
+        return encoder_ != nullptr ? &encoder_->backend() : nullptr;
+    }
+
+    /// How long a submitter waits on the shared queue before answering locally: 90 s for a
+    /// decode, `encoder_queue::kRemoteDeadline` for an encoder parse.
+    [[nodiscard]] auto remote_deadline() const noexcept -> std::chrono::milliseconds {
+        return encoder_ != nullptr ? encoder_queue::kRemoteDeadline
+                                           : std::chrono::milliseconds(90000);
+    }
+
+    /// Hands shared work to whatever executes here. A decoder's owner thread draws it in its own
+    /// loop; an encoder has no owner thread, so a runner drains the source into it.
+    auto install_lease_source(std::shared_ptr<LeaseSource> source) -> void {
+        if (backend_ != nullptr) {
+            backend_->set_lease_source(source);
+        } else {
+            encoder_->serve(source);
+        }
+        lease_source_ = std::move(source);
     }
 
     std::unique_ptr<QueuedBackend> backend_;
     /// Non-null only on MORTGAGE_ASSISTANT_BACKEND=encoder. Loaded once and then const, so
     /// `parse()` is safe from several threads -- unlike the decoder, whose `generate()` cannot
     /// be called concurrently because FeedForwardNetwork holds mutable scratch per instance.
-    std::unique_ptr<sensen::encoder_assistant::EncoderAssistant> encoder_;
+    std::unique_ptr<encoder_queue::EncoderService> encoder_;
     std::shared_ptr<pg::Pool> pool_;
     std::shared_ptr<inference_queue::Queue> queue_;
     std::shared_ptr<inference_admission::LeaseSource> lease_source_;
@@ -4095,7 +4138,7 @@ inline constexpr std::array<std::string_view, 4> kAllActionNames{
  * itself; it does not need to, because the asking lives in the serving layer, which is where
  * this project moved it when the weights lost the capability (0/90 -> 49/90). */
 [[nodiscard]] auto action_generate(Ctx& ctx) -> ExecutionResult<> {
-    if (const auto* enc = MortgageAssistantWorker::instance().encoder(); enc != nullptr) {
+    if (MortgageAssistantWorker::instance().encoder_enabled()) {
         // ALL THREE FIELDS, for the same reason `build_prompt` takes all three on the
         // decoder path: a second turn carries the answer to this service's own question, and
         // a model that cannot see it re-reads the first turn and asks again.
@@ -4110,32 +4153,40 @@ inline constexpr std::array<std::string_view, 4> kAllActionNames{
         // gave is 6.25)` -- the verifier names a number the model was never shown, because
         // `grounding_text()` concatenated the turns for the verifier and nothing did for the
         // model. A health signal read off the wrong layer, which is this file's oldest scar.
-        auto parsed = enc->parse(sensen::encoder_assistant::Turns{
-            .utterance = ctx->utterance,
-            .prior_question = ctx->prior_question,
-            .prior_clarification = ctx->prior_clarification});
-        if (!parsed.has_value()) {
-            // A refusal from the chain is a REFUSAL, not a crash and not a silent empty
-            // answer: a straddling literal span, an operation the schema cannot name, a
-            // literal that will not convert. Each is a statement about this request -- and an
-            // internal one, so the reason goes to the log and the visitor gets plain language.
-            logger::Logger::getInstance().info("mortgage assistant: the encoder chain refused: {}",
-                                                parsed.error());
-            populate_refusal(ctx->response, ::mortgage::assistant::Refusal::INVALID_PARAMETERS,
-                             cannot_interpret_message());
-            return std::unexpected(sgee::ExecutionError::ActionFailed);
+        //
+        // WHERE THE CHAIN RUNS IS NOT THIS FUNCTION'S BUSINESS. `encoder_answer` submits the
+        // exchange to the shared queue when one is configured -- so any replica holding the
+        // weights may execute it -- and runs it in this process otherwise; the rendering of
+        // the outcome below is the same either way.
+        const auto answer = MortgageAssistantWorker::instance().encoder_answer(
+            {.utterance = ctx->utterance,
+             .prior_question = ctx->prior_question,
+             .prior_clarification = ctx->prior_clarification});
+        switch (answer.verdict) {
+            case encoder_queue::Verdict::Refused:
+                // A refusal from the chain is a REFUSAL, not a crash and not a silent empty
+                // answer: a straddling literal span, an operation the schema cannot name, a
+                // literal that will not convert. Each is a statement about this request -- and
+                // an internal one, so the reason goes to the log and the visitor gets plain
+                // language.
+                logger::Logger::getInstance().info(
+                    "mortgage assistant: the encoder chain refused: {}", answer.text);
+                populate_refusal(ctx->response, ::mortgage::assistant::Refusal::INVALID_PARAMETERS,
+                                 cannot_interpret_message());
+                return std::unexpected(sgee::ExecutionError::ActionFailed);
+            case encoder_queue::Verdict::None:
+                // `<NONE>`: the model recognised no calculation in the request. That is a
+                // REFUSAL, and it used to be rendered as a prose "question" -- "The assistant
+                // did not identify a calculation for this request." -- which the site then
+                // treated as a clarification to answer, so the visitor's next message was read
+                // as the reply to a question nobody asked.
+                populate_refusal(ctx->response, ::mortgage::assistant::Refusal::OUT_OF_SCOPE,
+                                 cannot_interpret_message());
+                return std::unexpected(sgee::ExecutionError::ActionFailed);
+            case encoder_queue::Verdict::Params:
+                break;
         }
-        if (!parsed->has_value()) {
-            // `<NONE>`: the model recognised no calculation in the request. That is a REFUSAL,
-            // and it used to be rendered as a prose "question" -- "The assistant did not
-            // identify a calculation for this request." -- which the site then treated as a
-            // clarification to answer, so the visitor's next message was read as the reply to a
-            // question nobody asked.
-            populate_refusal(ctx->response, ::mortgage::assistant::Refusal::OUT_OF_SCOPE,
-                             cannot_interpret_message());
-            return std::unexpected(sgee::ExecutionError::ActionFailed);
-        }
-        ctx->model_text = "<params>" + encoder_params_to_json(**parsed) + "</params>";
+        ctx->model_text = answer.text;
         return {};
     }
 

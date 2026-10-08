@@ -266,6 +266,26 @@ export class NoLocalBackend final : public InferenceBackend {
     [[nodiscard]] auto name() const noexcept -> std::string_view override { return "no-local"; }
 };
 
+/** The idle-poll interval of every shared-queue consumer: `take_jobs()`'s BACKSTOP in postgres/sgee mode, and
+ *  an idle `LeaseRunner` lane --
+ *  only ever paid when an immediate lease attempt already came up empty
+ *  (see that function's own doc for the try-first ordering this backs
+ *  up). Local mode never uses this constant at all.
+ *
+ *  50ms, not the 200ms this was originally set to: the try-first fix
+ *  means this value no longer gates the common case (a job already
+ *  waiting), only the genuinely-idle case (nothing to lease at all,
+ *  where a worker thread is going to retry regardless and the only
+ *  question is how soon) -- so a smaller value buys a tighter worst-case
+ *  discovery latency for whatever arrives WHILE this thread happens to
+ *  be mid-wait, at the cost of a cheap indexed no-op lease() query up to
+ *  20x/sec/idle-worker instead of 5x/sec against Postgres. Against a
+ *  same-datacentre Postgres (low single-digit ms per round trip) that
+ *  cost is negligible; the latency this buys back is not, when the
+ *  budget for the whole postgres-mode path is ~10-15% over local mode's
+ *  1.6-2.5s (see this task's own latency breakdown). */
+export inline constexpr std::chrono::milliseconds kLeasePollTick{50};
+
 /**
  * Where a `QueuedBackend`'s owner thread draws SHARED work from, in addition to
  * its own local queue.
@@ -637,25 +657,6 @@ export class QueuedBackend : public InferenceBackend {
     [[maybe_unused, gnu::used]] static auto force_take_jobs_symbol_emission() noexcept
         -> std::vector<PendingJob> (QueuedBackend::*)(std::stop_token, std::size_t, bool);
 
-    /** The BACKSTOP idle-poll interval for `take_jobs()`'s postgres mode --
-     *  only ever paid when an immediate lease attempt already came up empty
-     *  (see that function's own doc for the try-first ordering this backs
-     *  up). Local mode never uses this constant at all.
-     *
-     *  50ms, not the 200ms this was originally set to: the try-first fix
-     *  means this value no longer gates the common case (a job already
-     *  waiting), only the genuinely-idle case (nothing to lease at all,
-     *  where a worker thread is going to retry regardless and the only
-     *  question is how soon) -- so a smaller value buys a tighter worst-case
-     *  discovery latency for whatever arrives WHILE this thread happens to
-     *  be mid-wait, at the cost of a cheap indexed no-op lease() query up to
-     *  20x/sec/idle-worker instead of 5x/sec against Postgres. Against a
-     *  same-datacentre Postgres (low single-digit ms per round trip) that
-     *  cost is negligible; the latency this buys back is not, when the
-     *  budget for the whole postgres-mode path is ~10-15% over local mode's
-     *  1.6-2.5s (see this task's own latency breakdown). */
-    static constexpr std::chrono::milliseconds kLeasePollTick{50};
-
     std::mutex mutex_;
     std::condition_variable_any cv_;
     std::deque<PendingJob> queue_;
@@ -954,6 +955,63 @@ export class SgeeAdmission final : public InferenceBackend {
     options_calculator::inference_queue::Surface surface_;
     InferenceBackend& local_;
     std::chrono::milliseconds remote_deadline_;
+};
+
+// ---------------------------------------------------------------------------
+// Running leased work on a backend that executes INLINE
+// ---------------------------------------------------------------------------
+
+/**
+ * Drains a `LeaseSource` on its own thread into a backend that answers on the CALLING thread.
+ *
+ * WHY THIS EXISTS. `QueuedBackend`'s owner thread is how a DECODER leases shared work: it has
+ * to be, because a decoder cannot run two sequences from two threads (`generate()` is not
+ * re-entrant) and so one owner thread feeds a fused batch. An ENCODER has no such constraint
+ * -- `EncoderAssistant::parse()` is const and thread-safe, a request costs about a
+ * millisecond -- so it has no owner thread and no batch, and therefore nothing that ever
+ * called `LeaseSource::fill()`. That is the whole reason `INFERENCE_QUEUE=sgee` moved ~120
+ * production assistant calls through the cluster's log by 10 housekeeping entries: the queue
+ * existed, the encoder was in-process, and no path connected them.
+ *
+ * This is that path, and it is deliberately the SMALLEST one: the same `LeaseSource`
+ * (`SgeeLeaseSource` / `PostgresLeaseSource`, surface filter and write-back included), driven
+ * by one loop, executing through the same `InferenceBackend::submit()` a local request uses.
+ * Nothing about the queue, the surface partition or the write-back is reimplemented.
+ *
+ * ONE THREAD, because `LeaseSource::fill()` is documented owner-thread-only
+ * (`SgeeLeaseSource` keeps unsynchronised back-off state). One job per pass, because jobs here
+ * are milliseconds long: leasing several at once would let one replica hoard a burst another
+ * replica could be answering, which is the opposite of what a shared queue is for.
+ *
+ * EVERY leased job's promise is fulfilled, on every path including an executor that throws or
+ * reports capacity -- the write-back helper blocks on that future, and an unfulfilled promise
+ * would surface as a broken-promise exception instead of an honest failure to the cluster.
+ */
+export class LeaseRunner final {
+  public:
+    /** How long an IDLE runner waits between lease attempts. A pass that found work does not wait
+     *  at all, so this bounds only the time a job sits unclaimed on an otherwise idle replica. */
+    static constexpr std::chrono::milliseconds kDefaultPollTick{10};
+
+    LeaseRunner(std::shared_ptr<LeaseSource> source, InferenceBackend& executor, std::string label);
+
+    LeaseRunner(const LeaseRunner&) = delete;
+    auto operator=(const LeaseRunner&) -> LeaseRunner& = delete;
+    LeaseRunner(LeaseRunner&&) = delete;
+    auto operator=(LeaseRunner&&) -> LeaseRunner& = delete;
+
+    /** The jthread requests stop and joins; it is declared last so that happens first. */
+    ~LeaseRunner() = default;
+
+  private:
+    auto run(std::stop_token stoken) -> void;
+
+    std::shared_ptr<LeaseSource> source_;
+    InferenceBackend& executor_;
+    std::string label_;
+    std::uint64_t executed_{0};  // run()'s thread only; numbers the log line
+    /** Declared last: destroyed first, so the thread is joined before any member it reads goes. */
+    std::jthread thread_;
 };
 
 }  // namespace options_calculator::inference_admission

@@ -670,6 +670,12 @@ auto SgeeAdmission::submit(std::string prompt) -> std::optional<InferenceOutcome
     // short multiplies GetTask RPCs against a three-node cluster for no benefit.
     // 25 ms is well under the smallest plausible decode and cheap at this
     // concurrency.
+    //
+    // MEASURED FOR ENCODER TASKS (2026-10-07) AND LEFT ALONE: a 2..25 ms doubling schedule here
+    // plus a 10 ms idle lease tick gave the same c=1 latency as this fixed 25 ms plus the 50 ms
+    // tick -- p50 150.9 vs 150.7, 80.3 vs 75.4, 69.4 vs 75.9 ms over three alternating rounds on
+    // one cluster -- at three times the idle CPU. Every queue operation is a replicated write that
+    // costs about a Raft heartbeat, and three of them per request dwarf any poll interval.
     constexpr auto kPollInterval = std::chrono::milliseconds(25);
     while (std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(kPollInterval);
@@ -718,6 +724,46 @@ auto SgeeAdmission::submit(std::string prompt) -> std::optional<InferenceOutcome
         "falling back to the local backend",
         *task_id);
     return local_.submit(std::move(prompt));
+}
+
+// ---------------------------------------------------------------------------
+// LeaseRunner
+// ---------------------------------------------------------------------------
+
+LeaseRunner::LeaseRunner(std::shared_ptr<LeaseSource> source, InferenceBackend& executor,
+                         std::string label)
+    : source_(std::move(source)), executor_(executor), label_(std::move(label)),
+      thread_([this](std::stop_token stoken) { run(stoken); }) {}
+
+auto LeaseRunner::run(std::stop_token stoken) -> void {
+    while (!stoken.stop_requested()) {
+        auto jobs = source_->fill(1);
+        if (jobs.empty()) {
+            // Nothing eligible, or the cluster did not answer (already logged by the source).
+            // Both are answered the same way: wait one tick, then ask again.
+            std::this_thread::sleep_for(kLeasePollTick);
+            continue;
+        }
+        for (auto& job : jobs) {
+            InferenceOutcome outcome;
+            try {
+                auto answered = executor_.submit(std::move(job.prompt));
+                outcome = answered.has_value()
+                              ? std::move(*answered)
+                              : InferenceOutcome{.ok = false, .text = {},
+                                                 .error = "the executing backend was at capacity"};
+            } catch (const std::exception& e) {
+                outcome = InferenceOutcome{.ok = false, .text = {}, .error = e.what()};
+            } catch (...) {
+                outcome = InferenceOutcome{.ok = false, .text = {},
+                                           .error = "unknown failure executing a leased job"};
+            }
+            job.promise.set_value(std::move(outcome));
+            logger::Logger::getInstance().info(
+                "inference_admission: {} executed leased job #{} on this replica", label_,
+                ++executed_);
+        }
+    }
 }
 
 }  // namespace options_calculator::inference_admission
