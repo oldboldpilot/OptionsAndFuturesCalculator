@@ -226,12 +226,6 @@ constexpr double kMaxAbsMagnitude = 1e15;
 // Environment helpers
 // ---------------------------------------------------------------------------
 
-[[nodiscard]] auto env_string(const char* name) -> std::optional<std::string> {
-    const char* raw = std::getenv(name);
-    if (raw == nullptr || *raw == '\0') return std::nullopt;
-    return std::string{raw};
-}
-
 /** Parses a positive integer from an env var, falling back on anything unset,
  * empty, non-numeric or non-positive -- a malformed override should degrade to
  * the documented default, never to zero threads or a crash. */
@@ -1133,7 +1127,7 @@ class SensenBackend final : public QueuedBackend {
 
         logger::Logger::getInstance().info(
             "mortgage assistant: MORTGAGE_GRAMMAR={} -- constrained decoding {}",
-            env_string("MORTGAGE_GRAMMAR").value_or("(unset, defaults on)"),
+            environment_text("MORTGAGE_GRAMMAR").value_or("(unset, defaults on)"),
             grammar_enabled_ ? "REQUESTED" : "OFF");
         if (!grammar_enabled_) return;
 
@@ -1262,7 +1256,7 @@ class SensenBackend final : public QueuedBackend {
     // Constrained decoding. All of this is touched ONLY by the owner thread
     // (`run` and the functions it calls), which is the same reason the rest of
     // the decode state needs no lock.
-    bool grammar_enabled_ = env_string("MORTGAGE_GRAMMAR").value_or("on") != "off";
+    bool grammar_enabled_ = environment_text("MORTGAGE_GRAMMAR").value_or("on") != "off";
     bool grammar_pool_ready_ = false;
     std::optional<mg::Schema> schema_;
     std::vector<std::unique_ptr<mg::MortgageParamsGrammar>> grammar_pool_;
@@ -1345,7 +1339,7 @@ class MortgageAssistantWorker {
         // model's tensors at worst. Same reasoning as MORTGAGE_MODEL_PATH not falling back
         // to MODEL_PATH.
         auto& log = logger::Logger::getInstance();
-        const auto backend_name = env_string("MORTGAGE_ASSISTANT_BACKEND");
+        const auto backend_name = environment_text("MORTGAGE_ASSISTANT_BACKEND");
         std::string wanted = backend_name.value_or("qwen3");
         std::ranges::transform(wanted, wanted.begin(),
                                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -1361,7 +1355,7 @@ class MortgageAssistantWorker {
         log.info(std::format("Mortgage assistant backend: MORTGAGE_ASSISTANT_BACKEND={}", wanted));
 
         if (wanted == "encoder") {
-            const auto enc_path = env_string("MORTGAGE_ENCODER_PATH");
+            const auto enc_path = environment_text("MORTGAGE_ENCODER_PATH");
             if (!enc_path.has_value()) {
                 log.warn("MORTGAGE_ASSISTANT_BACKEND=encoder but MORTGAGE_ENCODER_PATH is not "
                          "set -- the mortgage assistant will return a Refusal on every call. It "
@@ -1397,7 +1391,7 @@ class MortgageAssistantWorker {
             return;
         }
 
-        const auto path = env_string("MORTGAGE_MODEL_PATH");
+        const auto path = environment_text("MORTGAGE_MODEL_PATH");
         if (!path.has_value()) {
             // No weights here. That is still a supported image -- but it is no
             // longer necessarily a refusal. If a SHARED inference queue is
@@ -1454,7 +1448,7 @@ class MortgageAssistantWorker {
         // could land on instead, but the refuse-before-construct shape stays
         // identical for the same reason: never silently substitute a device
         // the gates do not cover.
-        const std::string requested_device = env_string("MORTGAGE_DEVICE").value_or("cpu");
+        const std::string requested_device = environment_text("MORTGAGE_DEVICE").value_or("cpu");
 
         // Runtime, not `#ifdef SENSEN_HAS_CUDA` -- see AssistantWorker's
         // identical block in assistant_service.cpp for why this file cannot

@@ -64,6 +64,10 @@ auto check(bool condition, const std::string& what) -> void {
     }
 }
 
+/** True when a count can be left by hand: it must not be, only its `Entered` token leaves. */
+template <typename Count>
+concept CanLeaveByHand = requires(Count& count) { count.leave(); };
+
 auto section(const char* title) -> void { std::printf("\n=== %s ===\n", title); }
 
 /** The file the logger writes to for this run. The logger flushes every line, so a test can count
@@ -101,9 +105,14 @@ struct CountingChain {
     std::shared_ptr<std::atomic<int>> active = std::make_shared<std::atomic<int>>(0);
     std::shared_ptr<std::atomic<int>> peak = std::make_shared<std::atomic<int>>(0);
     std::chrono::milliseconds work{0};
+    /** Every execution waits here before it answers. Open (count 0) unless a test holds the chain
+     *  on purpose: a test that needs "a request is inside the chain" releases it explicitly, rather
+     *  than sleeping and hoping the next arrival lands inside the window. */
+    std::shared_ptr<std::latch> gate = std::make_shared<std::latch>(0);
 
     [[nodiscard]] auto make() const -> EncoderBackend::Chain {
-        return [runs = runs, active = active, peak = peak, work = work](const Turns& turns) -> ChainResult {
+        return [runs = runs, active = active, peak = peak, work = work,
+                gate = gate](const Turns& turns) -> ChainResult {
             runs->fetch_add(1);
             const int now = active->fetch_add(1) + 1;
             for (int seen = peak->load(); now > seen && !peak->compare_exchange_weak(seen, now);) {}
@@ -112,6 +121,7 @@ struct CountingChain {
                 ~Done() { active.fetch_sub(1); }
             } const done{*active};
             if (work.count() > 0) std::this_thread::sleep_for(work);
+            gate->wait();
             if (turns.utterance == "none") return std::optional<Parsed>{};
             if (turns.utterance.starts_with("refuse")) {
                 return std::unexpected(std::string("token straddles a literal: ") +
@@ -419,11 +429,51 @@ int main() {
         EncoderService one{chain.make(), &render, "test encoder", Bounds{.local = 0, .queue = 1}};
         for (int i = 0; i < 3; ++i) (void)one.answer(failed, {"pay 1", "", ""});
         check(failed.calls.load() == 3, "a failed submission releases its slot: all three tried");
+
+        // The slot bounds what is OUTSTANDING ON THE QUEUE, so it is released the moment the queue has
+        // answered or failed -- not held while the local fallback runs the chain. Hold the first
+        // request inside its fallback; a second must still find the slot free and reach the queue.
+        const std::array<InferenceOutcome, 2> unusable{
+            InferenceOutcome{.ok = false, .text = {}, .error = "cluster down"},
+            InferenceOutcome{.ok = true, .text = "not an encoded answer", .error = {}}};
+        for (const auto& outcome : unusable) {
+            CountingChain held{.gate = std::make_shared<std::latch>(1)};
+            EncoderService fallback{held.make(), &render, "fallback replica", Bounds{.local = 0, .queue = 1}};
+            FixedBackend broken{outcome};
+            std::jthread first{[&] { (void)fallback.answer(broken, {"pay 1", "", ""}); }};
+            const bool in_fallback = wait_until([&] { return held.active->load() == 1; });
+            check(in_fallback && broken.calls.load() == 1,
+                  "the first request tried the queue, failed, and is now running the chain locally");
+            std::jthread second{[&] { (void)fallback.answer(broken, {"pay 2", "", ""}); }};
+            const bool reached_queue = wait_until([&] { return broken.calls.load() == 2; });
+            held.gate->count_down();  // release both fallbacks before judging, so a failure cannot hang
+            first.join();
+            second.join();
+            check(reached_queue,
+                  "while it did, the queue slot was free: the second request reached the queue too ("
+                  "an unusable answer: " + std::string(outcome.ok ? "undecodable" : "refused") + ")");
+        }
         InFlightCount exact;
-        check(exact.try_enter(1) && !exact.try_enter(1) && exact.load() == 1,
-              "the bound is exact: a bound of one admits one and refuses the second");
-        exact.leave();
-        check(!InFlightCount{}.try_enter(0), "and a bound of zero admits nothing");
+        {
+            const auto first = exact.try_enter(1);
+            check(first.has_value() && !exact.try_enter(1).has_value() && exact.load() == 1,
+                  "the bound is exact: a bound of one admits one and refuses the second");
+        }
+        check(exact.load() == 0, "and leaving is the token's destructor: the count is back to 0");
+        check(!InFlightCount{}.try_enter(0).has_value(), "and a bound of zero admits nothing");
+
+        // The token cannot be copied, assigned or left by hand, so the count cannot be unbalanced.
+        using Entered = InFlightCount::Entered;
+        static_assert(!std::is_copy_constructible_v<Entered> && !std::is_copy_assignable_v<Entered> &&
+                      !std::is_move_assignable_v<Entered> && std::is_nothrow_move_constructible_v<Entered>);
+        static_assert(!CanLeaveByHand<InFlightCount>);
+        {
+            auto moved_from = exact.enter();
+            check(exact.load() == 1, "an unconditional enter is counted");
+            const Entered moved_to{std::move(moved_from)};
+            check(exact.load() == 1, "moving the token transfers the entry: it is not counted twice");
+        }
+        check(exact.load() == 0, "and the moved-from token leaves nothing behind: left exactly once");
     }
 
     // ROUTING: a request is answered IN-PROCESS and spills to the queue only when the replica is
@@ -458,7 +508,7 @@ int main() {
     {
         // Busy = `local` chain executions in flight. One long request holds the only local slot;
         // the next arrival must go to the queue, not wait and not run beside it.
-        CountingChain chain{.work = 80ms};
+        CountingChain chain{.gate = std::make_shared<std::latch>(1)};
         EncoderService service{chain.make(), &render, "busy replica", Bounds{.local = 1, .queue = 4}};
         RecordingQueue queue;
         const int in_process0 = log_lines_containing(kInProcess);
@@ -470,6 +520,7 @@ int main() {
         check(entered, "the first request entered the chain (the replica was idle)");
         check(service.backend().in_flight() == 1, "the measured signal reads 1 while the chain executes");
         const auto second = service.answer(queue, {"pay 2", "", ""});
+        chain.gate->count_down();  // only now may the first request leave the chain
         holder.join();
 
         check(from_queue(second) && queue.submitted_.load() == 1,
@@ -482,7 +533,7 @@ int main() {
 
         // WORK LEASED FROM THE QUEUE COUNTS: a core spent on another replica's parse is a core this
         // replica's own request does not have, so "busy" is what the replica is actually doing.
-        CountingChain leased_chain{.work = 80ms};
+        CountingChain leased_chain{.gate = std::make_shared<std::latch>(1)};
         EncoderService leasing{leased_chain.make(), &render, "leasing replica", Bounds{.local = 1, .queue = 4}};
         RecordingQueue queue2;
         std::jthread leased{[&] {
@@ -491,6 +542,7 @@ int main() {
         check(wait_until([&] { return leased_chain.active->load() != 0; }),
               "the leased job entered the chain");
         const auto own = leasing.answer(queue2, {"pay 3", "", ""});
+        leased_chain.gate->count_down();
         leased.join();
         check(from_queue(own) && queue2.submitted_.load() == 1,
               "executing a leased job makes the replica busy for its OWN requests too");

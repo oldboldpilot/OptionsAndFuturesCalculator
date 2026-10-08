@@ -2,7 +2,8 @@
 # What the shared queue ADDS to an encoder parse: p50/p95 at concurrency 1/8/24 for three routings,
 # optionally across Raft heartbeats:
 #
-#   L  INFERENCE_QUEUE=local: the chain in-process, no queue anywhere (the floor)
+#   L  INFERENCE_QUEUE=local: the chain in-process, no queue anywhere (the floor). Its in-proc column is
+#      by construction (every request sent): local mode logs no per-request line to count
 #   A  INFERENCE_QUEUE=sgee at the DEFAULT bounds: in-process first, spill to the queue only when busy
 #   Q  INFERENCE_QUEUE=sgee with ENCODER_LOCAL_MAX_IN_FLIGHT=0: every request goes to the queue first,
 #      the routing the service had before 2026-10-07 and the one that cost ~570 ms at a 300 ms heartbeat
@@ -38,8 +39,18 @@ SURFACES="${EQB_SURFACES:-mortgage strategy}"
 HEARTBEATS="${EQB_HEARTBEATS:-0}"
 N_SINGLE="${EQB_REQUESTS_SINGLE:-200}"
 N_MANY="${EQB_REQUESTS:-480}"
+WARMUP=3
 mkdir -p "$OUT"
 : > "$OUT/samples.jsonl"
+
+# In-process answers in one cell: <arm> <label> <count before> <requests sent, warm-up included>.
+# Arms A and Q are READ from the engine log, which carries one line per request. Arm L runs
+# INFERENCE_QUEUE=local, where there is no queue to route around and no per-request line is written
+# (nothing to account for), so its count is BY CONSTRUCTION every request sent. Reading its log would
+# report 0 in-process for an engine that answered all of them in-process.
+in_process_in_cell() {
+  if [ "$1" = L ]; then echo "$4"; else echo $(( $(eqc_inprocess "$1" "$2") - $3 )); fi
+}
 
 for hb in $HEARTBEATS; do
   (
@@ -78,12 +89,12 @@ for hb in $HEARTBEATS; do
           for arm in L A Q; do
             port="PORT_$arm"; label="$surface encoder"
             s0="$(eqc_queued "$arm" "$label")"; i0="$(eqc_inprocess "$arm" "$label")"
-            python3 -P "$PROBE" latency --target "127.0.0.1:${!port}" --surface "$surface" -c "$c" -n "$n" --warmup 3 \
+            python3 -P "$PROBE" latency --target "127.0.0.1:${!port}" --surface "$surface" -c "$c" -n "$n" --warmup "$WARMUP" \
               > "$OUT/cell.json"
             # The log counts are read AFTER the cell has finished: expanded inside the pipeline that runs
             # the probe they would be read before it, and every cell would report zero spills.
             python3 -P -c 'import json,sys; d=json.load(open(sys.argv[1])); d["arm"],d["round"],d["heartbeat_ms"],d["fallbacks"],d["spilled"],d["in_process"]=sys.argv[2],int(sys.argv[3]),int(sys.argv[4]),int(sys.argv[5]),int(sys.argv[6]),int(sys.argv[7]); print(json.dumps(d))' \
-                "$OUT/cell.json" "$arm" "$round" "$hb" "$(eqc_fallbacks "$arm")" "$(( $(eqc_queued "$arm" "$label") - s0 ))" "$(( $(eqc_inprocess "$arm" "$label") - i0 ))" >> "$OUT/samples.jsonl"
+                "$OUT/cell.json" "$arm" "$round" "$hb" "$(eqc_fallbacks "$arm")" "$(( $(eqc_queued "$arm" "$label") - s0 ))" "$(in_process_in_cell "$arm" "$label" "$i0" "$(( n + WARMUP ))")" >> "$OUT/samples.jsonl"
           done
         done
       done

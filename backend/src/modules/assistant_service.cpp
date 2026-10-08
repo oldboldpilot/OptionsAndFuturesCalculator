@@ -182,12 +182,6 @@ constexpr std::int64_t kMaxQuantity = 100'000;
 // Environment helpers
 // ---------------------------------------------------------------------------
 
-[[nodiscard]] auto env_string(const char* name) -> std::optional<std::string> {
-    const char* raw = std::getenv(name);
-    if (raw == nullptr || *raw == '\0') return std::nullopt;
-    return std::string{raw};
-}
-
 /** Parses a positive thread count from an env var, falling back on anything
  * unset, empty, non-numeric, or non-positive -- a malformed override should
  * degrade to the documented default, never to zero threads or a crash. */
@@ -1483,7 +1477,7 @@ class AssistantWorker {
         // STRATEGY_ENCODER_PATH does NOT fall back to MODEL_PATH: that names the DECODER's
         // weights, and handing a 639 MB Qwen3 GGUF to the encoder loader would refuse at best.
         auto& log = logger::Logger::getInstance();
-        const auto model_choice = env_string("ASSISTANT_MODEL");
+        const auto model_choice = environment_text("ASSISTANT_MODEL");
         std::string wanted = model_choice.value_or("qwen3");
         std::ranges::transform(wanted, wanted.begin(),
                                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -1499,7 +1493,7 @@ class AssistantWorker {
         log.info(std::format("Strategy assistant model: ASSISTANT_MODEL={}", wanted));
 
         if (wanted == "encoder") {
-            const auto enc_path = env_string("STRATEGY_ENCODER_PATH");
+            const auto enc_path = environment_text("STRATEGY_ENCODER_PATH");
             if (!enc_path.has_value()) {
                 log.warn("ASSISTANT_MODEL=encoder but STRATEGY_ENCODER_PATH is not set -- the "
                          "strategy assistant will return a Refusal on every call. It is NOT "
@@ -1534,7 +1528,7 @@ class AssistantWorker {
             return;
         }
 
-        const auto path = env_string("MODEL_PATH");
+        const auto path = environment_text("MODEL_PATH");
         if (!path.has_value()) {
             // No weights here -- still a supported image, and no longer
             // necessarily a refusal. With a SHARED inference queue configured,
@@ -1609,7 +1603,7 @@ class AssistantWorker {
         // so a cuda request this build cannot honour refuses the whole
         // assistant rather than quietly landing on a CPU-only llama.cpp
         // backend nobody asked for.
-        const std::string requested_device = env_string("ASSISTANT_DEVICE").value_or("cpu");
+        const std::string requested_device = environment_text("ASSISTANT_DEVICE").value_or("cpu");
 
         // Whether THIS compiled binary has genuine CUDA support at all --
         // established at RUNTIME, not via `#ifdef SENSEN_HAS_CUDA` in this
@@ -1656,7 +1650,7 @@ class AssistantWorker {
         }
         const Device device = device_resolution.device;
 
-        const std::string requested = env_string("ASSISTANT_BACKEND").value_or("sensen");
+        const std::string requested = environment_text("ASSISTANT_BACKEND").value_or("sensen");
 
         if (requested == "sensen") {
             runtime_.adopt(SensenBackend::create(*path, max_concurrent, queue_depth,

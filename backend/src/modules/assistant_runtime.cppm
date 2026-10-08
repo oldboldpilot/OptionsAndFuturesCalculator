@@ -71,7 +71,7 @@ class AssistantRuntime {
         return std::ref(*decoder_);
     }
 
-    /** Non-null only when the small encoder was selected and loaded. Asked for one engine and
+    /** Present only when the small encoder was selected and loaded. Asked for one engine and
      *  unable to provide it, an assistant is UNAVAILABLE rather than quietly served by the other
      *  (the `ASSISTANT_BACKEND=llamacpp` rule), so a caller tests this rather than assuming. */
     [[nodiscard]] auto encoder() const noexcept
@@ -128,9 +128,11 @@ class AssistantRuntime {
         return decoder_->submit(std::move(prompt));
     }
 
-    /** One encoder exchange: through the shared queue when configured and a slot is free, in this
-     *  process otherwise. Either way `EncoderBackend::answer()` decides what the chain's outcome
-     *  means, so the two cannot disagree. Thread-safe. Only valid when an encoder was adopted. */
+    /** One encoder exchange: answered in this process, unless the replica is busy and a shared queue
+     *  is configured with a slot free for this assistant, in which case it spills to the queue (see
+     *  `EncoderService::answer`). Either way `EncoderBackend::answer()` decides what the chain's
+     *  outcome means, so the two cannot disagree. Thread-safe. Only valid when an encoder was
+     *  adopted. */
     [[nodiscard]] auto answer(const encoder_queue::EncoderRequest& request) -> encoder_queue::Answer {
         if (admission_ != nullptr) return encoder_->answer(*admission_, request);
         return encoder_->answer(request);
@@ -181,7 +183,7 @@ class AssistantRuntime {
         return {surface_, encoder_ != nullptr ? encoder_->fingerprint() : std::string{}};
     }
 
-    /** The backend that EXECUTES here, or null on a submit-only replica. */
+    /** The backend that EXECUTES here, or nothing on a submit-only replica. */
     [[nodiscard]] auto local_executor() noexcept
         -> std::optional<std::reference_wrapper<inference_admission::InferenceBackend>> {
         if (decoder_ != nullptr) return std::ref<inference_admission::InferenceBackend>(*decoder_);

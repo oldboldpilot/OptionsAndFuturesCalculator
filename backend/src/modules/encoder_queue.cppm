@@ -186,43 +186,59 @@ namespace detail {
  *
  * `try_enter(limit)` is exact (a compare-exchange loop), so a bound of N is never exceeded by a
  * race, and a limit of 0 admits nothing.
+ *
+ * Entering returns an `Entered` token and leaving is the token's destructor: there is no public
+ * `leave()` to call twice or to forget. The token is move-only, so one entry is left exactly once
+ * however it is passed around (a stray extra leave would wrap the count to SIZE_MAX, after which
+ * nothing is ever admitted again and the replica silently spills everything).
  */
 class InFlightCount {
   public:
-    [[nodiscard]] auto try_enter(std::size_t limit) noexcept -> bool {
+    /** One entry into the count; destroying it leaves. Move-only, and only the count makes one. */
+    class [[nodiscard]] Entered {
+      public:
+        Entered(Entered&& other) noexcept : count_(std::exchange(other.count_, std::nullopt)) {}
+        Entered(const Entered&) = delete;
+        auto operator=(const Entered&) -> Entered& = delete;
+        auto operator=(Entered&&) -> Entered& = delete;
+        ~Entered() {
+            if (count_.has_value()) count_->get().leave();
+        }
+
+      private:
+        friend class InFlightCount;
+        explicit Entered(InFlightCount& count) noexcept : count_(std::ref(count)) {}
+        std::optional<std::reference_wrapper<InFlightCount>> count_;  // empty once moved from
+    };
+
+    /** Enters if fewer than `limit` are in; `nullopt` means full and nothing was entered. */
+    [[nodiscard]] auto try_enter(std::size_t limit) noexcept -> std::optional<Entered> {
         auto current = count_.load(std::memory_order_relaxed);
         while (current < limit) {
             if (count_.compare_exchange_weak(current, current + 1, std::memory_order_acquire,
                                              std::memory_order_relaxed)) {
-                return true;
+                return Entered{*this};
             }
         }
-        return false;
+        return std::nullopt;
     }
 
     /** Enters unconditionally: work that has to run whatever the bound says still has to be COUNTED,
      *  or the next arrival would read an idle replica that is not. */
-    auto enter() noexcept -> void { count_.fetch_add(1, std::memory_order_acquire); }
-
-    auto leave() noexcept -> void { count_.fetch_sub(1, std::memory_order_release); }
+    [[nodiscard]] auto enter() noexcept -> Entered {
+        count_.fetch_add(1, std::memory_order_acquire);
+        return Entered{*this};
+    }
 
     [[nodiscard]] auto load() const noexcept -> std::size_t {
         return count_.load(std::memory_order_relaxed);
     }
 
   private:
+    auto leave() noexcept -> void { count_.fetch_sub(1, std::memory_order_release); }
+
     std::atomic<std::size_t> count_{0};
 };
-
-namespace detail {
-
-/** Leaves a count it has entered, on every path out of the scope. */
-struct LeaveOnExit {
-    InFlightCount& count;
-    ~LeaveOnExit() { count.leave(); }
-};
-
-}  // namespace detail
 
 /**
  * THE QUEUE-SIDE BOUND. Every queue operation is a replicated write and the leader serialises
@@ -376,8 +392,7 @@ class EncoderBackend final : public inference_admission::InferenceBackend {
      *  whatever the load: a leased job, a degrade, an overflow. Thread-safe: the chain is const
      *  (`EncoderAssistant` documents it) and the only state here is the atomic in-flight count. */
     [[nodiscard]] auto answer(const EncoderRequest& request) const -> Answer {
-        in_flight_.enter();
-        const detail::LeaveOnExit leave{in_flight_};
+        const auto entered = in_flight_.enter();
         return run(request);
     }
 
@@ -390,8 +405,8 @@ class EncoderBackend final : public inference_admission::InferenceBackend {
      */
     [[nodiscard]] auto answer_below(std::size_t limit, const EncoderRequest& request) const
         -> std::optional<Answer> {
-        if (!in_flight_.try_enter(limit)) return std::nullopt;
-        const detail::LeaveOnExit leave{in_flight_};
+        const auto entered = in_flight_.try_enter(limit);
+        if (!entered.has_value()) return std::nullopt;
         return run(request);
     }
 
@@ -547,20 +562,31 @@ class EncoderService {
     }
 
   private:
-    /** The replica is busy: send the request to the shared queue if this assistant may. */
+    /** The replica is busy: send the request to the shared queue if this assistant may, and answer
+     *  it here when the queue cannot. The queue slot is held by `through_queue` only: it bounds what
+     *  is outstanding ON THE QUEUE, so a fallback that runs the chain here must not hold it. */
     [[nodiscard]] auto spill(inference_admission::InferenceBackend& shared,
                              const EncoderRequest& request) -> Answer {
+        if (auto queued = through_queue(shared, request); queued.has_value()) return std::move(*queued);
+        return backend_.answer(request);
+    }
+
+    /** The answer the shared queue gave, or `nullopt` when this assistant has no slot free or the
+     *  queue produced nothing usable (the caller answers in-process). Holds one queue slot for
+     *  exactly as long as the request is outstanding there. */
+    [[nodiscard]] auto through_queue(inference_admission::InferenceBackend& shared,
+                                     const EncoderRequest& request) -> std::optional<Answer> {
         // The measured signal the decision was made on, in the line that reports the decision: an
         // operator reading "spilled" can see how busy the replica was without a profiler.
         const auto busy_at = backend_.in_flight();
-        if (!queue_in_flight_.try_enter(bounds_.queue)) {
+        const auto slot = queue_in_flight_.try_enter(bounds_.queue);
+        if (!slot.has_value()) {
             logger::Logger::getInstance().info(
                 "encoder_queue: {} answered in-process: busy here ({} in flight), and this assistant's "
                 "share of the shared queue is in use",
                 backend_.name(), busy_at);
-            return backend_.answer(request);
+            return std::nullopt;
         }
-        const detail::LeaveOnExit leave{queue_in_flight_};
 
         const auto queued = shared.submit(encode_request(request));
         if (queued.has_value() && queued->ok) {
@@ -591,7 +617,7 @@ class EncoderService {
                 "locally instead",
                 queued.has_value() ? queued->error : std::string("admission refused"));
         }
-        return backend_.answer(request);
+        return std::nullopt;
     }
 
     EncoderBackend backend_;

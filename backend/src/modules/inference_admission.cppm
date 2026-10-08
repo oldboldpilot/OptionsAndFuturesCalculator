@@ -140,8 +140,10 @@ export [[nodiscard]] constexpr auto resolve_device(std::string_view requested, b
 
 /**
  * The value of an environment variable, or nothing when it is unset or empty. A COPY, not the
- * pointer `std::getenv` hands back: that points into storage the next `setenv` may move, and the one
- * place this tree crosses into the C environment should not leak the pointer to anyone.
+ * pointer `std::getenv` hands back: that points into storage the next `setenv` may move, so no
+ * caller should hold it. The ONE reader of the environment for the assistant services, the encoder
+ * queue and the runtime; modules below this one (`sgee_queue_client`, `state_refresh`) cannot import
+ * it and keep their own.
  */
 export [[nodiscard]] inline auto environment_text(std::string_view name) -> std::optional<std::string> {
     const std::string key{name};  // getenv needs a terminated string
