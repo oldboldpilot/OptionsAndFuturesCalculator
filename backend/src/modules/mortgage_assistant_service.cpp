@@ -223,23 +223,6 @@ constexpr std::size_t kMaxArrayLength = 512;
 constexpr double kMaxAbsMagnitude = 1e15;
 
 // ---------------------------------------------------------------------------
-// Environment helpers
-// ---------------------------------------------------------------------------
-
-/** Parses a positive integer from an env var, falling back on anything unset,
- * empty, non-numeric or non-positive -- a malformed override should degrade to
- * the documented default, never to zero threads or a crash. */
-[[nodiscard]] auto env_positive_int(const char* name, int fallback) -> int {
-    const char* raw = std::getenv(name);
-    if (raw == nullptr || *raw == '\0') return fallback;
-    const std::string_view view{raw};
-    int value = 0;
-    const auto result = std::from_chars(view.data(), view.data() + view.size(), value);
-    if (result.ec != std::errc{} || value <= 0) return fallback;
-    return value;
-}
-
-// ---------------------------------------------------------------------------
 // Prompt construction
 // ---------------------------------------------------------------------------
 
@@ -491,7 +474,7 @@ class SensenBackend final : public QueuedBackend {
         // it on, because a typo in a deploy variable must not quietly remove a
         // measured optimisation. The switch exists so the A/B is one variable on
         // one binary, and so an operator can fall back without a redeploy.
-        if (const char* raw = std::getenv("MORTGAGE_RESTRICTED_PROJECTION")) {
+        if (const auto raw = environment_text("MORTGAGE_RESTRICTED_PROJECTION")) {
             // CASE-INSENSITIVE, because the off switch is the only way an operator
             // can retreat from a measured optimisation without a redeploy, and a
             // switch that silently ignores `False` or `OFF` is not a switch. A
@@ -500,7 +483,7 @@ class SensenBackend final : public QueuedBackend {
             // called it Enforce. Unrecognised values stay ON deliberately: the
             // fast path is the measured one, so a typo must not quietly give up
             // 1.58x. That is only safe because the next line SAYS so.
-            std::string v{raw};
+            std::string v{*raw};
             std::ranges::transform(v, v.begin(), [](const unsigned char c) {
                 return static_cast<char>(std::tolower(c));
             });
@@ -508,7 +491,7 @@ class SensenBackend final : public QueuedBackend {
             logger::Logger::getInstance().info(
                 "mortgage assistant: MORTGAGE_RESTRICTED_PROJECTION={} -- restricted lm_head "
                 "projection {}",
-                raw, restricted_projection_ ? "ON" : "OFF");
+                *raw, restricted_projection_ ? "ON" : "OFF");
         }
         max_queue_depth_ = queue_depth;
     }
@@ -1420,7 +1403,7 @@ class MortgageAssistantWorker {
         // separately settable precisely because a host serving both is now
         // running two engines that can each be told how much of the machine to
         // take.
-        const int threads = env_positive_int("MORTGAGE_ASSISTANT_INFERENCE_THREADS", 4);
+        const int threads = environment_positive_int("MORTGAGE_ASSISTANT_INFERENCE_THREADS", 4);
 
         // How many requests may decode simultaneously, and how many may wait
         // for a slot. Modest on purpose: batching raises aggregate throughput
@@ -1428,9 +1411,9 @@ class MortgageAssistantWorker {
         // interactive assistant where the person waiting on one answer cares
         // more about their own latency than the server's token rate.
         const auto max_concurrent =
-            static_cast<std::size_t>(env_positive_int("MORTGAGE_ASSISTANT_MAX_CONCURRENT", 4));
+            static_cast<std::size_t>(environment_positive_int("MORTGAGE_ASSISTANT_MAX_CONCURRENT", 4));
         const auto queue_depth =
-            static_cast<std::size_t>(env_positive_int("MORTGAGE_ASSISTANT_QUEUE_DEPTH", 8));
+            static_cast<std::size_t>(environment_positive_int("MORTGAGE_ASSISTANT_QUEUE_DEPTH", 8));
 
         // Per-sequence context window, capped rather than allocated: production
         // runs the PAGED KV cache, which commits blocks on demand, so a short
@@ -1438,7 +1421,7 @@ class MortgageAssistantWorker {
         // Nothing this service sends approaches it -- one system turn, one user
         // turn, optionally one more, plus kMaxNewTokens.
         const auto kv_max_seq_len =
-            static_cast<std::size_t>(env_positive_int("MORTGAGE_ASSISTANT_CONTEXT_TOKENS", 4096));
+            static_cast<std::size_t>(environment_positive_int("MORTGAGE_ASSISTANT_CONTEXT_TOKENS", 4096));
 
         // Device selection: mirrors AssistantWorker's own MORTGAGE_DEVICE-vs-
         // ASSISTANT_DEVICE handling in assistant_service.cpp exactly (see

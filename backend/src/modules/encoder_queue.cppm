@@ -564,7 +564,8 @@ class EncoderService {
   private:
     /** The replica is busy: send the request to the shared queue if this assistant may, and answer
      *  it here when the queue cannot. The queue slot is held by `through_queue` only: it bounds what
-     *  is outstanding ON THE QUEUE, so a fallback that runs the chain here must not hold it. */
+     *  is outstanding ON THE QUEUE, so a fallback THIS function runs must not hold it. (A degrade is
+     *  answered inside the admission object's `submit()`, so it is still under the slot.) */
     [[nodiscard]] auto spill(inference_admission::InferenceBackend& shared,
                              const EncoderRequest& request) -> Answer {
         if (auto queued = through_queue(shared, request); queued.has_value()) return std::move(*queued);
@@ -573,7 +574,9 @@ class EncoderService {
 
     /** The answer the shared queue gave, or `nullopt` when this assistant has no slot free or the
      *  queue produced nothing usable (the caller answers in-process). Holds one queue slot for
-     *  exactly as long as the request is outstanding there. */
+     *  exactly as long as the request is outstanding there -- including a degrade, which the
+     *  admission object answers inside `submit()` (`degrade_to_local`), so the slot also covers
+     *  that one local parse. */
     [[nodiscard]] auto through_queue(inference_admission::InferenceBackend& shared,
                                      const EncoderRequest& request) -> std::optional<Answer> {
         // The measured signal the decision was made on, in the line that reports the decision: an

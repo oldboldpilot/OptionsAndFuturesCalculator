@@ -101,8 +101,7 @@ def cmd_latency(args):
     # Single-call rows only: a latency sample should be one request, not a conversation.
     singles = [calls[0] for _, calls in reqs]
     stub_call = getattr(stub_cls(make_channel(args)), method)
-    for call in singles[:args.warmup]:
-        one_call(stub_call, pb, call, '')
+    warmup_answered = sum(one_call(stub_call, pb, call, '')[2] is None for call in singles[:args.warmup])
     lat, errors = [], 0
     started = time.perf_counter()
     with cf.ThreadPoolExecutor(max_workers=args.concurrency) as pool:
@@ -118,7 +117,8 @@ def cmd_latency(args):
     lat.sort()
     pick = lambda q: lat[min(len(lat) - 1, int(q * len(lat)))] if lat else float('nan')
     print(json.dumps({'target': args.target, 'surface': args.surface, 'concurrency': args.concurrency,
-                      'requests': args.requests, 'errors': errors, 'p50_ms': round(pick(0.50), 2),
+                      'requests': args.requests, 'errors': errors,
+                      'answered': warmup_answered + len(lat), 'p50_ms': round(pick(0.50), 2),
                       'p95_ms': round(pick(0.95), 2), 'max_ms': round(lat[-1], 2) if lat else None,
                       'mean_ms': round(statistics.fmean(lat), 2) if lat else None,
                       'throughput_rps': round(args.requests / wall, 1)}))

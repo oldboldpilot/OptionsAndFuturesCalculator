@@ -1613,6 +1613,16 @@ target_sources(test_encoder_queue PRIVATE src/modules/inference_queue.cpp src/mo
 target_link_libraries(test_encoder_queue PRIVATE sensen_slim PostgreSQL::PostgreSQL fastjson logger sgee)
 
 add_test(NAME EncoderQueueTest COMMAND test_encoder_queue)
+# A regression must FAIL this test, not hang it: the busy-replica cases hold chains on latches.
+set_tests_properties(EncoderQueueTest PROPERTIES TIMEOUT 120)
+
+# The probe's `answered` count, which the bench reads for arm L. Plain python3, registered only when an
+# interpreter is present; exits 77 (skipped) without grpc.
+find_program(PYTHON3_FOR_PROBE_TEST NAMES python3)
+if(PYTHON3_FOR_PROBE_TEST)
+    add_test(NAME EncoderQueueProbeTest COMMAND ${PYTHON3_FOR_PROBE_TEST} -B ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_encoder_queue_probe.py)
+    set_tests_properties(EncoderQueueProbeTest PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+endif()
 
 # The same claims against a REAL three-node SGEE cluster and REAL engines holding the real encoder
 # weights: encoders go through the queue, work is shared between engines, the surface partition

@@ -43,11 +43,12 @@ WARMUP=3
 mkdir -p "$OUT"
 : > "$OUT/samples.jsonl"
 
-# In-process answers in one cell: <arm> <label> <count before> <requests sent, warm-up included>.
+# In-process answers in one cell: <arm> <label> <count before> <requests ANSWERED, warm-up included>.
 # Arms A and Q are READ from the engine log, which carries one line per request. Arm L runs
 # INFERENCE_QUEUE=local, where there is no queue to route around and no per-request line is written
-# (nothing to account for), so its count is BY CONSTRUCTION every request sent. Reading its log would
-# report 0 in-process for an engine that answered all of them in-process.
+# (nothing to account for), so its count is BY CONSTRUCTION every request answered -- the probe's own
+# `answered`, which leaves out a request that errored. Reading its log would report 0 in-process for an
+# engine that answered all of them in-process.
 in_process_in_cell() {
   if [ "$1" = L ]; then echo "$4"; else echo $(( $(eqc_inprocess "$1" "$2") - $3 )); fi
 }
@@ -94,7 +95,7 @@ for hb in $HEARTBEATS; do
             # The log counts are read AFTER the cell has finished: expanded inside the pipeline that runs
             # the probe they would be read before it, and every cell would report zero spills.
             python3 -P -c 'import json,sys; d=json.load(open(sys.argv[1])); d["arm"],d["round"],d["heartbeat_ms"],d["fallbacks"],d["spilled"],d["in_process"]=sys.argv[2],int(sys.argv[3]),int(sys.argv[4]),int(sys.argv[5]),int(sys.argv[6]),int(sys.argv[7]); print(json.dumps(d))' \
-                "$OUT/cell.json" "$arm" "$round" "$hb" "$(eqc_fallbacks "$arm")" "$(( $(eqc_queued "$arm" "$label") - s0 ))" "$(in_process_in_cell "$arm" "$label" "$i0" "$(( n + WARMUP ))")" >> "$OUT/samples.jsonl"
+                "$OUT/cell.json" "$arm" "$round" "$hb" "$(eqc_fallbacks "$arm")" "$(( $(eqc_queued "$arm" "$label") - s0 ))" "$(in_process_in_cell "$arm" "$label" "$i0" "$(python3 -P -c 'import json,sys; print(json.load(open(sys.argv[1]))["answered"])' "$OUT/cell.json")")" >> "$OUT/samples.jsonl"
           done
         done
       done

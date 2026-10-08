@@ -11,6 +11,7 @@
 // this tree -- not gtest (config/cpp_details.txt rule 39 forbids external
 // test frameworks project-wide).
 #include <cstdio>
+#include <stdlib.h>
 
 
 import std;
@@ -22,6 +23,7 @@ using namespace std::chrono_literals;
 using options_calculator::inference_admission::Device;
 using options_calculator::inference_admission::InferenceOutcome;
 using options_calculator::inference_admission::QueuedBackend;
+using options_calculator::inference_admission::environment_positive_int;
 using options_calculator::inference_admission::resolve_device;
 
 namespace {
@@ -239,7 +241,7 @@ auto main() -> int {
     // and mortgage_assistant_service.cpp do at their own real call sites).
     section("resolve_device() -- ASSISTANT_DEVICE/MORTGAGE_DEVICE selector");
     {
-        // Default: no env var set, both callers pass "cpu" (env_string(...)
+        // Default: no env var set, both callers pass "cpu" (environment_text(...)
         // .value_or("cpu")) -- byte-identical to every build before this
         // selector existed, on a build/process combination that could not be
         // further from CUDA (neither compiled in nor ready).
@@ -517,6 +519,27 @@ auto main() -> int {
               "built before routes existed also uses");
         check(surface_lease_filter(mortgage_a) != surface_lease_filter(mortgage_b),
               "different builds, different filters");
+    }
+
+    section("environment_positive_int() -- the one parser behind the services' thread/queue knobs");
+    {
+        constexpr const char* kName = "OFC_TEST_POSITIVE_INT";
+        const auto read_with = [&](const char* value) {
+            if (value == nullptr) {
+                ::unsetenv(kName);
+            } else {
+                ::setenv(kName, value, 1);
+            }
+            return environment_positive_int(kName, 7);
+        };
+        check(read_with(nullptr) == 7, "unset falls back");
+        check(read_with("") == 7, "empty falls back");
+        check(read_with("12") == 12, "a positive number is taken");
+        check(read_with("0") == 7, "zero falls back, never zero threads");
+        check(read_with("-3") == 7, "negative falls back");
+        check(read_with("abc") == 7, "non-numeric falls back");
+        check(read_with("99999999999") == 7, "out of range falls back instead of wrapping");
+        ::unsetenv(kName);
     }
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);

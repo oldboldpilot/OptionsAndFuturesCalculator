@@ -179,23 +179,6 @@ constexpr std::int64_t kMinQuantity = 1;
 constexpr std::int64_t kMaxQuantity = 100'000;
 
 // ---------------------------------------------------------------------------
-// Environment helpers
-// ---------------------------------------------------------------------------
-
-/** Parses a positive thread count from an env var, falling back on anything
- * unset, empty, non-numeric, or non-positive -- a malformed override should
- * degrade to the documented default, never to zero threads or a crash. */
-[[nodiscard]] auto env_positive_int(const char* name, int fallback) -> int {
-    const char* raw = std::getenv(name);
-    if (raw == nullptr || *raw == '\0') return fallback;
-    const std::string_view view{raw};
-    int value = 0;
-    const auto result = std::from_chars(view.data(), view.data() + view.size(), value);
-    if (result.ec != std::errc{} || value <= 0) return fallback;
-    return value;
-}
-
-// ---------------------------------------------------------------------------
 // Prompt construction
 // ---------------------------------------------------------------------------
 
@@ -1551,15 +1534,15 @@ class AssistantWorker {
         // internally. This is a different axis from how many requests are in
         // flight: one owner thread drives the batch, and this is how wide
         // each of its steps is allowed to go.
-        const int threads = env_positive_int("ASSISTANT_INFERENCE_THREADS", 4);
+        const int threads = environment_positive_int("ASSISTANT_INFERENCE_THREADS", 4);
 
         // How many requests may decode simultaneously, and how many may wait
         // for a slot. See SensenBackend's measured throughput/latency table
         // for why the default is deliberately modest.
         const auto max_concurrent =
-            static_cast<std::size_t>(env_positive_int("ASSISTANT_MAX_CONCURRENT", 4));
+            static_cast<std::size_t>(environment_positive_int("ASSISTANT_MAX_CONCURRENT", 4));
         const auto queue_depth =
-            static_cast<std::size_t>(env_positive_int("ASSISTANT_QUEUE_DEPTH", 8));
+            static_cast<std::size_t>(environment_positive_int("ASSISTANT_QUEUE_DEPTH", 8));
 
         // Per-sequence context window. The original 1024 was a guess that
         // happened to hold; this model's GGUF declares a trained context of
@@ -1587,7 +1570,7 @@ class AssistantWorker {
         // PAGED cache, which commits 16-token blocks on demand, so a short
         // conversation's resident KV tracks its real length, not this number.
         const auto kv_max_seq_len =
-            static_cast<std::size_t>(env_positive_int("ASSISTANT_CONTEXT_TOKENS", 4096));
+            static_cast<std::size_t>(environment_positive_int("ASSISTANT_CONTEXT_TOKENS", 4096));
 
         // Device selection: `cpu` (default, byte-identical to every build
         // before this selector existed) or `cuda` (only ever real on a build

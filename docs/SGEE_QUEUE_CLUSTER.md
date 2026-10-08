@@ -98,11 +98,21 @@ The Postgres queue applies the same route in its lease query (`payload->>'route'
 task in the queue, and a worker executes it later for nobody. It is harmless and bounded by retention;
 it is also write capacity spent on nothing, which is why the in-flight bound exists.
 
-**Gates.** `test_encoder_queue` (hermetic) and `EncoderQueueClusterTest`
+**What the queue slot covers.** `ENCODER_QUEUE_MAX_IN_FLIGHT` bounds what this assistant has outstanding ON
+THE QUEUE. The slot is released before a fallback the service itself runs (a refused or undecodable queue
+answer); a degrade is answered inside the admission object's `submit()` (`degrade_to_local`), so the slot
+also covers that one local parse. The assistant services read their numeric knobs
+(`*_INFERENCE_THREADS`, `*_MAX_CONCURRENT`, `*_QUEUE_DEPTH`, `*_CONTEXT_TOKENS`) through the one
+`environment_positive_int` in `inference_admission`; unset, empty, non-numeric, out-of-range or non-positive
+falls back to the default.
+
+**Gates.** `test_encoder_queue` (hermetic; a regression fails its busy-replica cases, it does not hang them),
+`EncoderQueueProbeTest` (the probe's `answered` count) and `EncoderQueueClusterTest`
 (`backend/tests/integration/encoder_queue_cluster_test.sh`, shared bring-up in `lib/encoder_cluster.sh`;
 benchmark `scripts/encoder_queue_bench.sh` (arms L local, A default routing, Q queue-first) and
 `scripts/encoder_local_sweep.sh` (the measurement behind the local bound); client
-`scripts/encoder_queue_probe.py`).
+`scripts/encoder_queue_probe.py`). Arm L's "in-proc" column is the probe's `answered` count (warm-up
+included, errored requests left out), because `INFERENCE_QUEUE=local` writes no per-request log line.
 
 ## Promoted for inference again on 2026-08-20, with the lease partitioned
 

@@ -519,9 +519,16 @@ int main() {
         const bool entered = wait_until([&] { return chain.active->load() != 0; });
         check(entered, "the first request entered the chain (the replica was idle)");
         check(service.backend().in_flight() == 1, "the measured signal reads 1 while the chain executes");
-        const auto second = service.answer(queue, {"pay 2", "", ""});
+        // The second request runs off this thread: were it wrongly answered in-process it would wait
+        // on the gate beside the first (active == 2) and never return, so this thread must be free to
+        // release the gate. Either outcome ends the bounded wait; the checks below say which it was.
+        Answer second;
+        std::jthread arrival{[&] { second = service.answer(queue, {"pay 2", "", ""}); }};
+        check(wait_until([&] { return queue.submitted_.load() == 1 || chain.active->load() == 2; }),
+              "the second request reached the queue or the chain (it did not vanish)");
         chain.gate->count_down();  // only now may the first request leave the chain
         holder.join();
+        arrival.join();
 
         check(from_queue(second) && queue.submitted_.load() == 1,
               "the second request, arriving while the first held the only local slot, went to the queue");
@@ -541,9 +548,13 @@ int main() {
         }};
         check(wait_until([&] { return leased_chain.active->load() != 0; }),
               "the leased job entered the chain");
-        const auto own = leasing.answer(queue2, {"pay 3", "", ""});
+        Answer own;
+        std::jthread arrival2{[&] { own = leasing.answer(queue2, {"pay 3", "", ""}); }};
+        check(wait_until([&] { return queue2.submitted_.load() == 1 || leased_chain.active->load() == 2; }),
+              "the replica's own request reached the queue or the chain (it did not vanish)");
         leased_chain.gate->count_down();
         leased.join();
+        arrival2.join();
         check(from_queue(own) && queue2.submitted_.load() == 1,
               "executing a leased job makes the replica busy for its OWN requests too");
         check(service.backend().in_flight() == 0 && leasing.backend().in_flight() == 0,

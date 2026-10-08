@@ -142,14 +142,29 @@ export [[nodiscard]] constexpr auto resolve_device(std::string_view requested, b
  * The value of an environment variable, or nothing when it is unset or empty. A COPY, not the
  * pointer `std::getenv` hands back: that points into storage the next `setenv` may move, so no
  * caller should hold it. The ONE reader of the environment for the assistant services, the encoder
- * queue and the runtime; modules below this one (`sgee_queue_client`, `state_refresh`) cannot import
- * it and keep their own.
+ * queue and the runtime. Modules that `inference_admission` itself imports (`sgee_queue_client`), or
+ * that should not depend on the assistant layer (`state_refresh`), keep their own.
  */
 export [[nodiscard]] inline auto environment_text(std::string_view name) -> std::optional<std::string> {
     const std::string key{name};  // getenv needs a terminated string
     const char* const raw = std::getenv(key.c_str());
     if (raw == nullptr || *raw == '\0') return std::nullopt;
     return std::string{raw};
+}
+
+/**
+ * A positive integer from an environment variable, or `fallback` on anything unset, empty,
+ * non-numeric, out of range or non-positive -- a malformed override must degrade to the documented
+ * default, never to zero threads or a crash. Both assistant services read their thread, concurrency,
+ * queue-depth and context knobs through this one parser.
+ */
+export [[nodiscard]] inline auto environment_positive_int(std::string_view name, int fallback) -> int {
+    const auto text = environment_text(name);
+    if (!text.has_value()) return fallback;
+    int value = 0;
+    const auto result = std::from_chars(text->data(), text->data() + text->size(), value);
+    if (result.ec != std::errc{} || value <= 0) return fallback;
+    return value;
 }
 
 /**
