@@ -32,7 +32,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "agent" / "train"))
 
-# LiteralTag's enumerator order in backend/src/modules/mortgage_verification.cppm.
+# LiteralTag's enumerator order in sensen's numeric_lexer module.
 # Written as the enum's own order rather than a lookup built from strings, because the
 # probe emits the integer and a reordered enum must show up as a mismatch here.
 CPP_TAG = ["bare", "money", "percent", "years", "months", "days"]

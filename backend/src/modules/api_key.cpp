@@ -524,27 +524,25 @@ auto check_saved_scenarios_entitlement(const Identity& identity, std::string_vie
 namespace {
 
 /**
- * Picks the WHOLE message for this surface and outcome. Malformed, Unknown
- * and Revoked each get the surface's own dedicated sentence; every other
- * outcome (NoKey, or a well-formed identity that is simply free-tier) falls
- * back to `surface.message` -- the original, unchanged "is a Pro feature"
+ * Picks the WHOLE message for this outcome. Malformed, Unknown and Revoked
+ * each get the surface's own dedicated sentence; every other outcome (NoKey, or
+ * a well-formed identity that is simply free-tier) falls back to
+ * `kStrategySurface.message` -- the original, unchanged "is a Pro feature"
  * text, because those two genuinely are the same story: nothing is wrong
  * with what the caller sent.
  */
-[[nodiscard]] auto assistant_outcome_message(const AssistantSurface& surface,
-                                             Outcome outcome) noexcept -> std::string_view {
+[[nodiscard]] auto assistant_outcome_message(Outcome outcome) noexcept -> std::string_view {
     switch (outcome) {
-        case Outcome::Malformed: return surface.malformed_message;
-        case Outcome::Unknown: return surface.unknown_message;
-        case Outcome::Revoked: return surface.revoked_message;
-        default: return surface.message;
+        case Outcome::Malformed: return kStrategySurface.malformed_message;
+        case Outcome::Unknown: return kStrategySurface.unknown_message;
+        case Outcome::Revoked: return kStrategySurface.revoked_message;
+        default: return kStrategySurface.message;
     }
 }
 
 }  // namespace
 
-auto check_assistant_entitlement(const Identity& identity, const AssistantSurface& surface)
-    -> grpc::Status {
+auto check_assistant_entitlement(const Identity& identity) -> grpc::Status {
     const auto mode = pro_gate_mode();
     if (mode == GateMode::Off) return grpc::Status::OK;
     if (is_pro(identity)) return grpc::Status::OK;
@@ -553,15 +551,15 @@ auto check_assistant_entitlement(const Identity& identity, const AssistantSurfac
     const std::string who = identity.id.empty() ? "<anonymous>" : identity.id;
 
     if (mode == GateMode::Warn) {
-        log.error("pro-gate would-deny: key={} rpc={} tier={} auth={}", who, surface.rpc,
+        log.error("pro-gate would-deny: key={} rpc={} tier={} auth={}", who, kStrategySurface.rpc,
                   identity.tier.empty() ? "free" : identity.tier, to_string(identity.outcome));
         return grpc::Status::OK;
     }
 
-    log.info("pro-gate deny: key={} rpc={} tier={} auth={}", who, surface.rpc,
+    log.info("pro-gate deny: key={} rpc={} tier={} auth={}", who, kStrategySurface.rpc,
              identity.tier.empty() ? "free" : identity.tier, to_string(identity.outcome));
     return grpc::Status(grpc::StatusCode::PERMISSION_DENIED,
-                        std::string{assistant_outcome_message(surface, identity.outcome)});
+                        std::string{assistant_outcome_message(identity.outcome)});
 }
 
 auto parse_require_mode(std::string_view raw) noexcept -> Mode {

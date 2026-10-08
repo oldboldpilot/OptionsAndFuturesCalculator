@@ -6,7 +6,7 @@ directly: it has no domain and serves no user traffic.
 
 `options-calculator-backend` is the counterpart. It keeps its replicas — that
 is what serves the two live sites' calculator and finance RPCs — but carries
-**no** models: `MODEL_URL` and `MORTGAGE_MODEL_URL` are empty there, so its
+**no** models: `MODEL_URL` and `STRATEGY_ENCODER_URL` are empty there, so its
 assistants run submit-only, accepting the RPC and handing the work here.
 
 ## Why this is a separate service, not another replica
@@ -33,7 +33,7 @@ reachable from the CLI, so the staged tree carries this directory's
 **This service must NEVER have its model URLs emptied, and the engine must
 NEVER have them set.** If both carry weights the split saves nothing; if
 neither does, every assistant request refuses. The startup banner is the check —
-one line per assistant per replica:
+one line per replica:
 
     assistant-worker            "model is LOADED"
     options-calculator-backend  "NOT LOCAL -- submitting to the shared inference queue"

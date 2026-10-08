@@ -65,7 +65,7 @@ namespace {
 
 // ---------------------------------------------------------------------------
 // Harness (mirrors tests/test_option_pricing_service.cpp /
-// tests/test_mortgage_verification.cpp).
+// tests/test_assistant_verification.cpp).
 // ---------------------------------------------------------------------------
 
 int g_checks = 0;

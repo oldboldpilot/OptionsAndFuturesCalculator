@@ -20,7 +20,7 @@
 // TVM family).
 //
 // Plain hand-rolled check()/section() harness, matching
-// tests/test_option_pricing_service.cpp and tests/test_mortgage_verification.cpp
+// tests/test_option_pricing_service.cpp and tests/test_assistant_verification.cpp
 // -- NOT gtest (sensen coding policy, config/cpp_details.txt rule 39, BINDING).
 // A real in-process grpc::Server hosting exactly what
 // options_calculator::finance::RegisterFinanceService registers in
@@ -2153,7 +2153,7 @@ auto main() -> int {
     // workstream exists to add, in production-shaped code, with a green test
     // suite. Section 23's style of test could not see it, because every test
     // here built its request the way a C++ caller would: omitting what it did
-    // not need. The assistant CANNOT omit -- mortgage_verification.cppm's G2b
+    // not need. The assistant CANNOT omit -- its verifier's G2b (mortgage-nest-egg)
     // refuses a missing key -- so it says "not this shape" with the convention
     // value "0", and `.empty()` reads that as "present". One caller's silence
     // is the other caller's zero.
@@ -2808,7 +2808,7 @@ auto main() -> int {
     // which is true and useless to a caller.
     //
     // Three of the four artifacts describing this field speak days -- the
-    // proto, `mortgage_verification.cppm`'s SlotKind::DayOffsets bounded at
+    // proto, the mortgage assistant verifier's SlotKind::DayOffsets (mortgage-nest-egg) bounded at
     // 36,525, and a corpus that labels "after 372 days" as 372.0 -- so the
     // wire stayed in days and `dates_to_seconds` bridges once, at the service.
     // A seconds wire would have cost a retrain to teach the model to emit

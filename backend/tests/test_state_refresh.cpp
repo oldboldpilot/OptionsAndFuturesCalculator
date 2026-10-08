@@ -6,7 +6,7 @@
  * NO EXTERNAL TEST FRAMEWORK. Rule 39 forbids GTest and Catch2 outright, and
  * the tree follows it: across every file in tests/ there is not one include of
  * an external framework. The harness is a `check()` and two counters, the same
- * shape `test_mortgage_verification.cpp` and `test_finance_service_validation.cpp`
+ * shape `test_assistant_verification.cpp` and `test_finance_service_validation.cpp`
  * use, and a non-zero exit is the failure signal ctest reads.
  *
  * WHAT THIS COVERS, and why it is the validator rather than the RPC:

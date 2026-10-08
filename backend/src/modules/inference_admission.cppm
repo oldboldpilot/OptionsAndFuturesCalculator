@@ -7,10 +7,10 @@ import sgee_queue_client;
 /**
  * @author Olumuyiwa Oluwasanmi
  *
- * The admission-queue/backpressure layer shared by the strategy assistant
- * (assistant_service.cpp) and the mortgage assistant (mortgage_assistant_
- * service.cpp), extracted out of both files' near-identical anonymous
- * namespaces into one module. `InferenceOutcome`, `PendingJob`,
+ * The admission-queue/backpressure layer of the strategy assistant
+ * (assistant_service.cpp), extracted out of that file's anonymous namespace
+ * into one module. It was shared with a second assistant (mortgage) until that
+ * service moved to the mortgage-nest-egg repository. `InferenceOutcome`, `PendingJob`,
  * `InferenceBackend` and `QueuedBackend` below are the SAME classes that used
  * to live twice -- once per file -- with the SAME names and the SAME
  * behaviour; only their address changed. `SensenBackend`/`LlamaCppBackend`
@@ -38,7 +38,7 @@ import sgee_queue_client;
  *     `statement_timeout`, rather than hanging or erroring the RPC.
  *
  * WHY THIS MODULE IMPORTS `inference_queue` DIRECTLY (and is therefore only
- * safe to import from assistant_service.cpp / mortgage_assistant_service.cpp,
+ * safe to import from assistant_service.cpp,
  * never from finance_service.cpp or calculator_service.cpp): the Postgres
  * extension's types are expressed directly in terms of
  * `inference_queue::Queue`/`Surface`/`Job` rather than behind a further
@@ -53,7 +53,7 @@ import sgee_queue_client;
 namespace options_calculator::inference_admission {
 
 // ---------------------------------------------------------------------------
-// Device selection (ASSISTANT_DEVICE / MORTGAGE_DEVICE)
+// Device selection (ASSISTANT_DEVICE)
 // ---------------------------------------------------------------------------
 
 /**
@@ -67,7 +67,7 @@ namespace options_calculator::inference_admission {
 export enum class Device : std::uint8_t { Cpu, Cuda };
 
 /** `device`'s wire/log spelling -- "cpu" or "cuda", the same two strings
- *  `ASSISTANT_DEVICE`/`MORTGAGE_DEVICE` accept. Centralised so a ready-line
+ *  `ASSISTANT_DEVICE` accepts. Centralised so a ready-line
  *  log and a `device()` override never drift into spelling it differently. */
 export [[nodiscard]] constexpr auto device_name(Device device) noexcept -> std::string_view {
     return device == Device::Cuda ? "cuda" : "cpu";
@@ -86,8 +86,8 @@ export struct DeviceResolution {
 };
 
 /**
- * Pure decision function behind `ASSISTANT_DEVICE`/`MORTGAGE_DEVICE`, factored
- * out of both Worker constructors so it is unit-testable without an actual
+ * Pure decision function behind `ASSISTANT_DEVICE`, factored
+ * out of the Worker constructor so it is unit-testable without an actual
  * CUDA build or a real device: `cuda_build`/`cuda_device_ready` are the two
  * facts a caller has already established -- both at RUNTIME, via one
  * `sensen::cuda::CudaBackend::query()` call whose failure message tells the
@@ -218,8 +218,8 @@ export class InferenceBackend {
     /**
      * Which device is ACTUALLY serving requests through this backend right
      * now -- "cpu" or "cuda" (see `device_name`), never a partial value.
-     * Distinct from what a deployment REQUESTED via `ASSISTANT_DEVICE`/
-     * `MORTGAGE_DEVICE`: a backend that degraded from a `cuda` request to
+     * Distinct from what a deployment REQUESTED via
+     * `ASSISTANT_DEVICE`: a backend that degraded from a `cuda` request to
      * `cpu` at runtime (see `resolve_device`) reports "cpu" here, so a caller
      * logging this states ground truth, not the abandoned request.
      *
@@ -377,7 +377,7 @@ export class QueuedBackend : public InferenceBackend {
         {
             const std::lock_guard lock{mutex_};
             if (shutting_down_) {
-                return InferenceOutcome{.ok = false, .text = {}, .error = shutting_down_message_};
+                return InferenceOutcome{.ok = false, .text = {}, .error = std::string{kShuttingDownMessage}};
             }
             if (queue_.size() >= max_queue_depth_) {
                 return std::nullopt;
@@ -439,19 +439,7 @@ export class QueuedBackend : public InferenceBackend {
     }
 
   protected:
-    /**
-     * A per-surface human-readable name for the "shutting down" message
-     * `submit()` returns to a caller that arrives after shutdown has begun.
-     * Defaults to the strategy assistant's original wording so
-     * assistant_service.cpp's `SensenBackend`/`LlamaCppBackend` need no
-     * change; mortgage_assistant_service.cpp's `SensenBackend` passes its own
-     * original wording explicitly. This is the one piece of `QueuedBackend`'s
-     * externally-visible behaviour that genuinely differed between the two
-     * pre-extraction copies, so it is parameterized rather than unified.
-     */
-    explicit QueuedBackend(
-        std::string_view shutting_down_message = "assistant backend is shutting down")
-        : shutting_down_message_(shutting_down_message) {}
+    QueuedBackend() = default;
 
     /**
      * Blocks the owner thread until at least one job is queued or a stop is
@@ -546,7 +534,7 @@ export class QueuedBackend : public InferenceBackend {
      * compiled fresh for, and linked into, every target that uses this
      * module -- to emit a genuine, usable definition of `take_jobs`'s
      * compiled body, rather than leaving that to whichever calling TU
-     * (assistant_service.cpp, mortgage_assistant_service.cpp, a test driver,
+     * (assistant_service.cpp, a test driver,
      * ...) happens to need it first.
      *
      * DIAGNOSIS (root cause, not a shrug): `take_jobs`'s `local`-mode branch
@@ -599,9 +587,9 @@ export class QueuedBackend : public InferenceBackend {
      * happens to dodge the bug -- by independently instantiating the same
      * libc++ internals for some unrelated reason of its own, which sidesteps
      * the merge-as-declaration defect entirely rather than depending on it
-     * being fixed -- is NOT reliable: assistant_service.cpp.o and
-     * mortgage_assistant_service.cpp.o happened to emit a real definition
-     * (both construct `std::jthread` workers directly, which independently
+     * being fixed -- is NOT reliable: assistant_service.cpp.o
+     * happened to emit a real definition
+     * (it constructs `std::jthread` workers directly, which independently
      * instantiates this same `__stop_state` machinery); this task's own
      * tests/test_inference_admission.cpp.o and
      * tests/test_inference_admission_pg.cpp.o did not, and failed to link
@@ -656,11 +644,13 @@ export class QueuedBackend : public InferenceBackend {
      *  1.6-2.5s (see this task's own latency breakdown). */
     static constexpr std::chrono::milliseconds kLeasePollTick{50};
 
+    /** What `submit()` answers a caller that arrives after shutdown has begun. */
+    static constexpr std::string_view kShuttingDownMessage = "assistant backend is shutting down";
+
     std::mutex mutex_;
     std::condition_variable_any cv_;
     std::deque<PendingJob> queue_;
     bool shutting_down_ = false;
-    std::string shutting_down_message_;
     std::shared_ptr<LeaseSource> lease_source_;
 };
 

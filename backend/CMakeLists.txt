@@ -202,27 +202,7 @@ add_custom_command(
     DEPENDS ${ASSISTANT_PROTO_FILE} ${FINANCE_PROTO_FILE}
 )
 
-# The MORTGAGE assistant's contract: free-text mortgage / time-value-of-money /
-# cash-flow requests in, the NAME OF A sensen.finance.Finance RPC plus that
-# RPC's own parameters (or a clarifying question, or a refusal) out. A separate
-# file from assistant.proto rather than a second service inside it, because the
-# two assistants are backed by two different fine-tuned models with two
-# different label spaces -- see that file's own banner. Same binary, same port,
-# fourth contract.
-set(MORTGAGE_ASSISTANT_PROTO_FILE "${CMAKE_CURRENT_SOURCE_DIR}/proto/mortgage_assistant.proto")
-
-add_custom_command(
-    OUTPUT "${PROTO_GEN_DIR}/mortgage_assistant.pb.cc" "${PROTO_GEN_DIR}/mortgage_assistant.pb.h" "${PROTO_GEN_DIR}/mortgage_assistant.grpc.pb.cc" "${PROTO_GEN_DIR}/mortgage_assistant.grpc.pb.h"
-    COMMAND $<TARGET_FILE:protoc>
-    ARGS --cpp_out=${PROTO_GEN_DIR}
-         --grpc_out=${PROTO_GEN_DIR}
-         --plugin=protoc-gen-grpc=$<TARGET_FILE:grpc_cpp_plugin>
-         -I${CMAKE_CURRENT_SOURCE_DIR}/proto
-         ${MORTGAGE_ASSISTANT_PROTO_FILE}
-    DEPENDS ${MORTGAGE_ASSISTANT_PROTO_FILE}
-)
-
-# One descriptor set covering ALL FOUR contracts, for Envoy's gRPC-JSON transcoder.
+# One descriptor set covering ALL THREE contracts, for Envoy's gRPC-JSON transcoder.
 #
 # Envoy resolves method names, field names and types from this at runtime, which
 # is what lets a caller POST JSON without holding a .proto or running codegen.
@@ -239,8 +219,8 @@ add_custom_command(
     ARGS --include_imports
          --descriptor_set_out=${PROTO_DESCRIPTOR}
          -I${CMAKE_CURRENT_SOURCE_DIR}/proto
-         ${PROTO_FILE} ${FINANCE_PROTO_FILE} ${ASSISTANT_PROTO_FILE} ${MORTGAGE_ASSISTANT_PROTO_FILE}
-    DEPENDS ${PROTO_FILE} ${FINANCE_PROTO_FILE} ${ASSISTANT_PROTO_FILE} ${MORTGAGE_ASSISTANT_PROTO_FILE}
+         ${PROTO_FILE} ${FINANCE_PROTO_FILE} ${ASSISTANT_PROTO_FILE}
+    DEPENDS ${PROTO_FILE} ${FINANCE_PROTO_FILE} ${ASSISTANT_PROTO_FILE}
     COMMENT "Generating proto descriptor set for Envoy JSON transcoding"
 )
 add_custom_target(proto_descriptor ALL DEPENDS ${PROTO_DESCRIPTOR})
@@ -252,8 +232,6 @@ add_library(proto_lib STATIC
     "${PROTO_GEN_DIR}/finance.grpc.pb.cc"
     "${PROTO_GEN_DIR}/assistant.pb.cc"
     "${PROTO_GEN_DIR}/assistant.grpc.pb.cc"
-    "${PROTO_GEN_DIR}/mortgage_assistant.pb.cc"
-    "${PROTO_GEN_DIR}/mortgage_assistant.grpc.pb.cc"
 )
 target_include_directories(proto_lib PUBLIC ${PROTO_GEN_DIR})
 target_link_libraries(proto_lib PUBLIC grpc++ libprotobuf)
@@ -551,8 +529,8 @@ endif()
 # add_subdirectory(cpp23-logger EXCLUDE_FROM_ALL)
 
 # Core engine binary
-add_executable(calculator_engine src/main.cpp src/issue_key.cpp src/modules/calculator_service.cpp src/modules/finance_service.cpp src/modules/quota.cpp src/modules/api_key.cpp src/modules/assistant_service.cpp src/modules/mortgage_assistant_service.cpp src/modules/inference_queue.cpp src/modules/inference_admission.cpp src/modules/sgee_queue_client.cpp src/modules/strategy_store.cpp src/modules/state_refresh.cpp)
-target_sources(calculator_engine PUBLIC FILE_SET CXX_MODULES FILES src/modules/calculator_service.cppm src/modules/market_data.cppm src/modules/finance_service.cppm src/modules/quota.cppm src/modules/api_key.cppm src/modules/fips_mode.cppm src/modules/state_refresh.cppm src/modules/strategy_catalogue.cppm src/modules/assistant_verification.cppm src/modules/assistant_service.cppm src/modules/mortgage_verification.cppm src/modules/mortgage_explanation.cppm src/modules/mortgage_derivation.cppm src/modules/mortgage_grammar.cppm src/modules/mortgage_assistant_service.cppm src/modules/pg.cppm src/modules/inference_queue.cppm src/modules/sgee_queue_client.cppm src/modules/inference_admission.cppm src/modules/strategy_store.cppm src/modules/llq_weight_store.cppm)
+add_executable(calculator_engine src/main.cpp src/issue_key.cpp src/modules/calculator_service.cpp src/modules/finance_service.cpp src/modules/quota.cpp src/modules/api_key.cpp src/modules/assistant_service.cpp src/modules/inference_queue.cpp src/modules/inference_admission.cpp src/modules/sgee_queue_client.cpp src/modules/strategy_store.cpp src/modules/state_refresh.cpp)
+target_sources(calculator_engine PUBLIC FILE_SET CXX_MODULES FILES src/modules/calculator_service.cppm src/modules/market_data.cppm src/modules/finance_service.cppm src/modules/quota.cppm src/modules/api_key.cppm src/modules/fips_mode.cppm src/modules/state_refresh.cppm src/modules/strategy_catalogue.cppm src/modules/assistant_verification.cppm src/modules/assistant_service.cppm src/modules/mortgage_explanation.cppm src/modules/pg.cppm src/modules/inference_queue.cppm src/modules/sgee_queue_client.cppm src/modules/inference_admission.cppm src/modules/strategy_store.cppm src/modules/llq_weight_store.cppm)
 target_link_libraries(calculator_engine PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto sgee)
 # PostgreSQL::PostgreSQL is linked into calculator_engine further down, right
 # after find_package(PostgreSQL REQUIRED) runs (see that comment block) --
@@ -707,78 +685,30 @@ target_link_libraries(test_runner PRIVATE proto_lib sensen_slim fastjson logger 
 
 add_test(NAME CoreEngineTest COMMAND test_runner)
 
-# CorpusInvariantsTest: deterministic properties of the assistant's TRAINING
-# DATA, asserted without a model, a checkpoint or a GPU.
+# EnvoyTranscoderServicesTest: the JSON transcoder's service list in envoy.yaml must
+# equal the services in the descriptor set built above. A service named in envoy.yaml
+# and missing from the descriptor makes Envoy refuse the configuration, so every
+# replica crash-loops under a SUCCESS deployment; a service in the descriptor and not
+# in envoy.yaml silently has no JSON route. The CMake proto list and envoy.yaml are
+# edited in different files and nothing else connects them, which is what this does.
 #
-# Every corpus defect this project has paid for was visible in the data before
-# any model was trained, and every one was found only after a retrain measured
-# worse -- `phrase_money` rounding away the cents its label kept (0/98 on eight
-# operations), `prepaid_interest_days` labelling a convention the utterance
-# never states (21 of 26 closing-cost failures), and the dated cash-flow grid
-# generated at ~365-day intervals and labelled ComputeXnpv, whose entire
-# distinction from ComputeNpv is IRREGULAR spacing (8 of 9 held-out rows
-# answered as the wrong operation). The generator is a pure function of
-# (seed, n, val_frac, its own source), so all of it is checkable in a second.
-#
-# Plain `python3`, deliberately NOT ${Python_EXECUTABLE}: that variable only
-# exists when BUILD_PYTHON_BINDINGS is ON, which the production container build
-# must never require. Registered only if an interpreter is present, so a host
-# without one skips the test rather than failing it.
-find_program(PYTHON3_FOR_CORPUS_TEST NAMES python3)
-if(PYTHON3_FOR_CORPUS_TEST)
+# Plain `python3`, deliberately NOT ${Python_EXECUTABLE}: that variable only exists when
+# BUILD_PYTHON_BINDINGS is ON, which the production container build must never require.
+# Registered only if an interpreter is present, so a host without one skips the test
+# rather than failing it. The descriptor is decoded by the protoc that built it.
+find_program(PYTHON3_FOR_TESTS NAMES python3)
+if(PYTHON3_FOR_TESTS)
     add_test(
-        NAME CorpusInvariantsTest
-        COMMAND ${PYTHON3_FOR_CORPUS_TEST}
-                ${CMAKE_CURRENT_SOURCE_DIR}/../agent/dataset/test_corpus_invariants.py
+        NAME EnvoyTranscoderServicesTest
+        COMMAND ${PYTHON3_FOR_TESTS}
+                ${CMAKE_CURRENT_SOURCE_DIR}/../scripts/check_envoy_services.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/envoy.yaml
+                ${PROTO_DESCRIPTOR}
+                $<TARGET_FILE:protoc>
+                ${grpc_SOURCE_DIR}/third_party/protobuf/src
     )
 else()
-    message(STATUS "python3 not found -- CorpusInvariantsTest not registered")
-endif()
-
-# DerivationCorpusSweepTest: prove the derivation layer never CORRUPTS a correct
-# answer, against a corpus generated from the generator itself.
-#
-# Accuracy cannot see this failure. The sweep hands the layer the GOLD params as
-# though the model had emitted them perfectly and reports every field the layer
-# then REWRITES -- and rewriting a correct value is a served regression by
-# construction, because the row still scores raw-exact and serves wrong. A
-# recency rule keyed on percent alone cost 19 holdout rows exactly that way: a
-# HELOC reply of "75%" is a max-LTV, and letting it supersede the stated 8.33%
-# derived annual_rate = 0.7500 on rows the model had answered perfectly.
-# `raw_exact` was byte-identical across that regression; only served_exact moved.
-#
-# The corpus is GENERATED rather than checked in, for the reason
-# CorpusInvariantsTest gives: it is a pure function of (seed, n, the generator),
-# so the gate re-derives itself whenever the corpus changes and cannot go stale
-# beside it.
-if(PYTHON3_FOR_CORPUS_TEST)
-    add_test(
-        NAME DerivationCorpusSweepTest
-        COMMAND ${PYTHON3_FOR_CORPUS_TEST}
-                ${CMAKE_CURRENT_SOURCE_DIR}/../scripts/sweep_corpus.py
-                --gate $<TARGET_FILE:dbg_derivation> 500
-    )
-endif()
-
-# GroundingCorpusSweepTest: the same sweep, one layer down -- prove the GROUNDING
-# gate never refuses a label the corpus itself teaches.
-#
-# `mortgage_verification.cppm` has claimed this property in a comment since
-# 2026-08-05 (the misuse spec's WU-M2 criterion) and nothing ever ran it. The
-# criterion was checked once by hand and the corpus then moved underneath it.
-#
-# What that cost, measured 2026-09-16: `ComputePaybackPeriod` teaches
-# `rate: 0.0` for an UNDISCOUNTED payback -- the convention meaning "no
-# discounting", which the engine never reads -- and grounding refused it as an
-# ungrounded zero. 17 of 28 holdout rows, with the model's output byte-identical
-# to the gold. `raw_exact` scored every one of them correct.
-if(PYTHON3_FOR_CORPUS_TEST)
-    add_test(
-        NAME GroundingCorpusSweepTest
-        COMMAND ${PYTHON3_FOR_CORPUS_TEST}
-                ${CMAKE_CURRENT_SOURCE_DIR}/../scripts/sweep_corpus.py
-                --gate $<TARGET_FILE:dbg_grounding> 500
-    )
+    message(STATUS "python3 not found -- EnvoyTranscoderServicesTest not registered")
 endif()
 
 # Retry-with-backoff + circuit-breaker orchestration around market_data.cppm's
@@ -835,74 +765,26 @@ target_sources(test_assistant_verification
 
 add_test(NAME AssistantVerificationTest COMMAND test_assistant_verification)
 
-# GP-ARA mandatory verification stage for the MORTGAGE assistant. Same
-# rationale as the options block above: proto- and gRPC-free, and deliberately
-# NOT linked against sensen_slim -- the only sensen module it needs,
-# sensen.gp_ara_interfaces, has no dependencies beyond std, so it is compiled
-# here as this target's own FILE_SET source.
-# mortgage_derivation: the Horn-clause derivation layer. Links sensen_slim
-# because it imports sensen.logic and sensen.logic_parser, which the engine now
-# carries -- see the logic.cppm entry in the slim list for why that is the right
-# engine for this and z3 is not.
-add_executable(bench_derivation tests/bench_derivation.cpp)
-target_sources(bench_derivation PRIVATE FILE_SET CXX_MODULES FILES
-    sensen/src/gp_ara_interfaces.cppm
-    src/modules/mortgage_verification.cppm
-    src/modules/mortgage_derivation.cppm)
-target_link_libraries(bench_derivation PRIVATE sensen_slim fastjson logger)
-
 # bench_finance_compute: raw kernel latency with no gRPC and no network. It
 # needs no module FILE_SET of its own -- every symbol it times is exported by
 # sensen_slim's financial/bigdecimal modules, which it imports directly.
 add_executable(bench_finance_compute tests/bench_finance_compute.cpp)
 target_link_libraries(bench_finance_compute PRIVATE sensen_slim fastjson logger)
 
-add_executable(dbg_grounding tests/dbg_grounding.cpp)
-target_sources(dbg_grounding PRIVATE FILE_SET CXX_MODULES FILES
-    sensen/src/gp_ara_interfaces.cppm
-    src/modules/mortgage_verification.cppm)
-target_link_libraries(dbg_grounding PRIVATE sensen_slim fastjson logger)
-
-add_executable(dbg_derivation tests/dbg_derivation.cpp)
-target_sources(dbg_derivation PRIVATE FILE_SET CXX_MODULES FILES
-    sensen/src/gp_ara_interfaces.cppm
-    src/modules/mortgage_verification.cppm
-    src/modules/mortgage_derivation.cppm)
-target_link_libraries(dbg_derivation PRIVATE sensen_slim fastjson logger)
-
-# Two consistency checkers over rule systems this project spreads across files
-# no compiler reads together -- the mortgage assistant's per-operation coverage,
-# and mortgagefvcalculator.com's monetization workflow. Both ask the Horn-clause
-# engine "which member of this family has no rule", which is the defect shape
-# every coverage miss recorded in CLAUDE.md has taken.
+# A consistency checker over a rule system this project spreads across files no
+# compiler reads together -- mortgagefvcalculator.com's monetization workflow. It asks
+# the Horn-clause engine "which member of this family has no rule", which is the defect
+# shape every coverage miss recorded in CLAUDE.md has taken.
 #
-# THEY LIVE HERE BECAUSE THIS IS THE ONLY TREE THAT CAN BUILD THEM. The facts
-# they consume are GENERATED -- scripts/emit_assistant_facts.py in this repo,
-# nest-egg-loan/scripts/emit-workflow-facts.mjs in the other -- and both
-# emitters were committed while their readers existed only in an untracked
-# worktree. A generator whose only consumer is uncommitted is a generator
-# nothing gates.
+# IT LIVES HERE BECAUSE THIS IS THE ONLY TREE THAT CAN BUILD IT. The facts it consumes
+# are GENERATED -- nest-egg-loan/scripts/emit-workflow-facts.mjs in the other repository
+# -- and the emitter was committed while its reader existed only in an untracked
+# worktree. A generator whose only consumer is uncommitted is a generator nothing gates.
 #
-# Deliberately NOT registered with add_test: each needs a generated facts file,
-# and a check that passes because its input was missing is worse than no check.
-add_executable(assistant_check tests/assistant_check.cpp)
-target_link_libraries(assistant_check PRIVATE sensen_slim fastjson logger)
-
+# Deliberately NOT registered with add_test: it needs a generated facts file, and a check
+# that passes because its input was missing is worse than no check.
 add_executable(workflow_check tests/workflow_check.cpp)
 target_link_libraries(workflow_check PRIVATE sensen_slim fastjson logger)
-
-add_executable(test_mortgage_derivation tests/test_mortgage_derivation.cpp)
-target_sources(test_mortgage_derivation
-    PRIVATE
-    FILE_SET CXX_MODULES FILES
-        sensen/src/gp_ara_interfaces.cppm
-        src/modules/mortgage_verification.cppm
-        src/modules/mortgage_derivation.cppm
-)
-target_link_libraries(test_mortgage_derivation PRIVATE sensen_slim fastjson logger)
-target_compile_definitions(test_mortgage_derivation PRIVATE
-    MORTGAGE_FINANCE_PROTO_PATH="${CMAKE_CURRENT_SOURCE_DIR}/proto/finance.proto")
-add_test(NAME MortgageDerivationTest COMMAND test_mortgage_derivation)
 
 # mortgage_explanation: the PMI scenario put into words by the SAME Horn-clause
 # solver the derivation layer uses. It needs no verifier and no proto: it reasons
@@ -949,21 +831,6 @@ add_executable(test_rent_vs_buy_costs tests/test_rent_vs_buy_costs.cpp)
 target_link_libraries(test_rent_vs_buy_costs PRIVATE sensen_slim fastjson logger)
 add_test(NAME RentVsBuyCostsTest COMMAND test_rent_vs_buy_costs)
 
-# test_label_space_drift: the FOURTH table, which had no check at all and was
-# the one that drifted. It reads `kOperations` out of the service .cpp as text
-# -- the table is not in a module interface, and a derived check against the
-# real artifact beats a hand-written list that can drift exactly as the thing
-# it checks just did. The source root is passed so it does not depend on cwd.
-add_executable(test_label_space_drift tests/test_label_space_drift.cpp)
-target_sources(test_label_space_drift
-    PRIVATE
-    FILE_SET CXX_MODULES FILES
-        src/modules/mortgage_verification.cppm
-)
-target_link_libraries(test_label_space_drift PRIVATE sensen_slim fastjson logger)
-add_test(NAME LabelSpaceDriftTest
-         COMMAND test_label_space_drift ${CMAKE_CURRENT_SOURCE_DIR})
-
 # test_pmi_policy: the byte-identity gate over the PMI cancellation refactor,
 # plus the new basis/threshold behaviour. It links sensen_slim and calls
 # sensen::calculate_mortgage_amortization DIRECTLY rather than through the
@@ -996,29 +863,6 @@ target_sources(test_rental_tax PRIVATE FILE_SET CXX_MODULES FILES
     src/modules/rental_tax.cppm)
 target_link_libraries(test_rental_tax PRIVATE fastjson logger)
 add_test(NAME RentalTaxTest COMMAND test_rental_tax)
-
-add_executable(test_mortgage_verification tests/test_mortgage_verification.cpp)
-target_sources(test_mortgage_verification
-    PRIVATE
-    FILE_SET CXX_MODULES FILES
-        sensen/src/gp_ara_interfaces.cppm
-        # The lexer and Decimal the verifier grounds against live in sensen now. The lexer
-        # imports ascii_text and float_types (which imports cpu_features) and nothing else, so
-        # the four are compiled here as this target's own sources, as gp_ara is.
-        sensen/src/ascii_text.cppm
-        sensen/src/cpu_features.cppm
-        sensen/src/float_types.cppm
-        sensen/src/numeric_lexer.cppm
-        src/modules/mortgage_verification.cppm
-)
-# The label-space drift check re-parses finance.proto at RUN time, so the test
-# fails rather than silently skipping if the path is wrong. The test also falls
-# back to $FINANCE_PROTO_PATH and to ../proto/finance.proto (which resolves when
-# ctest runs from the build dir); this define is belt and braces.
-target_compile_definitions(test_mortgage_verification PRIVATE
-    MORTGAGE_FINANCE_PROTO_PATH="${CMAKE_CURRENT_SOURCE_DIR}/proto/finance.proto")
-
-add_test(NAME MortgageVerificationTest COMMAND test_mortgage_verification)
 
 # PARITY PROBE for encoder_reconstruct.cppm -- the C++ port of Python's
 # reconstruct() (agent/train/encoder_corpus.py). The small-encoder assistants
@@ -1083,8 +927,7 @@ target_link_libraries(test_encoder_tokenizer_parity PRIVATE sensen_slim fastjson
 add_executable(test_encoder_lexer_parity tests/encoder_lexer_parity.cpp)
 # The lexer is sensen.numeric_lexer now (it imports sensen.ascii_text and sensen.float_types, which
 # imports sensen.cpu_features), so this probe compiles those four as its own sources rather than
-# linking the whole of sensen_slim -- the same light shape it had when the lexer lived inside
-# mortgage_verification.
+# linking the whole of sensen_slim.
 target_sources(test_encoder_lexer_parity PRIVATE FILE_SET CXX_MODULES FILES
     sensen/src/ascii_text.cppm sensen/src/cpu_features.cppm sensen/src/float_types.cppm
     sensen/src/numeric_lexer.cppm)
@@ -1098,13 +941,6 @@ target_link_libraries(test_encoder_lexer_parity PRIVATE fastjson)
 add_executable(test_encoder_assistant_probe tests/encoder_assistant_probe.cpp)
 target_link_libraries(test_encoder_assistant_probe PRIVATE sensen_slim fastjson)
 
-# Proto-derived CONSTRAINED DECODING for the mortgage assistant
-# (mortgage_grammar.cppm). Same rationale as the verification blocks above:
-# proto- and gRPC-free, and deliberately NOT linked against sensen_slim. It
-# needs two sensen modules -- sensen.gp_ara_interfaces (via
-# mortgage_verification) and sensen.grammar, whose IGrammar contract this
-# module implements -- and neither depends on anything beyond std, so both are
-# compiled here as this target's own FILE_SET sources.
 # Pure text comparison of two files -- no engine, no protobuf, no links.
 # Gates the ACS validator directly. No engine, no network, no database -- the
 # validator is split out of the service precisely so it can be tested here.
@@ -1165,32 +1001,9 @@ target_compile_definitions(test_vendored_proto_drift PRIVATE
     kRepoRoot="${CMAKE_CURRENT_SOURCE_DIR}/..")
 add_test(NAME VendoredProtoDriftTest COMMAND test_vendored_proto_drift)
 
-add_executable(test_mortgage_grammar tests/test_mortgage_grammar.cpp)
-target_sources(test_mortgage_grammar
-    PRIVATE
-    FILE_SET CXX_MODULES FILES
-        sensen/src/gp_ara_interfaces.cppm
-        sensen/src/grammar.cppm
-        sensen/src/ascii_text.cppm
-        sensen/src/cpu_features.cppm
-        sensen/src/float_types.cppm
-        sensen/src/numeric_lexer.cppm
-        src/modules/mortgage_verification.cppm
-        src/modules/mortgage_grammar.cppm
-)
-# Both structural gates read a real file at RUN time -- the label-space drift
-# check re-parses finance.proto, and the control set is the gold val.jsonl --
-# so the test FAILS rather than silently skipping if a path is wrong.
-target_compile_definitions(test_mortgage_grammar PRIVATE
-    MORTGAGE_FINANCE_PROTO_PATH="${CMAKE_CURRENT_SOURCE_DIR}/proto/finance.proto"
-    MORTGAGE_VAL_JSONL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../agent/dataset/data_mortgage/val.jsonl")
-
-add_test(NAME MortgageGrammarTest COMMAND test_mortgage_grammar)
-
 # Formal Z3-backed automated reasoning for SGEE workflow graphs
-# (OptionsWorkflow, FinanceRequestLifecycle, StrategyAssistantWorkflow, MortgageAssistantWorkflow).
-# Encodes architectural invariants (action bindings, reachability, termination, error routing,
-# mortgage refusal isolation) as SMT-LIB2 formulas and discharges them via sensen GP-ARA Z3Reasoner.
+# (OptionsWorkflow, FinanceRequestLifecycle, StrategyAssistantWorkflow).
+# Encodes architectural invariants (action bindings, reachability, termination, error routing) as SMT-LIB2 formulas and discharges them via sensen GP-ARA Z3Reasoner.
 add_executable(test_sgee_automated_reasoning tests/test_sgee_automated_reasoning.cpp)
 target_sources(test_sgee_automated_reasoning
     PRIVATE
@@ -1374,16 +1187,15 @@ add_test(NAME QuotaTierLabelTest COMMAND test_quota_tier_label)
 # ---------------------------------------------------------------------------
 # Shared inference queue substrate (pg.cppm + inference_queue.cppm), and the
 # admission layer built on top of it (inference_admission.cppm) -- the
-# Postgres-backed queue that lets more than one engine replica share the two
-# fine-tuned Qwen3-0.6B assistants as a pool of workers, wired into
-# assistant_service.cpp/mortgage_assistant_service.cpp behind the
+# Postgres-backed queue that lets more than one engine replica share the
+# assistant as a pool of workers, wired into assistant_service.cpp behind the
 # INFERENCE_QUEUE env var (default `local`, unchanged behaviour;
 # `postgres` opts in). THIS IS NO LONGER "a later, separate wave" -- this
 # comment used to say wiring a caller/worker was future work; that wave is
 # this commit, and calculator_engine (below, via its own
 # `target_link_libraries(calculator_engine PRIVATE PostgreSQL::PostgreSQL)`
 # right after find_package() runs) DOES now link PostgreSQL::PostgreSQL,
-# because assistant_service.cpp and mortgage_assistant_service.cpp both
+# because assistant_service.cpp
 # `import inference_admission;` (which itself imports `inference_queue`,
 # which imports `pg`).
 #
@@ -1440,23 +1252,21 @@ find_package(PostgreSQL REQUIRED)
 target_link_libraries(calculator_engine PRIVATE PostgreSQL::PostgreSQL)
 
 # ---------------------------------------------------------------------------
-# StrategyAssistant / MortgageAssistant SGEE-graph coverage.
+# StrategyAssistant SGEE-graph coverage.
 #
-# ParseStrategy and ParseOperation are now real SGEE workflow graphs (see the
-# "SGEE execution context and graph actions" banner in each .cpp) instead of a
+# ParseStrategy is now a real SGEE workflow graph (see the
+# "SGEE execution context and graph actions" banner in assistant_service.cpp) instead of a
 # chain of hand-rolled `if (...) return ...;` checks. Same shape as
 # test_calculator_service just above: a real in-process grpc::Server through a
-# real Stub, plus RegisterAssistantServiceForTest / RegisterMortgageAssistant
-# ServiceForTest for the discriminating section that proves interpreter.Run()'s
+# real Stub, plus RegisterAssistantServiceForTest for the discriminating
+# section that proves interpreter.Run()'s
 # postconditions actually catch a partial action registry.
 #
-# Needs the same closure calculator_engine itself needs for these two files:
+# Needs the same closure calculator_engine itself needs for this file:
 # sensen_slim (LLMPipeline/cuda_backend), market_data (assistant only --
 # probe_symbol's live-quote check), quota/api_key (admission and the Pro
-# gate), strategy_catalogue (assistant only), assistant_verification (both --
-# shared prompt-injection/advice-request guards), mortgage_verification/
-# mortgage_grammar (mortgage only), and the inference_admission/inference_
-# queue/pg substrate both assistants sit on top of -- hence PostgreSQL::
+# gate), strategy_catalogue (assistant only), assistant_verification, and the inference_admission/inference_
+# queue/pg substrate the assistant sits on top of -- hence PostgreSQL::
 # PostgreSQL, linked here (after find_package(PostgreSQL) above) for the same
 # reason calculator_engine's own PostgreSQL link is deferred to this point
 # rather than its initial declaration.
@@ -1491,38 +1301,6 @@ target_sources(test_assistant_service
 target_link_libraries(test_assistant_service PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto sgee PostgreSQL::PostgreSQL)
 
 add_test(NAME AssistantServiceTest COMMAND test_assistant_service)
-
-add_executable(test_mortgage_assistant_service
-    tests/test_mortgage_assistant_service.cpp
-    src/modules/mortgage_assistant_service.cpp
-    src/modules/quota.cpp
-    src/modules/api_key.cpp
-    src/modules/inference_queue.cpp
-    src/modules/sgee_queue_client.cpp
-    src/modules/inference_admission.cpp
-)
-target_sources(test_mortgage_assistant_service
-    PRIVATE
-    FILE_SET CXX_MODULES FILES
-        src/modules/mortgage_assistant_service.cppm
-        # The service imports it to honour *_WEIGHT_STORE; inert unless that is set.
-        src/modules/llq_weight_store.cppm
-        src/modules/mortgage_verification.cppm
-        # Graph C imports this; a target compiling the service must carry it.
-        src/modules/mortgage_derivation.cppm
-        src/modules/mortgage_grammar.cppm
-        src/modules/quota.cppm
-        src/modules/api_key.cppm
-        src/modules/pg.cppm
-        src/modules/inference_queue.cppm
-        # See test_assistant_service above: inference_admission.cppm's import of
-        # sgee_queue_client must be satisfied per target.
-        src/modules/sgee_queue_client.cppm
-        src/modules/inference_admission.cppm
-)
-target_link_libraries(test_mortgage_assistant_service PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto sgee PostgreSQL::PostgreSQL)
-
-add_test(NAME MortgageAssistantServiceTest COMMAND test_mortgage_assistant_service)
 
 # sgee (not sensen_slim) for the same reason test_market_data_resilience links
 # it above: the only sensen-family module this needs is
@@ -1996,30 +1774,10 @@ endif()  # ENABLE_LLAMACPP_BACKEND -- everything above here needs llama or ggml
     # (schedulerPrefill + schedulerPrefillContinue) numerically diverge from
     # an equivalent one-shot schedulerPrefill on this build -- the reason a
     # system-prompt KV prefix-reuse fast path was investigated and NOT
-    # shipped for the strategy/mortgage assistants. Links sensen alone; it
+    # shipped for the assistants. Links sensen alone; it
     # compares two code paths within one process, not two engines.
     add_executable(prefix_cache_verify_probe src/prefix_cache_verify_probe.cpp)
     target_link_libraries(prefix_cache_verify_probe PRIVATE sensen_slim)
-
-    # Diagnostic-only: real per-token cost of MortgageParamsGrammar::accept()
-    # (recompute() over the real tokenizer vocabulary) against a REAL model's
-    # tokenizer, measured on this machine, rather than the unspecified-machine
-    # figure quoted in mortgage_grammar.cppm's own header comment. Needs
-    # sensen_slim (for the tokenizer via LLMPipeline) PLUS the app's own
-    # mortgage_verification/mortgage_grammar modules -- gp_ara_interfaces and
-    # sensen.grammar are already provided by sensen_slim (see its own FILE_SET
-    # a few hundred lines up), so they are NOT re-added here to avoid a
-    # duplicate-PCM conflict.
-    add_executable(bench_mortgage_grammar_timing src/bench_mortgage_grammar_timing.cpp)
-    target_sources(bench_mortgage_grammar_timing
-        PRIVATE
-        FILE_SET CXX_MODULES FILES
-            src/modules/mortgage_verification.cppm
-            src/modules/mortgage_grammar.cppm
-    )
-    target_compile_definitions(bench_mortgage_grammar_timing PRIVATE
-        MORTGAGE_FINANCE_PROTO_PATH="${CMAKE_CURRENT_SOURCE_DIR}/proto/finance.proto")
-    target_link_libraries(bench_mortgage_grammar_timing PRIVATE sensen_slim)
 
     # Bit-exactness gate for the decode path. Captures the exact token-id stream
     # for a fixed prompt battery under greedy deterministic decoding, and later

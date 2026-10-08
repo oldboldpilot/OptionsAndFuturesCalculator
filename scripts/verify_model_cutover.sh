@@ -20,7 +20,7 @@ bad()  { note "$1" "FAIL -- $2"; fail=1; }
 if [ -z "$replicas" ]; then
   replicas=$(python3 -c "import json;print(json.load(open('railway.json'))['deploy']['numReplicas'])" 2>/dev/null || echo 2)
 fi
-want_loaded=$((replicas * 2))   # two assistants per replica
+want_loaded=$replicas   # one assistant per replica
 
 # 1. Railway's own answer about THIS rollout.
 st=$(timeout 90 railway deployment list --service "$svc" --json 2>/dev/null \
@@ -30,12 +30,12 @@ st=$(timeout 90 railway deployment list --service "$svc" --json 2>/dev/null \
 # 2. THE CHECKSUM INSIDE THE CONTAINER. Not a variable, not a local pin -- this
 #    repository's model-of-record line has been stale three times over, and only
 #    this reading has ever caught it.
-got=$(timeout 180 railway ssh --service "$svc" -- sha256sum /app/model/mortgage-assistant.gguf 2>/dev/null | awk '{print $1}' | tail -1)
+got=$(timeout 180 railway ssh --service "$svc" -- sha256sum /app/model/strategy-encoder.gguf 2>/dev/null | awk '{print $1}' | tail -1)
 [ "$got" = "$want" ] && note "container sha256" "matches ($got)" || bad "container sha256" "got '$got' want '$want'"
 
 logs=$(mktemp); timeout 180 railway logs --deployment "$dep" >"$logs" 2>/dev/null
 
-# 3. One load line per replica per assistant, from a FRESH boot.
+# 3. One load line per replica, from a FRESH boot.
 n=$(grep -c 'model is LOADED' "$logs")
 [ "$n" -ge "$want_loaded" ] && note "model is LOADED lines" "$n (want >= $want_loaded)" \
                             || bad "model is LOADED lines" "$n, want $want_loaded"

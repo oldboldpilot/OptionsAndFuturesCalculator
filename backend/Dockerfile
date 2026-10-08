@@ -19,25 +19,13 @@
 ARG MODEL_URL=""
 ARG MODEL_SHA256=""
 
-# The mortgage assistant's model, declared here for exactly the same reasons and
-# obeying exactly the same contract: empty URL is a supported build, a URL
-# without a checksum fails the build, a checksum mismatch fails the build. It is
-# a SECOND fine-tuned Qwen3-0.6B Q8_0 GGUF (~639 MB), served by the mortgage
-# assistant service from MORTGAGE_MODEL_PATH, and it is deliberately a separate
-# pair of arguments rather than a list packed into the existing ones: the two
-# models are swapped independently, and each must carry its own checksum so a
-# mismatch names which file was wrong.
-ARG MORTGAGE_MODEL_URL=""
-ARG MORTGAGE_MODEL_SHA256=""
-
-# A THIRD, SEPARATE pair, for the small bidirectional ENCODER that can serve the
-# mortgage surface instead of the Qwen3 decoder
-# (MORTGAGE_ASSISTANT_BACKEND=encoder). Separate for the same reason the mortgage
-# pair is separate from the strategy pair: one model, two, three or none is a
-# supported image, and a shared variable would make "which model is missing"
-# unanswerable. The engine reads MORTGAGE_ENCODER_PATH and deliberately does NOT
-# fall back to MORTGAGE_MODEL_PATH -- that names the DECODER's weights, and
-# handing a 639 MB Qwen3 GGUF to the encoder loader would refuse at best.
+# A SEPARATE pair, for the small bidirectional ENCODER that can serve the strategy
+# surface instead of the Qwen3 decoder (ASSISTANT_MODEL=encoder). Separate from the
+# decoder pair because the two models are swapped independently, and each must carry
+# its own checksum so a mismatch names which file was wrong. The engine reads
+# STRATEGY_ENCODER_PATH and deliberately does NOT fall back to MODEL_PATH -- that names
+# the DECODER's weights, and handing a 639 MB Qwen3 GGUF to the encoder loader would
+# refuse at best.
 #
 # IT IS ~3.9 MB, not 639, and the difference is worth stating because it changes
 # none of the rules below. A checksum is still mandatory: the hazard a truncated
@@ -45,8 +33,6 @@ ARG MORTGAGE_MODEL_SHA256=""
 # SCHEMA and the TOKENIZER as well as the weights, so a substituted file does not
 # merely compute wrongly -- it would compute against a different label space and
 # a different vocabulary, with the token id being the line number.
-ARG MORTGAGE_ENCODER_URL=""
-ARG MORTGAGE_ENCODER_SHA256=""
 ARG STRATEGY_ENCODER_URL=""
 ARG STRATEGY_ENCODER_SHA256=""
 
@@ -66,27 +52,27 @@ ARG BUCKET_ACCESS_KEY_ID=""
 ARG BUCKET_SECRET_ACCESS_KEY=""
 
 # --------------------------------------------------------------------------
-# Model fetch: the fine-tuned Qwen3-0.6B GGUFs (Q8_0, ~639 MB each) that this
-# image's in-process assistants run at inference time --
-# calculator.assistant.StrategyAssistant (backend/proto/assistant.proto), and
-# the mortgage assistant, which reads MORTGAGE_MODEL_PATH.
+# Model fetch: the model files that this image's in-process
+# calculator.assistant.StrategyAssistant (backend/proto/assistant.proto) runs at
+# inference time -- the fine-tuned Qwen3-0.6B decoder GGUF (Q8_0, ~639 MB) and the
+# small encoder GGUF (~3.9 MB). A mortgage assistant's models used to be fetched here
+# too; that service now lives in the mortgage-nest-egg repository.
 # --------------------------------------------------------------------------
 #
-# Everything this comment says about "the model" is true of BOTH of them: the
-# reasoning below was written for the first one and the second is governed by
-# the identical contract, with MORTGAGE_MODEL_URL / MORTGAGE_MODEL_SHA256 in
-# place of MODEL_URL / MODEL_SHA256. Two separate RUN instructions, and shell
-# that is parallel to the point of near-duplication, are deliberate: each
-# failure names the model it is about, and the two blocks can be diffed against
-# each other to see that they really do enforce the same rules. The tempting
-# alternatives -- a heredoc-defined helper function, or a loop over a
-# url/sha/destination table -- either need Dockerfile frontend features this
-# builder has already proven it can reject SILENTLY (see the type=secret note
-# below, and the five deployments it cost), or make one failure message have to
-# explain which of two models it means.
+# Everything this comment says about "the model" is true of both files: the reasoning
+# below was written for the decoder and the encoder is governed by the identical
+# contract, with STRATEGY_ENCODER_URL / STRATEGY_ENCODER_SHA256 in place of MODEL_URL /
+# MODEL_SHA256. Two separate RUN instructions, and shell that is parallel to the point
+# of near-duplication, are deliberate: each failure names the model it is about, and the
+# two blocks can be diffed against each other to see that they really do enforce the
+# same rules. The tempting alternatives -- a heredoc-defined helper function, or a loop
+# over a url/sha/destination table -- either need Dockerfile frontend features this
+# builder has already proven it can reject SILENTLY (see the type=secret note below, and
+# the five deployments it cost), or make one failure message have to explain which of two
+# models it means.
 #
 # What two RUNs do NOT buy is independent caching, and this was measured rather
-# than assumed: changing MORTGAGE_MODEL_URL re-executed the strategy fetch too
+# than assumed: changing one model's URL re-executed the other's fetch too
 # (buildah 5.8.4), because declared build arguments reach EVERY RUN in the stage
 # as environment, whether or not that RUN mentions them. Swapping either model
 # therefore re-downloads both. Do not restructure this file in pursuit of a
@@ -167,10 +153,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 ARG MODEL_URL
 ARG MODEL_SHA256
-ARG MORTGAGE_MODEL_URL
-ARG MORTGAGE_MODEL_SHA256
-ARG MORTGAGE_ENCODER_URL
-ARG MORTGAGE_ENCODER_SHA256
 ARG STRATEGY_ENCODER_URL
 ARG STRATEGY_ENCODER_SHA256
 # Redeclared INSIDE this stage for the same reason MODEL_TOKEN is below: a
@@ -186,21 +168,6 @@ ARG BUCKET_SECRET_ACCESS_KEY
 # and the fallback silently does nothing, which is how the first version of
 # this failed: the error said "supply a token" while ignoring the one supplied.
 ARG MODEL_TOKEN
-# MORTGAGE_MODEL_TOKEN exists because NOTHING IN THIS REPOSITORY STATES THE
-# SCOPE OF MODEL_TOKEN, and the two possibilities behave differently. A classic
-# HuggingFace read token is account-wide and would cover a second repo without
-# anyone doing anything; a fine-grained token can be scoped to a single repo, in
-# which case reusing it for the mortgage GGUF is a 401 that looks exactly like
-# "the URL is wrong". The mortgage pipeline spec says the mortgage model goes in
-# "the same private HF repo family", which is not the same claim as "the same
-# repo" and is not evidence either way, so this file does not assume: it takes a
-# mortgage-specific token if one is supplied and FALLS BACK to MODEL_TOKEN if
-# not. An account-scoped token therefore needs no new build variable at all --
-# set nothing and the existing one is used -- while a per-repo token has
-# somewhere to go without overloading the variable that already authenticates a
-# different repo.
-ARG MORTGAGE_MODEL_TOKEN
-
 # /model/strategy-assistant.gguf is the one place this filename is spelled
 # out; the runtime stage's COPY --from=model and its MODEL_PATH both refer
 # back to this same path rather than re-deriving it, so the three cannot
@@ -305,166 +272,27 @@ RUN set -eu; \
         echo "Model verified against MODEL_SHA256."; \
     fi
 
-# The mortgage assistant's model. Same contract, same failure modes, same
-# reasons -- see the block above and the stage header for all of it.
-#
-# /model/mortgage-assistant.gguf is the one place this filename is CHOSEN; the
-# runtime stage's ENV MORTGAGE_MODEL_PATH points at the same basename under
-# /app/model/ and the COPY --from=model carries the whole directory, so nothing
-# downstream re-derives it. The two must move together if it is ever renamed.
-#
-# The token order is: a mortgage-specific BuildKit secret, then
-# MORTGAGE_MODEL_TOKEN, then the generic model_token secret, then MODEL_TOKEN.
-# The last of those is the one that matters in practice -- if MODEL_TOKEN is an
-# account-scoped HF token it already covers this repo and no new build variable
-# is needed. See the ARG comments above for why this file refuses to assume
-# that rather than hardcoding it.
-RUN set -eu; \
-    mkdir -p /model; \
-    if [ -f /model-staged/mortgagefv-assistant-q8_0.gguf ]; then \
-        echo "Using the mortgage-assistant model staged in the build context."; \
-        if [ -z "${MORTGAGE_MODEL_SHA256}" ]; then \
-            echo "FATAL: a staged mortgage model is present but MORTGAGE_MODEL_SHA256 is not set." >&2; \
-            echo "Supply the sha256 of the exact GGUF you staged -- staging is not verification." >&2; \
-            exit 1; \
-        fi; \
-        echo "${MORTGAGE_MODEL_SHA256}  /model-staged/mortgagefv-assistant-q8_0.gguf" | sha256sum -c -; \
-        cp /model-staged/mortgagefv-assistant-q8_0.gguf /model/mortgage-assistant.gguf; \
-        echo "Staged mortgage-assistant model verified and installed."; \
-    elif [ -z "${MORTGAGE_MODEL_URL}" ]; then \
-        echo "MORTGAGE_MODEL_URL not set -- building without the mortgage assistant's model."; \
-        echo "The calculator, finance and strategy-assistant services are unaffected; the mortgage assistant will report its model unavailable at runtime instead of parsing mortgage requests."; \
-    else \
-        if [ -z "${MORTGAGE_MODEL_SHA256}" ]; then \
-            echo "FATAL: MORTGAGE_MODEL_URL is set but MORTGAGE_MODEL_SHA256 is not." >&2; \
-            echo "Shipping a 639 MB model with no integrity check is worse than refusing to build: a truncated or substituted GGUF can still load and then emit fluent, confident, wrong output -- and this one answers questions about somebody's mortgage, where wrong-but-plausible is the whole hazard. Supply the sha256 computed against the exact file MORTGAGE_MODEL_URL serves." >&2; \
-            exit 1; \
-        fi; \
-        echo "Fetching the mortgage model from MORTGAGE_MODEL_URL (checksum will be verified before it is used for anything)..."; \
-        AUTH_HEADER=""; \
-        if [ -f /run/secrets/mortgage_model_token ]; then \
-            AUTH_HEADER="Authorization: Bearer $(cat /run/secrets/mortgage_model_token)"; \
-            echo "Using the bearer token mounted at /run/secrets/mortgage_model_token."; \
-        elif [ -n "${MORTGAGE_MODEL_TOKEN:-}" ]; then \
-            AUTH_HEADER="Authorization: Bearer ${MORTGAGE_MODEL_TOKEN}"; \
-            echo "Using MORTGAGE_MODEL_TOKEN from the build environment."; \
-        elif [ -f /run/secrets/model_token ]; then \
-            AUTH_HEADER="Authorization: Bearer $(cat /run/secrets/model_token)"; \
-            echo "Using the bearer token mounted at /run/secrets/model_token."; \
-        elif [ -n "${MODEL_TOKEN:-}" ]; then \
-            AUTH_HEADER="Authorization: Bearer ${MODEL_TOKEN}"; \
-            echo "Using MODEL_TOKEN from the build environment."; \
-        fi; \
-        if [ -n "${BUCKET_ACCESS_KEY_ID}" ] && [ -n "${BUCKET_SECRET_ACCESS_KEY}" ]; then \
-            echo "Fetching the mortgage-assistant model from the private Railway bucket (SigV4)..."; \
-            curl -sS --fail --retry 3 --retry-delay 2 \
-                 --aws-sigv4 "aws:amz:auto:s3" \
-                 --user "${BUCKET_ACCESS_KEY_ID}:${BUCKET_SECRET_ACCESS_KEY}" \
-                 -o /model/mortgage-assistant.gguf "${MORTGAGE_MODEL_URL}" || { \
-                echo "FATAL: SigV4 fetch of mortgage-assistant model failed." >&2; \
-                exit 1; \
-            }; \
-        elif [ -n "${AUTH_HEADER}" ]; then \
-            wget --tries=3 --timeout=60 --header="${AUTH_HEADER}" \
-                 -qO /model/mortgage-assistant.gguf "${MORTGAGE_MODEL_URL}"; \
-        else \
-            wget --tries=3 --timeout=60 \
-                 -qO /model/mortgage-assistant.gguf "${MORTGAGE_MODEL_URL}"; \
-        fi || { \
-            echo "FATAL: could not fetch MORTGAGE_MODEL_URL." >&2; \
-            echo "If the model lives in a PRIVATE repository this is almost certainly a 401: wget sends no credentials by default. Supply a token as a MORTGAGE_MODEL_TOKEN build argument, or rely on MODEL_TOKEN if that token is account-scoped and therefore already covers this repo. A public MORTGAGE_MODEL_URL needs neither." >&2; \
-            exit 1; \
-        }; \
-        if ! echo "${MORTGAGE_MODEL_SHA256}  /model/mortgage-assistant.gguf" | sha256sum -c -; then \
-            echo "FATAL: downloaded mortgage model failed sha256 verification against MORTGAGE_MODEL_SHA256." >&2; \
-            echo "This means the bytes at MORTGAGE_MODEL_URL do not match what was expected -- a truncated download, a URL that now serves something else, or a stale checksum. Refusing to ship it rather than gamble that a corrupt GGUF happens to still work." >&2; \
-            rm -f /model/mortgage-assistant.gguf; \
-            exit 1; \
-        fi; \
-        echo "Mortgage model verified against MORTGAGE_MODEL_SHA256."; \
-    fi
-
-# --------------------------------------------------------------------------
-# Builder
-# --------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
-# The small bidirectional ENCODER for the mortgage surface, ~3.9 MB.
+# The small bidirectional ENCODER for the strategy surface, ~3.9 MB.
 #
-# A THIRD RUN rather than a branch inside the mortgage one, for the reason this
+# A SEPARATE RUN rather than a branch inside the decoder one, for the reason this
 # stage's own header gives: declared build arguments reach EVERY RUN in the stage
 # as environment, so separate RUNs buy a readable failure, not independent
-# caching. Swapping one model re-executes the others regardless.
+# caching. Swapping one model re-executes the other regardless.
 #
 # THE CHECKSUM IS MANDATORY ON BOTH PATHS, and the small size is not a reason to
-# relax it. This file carries the label SCHEMA and the TOKENIZER as well as the
-# weights, so a substituted one does not merely compute wrongly: it computes
-# against a different label space and a different vocabulary, where the token id
-# IS the line number. A truncated 3.9 MB GGUF is as capable of loading and
-# answering confidently as a truncated 639 MB one.
+# relax it. This file carries the label SCHEMA (48 operations) and the TOKENIZER
+# (vocab 689) as well as the weights, so a substituted one does not merely compute
+# wrongly: it computes against a different label space and a different vocabulary,
+# where the token id IS the line number. A truncated 3.9 MB GGUF is as capable of
+# loading and answering confidently as a truncated 639 MB one.
 #
-# An EMPTY MORTGAGE_ENCODER_URL is a supported build, exactly as an empty
-# MORTGAGE_MODEL_URL is: the encoder is one of two backends for one of four
-# services, and MORTGAGE_ASSISTANT_BACKEND defaults to the decoder.
-RUN set -eu; \
-    mkdir -p /model; \
-    if [ -f /model-staged/mortgage-encoder.gguf ]; then \
-        echo "Using the mortgage ENCODER staged in the build context."; \
-        if [ -z "${MORTGAGE_ENCODER_SHA256}" ]; then \
-            echo "FATAL: a staged mortgage encoder is present but MORTGAGE_ENCODER_SHA256 is not set." >&2; \
-            echo "Supply the sha256 of the exact GGUF you staged -- staging is not verification." >&2; \
-            exit 1; \
-        fi; \
-        echo "${MORTGAGE_ENCODER_SHA256}  /model-staged/mortgage-encoder.gguf" | sha256sum -c -; \
-        cp /model-staged/mortgage-encoder.gguf /model/mortgage-encoder.gguf; \
-        echo "Staged mortgage encoder verified and installed."; \
-    elif [ -z "${MORTGAGE_ENCODER_URL}" ]; then \
-        echo "MORTGAGE_ENCODER_URL not set -- building without the mortgage ENCODER."; \
-        echo "Nothing is degraded: MORTGAGE_ASSISTANT_BACKEND defaults to the Qwen3 decoder, and asking for the encoder in an image that has none makes that ONE service report itself unavailable rather than silently serving the other model."; \
-    else \
-        if [ -z "${MORTGAGE_ENCODER_SHA256}" ]; then \
-            echo "FATAL: MORTGAGE_ENCODER_URL is set but MORTGAGE_ENCODER_SHA256 is not." >&2; \
-            echo "This GGUF carries the label schema and the tokenizer as well as the weights, so an unverified one can load cleanly and then parse against a different label space with a renumbered vocabulary -- wrong, plausible, and silent. Supply the sha256 computed against the exact file MORTGAGE_ENCODER_URL serves." >&2; \
-            exit 1; \
-        fi; \
-        echo "Fetching the mortgage encoder from MORTGAGE_ENCODER_URL (checksum will be verified before it is used for anything)..."; \
-        if [ -n "${BUCKET_ACCESS_KEY_ID}" ] && [ -n "${BUCKET_SECRET_ACCESS_KEY}" ]; then \
-            echo "Fetching the mortgage encoder from the private bucket (SigV4)..."; \
-            curl -sS --fail --retry 3 --retry-delay 2 \
-                 --aws-sigv4 "aws:amz:auto:s3" \
-                 --user "${BUCKET_ACCESS_KEY_ID}:${BUCKET_SECRET_ACCESS_KEY}" \
-                 -o /model/mortgage-encoder.gguf "${MORTGAGE_ENCODER_URL}" || { \
-                echo "FATAL: SigV4 fetch of the mortgage encoder failed." >&2; \
-                exit 1; \
-            }; \
-        else \
-            curl -sS --fail --retry 3 --retry-delay 2 \
-                 -o /model/mortgage-encoder.gguf "${MORTGAGE_ENCODER_URL}" || { \
-                echo "FATAL: fetch of the mortgage encoder failed." >&2; \
-                exit 1; \
-            }; \
-        fi; \
-        echo "${MORTGAGE_ENCODER_SHA256}  /model/mortgage-encoder.gguf" | sha256sum -c - || { \
-            echo "FATAL: the mortgage encoder's sha256 does not match MORTGAGE_ENCODER_SHA256." >&2; \
-            echo "The file is REMOVED rather than shipped: a GGUF that loads and parses against the wrong schema is worse than no encoder, because the service would answer instead of refusing." >&2; \
-            rm -f /model/mortgage-encoder.gguf; \
-            exit 1; \
-        }; \
-        echo "Mortgage encoder fetched and verified ($(stat -c%s /model/mortgage-encoder.gguf) bytes)."; \
-    fi
-
-# THE STRATEGY ENCODER, the fourth model this image can carry and the second
-# encoder. Everything the block above says about an unverified GGUF applies
-# here verbatim and for the same reason -- this file carries the label SCHEMA
-# (48 operations) and the TOKENIZER (vocab 689) as well as the weights, so a
-# substituted one parses against a different label space with renumbered token
-# ids, confidently.
+# IT IS A SEPARATE VARIABLE FROM THE DECODER'S AND MUST STAY ONE: STRATEGY_ENCODER_PATH
+# does not fall back to MODEL_PATH, which names the DECODER's weights.
 #
-# IT IS A SEPARATE VARIABLE FROM THE MORTGAGE ENCODER'S AND MUST STAY ONE, for
-# the reason MORTGAGE_MODEL_PATH does not fall back to MODEL_PATH: the two
-# encoders have DIFFERENT label spaces (48 strategies against 29 mortgage
-# operations) and different vocabularies, so loading one behind the other's
-# contract is a model trained on option spreads answering a mortgage question.
-# One encoder, both, or neither is a supported image.
+# An EMPTY STRATEGY_ENCODER_URL is a supported build, exactly as an empty MODEL_URL is:
+# the encoder is one of two backends for the one assistant, and ASSISTANT_MODEL defaults
+# to the decoder. One model, both, or neither is a supported image.
 RUN set -eu; \
     mkdir -p /model; \
     if [ -f /model-staged/strategy-encoder.gguf ]; then \
@@ -512,6 +340,9 @@ RUN set -eu; \
         echo "Strategy encoder fetched and verified ($(stat -c%s /model/strategy-encoder.gguf) bytes)."; \
     fi
 
+# --------------------------------------------------------------------------
+# Builder
+# --------------------------------------------------------------------------
 FROM docker.io/library/ubuntu:24.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -876,27 +707,24 @@ COPY backend/start.sh   /app/start.sh
 # engine was compiled against.
 COPY --from=builder /src/build/generated/api_descriptor.pb /etc/envoy/api_descriptor.pb
 
-# The assistants' models -- calculator.assistant.StrategyAssistant's and the
-# mortgage assistant's -- carried over from the `model` stage at the top of
-# this file, which already verified each against its own checksum (or
-# deliberately fetched nothing -- see that stage's comment for why an empty
-# URL is a supported build, not an error). This COPY always succeeds, whether
-# or not either model was fetched: with both URLs empty, /model/ in the source
-# stage is simply an empty directory, and copying zero files into /app/model/
-# is not a failure. It is also why adding the second model needed no second
-# COPY -- the directory, not the file, is what crosses the stage boundary. The
-# COPY itself is therefore not the signal the rest of the system acts on --
-# MODEL_PATH and MORTGAGE_MODEL_PATH, right below, are.
+# The assistant's models -- calculator.assistant.StrategyAssistant's decoder and
+# encoder -- carried over from the `model` stage at the top of this file, which
+# already verified each against its own checksum (or deliberately fetched nothing --
+# see that stage's comment for why an empty URL is a supported build, not an error).
+# This COPY always succeeds, whether or not either model was fetched: with both URLs
+# empty, /model/ in the source stage is simply an empty directory, and copying zero
+# files into /app/model/ is not a failure. It is also why adding the second model
+# needed no second COPY -- the directory, not the file, is what crosses the stage
+# boundary. The COPY itself is therefore not the signal the rest of the system acts
+# on -- MODEL_PATH and STRATEGY_ENCODER_PATH, right below, are.
 COPY --from=model /model/ /app/model/
 
-# Redeclared: ARG scope is per-stage, so the global MODEL_URL and
-# MORTGAGE_MODEL_URL declared before the `model` stage above do not
-# automatically carry into this later FROM without these lines. Their only use
-# here is the ${...:+...} tests in the ENV instructions below -- the models'
-# actual bytes, if any, already crossed stages via the COPY immediately above,
-# and do not depend on these ARGs at runtime.
+# Redeclared: ARG scope is per-stage, so the global MODEL_URL declared before the
+# `model` stage above does not automatically carry into this later FROM without this
+# line. Its only use here is the ${...:+...} test in the ENV instruction below -- the
+# model's actual bytes, if any, already crossed stages via the COPY immediately above,
+# and do not depend on this ARG at runtime.
 ARG MODEL_URL
-ARG MORTGAGE_MODEL_URL
 
 # Docker's ENV instruction cannot conditionally omit itself, so a build with
 # no MODEL_URL leaves MODEL_PATH set to an EMPTY STRING here rather than
@@ -916,29 +744,16 @@ ARG MORTGAGE_MODEL_URL
 # MODEL_UNAVAILABLE rather than trying to open a path that does not exist.
 ENV MODEL_PATH=/app/model/strategy-assistant.gguf
 
-# The same construction, and the same meaning, for the mortgage assistant: an
-# empty MORTGAGE_MODEL_URL leaves MORTGAGE_MODEL_PATH an EMPTY STRING, which
-# the mortgage service must treat exactly like a missing variable -- neither
-# names a usable file. The basename here is the one chosen in the `model`
-# stage's mortgage fetch; if that is ever renamed, this line moves with it.
-#
-# The two variables are independent on purpose. A build with a strategy model
-# and no mortgage model, or the reverse, is a supported configuration, not a
-# half-broken image: each assistant reports its own model unavailable and every
-# other service in the container is unaffected.
-ENV MORTGAGE_MODEL_PATH=/app/model/mortgage-assistant.gguf
-
-# The ENCODER's path. Set unconditionally for the same reason the two above are:
+# The ENCODER's path. Set unconditionally for the same reason the one above is:
 # the engine treats a path naming no file exactly like an unset one, and the
 # basename matches the model stage's encoder step -- if that is renamed, this
 # line moves with it.
 #
-# MORTGAGE_ASSISTANT_BACKEND is deliberately NOT set here. It defaults to qwen3
-# in the service, so an image carrying the encoder changes nothing until an
-# operator asks for it: the capability ships first and the switch is flipped
-# second, each step with its own rollback. An unrecognised value stops the
-# process rather than reading as the default.
-ENV MORTGAGE_ENCODER_PATH=/app/model/mortgage-encoder.gguf
+# ASSISTANT_MODEL is deliberately NOT set here. It defaults to qwen3 in the
+# service, so an image carrying the encoder changes nothing until an operator
+# asks for it: the capability ships first and the switch is flipped second, each
+# step with its own rollback. An unrecognised value stops the process rather
+# than reading as the default.
 ENV STRATEGY_ENCODER_PATH=/app/model/strategy-encoder.gguf
 
 USER root
