@@ -31,6 +31,55 @@ to the cluster yet — `SgeeQueueClient` is mirror-mode only, so promotion means
 building an SGEE-backed admission path rather than flipping a flag. Postgres
 remains the system of record until both are done.
 
+## The encoder assistants go through the queue (2026-10-07)
+
+`INFERENCE_QUEUE=sgee` had no effect on the encoders. Production, 2026-10-07: ~120 assistant calls moved
+the three nodes' `last_applied` by 10, all housekeeping. The services ran `EncoderAssistant::parse()`
+in-process and consulted `admission_` only for decoder prompts. See CLAUDE.md, "The ENCODERS now go
+THROUGH the queue", for the full account and the measurement table; this section is the operational
+part.
+
+**Wire.** A task's `prompt` is a JSON object `{utterance, prior_question, prior_clarification}` inside
+the usual `{"prompt": ..., "surface": ...}` envelope, so the surface tag and the lease filter are
+exactly what they were. The result `text` is `{verdict, text}` with `verdict` one of `params` (text is
+the `<params>...</params>` block), `none` (`<NONE>`, empty text) or `refused` (the chain's reason).
+All three COMPLETE the task. Code: `backend/src/modules/encoder_queue.cppm`.
+
+**Who does what.** Every engine replica is both a submitter and a worker of its own surface;
+`EncoderService` (in `encoder_queue`) owns the encoder side of one assistant. Its `LeaseRunner` (in
+`inference_admission`) polls the surface-filtered `SgeeLeaseSource` every 50 ms when
+idle and executes what it leases through the same `EncoderBackend::submit()` a failed submit degrades
+to. A replica keeps at most `ENCODER_QUEUE_MAX_IN_FLIGHT` (default 1) of its own requests on the queue;
+the rest are answered in-process. Remote deadline: 2 s, then the in-process answer.
+
+**Reading the cluster.** Per queued request the log moves by three entries (enqueue, lease,
+complete). 96 sequential requests: `last_applied` +289, +290, +291. If real traffic moves it by
+nothing, the encoders are not on the queue. Per replica, the engine logs one line per request
+(`... encoder answered through the shared queue` / `... answered in-process`) and one per executed
+leased job (`... encoder executed leased job #N on this replica`); the sum of the second across
+replicas equals the first on the submitting one. Those counts are exact only if the engine's stdout is
+line-buffered -- redirected to a file it is not, and the counts lag by the unflushed block.
+
+**What to do about the cost.** At the deployed heartbeat (300 ms) a queued parse costs ~0.6 s and the
+queue saturates near 3 requests per second; at the 50 ms default ~80-150 ms and ~13 per second; at
+10 ms ~30 ms and ~30 per second. The throughput does not respond to more replicas or more lease lanes
+(writes are serialised at the leader) -- it responds to `SGEE_HEARTBEAT_MS`.
+
+**Deploy order.** Nothing on the queue-node side changes: the nodes carry opaque payloads and results.
+Engines first or last is safe, with one rule: a surface must not run decoder and encoder replicas
+together while `INFERENCE_QUEUE` is shared, because the surface filter cannot tell an encoder task
+from a decoder prompt. An encoder worker fails a decoder prompt by name; a decoder worker handed an
+encoder task would decode JSON.
+
+**Orphans.** A request that times out (deadline, or a submit that failed after the enqueue) leaves its
+task in the queue, and a worker executes it later for nobody. It is harmless and bounded by retention;
+it is also write capacity spent on nothing, which is why the in-flight bound exists.
+
+**Gates.** `test_encoder_queue` (hermetic) and `EncoderQueueClusterTest`
+(`backend/tests/integration/encoder_queue_cluster_test.sh`, shared bring-up in `lib/encoder_cluster.sh`;
+benchmarks `scripts/encoder_queue_bench.sh`, `scripts/encoder_queue_timing_sweep.sh`; client
+`scripts/encoder_queue_probe.py`).
+
 ## Promoted for inference again on 2026-08-20, with the lease partitioned
 
 `INFERENCE_QUEUE=sgee` is live on the engine. The gate, on the fixed 16-row

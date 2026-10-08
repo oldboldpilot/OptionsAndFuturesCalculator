@@ -3604,6 +3604,121 @@ hostname, so the peers could not address each other.
 **It is a non-authoritative mirror. Postgres remains the system of record**, and
 `docs/SGEE_QUEUE_CLUSTER.md` carries the evidence for why.
 
+### The ENCODERS now go THROUGH the queue (2026-10-07), and what that costs
+
+**The finding that prompted it, measured in production:** with `INFERENCE_QUEUE=sgee`, ~120
+assistant calls advanced the three nodes' `last_applied` by **10** -- housekeeping. Both workers'
+encoder branch `return`ed before `configure_inference_queue()` and the service called
+`EncoderAssistant::parse()` in-process, so `admission_` was consulted only for DECODER prompts. The
+banner said `INFERENCE_QUEUE=sgee`; the encoders never saw it. The queue existed and nothing connected
+the encoder to it -- a configuration that reads as true and is not, which is this file's oldest shape.
+
+**What was built, and it is one path rather than a parallel one.** `encoder_queue.cppm`:
+`EncoderBackend` is an `InferenceBackend` whose `answer()` is the only code that runs the chain and
+decides what its outcome means. Local mode calls it directly; the queue's worker and the queue's own
+degrade path call it through `submit()`. A request travels as the `prompt` string the queue already
+carries (JSON of the three `ParseRequest` fields); the answer returns as the result `text` (a verdict
+plus the SAME `<params>...</params>` block the decoder produces), so `interpret_model_output` and
+everything after it is unchanged. `LeaseRunner` drains the same `SgeeLeaseSource` /
+`PostgresLeaseSource` a decoder's owner thread would -- surface filter and write-back included, none
+reimplemented -- into the inline-executing encoder. `EncoderService` owns the encoder side of one
+assistant (backend, bound, runner) so their lifetimes are one lifetime and both assistants share the
+one definition. Both assistants are wired; each replica is both a submitter and a worker of its own
+surface.
+
+**A chain refusal and `<NONE>` are ANSWERS that complete the task.** They are deterministic, and a
+failed task would burn its attempts on re-leases that cannot change the outcome and leave the submitter
+polling a Dead task -- the defect-3 lesson ("a rejection is an answer") applied at the payload level.
+A worker handed a task that is not an encoder task (a decoder prompt) fails it BY NAME. A fleet must
+still run one backend kind per surface: the surface filter cannot tell an encoder task from a decoder
+one, and a decoder replica leasing an encoder task would decode JSON.
+
+**HOW TO READ `last_applied` AS THE PROOF.** A queued request is three replicated writes: enqueue,
+lease, complete. Measured on a local three-node cluster, 96 sequential requests moved `last_applied` by
+**289 / 290 / 291** (3 x 96 = 288 plus one or two housekeeping entries). A delta near zero over real
+traffic is exactly the 2026-10-07 production finding. The engines say the rest in their own logs, one
+line per request: `<surface> encoder answered through the shared queue` (submit side),
+`<surface> encoder executed leased job #N on this replica` (worker side, `N` is a per-process counter),
+and `<surface> encoder answered in-process` (the bound below). Summed across replicas, executed ==
+queued; and a burst sent to ONE engine was executed 49/47 and 41/55 by the two.
+
+**WHAT THE QUEUE COSTS, and it is not the polling.** Every queue operation is a replicated write; the
+leader serialises them and each costs about a Raft heartbeat. Local three-node cluster, mortgage
+surface, p50 / p95 ms, throughput in requests per second:
+
+| Raft heartbeat | callers | in-process | queue, unbounded | queue, default bound |
+| --- | --- | --- | --- | --- |
+| 10 ms | 1 | 1.0 / 1.2 | 30 / 48 (31 rps) | not measured |
+| 10 ms | 24 | 3.2 / 6.1 | 728 / 1138 (30 rps) | not measured |
+| **50 ms** (SGEE default) | 1 | 0.8 / 1.1 | 102 / 152 (9 rps) | 151 / 152 (7 rps) |
+| 50 ms | 8 | 1.3 / 2.2 | 604 / 954 (13 rps) | 1.3 / 1.8 |
+| 50 ms | 24 | 3.0 / 4.9 | 1704 / 2359 (13 rps) | 3.0 / 4.8 |
+| **300 ms** (DEPLOYED) | 1 | 0.8 / 1.1 | **573 / 3289 (1-2 rps)** | **571 / 600 (2 rps)** |
+| 300 ms | 8 | 1.4 / 2.1 | 2401 / 3299 (3 rps) | 1.4 / 2.0 |
+| 300 ms | 24 | 3.1 / 5.2 | 5695 / 6317 (4 rps), deadline expiries | 3.2 / 5.5 |
+
+Median over three alternating rounds, mortgage surface, one cluster per heartbeat, box load average ~1.
+At one caller a queued request is three heartbeat-bound writes, so its latency is quantised to the
+heartbeat (75 or 150 ms at 50 ms; the 102 vs 151 above are the same code on two clusters). "Default
+bound" at 8 and 24 callers is mostly the replica answering for itself, which is the point of it.
+The unbounded 300 ms row's p95 of 3289 ms at ONE caller is the collapse persisting: the previous
+cell's timed-out requests left hundreds of orphan tasks that the cluster was still working off at
+3 writes per ~150 ms, and the next round's single caller queued behind them.
+
+**At the deployed heartbeat an encoder parse through the queue costs ~0.6 s instead of ~1 ms, and the
+queue saturates at ~3 requests per second.** The owner decided the queue is how the service scales
+across backends, and that is what is built; this is the price, measured, so the decision is made with
+it in view. Two levers exist and neither is taken here: a lower `SGEE_HEARTBEAT_MS` on the nodes (the
+`heartbeat * 2 <= election_base` rule leaves room under 1500 ms; whether the election churn that
+motivated 300 ms returns is an operations question this was not asked to test), or routing in-process
+unless the replica is busy.
+
+**THE POLL INTERVALS WERE MEASURED AND LEFT ALONE.** The brief's lever was the submitter's 25 ms poll
+and the lease tick. A 2..25 ms doubling poll with a 10 ms idle tick gave the SAME c=1 latency as the
+original 25 / 50 ms -- p50 150.9 vs 150.7, 80.3 vs 75.4, 69.4 vs 75.9 over three alternating rounds on
+one cluster, the values quantised by the heartbeat -- at three times the idle CPU of the two engines
+(2.8-3.2 % against 0.8-1.2 % of a core). Three heartbeat-bound writes per request dwarf any interval.
+Several lease lanes per replica were tried too (1 / 4 / 8): no throughput change, because the writes
+are serialised at the leader, and more idle CPU. Removed.
+
+**THE BOUND (`QueueSlots`) EXISTS BECAUSE UNBOUNDED, THE QUEUE COLLAPSES.** Past its ceiling a request
+waits out the 2 s deadline, is answered in-process anyway, and leaves an ORPHAN task that a worker
+executes later for nobody -- three more writes, in the one resource that was already saturated, which
+delays the next request further. So each replica keeps at most `ENCODER_QUEUE_MAX_IN_FLIGHT` (default
+**1**) requests on the queue and answers the overflow itself. Measured: the bound removes every
+deadline expiry at every heartbeat tried, and an overload run (24 callers) moves the cluster log by
+exactly three writes per executed request -- no orphans. The cost is that under concurrency most
+requests are NOT carried by the queue, which is the right outcome for a 1 ms task against a 3-30 rps
+ceiling and the wrong one if the intent is to demonstrate sharing under load: the sharing proof uses
+one caller at a time. `ENCODER_QUEUE_MAX_IN_FLIGHT=64` restores the unbounded behaviour measured above.
+
+**The remote deadline for an encoder is 2 s, not the decoder's 90 s:** the local answer costs a
+millisecond, so waiting a minute and a half on a stopped cluster would cost the visitor more than the
+answer it is waiting to avoid.
+
+**AN INSTRUMENT LESSON THAT COST A RUN: engine stdout redirected to a file is block-buffered.** The
+first accounting run counted 79 executions for 96 requests and 16 mortgage executions "during" the
+strategy burst; the work was all done, the lines had not been flushed. `stdbuf -oL -eL` on the engine
+makes the counts exact (48 / 48). The same trap is recorded for the queue nodes, and it applies to any
+test that counts log lines from a process whose stdout is not a terminal.
+
+**A FAILED BIND WAS A SEGV, FOUND BY THAT BENCHMARK.** One engine lost its port between the port
+window being reserved and the engine binding it; `BuildAndStart()` returned null, `RunServer()`
+dereferenced it, and the bring-up -- which certified readiness from the weights-loaded banner, printed
+BEFORE the listener binds -- carried on with a dead engine and reported 120 transport errors.
+`main.cpp` now exits 1 naming the address (`EngineBindFailureTest`, RED on the old engine: status 139),
+and the bring-up waits for a TCP connect to the port, not for the banner.
+
+Gated by `test_encoder_queue` (38 checks, hermetic: codec, one-place semantics, two runners sharing a
+queue, degrade, refusal-completes-task, the bound) and `EncoderQueueClusterTest` (a real three-node
+cluster and real engines with the real weights; ~2 min; exits 77 when the encoder GGUFs or python gRPC
+are absent). Against the pre-change engine the cluster test fails 21 checks. Mutation-checked, each arm
+failing exactly the checks that name it: `answer()` ignoring the queue (7), no local fallback (2), a
+refusal reported as a failed task (2), an executor that throws leaving a promise broken (abort), a
+decoder prompt accepted as a task (2), the bound admitting everyone (2), a slot never released (2);
+and at engine level the service not handing the encoder to the queue, the mortgage worker leasing
+under the STRATEGY surface, and neither layer degrading.
+
 ### The queue nodes went FIVE WEEKS stale, and nothing was watching them
 
 Rolled to `f73cb606` on 2026-09-28. The previous deployment on all three was
@@ -7341,6 +7456,13 @@ every turn, so there is nothing left to ask about. Testing ask -> answer -> pars
 harness's two-call protocol with `prior_question` echoed back. The encoder cannot ask a question
 itself -- `refine_unstated` in the serving layer is what asks, and whether it still does on this
 path is UNTESTED.
+
+### The deployed encoders did NOT use `INFERENCE_QUEUE=sgee` until 2026-10-07
+
+Everything in the next section is true of the encoders as deployed, and one thing the boot banner
+implied was not: `INFERENCE_QUEUE=sgee` was set and the encoders ran in-process regardless. They go
+through the queue now, with a bound, at a measured cost -- see "The ENCODERS now go THROUGH the queue"
+under "SGEE queue cluster", including the table that says what that costs at the deployed heartbeat.
 
 ### BOTH ENCODERS ARE DEPLOYED AND THE DECODERS ARE GONE, and the strategy one was refusing 1 row in 3
 
