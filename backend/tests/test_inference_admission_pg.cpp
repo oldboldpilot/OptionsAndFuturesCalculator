@@ -172,8 +172,8 @@ class LocalStubBackend final : public InferenceBackend {
  *
  *  Deliberately does NOT start its owner thread in the constructor -- every
  *  section below that installs a lease source calls set_lease_source() THEN
- *  start(), mirroring the exact order assistant_service.cpp/mortgage_
- *  assistant_service.cpp's Worker constructors now enforce (see
+ *  start(), mirroring the exact order assistant_service.cpp's
+ *  Worker constructor now enforces (see
  *  QueuedBackend::start()'s own doc in inference_admission.cppm for the
  *  startup race that order exists to make impossible). Starting eagerly here
  *  is exactly the bug this task's own regression test (below) exists to
@@ -187,7 +187,7 @@ class MockDecodeBackend final : public QueuedBackend {
      *  real completion can land before the test ever gets to try. */
     explicit MockDecodeBackend(std::size_t max_concurrent = 2,
                                 std::chrono::milliseconds decode_delay = 0ms)
-        : QueuedBackend("mock decode backend shutting down"), decode_delay_(decode_delay) {
+        : decode_delay_(decode_delay) {
         max_concurrent_ = max_concurrent;
         max_queue_depth_ = 8;
     }
@@ -336,8 +336,8 @@ auto main() -> int {
 
     // -----------------------------------------------------------------
     section("Production wiring shape: PostgresAdmission wraps the SAME backend that also leases "
-            "from Postgres (exactly assistant_service.cpp/mortgage_assistant_service.cpp's own "
-            "Worker classes) -- job served via PG, fallback proven NOT to have fired");
+            "from Postgres (exactly assistant_service.cpp's own "
+            "Worker class) -- job served via PG, fallback proven NOT to have fired");
     {
         reset_db(admin);
         auto queue = make_queue("admission_test_same_object");

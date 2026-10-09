@@ -127,8 +127,8 @@ ERRORS=0
 #
 # Gated on CHANGED FILES ONLY, deliberately: a pre-commit gate should judge
 # what is being committed, not flag pre-existing code the diff never
-# touches. The 4 full-tree hits today (assistant_service.cpp x2,
-# mortgage_assistant_service.cpp, calculator_service.cpp) are all
+# touches. The 4 full-tree hits at the time (assistant_service.cpp x2,
+# the since-removed mortgage assistant's service file, calculator_service.cpp) were all
 # pre-existing, deliberate, and already commented as such (one immediately
 # wrapped in unique_ptr around a private constructor, one intentionally
 # leaked for a short-lived test process) -- gating on them would block every
@@ -167,8 +167,8 @@ done
 # The comment above says a pre-commit gate "should judge what is being
 # committed, not flag pre-existing code the diff never touches" -- and then
 # scanned entire files, which does the opposite. On 2026-08-10 that rejected a
-# fully-verified prefix-cache commit because mortgage_assistant_service.cpp
-# contains a pre-existing `new SensenBackend(...)` the diff never went near.
+# fully-verified prefix-cache commit because the (since-removed) mortgage assistant's service file
+# contained a pre-existing `new SensenBackend(...)` the diff never went near.
 #
 # That failure mode matters more than it sounds: a gate that blocks correct
 # work over unrelated existing debt is a gate people learn to bypass, and a

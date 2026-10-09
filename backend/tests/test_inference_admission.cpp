@@ -26,6 +26,11 @@ using options_calculator::inference_admission::resolve_device;
 
 namespace {
 
+// What QueuedBackend::submit() answers once shut down (inference_admission.cppm's
+// kShuttingDownMessage). The test hands the same string to drain_and_fail(), so a job
+// still queued at shutdown and a late caller are told the same thing.
+constexpr std::string_view kShuttingDown = "assistant backend is shutting down";
+
 int g_checks = 0;
 int g_failures = 0;
 
@@ -52,9 +57,7 @@ auto section(const char* title) -> void { std::printf("\n=== %s ===\n", title); 
  */
 class GatedEchoBackend final : public QueuedBackend {
   public:
-    GatedEchoBackend(std::size_t max_concurrent, std::size_t queue_depth,
-                      std::string_view shutting_down_message = "assistant backend is shutting down")
-        : QueuedBackend(shutting_down_message), shutting_down_message_(shutting_down_message) {
+    GatedEchoBackend(std::size_t max_concurrent, std::size_t queue_depth) {
         max_concurrent_ = max_concurrent;
         max_queue_depth_ = queue_depth;
         start();
@@ -71,14 +74,11 @@ class GatedEchoBackend final : public QueuedBackend {
         worker_.request_stop();
         open_gate();  // unstick anything blocked on the gate so join() below completes
         worker_.join();
-        // The SAME message this instance was constructed with -- drain_and_fail()'s
-        // reason is a free parameter, not automatically tied to the base's own
-        // shutting_down_message_ (used only by submit()'s post-shutdown path), so
-        // this test deliberately passes the identical string to prove both call
-        // sites agree, exactly as SensenBackend's real shutdown path does (see
-        // assistant_service.cpp / mortgage_assistant_service.cpp's own
-        // drain_and_fail(...) call sites).
-        drain_and_fail(shutting_down_message_);
+        // drain_and_fail()'s reason is a free parameter, not tied to the base's own
+        // shutting-down message (used only by submit()'s post-shutdown path), so this
+        // test passes the identical string to prove both call sites can agree. The real
+        // service words its drain "assistant worker shutting down" (assistant_service.cpp).
+        drain_and_fail(kShuttingDown);
     }
 
     [[nodiscard]] auto name() const noexcept -> std::string_view override { return "gated-echo"; }
@@ -117,7 +117,6 @@ class GatedEchoBackend final : public QueuedBackend {
     std::mutex gate_mu_;
     std::condition_variable_any gate_cv_;
     bool gate_open_ = true;
-    std::string shutting_down_message_;
     std::jthread worker_;
 };
 
@@ -173,11 +172,11 @@ auto main() -> int {
     }
 
     // -----------------------------------------------------------------
-    section("Per-surface shutting-down wording is preserved through the shared base");
+    section("The shutting-down wording reaches a job still queued at shutdown");
     {
-        auto run_one = [](std::string_view message) {
+        auto run_one = [] {
             auto backend = std::make_unique<GatedEchoBackend>(/*max_concurrent=*/1,
-                                                                /*queue_depth=*/1, message);
+                                                                /*queue_depth=*/1);
             backend->close_gate();
 
             // One job in flight (dequeued, blocked on the gate)...
@@ -202,37 +201,23 @@ auto main() -> int {
             return std::pair{held, queued};
         };
 
-        const auto [held_default, queued_default] = run_one("assistant backend is shutting down");
-        check(held_default.has_value() && !held_default->ok &&
-                  held_default->error == "test worker stopping",
+        const auto [held, queued] = run_one();
+        check(held.has_value() && !held->ok && held->error == "test worker stopping",
               "the in-flight job is failed with the worker-stopping message on shutdown");
-        check(queued_default.has_value() && !queued_default->ok &&
-                  queued_default->error == "assistant backend is shutting down",
-              "the still-queued job is failed by drain_and_fail() with the DEFAULT "
-              "shutting-down message (matches assistant_service.cpp's original wording)");
-
-        const auto [held_custom, queued_custom] =
-            run_one("mortgage assistant backend is shutting down");
-        check(held_custom.has_value() && !held_custom->ok &&
-                  held_custom->error == "test worker stopping",
-              "(custom-message instance) the in-flight job still fails with the same "
-              "worker-stopping message -- that text is not parameterized");
-        check(queued_custom.has_value() && !queued_custom->ok &&
-                  queued_custom->error == "mortgage assistant backend is shutting down",
-              "the still-queued job is failed with the CUSTOM shutting-down message (matches "
-              "mortgage_assistant_service.cpp's original wording) -- proving the two surfaces' "
-              "wording did not homogenize when the class was unified");
+        check(queued.has_value() && !queued->ok && queued->error == kShuttingDown,
+              "the still-queued job is failed by drain_and_fail() with the shutting-down "
+              "message (matches assistant_service.cpp's wording)");
     }
 
     // -----------------------------------------------------------------
-    // resolve_device() -- the ASSISTANT_DEVICE/MORTGAGE_DEVICE selector's
+    // resolve_device() -- the ASSISTANT_DEVICE selector's
     // decision logic, factored into inference_admission.cppm as a pure
     // function precisely so every branch is testable here without an actual
     // CUDA build or a real device: cuda_build/cuda_device_ready are passed in
     // as plain booleans rather than queried from #ifdef SENSEN_HAS_CUDA or
     // sensen::cuda::CudaBackend::is_available() (which assistant_service.cpp
-    // and mortgage_assistant_service.cpp do at their own real call sites).
-    section("resolve_device() -- ASSISTANT_DEVICE/MORTGAGE_DEVICE selector");
+    // does at its own real call site).
+    section("resolve_device() -- ASSISTANT_DEVICE selector");
     {
         // Default: no env var set, both callers pass "cpu" (env_string(...)
         // .value_or("cpu")) -- byte-identical to every build before this

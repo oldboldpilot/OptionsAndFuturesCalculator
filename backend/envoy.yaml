@@ -117,11 +117,11 @@ static_resources:
                           body: { inline_string: "not found" }
                       # Everything else is gRPC, matched by prefix rather than
                       # by service name. That is deliberate and load-bearing:
-                      # the engine serves TWO services on this port
-                      # (calculator.OptionsCalculator and
-                      # sensen.finance.Finance), and the grpc_web + cors filters
-                      # below are chain-wide, so both are reachable from a
-                      # browser with no per-service configuration. Narrowing
+                      # the engine serves THREE services on this port
+                      # (calculator.OptionsCalculator, sensen.finance.Finance and
+                      # calculator.assistant.StrategyAssistant), and the grpc_web + cors
+                      # filters below are chain-wide, so all are reachable from a browser
+                      # with no per-service configuration. Narrowing
                       # this to a named prefix would silently strand whichever
                       # service was not listed -- as a 404 from Envoy, which
                       # looks like the backend is down rather than unrouted.
@@ -208,7 +208,6 @@ static_resources:
                       - calculator.OptionsCalculator
                       - sensen.finance.Finance
                       - calculator.assistant.StrategyAssistant
-                      - mortgage.assistant.MortgageAssistant
                     auto_mapping: true
                     # Without this a refusal arrives as an empty body with a
                     # header the caller has to know to look for. With it, a

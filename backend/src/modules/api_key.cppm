@@ -123,8 +123,8 @@ struct Identity {
      * has a key to fix. Carried on `Identity` rather than threaded through as
      * a second out-parameter because every call site already plumbs one
      * `Identity` from `authenticate()`/`check()` to the entitlement check a
-     * few lines later (see calculator_service.cpp, assistant_service.cpp,
-     * mortgage_assistant_service.cpp) -- adding a field costs nothing extra
+     * few lines later (see calculator_service.cpp, assistant_service.cpp)
+     * -- adding a field costs nothing extra
      * on that path, where a second parameter would have to be threaded
      * through each of them by hand.
      *
@@ -409,23 +409,21 @@ enum class GateMode : std::uint8_t { Off, Warn, Enforce };
  * the same "is a Pro feature" text -- true of the 4, misleading for the 206,
  * whose actual problem was a key that failed the `pk_live_`/`sk_live_` + 43
  * character shape check in `api_key.cpp` before ever reaching the registry.
- * `surface.malformed_message` / `.unknown_message` / `.revoked_message` name
- * that distinction; `surface.message` is unchanged and still covers NoKey and
- * a well-formed free-tier identity, which genuinely are the same story.
+ * `kStrategySurface.malformed_message` / `.unknown_message` / `.revoked_message`
+ * name that distinction; `kStrategySurface.message` still covers NoKey and a
+ * well-formed free-tier identity, which genuinely are the same story.
  */
 /**
- * Names the calling surface, so a refusal describes the site the caller is
- * actually on.
+ * The copy a refusal carries for the assistant surface it describes, plus the RPC name
+ * the log line records.
  *
- * The POLICY is deliberately shared between the two assistants -- see the
- * rationale above; it follows from running a 0.6B model at all, not from which
- * model it is. The COPY is not shareable, and for a while it was: the mortgage
- * RPC refused with the strategy assistant's text, telling a
- * mortgagefvcalculator.com user to "build your strategy manually with the
- * symbol and strategy selectors" -- controls that do not exist on that site.
- * The log line had the same defect from the other direction: every denial was
- * recorded as `rpc=ParseStrategy` regardless of which service issued it, so the
- * logs could not attribute a denial to a service.
+ * Today there is exactly one surface, the strategy assistant. There used to be two: the
+ * mortgage assistant refused with this surface's text, telling a mortgagefvcalculator.com
+ * user to "build your strategy manually with the symbol and strategy selectors" -- controls
+ * that do not exist on that site -- and its denials were logged as `rpc=ParseStrategy`.
+ * That assistant now runs in the nest-egg-loan repository with its own gate; the
+ * struct stays because it is where this surface's four complete sentences live, and
+ * `check_assistant_entitlement` reads it, so its log line names the call it refused.
  */
 struct AssistantSurface {
     std::string_view rpc;      // e.g. "ParseStrategy" -- for the log line
@@ -444,11 +442,10 @@ struct AssistantSurface {
 
 // Every *_message field below is stored whole rather than assembled from a
 // template and a couple of clauses. The templated version lasted one deploy:
-// the template's own "--" collided with an em-dash inside the mortgage clause
+// the template's own "--" collided with an em-dash inside one surface's clause
 // and pushed the upgrade offer out behind a subordinate clause, producing a
 // sentence no one would have written on purpose. Complete sentences cost a
-// few duplicated words across the two surfaces and cannot come out
-// ungrammatical.
+// few duplicated words and cannot come out ungrammatical.
 inline constexpr AssistantSurface kStrategySurface{
     .rpc = "ParseStrategy",
     .message = "The natural-language strategy assistant is a Pro feature. The calculator "
@@ -470,31 +467,6 @@ inline constexpr AssistantSurface kStrategySurface{
         "Contact support for a replacement. The calculator itself remains free in the "
         "meantime: build your strategy manually with the symbol and strategy selectors."};
 
-// Names the Finance service, because that is genuinely what this caller wants
-// and it is free: the assistant only ever SELECTS a Finance operation and fills
-// in its parameters. Refusing it costs the caller the parsing, not the maths.
-inline constexpr AssistantSurface kMortgageSurface{
-    .rpc = "ParseOperation",
-    .message = "The natural-language mortgage assistant is a Pro feature. The calculations "
-               "themselves remain free: call the sensen.finance.Finance operation you want "
-               "directly, or upgrade to have it chosen and filled in for you.",
-    .malformed_message =
-        "The API key on this request is malformed, not just unentitled. A key must start "
-        "with `pk_live_` or `sk_live_` followed by 43 characters, 51 in total, and this one "
-        "does not match that shape -- check for a copy-paste error. The calculations "
-        "themselves remain free in the meantime: call the sensen.finance.Finance operation "
-        "you want directly.",
-    .unknown_message =
-        "The API key on this request is well-formed but does not match any key on record. "
-        "Check that it was copied in full, or upgrade for a new one. The calculations "
-        "themselves remain free in the meantime: call the sensen.finance.Finance operation "
-        "you want directly.",
-    .revoked_message =
-        "The API key on this request has been revoked and can no longer authenticate. "
-        "Contact support for a replacement. The calculations themselves remain free in the "
-        "meantime: call the sensen.finance.Finance operation you want directly."};
-
-[[nodiscard]] auto check_assistant_entitlement(const Identity& identity,
-                                               const AssistantSurface& surface) -> grpc::Status;
+[[nodiscard]] auto check_assistant_entitlement(const Identity& identity) -> grpc::Status;
 
 }  // namespace options_calculator::auth

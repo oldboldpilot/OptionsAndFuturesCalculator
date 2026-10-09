@@ -677,7 +677,7 @@ def ask_probe(model: TinyEncoder, dialogues: list[C.Dialogue], sch: C.Schema, to
     dialogue (the reply withheld) the encoder should leave exactly the fields the
     reply supplies EMPTY, so the layer above can turn "no value for `periods`" into
     "Over how many years?" -- the missing-field logic the decoder contract already
-    has (`UnstatedField` in mortgage_verification.cppm).
+    has (`UnstatedField` in nest-egg-loan's mortgage_verification.cppm).
 
     By default nothing in training shows the model a first turn alone, so this is a
     measurement of whether abstention comes for free from pointing, which it can for

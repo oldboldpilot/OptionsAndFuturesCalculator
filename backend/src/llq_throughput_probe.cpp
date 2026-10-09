@@ -214,7 +214,7 @@ class Sha256 {
     return unescape(row.substr(start, end - start));
 }
 
-/// The exact prompt shape mortgage_assistant_service.cpp's build_prompt emits for
+/// The exact prompt shape the (removed) mortgage assistant's build_prompt emitted for
 /// a first turn: system, user, then the assistant header.
 [[nodiscard]] auto load_prompts(const std::string& path, std::size_t n) -> std::vector<std::string> {
     std::vector<std::string> out;
