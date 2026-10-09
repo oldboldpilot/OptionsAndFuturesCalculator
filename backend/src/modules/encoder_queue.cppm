@@ -262,17 +262,15 @@ inline constexpr std::size_t kDefaultMaxInFlight{1};
  * request spills to the shared queue (if this assistant has a queue slot free).
  *
  * MEASURED, not chosen: `scripts/encoder_local_sweep.sh`, one engine in `local` mode, three rounds
- * (the order of the concurrencies reversed on alternate rounds), 32-CPU host, medians. Client
- * concurrency 1 / 2 / 4 / 8 / 16 / 32 / 64:
+ * (the order of the concurrencies reversed on alternate rounds), 32-CPU host, medians, strategy
+ * surface. Client concurrency 1 / 2 / 4 / 8 / 16 / 32 / 64:
  *
- *     mortgage   p50 0.87 / 0.95 / 1.03 / 1.24 / 2.08 / 4.79 / 8.81 ms    1134 / 2029 / 3636 / 5870 / 6887 / 6284 / 6498 rps
  *     strategy   p50 0.30 / 0.35 / 0.45 / 0.64 / 1.57 / 3.29 / 7.70 ms    3151 / 5331 / 8102 / 10761 / 9376 / 8847 / 7617 rps
  *
- * Throughput stops growing between 8 and 16 (strategy peaks AT 8, mortgage at 16) and latency then
- * doubles with every doubling of callers, which is a replica with nothing left to give. 8 is the
- * highest concurrency at which p50 is still about twice its idle value on both surfaces (1.4x and
- * 2.1x) while throughput is already 85-100% of peak; at 16 the strategy p50 is 5x idle for 87% of
- * its peak. So below 8 a request is answered in about a millisecond.
+ * Throughput peaks AT 8 and stops growing after it, and latency then doubles with every doubling
+ * of callers, which is a replica with nothing left to give. 8 is the highest concurrency at which
+ * p50 is still about twice its idle value (2.1x) while throughput is at its peak; at 16 the p50 is
+ * 5x idle for 87% of that peak. So below 8 a request is answered in about a millisecond.
  *
  * The bound counts chain executions, which is fewer than client concurrency (gRPC framing and the
  * service's own work run outside the chain), so it is reached rarely: the benchmark with 24 callers
@@ -300,7 +298,7 @@ struct Bounds {
  * (`zero_means` says what it does for this variable).
  *
  * An unusable value is an ERROR rather than a fallback. This tree's rule for an operator switch
- * (`MORTGAGE_WEIGHT_STORE`, `MORTGAGE_RESTRICTED_PROJECTION`) is that a typo must not silently
+ * (`STRATEGY_WEIGHT_STORE`) is that a typo must not silently
  * serve the configuration the operator meant to leave: coercing `=abc` or `=0` to 1 left a replica
  * on a ~0.6 s request path with no line anywhere saying why.
  */
@@ -384,7 +382,7 @@ class EncoderBackend final : public inference_admission::InferenceBackend {
                                               std::string>(const sensen::encoder_assistant::Turns&)>;
     using Render = std::function<std::string(const sensen::encoder_assistant::Parsed&)>;
 
-    /** @param label what the logs call this backend: "mortgage encoder", "strategy encoder". */
+    /** @param label what the logs call this backend: "strategy encoder". */
     EncoderBackend(Chain chain, Render render, std::string label)
         : chain_(std::move(chain)), render_(std::move(render)), label_(std::move(label)) {}
 

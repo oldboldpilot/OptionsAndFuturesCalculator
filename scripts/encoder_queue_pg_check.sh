@@ -36,7 +36,7 @@ eqc_start_engine A "$PORT_A" postgres ENCODER_LOCAL_MAX_IN_FLIGHT=0 "DATABASE_UR
 eqc_start_engine B "$PORT_B" postgres ENCODER_LOCAL_MAX_IN_FLIGHT=0 "DATABASE_URL=$DBURL" PGSSLMODE_OVERRIDE=prefer || exit 1
 sleep 1
 for e in A B; do
-    check_eq "engine $e: both assistants announce INFERENCE_QUEUE=postgres" "$(grep -c 'INFERENCE_QUEUE=postgres' "$WORK/$e.log")" 2
+    check_eq "engine $e: the assistant announces INFERENCE_QUEUE=postgres" "$(grep -c 'INFERENCE_QUEUE=postgres' "$WORK/$e.log")" 1
 done
 
 # A and B send every request to the queue first (the lever that exercises the queue path at one caller).
@@ -44,20 +44,17 @@ done
 # job at all at a concurrency of one.
 eqc_start_engine D "$PORT_D" postgres "DATABASE_URL=$DBURL" PGSSLMODE_OVERRIDE=prefer || exit 1
 jobs0="$(podman exec sensen-postgres psql -U postgres -d "$DB" -Atc 'select count(*) from inference_jobs')"
-for surface in mortgage strategy; do
-    label="$surface encoder"; ip0="$(eqc_inprocess D "$label")"; sp0="$(eqc_queued D "$label")"
-    python3 -P "$PROBE" latency --target "127.0.0.1:$PORT_D" --surface "$surface" -c 1 -n 48 --warmup 0 > "$WORK/pg_idle_$surface.json" 2>&1 \
-        || { fail "$surface idle run on postgres reported errors"; cat "$WORK/pg_idle_$surface.json"; }
-    check_eq "postgres idle $surface: all 48 answered in-process" "$(( $(eqc_inprocess D "$label") - ip0 ))" 48
-    check_eq "postgres idle $surface: none spilled" "$(( $(eqc_queued D "$label") - sp0 ))" 0
-done
+surface=strategy
+label="$surface encoder"; ip0="$(eqc_inprocess D "$label")"; sp0="$(eqc_queued D "$label")"
+python3 -P "$PROBE" latency --target "127.0.0.1:$PORT_D" -c 1 -n 48 --warmup 0 > "$WORK/pg_idle_$surface.json" 2>&1 \
+    || { fail "$surface idle run on postgres reported errors"; cat "$WORK/pg_idle_$surface.json"; }
+check_eq "postgres idle $surface: all 48 answered in-process" "$(( $(eqc_inprocess D "$label") - ip0 ))" 48
+check_eq "postgres idle $surface: none spilled" "$(( $(eqc_queued D "$label") - sp0 ))" 0
 jobs1="$(podman exec sensen-postgres psql -U postgres -d "$DB" -Atc 'select count(*) from inference_jobs')"
 check_eq "postgres idle: the jobs table did not gain a row" "$(( jobs1 - jobs0 ))" 0
 kill -TERM "${ENGINE_PIDS[-1]}" 2>/dev/null || true   # the pid this script captured
 
-eqc_burst mortgage "mortgage encoder" "strategy encoder"
-eqc_burst strategy "strategy encoder" "mortgage encoder"
-eqc_replay mortgage "mortgage encoder" 272
+eqc_burst strategy "strategy encoder"
 eqc_replay strategy "strategy encoder" 300
 
 echo; [ "$FAILURES" -eq 0 ] && echo "encoder_queue_pg_check: all checks passed" || echo "encoder_queue_pg_check: $FAILURES FAILED"

@@ -1,21 +1,20 @@
 #!/usr/bin/env bash
 #
-# Gate for the encoder assistants on the shared queue, against a REAL three-node SGEE cluster and
+# Gate for the encoder assistant on the shared queue, against a REAL three-node SGEE cluster and
 # REAL engines holding the REAL encoder weights.
 #
 # @author Olumuyiwa Oluwasanmi
 #
 # WHAT IT DECIDES, AND WHAT THE HERMETIC test_encoder_queue CANNOT:
 #
-#   1. The encoders go THROUGH the queue. Before this existed, ~120 production assistant calls
+#   1. The encoder goes THROUGH the queue. Before this existed, ~120 production assistant calls
 #      advanced the cluster's `last_applied` by 10 -- housekeeping -- because the encoder ran
 #      in-process and `admission_` was consulted only for decoder prompts. Here every request is
 #      accounted for: the engines' own "executed leased job" counts must sum to the requests sent.
 #   2. Work is SHARED. A burst sent to engine A is executed partly by engine B (per-engine counts).
-#   3. The SURFACE partition holds: a mortgage burst is executed by mortgage runners only, a
-#      strategy burst by strategy runners only, and no request falls back to a local answer.
-#   4. The served answers are BYTE-IDENTICAL to local mode over the repository's own corpora: the
-#      272-row mortgage visitor regression and the 1500-row strategy holdout.
+#   3. No request falls back to a local answer when the cluster is healthy.
+#   4. The served answers are BYTE-IDENTICAL to local mode over the repository's own corpus: the
+#      1500-row strategy holdout.
 #   5. A cluster that has gone away costs nothing but the queue: the engine still answers, with the
 #      same answer, and says why in its log -- and does NOT claim the queue carried it.
 #   6. A worker only leases tasks it would answer identically. Across a deploy overlap two builds
@@ -35,7 +34,7 @@ set -uo pipefail
 NODE_BIN="${1:?usage: $0 <sgee_queue_node> <calculator_engine> <repo-root>}"
 ENGINE_BIN="${2:?usage: $0 <sgee_queue_node> <calculator_engine> <repo-root>}"
 REPO="${3:?usage: $0 <sgee_queue_node> <calculator_engine> <repo-root>}"
-EQC_BURST="${EQC_BURST:-96}"                      # requests per surface in the sharing run
+EQC_BURST="${EQC_BURST:-96}"                      # requests in the sharing run
 OVERLOAD_CONC="${EQC_OVERLOAD_CONCURRENCY:-24}"   # callers in the overload run
 STRATEGY_ROWS="${EQC_STRATEGY_ROWS:-300}"         # strategy holdout rows replayed (1500 = all; ~4 min)
 
@@ -51,17 +50,16 @@ eqc_start_engine A "$PORT_A" sgee ENCODER_LOCAL_MAX_IN_FLIGHT=0 || exit 1
 eqc_start_engine B "$PORT_B" sgee ENCODER_LOCAL_MAX_IN_FLIGHT=0 || exit 1
 sleep 1   # let both runners complete a first idle poll
 
-# Both assistants of a queue-mode engine must say they joined the queue. Before the encoders were
-# wired to it they did not: the encoder branch of each worker returned before the queue was
-# configured, and an operator reading the boot log saw "INFERENCE_QUEUE=sgee" and believed it.
+# The assistant of a queue-mode engine must say it joined the queue. Before the encoder was wired
+# to it, it did not: the encoder branch of the worker returned before the queue was configured, and
+# an operator reading the boot log saw "INFERENCE_QUEUE=sgee" and believed it.
 for e in A B; do
-    check_eq "engine $e: both assistants announce INFERENCE_QUEUE=sgee" "$(grep -c 'INFERENCE_QUEUE=sgee' "$WORK/$e.log")" 2
+    check_eq "engine $e: the assistant announces INFERENCE_QUEUE=sgee" "$(grep -c 'INFERENCE_QUEUE=sgee' "$WORK/$e.log")" 1
 done
 check_eq "engine L: local mode announces no queue" "$(grep -c 'INFERENCE_QUEUE=sgee' "$WORK/L.log")" 0
 
-# ---- 1-3. requests through A: accounted for, shared, partitioned by surface -----------------------
-eqc_burst mortgage "mortgage encoder" "strategy encoder"
-eqc_burst strategy "strategy encoder" "mortgage encoder"
+# ---- 1-3. requests through A: accounted for and shared ------------------------------------------
+eqc_burst strategy "strategy encoder"
 
 # ---- 3b. overload: more callers than the replica's bound ------------------------------------------
 #
@@ -73,7 +71,7 @@ overload() {   # <surface> <label>
     local surface="$1" label="$2" a0 b0 a1 b1 f0 f1 l0 l1 executed q0 q1 p0 p1
     a0="$(eqc_executed A "$label")"; b0="$(eqc_executed B "$label")"; f0="$(eqc_fallbacks A)"; l0="$(eqc_applied)"
     q0="$(eqc_queued A "$label")"; p0="$(eqc_inprocess A "$label")"
-    python3 -P "$PROBE" latency --target "127.0.0.1:$PORT_A" --surface "$surface" -c "$OVERLOAD_CONC" \
+    python3 -P "$PROBE" latency --target "127.0.0.1:$PORT_A" -c "$OVERLOAD_CONC" \
         -n "$EQC_BURST" --warmup 0 > "$WORK/overload_$surface.json" 2>&1 \
         || { fail "$surface overload run reported errors"; cat "$WORK/overload_$surface.json"; }
     sleep 1
@@ -89,16 +87,17 @@ overload() {   # <surface> <label>
     check_eq "$surface overload: no orphan -- the log moved by exactly three writes per executed request (+/- housekeeping)" \
         "$(( (l1-l0) >= 3*executed && (l1-l0) <= 3*executed + 12 ))" 1
 }
-overload mortgage "mortgage encoder"
 overload strategy "strategy encoder"
 
 # ---- 3c. version skew: another build on the same queue leases nothing of ours --------------------
 #
 # Railway stands the new containers up while the old ones still carry traffic, all against one queue.
-# Engine S plays "the other build": its MORTGAGE encoder loads the strategy GGUF, so its mortgage
-# fingerprint differs from A's and B's exactly as a retrained model or a changed binary would make it
-# (the fingerprint is derived from the model file and the executable, never from a number someone
-# bumps). Its answers are meaningless for mortgage and are never read; only who EXECUTES is counted.
+# Engine S plays "the other build": its strategy encoder loads a COPY of the strategy GGUF with one
+# trailing zero byte, so its fingerprint differs from A's and B's exactly as a retrained model or a
+# changed binary would make it (the fingerprint is `encoder_queue::build_fingerprint`: a hash of the
+# model file's bytes and of the executable's, never a number someone bumps). The GGUF parser maps
+# the file and reads only what its header and tensor table point at, so the extra byte changes the
+# identity and nothing the encoder computes: S answers correctly, and only who EXECUTES is counted.
 #
 # Two directions, because one alone proves nothing: "S executed none of A's tasks" is also true of a
 # runner that is dead, so S must be shown to execute its OWN.
@@ -106,12 +105,12 @@ skew() {   # <surface> <label>
     local surface="$1" label="$2" s0 a0 b0 s1 a1 b1 s2 a2 b2 f0 f1 fs0 fs1
     s0="$(eqc_executed S "$label")"; a0="$(eqc_executed A "$label")"; b0="$(eqc_executed B "$label")"
     f0="$(eqc_fallbacks A)"; fs0="$(eqc_fallbacks S)"
-    python3 -P "$PROBE" latency --target "127.0.0.1:$PORT_A" --surface "$surface" -c 1 \
+    python3 -P "$PROBE" latency --target "127.0.0.1:$PORT_A" -c 1 \
         -n "$EQC_BURST" --warmup 0 > "$WORK/skew_a_$surface.json" 2>&1 \
         || { fail "$surface skew run against A reported errors"; cat "$WORK/skew_a_$surface.json"; }
     sleep 0.5
     s1="$(eqc_executed S "$label")"; a1="$(eqc_executed A "$label")"; b1="$(eqc_executed B "$label")"
-    python3 -P "$PROBE" latency --target "127.0.0.1:$PORT_S" --surface "$surface" -c 1 \
+    python3 -P "$PROBE" latency --target "127.0.0.1:$PORT_S" -c 1 \
         -n "$EQC_BURST" --warmup 0 > "$WORK/skew_s_$surface.json" 2>&1 \
         || { fail "$surface skew run against S reported errors"; cat "$WORK/skew_s_$surface.json"; }
     sleep 0.5
@@ -123,10 +122,12 @@ skew() {   # <surface> <label>
     check_eq "$surface skew: the other build executed all of its own (its runner is alive)" "$(( s2-s1 ))" "$EQC_BURST"
     check_eq "$surface skew: nothing fell back to a local answer on either side" "$(( (f1-f0) + (fs1-fs0) ))" 0
 }
-eqc_log "starting engine S: a mortgage encoder of ANOTHER build on the same queue"
-eqc_start_engine S "$PORT_S" sgee ENCODER_LOCAL_MAX_IN_FLIGHT=0 MORTGAGE_ENCODER_PATH="$STRATEGY_GGUF" || exit 1
+eqc_log "starting engine S: a strategy encoder of ANOTHER build on the same queue"
+OTHER_BUILD_GGUF="$WORK/strategy-encoder-other-build.gguf"
+cp "$STRATEGY_GGUF" "$OTHER_BUILD_GGUF" && printf '\0' >> "$OTHER_BUILD_GGUF" || { echo "FAIL: cannot make the other build's GGUF"; exit 1; }
+eqc_start_engine S "$PORT_S" sgee ENCODER_LOCAL_MAX_IN_FLIGHT=0 STRATEGY_ENCODER_PATH="$OTHER_BUILD_GGUF" || exit 1
 sleep 1
-skew mortgage "mortgage encoder"
+skew strategy "strategy encoder"
 kill -TERM "${ENGINE_PIDS[-1]}" 2>/dev/null || true   # the pid this script captured; never by name
 
 # ---- 3d. the two bounds are operator switches, and are read as ones ----------------------------
@@ -135,7 +136,7 @@ kill -TERM "${ENGINE_PIDS[-1]}" 2>/dev/null || true   # the pid this script capt
 # be inferred from per-request lines under load). 0 is a VALUE -- local 0 means every request is busy,
 # queue 0 means this assistant never submits -- and a typo is a REFUSAL to start, naming the variable
 # and the value, rather than a quiet coercion to the default.
-check_eq "engine A: each assistant logs its bounds" "$(grep -c 'only when 0 are already executing here -- at most 1 at a time' "$WORK/A.log")" 2
+check_eq "engine A: the assistant logs its bounds" "$(grep -c 'only when 0 are already executing here -- at most 1 at a time' "$WORK/A.log")" 1
 rc="$(eqc_engine_refuses Z "$PORT_S" sgee ENCODER_QUEUE_MAX_IN_FLIGHT=abc)"
 check_eq "a non-numeric ENCODER_QUEUE_MAX_IN_FLIGHT stops the engine at boot (exit status)" "$rc" 1
 check_eq "and it names the value it refused" "$(grep -c 'ENCODER_QUEUE_MAX_IN_FLIGHT="abc" is not a whole number' "$WORK/Z.log")" 1
@@ -143,13 +144,13 @@ rc="$(eqc_engine_refuses Z "$PORT_S" sgee ENCODER_LOCAL_MAX_IN_FLIGHT=-3)"
 check_eq "a malformed ENCODER_LOCAL_MAX_IN_FLIGHT stops the engine too" "$rc" 1
 check_eq "and names ITS variable and value" "$(grep -c 'ENCODER_LOCAL_MAX_IN_FLIGHT="-3" is not a whole number' "$WORK/Z.log")" 1
 eqc_start_engine Z "$PORT_S" sgee ENCODER_LOCAL_MAX_IN_FLIGHT=0 ENCODER_QUEUE_MAX_IN_FLIGHT=0 || exit 1
-check_eq "both bounds at 0 are accepted and logged" "$(grep -c 'only when 0 are already executing here -- at most 0 at a time' "$WORK/Z.log")" 2
-z0="$(eqc_inprocess Z "mortgage encoder")"; zq0="$(eqc_queued Z "mortgage encoder")"
-python3 -P "$PROBE" latency --target "127.0.0.1:$PORT_S" --surface mortgage -c 1 -n 24 --warmup 0 \
+check_eq "both bounds at 0 are accepted and logged" "$(grep -c 'only when 0 are already executing here -- at most 0 at a time' "$WORK/Z.log")" 1
+z0="$(eqc_inprocess Z "strategy encoder")"; zq0="$(eqc_queued Z "strategy encoder")"
+python3 -P "$PROBE" latency --target "127.0.0.1:$PORT_S" -c 1 -n 24 --warmup 0 \
     > "$WORK/zero_bound.json" 2>&1 || { fail "engine Z (queue bound 0) reported errors"; cat "$WORK/zero_bound.json"; }
 sleep 0.5
-check_eq "with a queue bound of 0 even a request that is always busy is answered in-process" "$(( $(eqc_inprocess Z "mortgage encoder") - z0 ))" 24
-check_eq "and none is reported as spilled to the queue" "$(( $(eqc_queued Z "mortgage encoder") - zq0 ))" 0
+check_eq "with a queue bound of 0 even a request that is always busy is answered in-process" "$(( $(eqc_inprocess Z "strategy encoder") - z0 ))" 24
+check_eq "and none is reported as spilled to the queue" "$(( $(eqc_queued Z "strategy encoder") - zq0 ))" 0
 kill -TERM "${ENGINE_PIDS[-1]}" 2>/dev/null || true   # the pid this script captured; never by name
 
 # ---- 3e. a listener that cannot bind exits cleanly even with queue runners already polling -------
@@ -174,7 +175,6 @@ check_eq "and names the address" "$(grep -c "could not start the gRPC server on 
 if [ $(( SECONDS - started )) -le 15 ]; then pass "and leaves promptly ($(( SECONDS - started )) s)"; else fail "took $(( SECONDS - started )) s to exit"; fi
 
 # ---- 4. byte-identical served answers, over the whole RPC ----------------------------------------
-eqc_replay mortgage "mortgage encoder" 272
 eqc_replay strategy "strategy encoder" "$STRATEGY_ROWS"
 if [ -n "${EQC_KEEP_DUMPS:-}" ]; then cp "$WORK"/local_*.jsonl "$WORK"/raw_local_*.txt "$EQC_KEEP_DUMPS"/; fi
 
@@ -199,7 +199,7 @@ route_idle() {   # <surface> <label>   (engine D, defaults)
     local surface="$1" label="$2" ip0 sp0 dg0 f0 x0 l0 ip1 sp1 dg1 f1 x1 l1
     ip0="$(eqc_inprocess D "$label")"; sp0="$(eqc_queued D "$label")"; dg0="$(eqc_degraded D "$label")"; f0="$(eqc_fallbacks D)"
     x0=$(( $(eqc_executed A "$label") + $(eqc_executed B "$label") + $(eqc_executed D "$label") )); l0="$(eqc_applied)"
-    python3 -P "$PROBE" latency --target "127.0.0.1:$PORT_D" --surface "$surface" -c 1 \
+    python3 -P "$PROBE" latency --target "127.0.0.1:$PORT_D" -c 1 \
         -n "$EQC_BURST" --warmup 0 > "$WORK/route_idle_$surface.json" 2>&1 \
         || { fail "$surface idle run reported errors"; cat "$WORK/route_idle_$surface.json"; }
     sleep 0.5
@@ -215,21 +215,19 @@ route_idle() {   # <surface> <label>   (engine D, defaults)
 route_burst() {   # <surface> <label> <rows>   (engine P)
     local surface="$1" label="$2" rows="$3" ip0 sp0 dg0 f0 a0 b0 p0 ip1 sp1 dg1 f1 a1 b1 p1 s2 n="${EQC_ROUTE_BURST:-480}"
     ip0="$(eqc_inprocess P "$label")"; sp0="$(eqc_queued P "$label")"; dg0="$(eqc_degraded P "$label")"; f0="$(eqc_fallbacks P)"
-    a0="$(eqc_executed A "$label")"; b0="$(eqc_executed B "$label")"; p0="$(eqc_executed P "$label")"; r0="$(eqc_raw_count P "$surface")"
-    python3 -P "$PROBE" latency --target "127.0.0.1:$PORT_P" --surface "$surface" -c "$OVERLOAD_CONC" \
+    a0="$(eqc_executed A "$label")"; b0="$(eqc_executed B "$label")"; p0="$(eqc_executed P "$label")"; r0="$(eqc_raw_count P)"
+    python3 -P "$PROBE" latency --target "127.0.0.1:$PORT_P" -c "$OVERLOAD_CONC" \
         -n "$n" --warmup 0 > "$WORK/route_burst_$surface.json" 2>&1 \
         || { fail "$surface burst reported errors"; cat "$WORK/route_burst_$surface.json"; }
     sleep 1
     ip1="$(eqc_inprocess P "$label")"; sp1="$(eqc_queued P "$label")"; dg1="$(eqc_degraded P "$label")"; f1="$(eqc_fallbacks P)"
-    a1="$(eqc_executed A "$label")"; b1="$(eqc_executed B "$label")"; p1="$(eqc_executed P "$label")"; r1="$(eqc_raw_count P "$surface")"
+    a1="$(eqc_executed A "$label")"; b1="$(eqc_executed B "$label")"; p1="$(eqc_executed P "$label")"; r1="$(eqc_raw_count P)"
     eqc_log "$surface burst ($OVERLOAD_CONC callers, $n requests, local bound 1): in-process $((ip1-ip0)), spilled $((sp1-sp0)), degraded $((dg1-dg0)); executed by A $((a1-a0)) B $((b1-b0)) P $((p1-p0))"
     check_ge "$surface burst: part of it was answered in-process" "$(( ip1-ip0 ))" 1
     check_ge "$surface burst: the overflow above the local bound was spilled to the queue" "$(( sp1-sp0 ))" 1
-    # Bracketed, because no exact denominator exists for every surface: some corpus rows are answered
-    # before the encoder is asked at all, and the service's raw-output line is written only for a
-    # params block (not for <NONE> or a refusal). So every request that produced a params block must
-    # have been counted (the raw-output delta is a floor), and no more can have been counted than were
-    # sent. The strategy surface closes exactly; the mortgage one lands inside the bracket.
+    # Bracketed, because the service's raw-output line is written only for a params block (not for
+    # <NONE> or a refusal). So every request that produced a params block must have been counted (the
+    # raw-output delta is a floor), and no more can have been counted than were sent.
     acc=$(( (ip1-ip0) + (sp1-sp0) + (dg1-dg0) ))
     check_eq "$surface burst: every request that produced a params block was accounted for, and none more than were sent (in-process + spilled + degraded = $acc, within [$(( r1-r0 )), $n])" \
         "$(( acc >= r1-r0 && acc <= n ))" 1
@@ -238,7 +236,7 @@ route_burst() {   # <surface> <label> <rows>   (engine P)
     check_eq "$surface burst: nothing fell back or degraded" "$(( (f1-f0) + (dg1-dg0) ))" 0
     # The same rows as the local-mode dump, sent at concurrency 8 so BOTH routes carry some of them.
     s2="$(eqc_queued P "$label")"
-    python3 -P "$PROBE" dump --target "127.0.0.1:$PORT_P" --surface "$surface" -c 8 --limit "$rows" --out "$WORK/mixed_$surface.jsonl" \
+    python3 -P "$PROBE" dump --target "127.0.0.1:$PORT_P" -c 8 --limit "$rows" --out "$WORK/mixed_$surface.jsonl" \
         > "$WORK/dump_mixed_$surface.out" 2>&1 || { fail "$surface mixed-route dump had transport errors"; cat "$WORK/dump_mixed_$surface.out"; }
     check_ge "$surface mixed routes: some of the dump's requests really did go through the queue" "$(( $(eqc_queued P "$label") - s2 ))" 1
     if cmp -s "$WORK/local_$surface.jsonl" "$WORK/mixed_$surface.jsonl"; then
@@ -250,11 +248,9 @@ route_burst() {   # <surface> <label> <rows>   (engine P)
 }
 eqc_log "starting engine D (defaults) and, after it, engine P (local bound 1, queue bound 8)"
 eqc_start_engine D "$PORT_D" sgee || exit 1
-route_idle mortgage "mortgage encoder"
 route_idle strategy "strategy encoder"
 kill -TERM "${ENGINE_PIDS[-1]}" 2>/dev/null || true   # the pid this script captured; never by name
 eqc_start_engine P "$PORT_P" sgee ENCODER_LOCAL_MAX_IN_FLIGHT=1 ENCODER_QUEUE_MAX_IN_FLIGHT=8 || exit 1
-route_burst mortgage "mortgage encoder" 272
 route_burst strategy "strategy encoder" "$STRATEGY_ROWS"
 kill -TERM "${ENGINE_PIDS[-1]}" 2>/dev/null || true
 
@@ -262,17 +258,17 @@ kill -TERM "${ENGINE_PIDS[-1]}" 2>/dev/null || true
 eqc_log "stopping the whole cluster"
 qn_kill_self || true
 sleep 1
-f0="$(eqc_fallbacks A)"; q0="$(eqc_queued A "mortgage encoder")"; d0="$(eqc_degraded A "mortgage encoder")"
+f0="$(eqc_fallbacks A)"; q0="$(eqc_queued A "strategy encoder")"; d0="$(eqc_degraded A "strategy encoder")"
 started=$SECONDS
-python3 -P "$PROBE" dump --target "127.0.0.1:$PORT_A" --surface mortgage -c 1 --limit 6 --out "$WORK/down_mortgage.jsonl" \
+python3 -P "$PROBE" dump --target "127.0.0.1:$PORT_A" -c 1 --limit 6 --out "$WORK/down_strategy.jsonl" \
     > "$WORK/dump_down.out" 2>&1 || { fail "engine A returned transport errors with the cluster down"; cat "$WORK/dump_down.out"; }
 elapsed=$(( SECONDS - started ))
-f1="$(eqc_fallbacks A)"; q1="$(eqc_queued A "mortgage encoder")"; d1="$(eqc_degraded A "mortgage encoder")"
+f1="$(eqc_fallbacks A)"; q1="$(eqc_queued A "strategy encoder")"; d1="$(eqc_degraded A "strategy encoder")"
 check_ge "cluster down: the engine says in its log that it answered locally" "$(( f1 - f0 ))" 1
 check_eq "cluster down: NO request is reported as answered through the shared queue" "$(( q1 - q0 ))" 0
 check_eq "cluster down: every fallback is accounted for as a degraded answer" "$(( d1 - d0 ))" "$(( f1 - f0 ))"
-head -n 6 "$WORK/local_mortgage.jsonl" > "$WORK/local_mortgage_head.jsonl"
-if cmp -s "$WORK/local_mortgage_head.jsonl" "$WORK/down_mortgage.jsonl"; then
+head -n 6 "$WORK/local_strategy.jsonl" > "$WORK/local_strategy_head.jsonl"
+if cmp -s "$WORK/local_strategy_head.jsonl" "$WORK/down_strategy.jsonl"; then
     pass "cluster down: answers are identical to local mode"
 else
     fail "cluster down: answers differ from local mode"

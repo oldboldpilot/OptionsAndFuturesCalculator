@@ -94,9 +94,9 @@ argue about whether to retrain. The same weights through the real RPC scored
 **0/279**. Nothing about the retrain question was answerable from the transformers
 number, in either direction.
 
-**Discriminator.** `agent/train/eval_grpc.py` (options) and
-`agent/train/eval_grpc_mortgage.py` (mortgage). Both drive the real RPC against a
-running `calculator_engine`. `eval_grpc.py`'s own docstring already said this in
+**Discriminator.** `agent/train/eval_grpc.py` (options) drives the real RPC against a
+running `calculator_engine`. (Its mortgage twin, `eval_grpc_mortgage.py`, was deleted with the
+mortgage assistant in 2026-10; the deleting commit's parent still holds it.) `eval_grpc.py`'s own docstring already said this in
 so many words — "evaluate.py measures the merged 16-bit weights straight out of
 training … but NOT what ships" — and was not read.
 
@@ -148,8 +148,8 @@ So an engine with no credentials at all still reports `2/2 non-params` and
 reason on every mismatch and **hard-fail** any run containing a
 `DATA_UNAVAILABLE` or `MODEL_UNAVAILABLE` refusal. An infrastructure refusal
 scored as a model miss is indistinguishable from a real failure, and the run
-should refuse to produce a number rather than produce a wrong one. The sibling
-`eval_grpc_mortgage.py` already does the reporting half — it carries
+should refuse to produce a number rather than produce a wrong one. The mortgage
+harness (since removed, see git history) already did the reporting half — it carried
 `resp.refusal.reason` out of `call()` (line 275), buckets it in
 `classify_refusal()`, and prints a refusal-shape histogram — so this is porting
 existing code, not designing it.
@@ -515,9 +515,10 @@ turn contains a `<params>` block.
     row, and on any operation that goes to zero. It does NOT decide the
     trade-off — it prints both columns and stops you calling a dead operation
     noise.
-12. **Run the reasoning pass** — `scripts/emit_assistant_facts.py` then
-    `assistant_check` (see `agent/eval/README.md`). `feature_absent` must be
-    zero: a non-zero answer means the corpus change did not take.
+12. **Run the reasoning pass** — this step was `scripts/emit_assistant_facts.py` then
+    `assistant_check`, which read the MORTGAGE harness's output; both were deleted with that
+    assistant in 2026-10 (preserved at `c850701`). No equivalent exists for the options assistant. The lesson
+    it encoded stands: a non-zero `feature_absent` meant the corpus change did not take.
 
 ### Steps 8, 10 and 11 exist because step 8 was skipped
 
@@ -537,9 +538,9 @@ on itself.
 
 - `docs/STRATEGY_ASSISTANT_PIPELINE.md` — training-to-serving chain, model of
   record, and the procedure for swapping the served model.
-- `docs/MORTGAGE_ASSISTANT_PIPELINE.md` — the mortgage assistant's equivalent,
-  whose harness `agent/train/eval_grpc_mortgage.py` already reports refusal
-  reasons and separates raw-model accuracy from post-verification accuracy.
+- `docs/MORTGAGE_ASSISTANT_PIPELINE.md` — the mortgage assistant's equivalent (history:
+  that assistant left this repository in 2026-10). Its harness reported refusal
+  reasons and separated raw-model accuracy from post-verification accuracy.
 - `docs/MORTGAGEFV_INTEGRATION.md` and `clients/mortgagefv/` — the downstream
   client of that contract.
 - `docs/session_logs/session_2026-08-05_penalty_hosting_and_harness.md` — the

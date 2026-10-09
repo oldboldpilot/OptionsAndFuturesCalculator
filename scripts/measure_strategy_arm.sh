@@ -1,15 +1,11 @@
 #!/usr/bin/env bash
 # Score ONE strategy-assistant weight file through the real ParseStrategy RPC.
 #
-# The mortgage twin of this is scripts/measure_bit_width_arm.sh. They are kept
-# separate rather than merged behind a flag because the two assistants differ in
-# every one of the four things that matter: the env var naming the weights
-# (MODEL_PATH, which deliberately does NOT fall back from MORTGAGE_MODEL_PATH),
-# the boot line that proves a load, the harness, and the Pro gate -- the strategy
-# surface refuses anonymously, so PRO_GATE_MODE=off is a precondition rather than
-# a convenience.
+# The strategy surface refuses anonymously, so PRO_GATE_MODE=off is a precondition
+# rather than a convenience. (A mortgage twin of this harness existed while the
+# mortgage decoder was served from this engine; it left with that assistant.)
 #
-# WHAT THIS HARNESS CANNOT DO, stated because the mortgage one can: eval_grpc.py
+# WHAT THIS HARNESS CANNOT DO: eval_grpc.py
 # has no --json-out and no --assert-disjoint-from, so there is no per-row record
 # to pair on and no contamination check. A difference of totals is all this side
 # can report until that is fixed, and a difference of totals is exactly what this

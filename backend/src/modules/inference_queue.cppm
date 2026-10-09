@@ -10,9 +10,8 @@ import pg;
  * pg.cppm's connection pool. This module is Postgres-backed persistence and
  * protocol ONLY -- it does not run inference, does not know what a
  * "strategy" or a "mortgage operation" IS beyond the two literal strings
- * that name them, and is not imported by assistant_service.cpp or
- * mortgage_assistant_service.cpp. Wiring an actual caller and an actual
- * worker onto this substrate is a later, separate change; see this module's
+ * that name them, and is not imported by assistant_service.cpp. Wiring an
+ * actual caller and an actual worker onto this substrate is a later, separate change; see this module's
  * own file banner in the task that produced it for why that separation is
  * deliberate.
  *
@@ -198,9 +197,8 @@ export struct QueueConfig {
      *  rather than assuming it away: "concurrent submitters" here means
      *  concurrent submit_remote() calls racing this exact statement for
      *  the SAME surface, which is hard-capped by each process's own
-     *  `pg::PoolConfig::size` (4, unmodified by either
-     *  assistant_service.cpp's or mortgage_assistant_service.cpp's
-     *  `configure_inference_queue()`) -- submit_remote() must first
+     *  `pg::PoolConfig::size` (4, unmodified by
+     *  assistant_service.cpp's `configure_inference_queue()`) -- submit_remote() must first
      *  acquire a pooled connection, so no more than `pool_size` callers
      *  can even be mid-INSERT at once per process. Worst case, with the
      *  current single-container Railway deployment (one replica, one pool

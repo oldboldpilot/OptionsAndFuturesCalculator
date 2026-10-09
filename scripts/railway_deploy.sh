@@ -18,7 +18,7 @@
 #   * the parameters: .railwayignore, the paths the engine cannot build without, no weights;
 #   * the PREFLIGHT, which has to run after the destination is known and before the archive is
 #     built (hence the tool's --check-destination);
-#   * the CUTOVER advice, which is about this service's two assistants.
+#   * the CUTOVER advice, which is about this service's one assistant.
 #
 # The tool is a submodule file, so a checkout without `git submodule update --init backend/sensen`
 # has no deploy script. That is a refusal below and not a fallback to a second copy.
@@ -190,15 +190,16 @@ trap 'rm -f "$ID_FILE"' EXIT
 DEPLOY_ID="$(cat "$ID_FILE")"
 [[ -n "$DEPLOY_ID" ]] || exit 0     # a dry run uploaded nothing, so there is nothing to confirm
 
-# Derive the expected count from railway.json rather than stating a number here. This line said
+# Derive the expected count from railway.json rather than stating a number here. This line once said
 # "numReplicas 3 => 3 mortgage + 3 strategy" for four days after numReplicas dropped to 2, which
-# makes the gate pass at 4 while telling the reader to expect 6.
+# made the gate pass at 4 while telling the reader to expect 6. It is one line per replica now that
+# the mortgage assistant runs in its own service.
 _replicas="$(sed -n 's/.*"numReplicas"[[:space:]]*:[[:space:]]*\([0-9]\+\).*/\1/p' \
               "${REPO_ROOT}/railway.json" 2>/dev/null | head -1)"
 _replicas="${_replicas:-1}"
 echo ""
-echo "  Expect one 'model is LOADED' line per replica per assistant --"
-echo "  numReplicas ${_replicas} => $((_replicas * 2)) lines (${_replicas} mortgage + ${_replicas} strategy) --"
+echo "  Expect one 'model is LOADED' line per replica (the strategy assistant) --"
+echo "  numReplicas ${_replicas} => ${_replicas} lines --"
 echo "  timestamped after this upload:"
 echo "      railway logs --deployment ${DEPLOY_ID} | grep -c 'model is LOADED'"
 echo ""
@@ -213,7 +214,7 @@ echo "  An ENCODER prints 'ENCODER assistant ready: ... N operations, vocab N'"
 echo "  beside its LOADED line; a decoder prints neither of those fields."
 echo ""
 echo "  And assert the NEGATIVE: 0 '[ERROR' lines. An assistant whose weights"
-echo "  are missing reports itself UNAVAILABLE while the other three services"
+echo "  are missing reports itself UNAVAILABLE while the other two services"
 echo "  serve perfectly, so a half-loaded fleet looks green. Note the logger"
 echo "  PADS the level, so the text is '[WARN ]' -- grep '\[WARN *\]' and"
 echo "  assert a positive control on the same pattern family before quoting a"

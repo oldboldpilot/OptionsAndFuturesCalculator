@@ -38,9 +38,8 @@ This document provides a comprehensive code map and technical reference for the 
 | `AuthResult` | `struct` | `backend/src/modules/api_key.cppm:137-142` | Contains `Outcome outcome`, `Identity identity`, and `std::string message`. |
 | `KeyRegistry` | `class` | `backend/src/modules/api_key.cppm:151-194` | In-memory key store indexed by 128-character SHA-512 hex digest. |
 | `GateMode` | `enum class` | `backend/src/modules/api_key.cppm:301` | Feature gate enforcement mode: `Off`, `Warn`, `Enforce`. |
-| `AssistantSurface` | `enum class` | `backend/src/modules/api_key.cppm:408-421` | Surface enumeration: `Strategy`, `Mortgage`. |
+| `AssistantSurface` | `struct` | `backend/src/modules/api_key.cppm:428` | The copy a refusal carries for one assistant surface (`rpc`, `message`, and the malformed / unknown / revoked sentences). `kStrategySurface` is the only instance since the mortgage surface left with its service (2026-10). |
 | `kStrategySurface` | `constexpr AssistantSurfaceConfig` | `backend/src/modules/api_key.cppm:430-450` | Entitlement configuration for the strategy surface. |
-| `kMortgageSurface` | `constexpr AssistantSurfaceConfig` | `backend/src/modules/api_key.cppm:454-474` | Entitlement configuration for the mortgage surface. |
 | `sha512_hex` | `function` | `backend/src/modules/api_key.cpp:116` | Computes 128-character lowercase hexadecimal SHA-512 digest. |
 | `constant_time_equals` | `function` | `backend/src/modules/api_key.cpp:139` | Timing-attack resistant string comparison using `CRYPTO_memcmp`. |
 | `generate_key` | `function` | `backend/src/modules/api_key.cpp:147` | Generates 51-character key with `pk_live_` or `sk_live_` prefix and 43 unpadded base64url characters. |
@@ -51,7 +50,7 @@ This document provides a comprehensive code map and technical reference for the 
 | `is_pro` | `function` | `backend/src/modules/api_key.cpp:408` | Returns true if tier is `"pro"` or `"partner"`. |
 | `check_strategy_entitlement` | `function` | `backend/src/modules/api_key.cpp:457` | Validates multi-leg strategy entitlement against `PRO_GATE_MODE`. |
 | `check_saved_scenarios_entitlement` | `function` | `backend/src/modules/api_key.cpp:480` | Enforces subject existence and Pro status for scenario persistence. |
-| `check_assistant_entitlement` | `function` | `backend/src/modules/api_key.cpp:537` | Validates assistant surface access entitlements. |
+| `check_assistant_entitlement` | `function` | `backend/src/modules/api_key.cpp:537` | Validates access to the strategy assistant; takes the `Identity` only (the surface parameter left with the mortgage surface, 2026-10). |
 | `authenticate` | `function` | `backend/src/modules/api_key.cpp:732` | Dispatches authentication across bearer tokens and API keys. |
 
 ### Key & Token Formats
@@ -321,7 +320,7 @@ Census ACS 1-year data releases experience an approximate 18-month publication l
 
 ### Backend Selection Architecture
 
-Inference admission routing is configured via the `INFERENCE_QUEUE` environment variable (`backend/src/modules/assistant_service.cpp:1700`, `backend/src/modules/mortgage_assistant_service.cpp:1340`):
+Inference admission routing is configured via the `INFERENCE_QUEUE` environment variable (`backend/src/modules/assistant_service.cpp:1700`):
 - `"sgee"`: Executes `configure_sgee_queue()` (`backend/src/modules/assistant_service.cpp:1705`). Instantiates `SgeeQueueClient::create_for_admission()`, installs `SgeeLeaseSource` with a 90-second lease visibility timeout, and wraps the submission pipeline in `SgeeAdmission` (90-second deadline).
 - `"postgres"`: Executes `configure_inference_queue()` (`backend/src/modules/assistant_service.cpp:1754`). Requires `DATABASE_URL`, initializes a dedicated 16-connection pool, installs `PostgresLeaseSource`, and wraps submission in `PostgresAdmission` (90-second deadline).
 - `"local"` / Unset / Other: Bypasses distributed admission queues. The service interacts directly with the local engine (`backend_`), leaving `admission_` and `lease_source_` null.

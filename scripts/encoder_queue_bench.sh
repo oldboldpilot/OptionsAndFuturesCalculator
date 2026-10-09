@@ -19,7 +19,7 @@
 #
 # Environment:
 #   EQB_ROUNDS         rounds per cell (default 3)
-#   EQB_SURFACES       surfaces to drive (default "mortgage strategy")
+#   EQB_SURFACES       surfaces to drive (default "strategy")
 #   EQB_HEARTBEATS     Raft heartbeats in ms, one fresh cluster each (default: the node default). A
 #                      queue operation costs about a heartbeat, so this is THE parameter; the
 #                      election base is set to 5x. 300 is the deployed value.
@@ -35,7 +35,7 @@ NODE_BIN="${1:?usage: $0 <sgee_queue_node> <calculator_engine> <out-dir>}"
 ENGINE_BIN="${2:?}"; OUT="${3:?}"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROUNDS="${EQB_ROUNDS:-3}"
-SURFACES="${EQB_SURFACES:-mortgage strategy}"
+SURFACES="${EQB_SURFACES:-strategy}"
 HEARTBEATS="${EQB_HEARTBEATS:-0}"
 N_SINGLE="${EQB_REQUESTS_SINGLE:-200}"
 N_MANY="${EQB_REQUESTS:-480}"
@@ -90,7 +90,7 @@ for hb in $HEARTBEATS; do
           for arm in L A Q; do
             port="PORT_$arm"; label="$surface encoder"
             s0="$(eqc_queued "$arm" "$label")"; i0="$(eqc_inprocess "$arm" "$label")"
-            python3 -P "$PROBE" latency --target "127.0.0.1:${!port}" --surface "$surface" -c "$c" -n "$n" --warmup "$WARMUP" \
+            python3 -P "$PROBE" latency --target "127.0.0.1:${!port}" -c "$c" -n "$n" --warmup "$WARMUP" \
               > "$OUT/cell.json"
             # The log counts are read AFTER the cell has finished: expanded inside the pipeline that runs
             # the probe they would be read before it, and every cell would report zero spills.
@@ -100,7 +100,7 @@ for hb in $HEARTBEATS; do
         done
       done
     done
-    echo "executed per engine: A mortgage=$(eqc_executed A 'mortgage encoder') B mortgage=$(eqc_executed B 'mortgage encoder') Q mortgage=$(eqc_executed Q 'mortgage encoder') A strategy=$(eqc_executed A 'strategy encoder') B strategy=$(eqc_executed B 'strategy encoder') Q strategy=$(eqc_executed Q 'strategy encoder')"
+    echo "executed per engine: A strategy=$(eqc_executed A 'strategy encoder') B strategy=$(eqc_executed B 'strategy encoder') Q strategy=$(eqc_executed Q 'strategy encoder')"
   )
 done
 

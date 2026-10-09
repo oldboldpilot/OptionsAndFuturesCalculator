@@ -7,7 +7,7 @@ This document provides the authoritative, as-built reference inventory of all us
 
 The repository serves two distinct products from a single unified C++23 backend engine:
 1. **optionsandfuturescalculator.com** — The options and futures strategy calculator, risk modeler, and educational guides. Frontend implementation resides in `frontend/`, and backend RPCs are served by `calculator.OptionsCalculator` (`backend/proto/calculator.proto`) and `calculator.assistant.StrategyAssistant` (`backend/proto/assistant.proto`).
-2. **mortgagefvcalculator.com** — The loan amortization, time-value-of-money, real estate, and financial planning engine. Served by `sensen.finance.Finance` (`backend/proto/finance.proto`) and `mortgage.assistant.MortgageAssistant` (`backend/proto/mortgage_assistant.proto`). **Its web client lives in a different repository** (with stubs and contracts mirrored in `clients/mortgagefv/`); only the backend engine, model runtime, and verification systems are housed here.
+2. **mortgagefvcalculator.com** — The loan amortization, time-value-of-money, real estate, and financial planning engine. Served by `sensen.finance.Finance` (`backend/proto/finance.proto`). Its natural-language assistant (`mortgage.assistant.MortgageAssistant`) moved to the `nest-egg-loan` repository in 2026-10 and is no longer served from this engine. **Its web client lives in a different repository** (with stubs and contracts mirrored in `clients/mortgagefv/`); only the backend engine, model runtime, and verification systems are housed here.
 
 Files covered by this inventory:
 - **Frontend Presentation & Routes**:
@@ -19,14 +19,13 @@ Files covered by this inventory:
   - `frontend/src/lib/chainFreshness.ts`, `frontend/src/lib/licence.ts`, `frontend/src/lib/useProStatus.ts`
   - `frontend/scripts/check-export.mjs`
 - **Backend Service Contracts (Protobuf)**:
-  - `backend/proto/calculator.proto`, `backend/proto/finance.proto`, `backend/proto/assistant.proto`, `backend/proto/mortgage_assistant.proto`
+  - `backend/proto/calculator.proto`, `backend/proto/finance.proto`, `backend/proto/assistant.proto`
 - **Backend Engine Modules & Implementations**:
   - `backend/src/modules/calculator_service.cppm`, `backend/src/modules/calculator_service.cpp`
   - `backend/src/modules/strategy_catalogue.cppm`
   - `backend/src/modules/market_data.cppm`
   - `backend/src/modules/finance_service.cppm`, `backend/src/modules/finance_service.cpp`
   - `backend/src/modules/assistant_service.cppm`, `backend/src/modules/assistant_service.cpp`, `backend/src/modules/assistant_verification.cppm`
-  - `backend/src/modules/mortgage_assistant_service.cppm`, `backend/src/modules/mortgage_assistant_service.cpp`, `backend/src/modules/mortgage_grammar.cppm`, `backend/src/modules/mortgage_verification.cppm`
   - `backend/src/modules/api_key.cppm`, `backend/src/modules/api_key.cpp`
   - `backend/src/modules/quota.cppm`, `backend/src/modules/quota.cpp`
   - `backend/src/modules/strategy_store.cppm`, `backend/src/modules/strategy_store.cpp`
@@ -36,7 +35,7 @@ Files covered by this inventory:
   - `backend/src/modules/pg.cppm`
   - `backend/src/modules/fips_mode.cppm`
 - **Test Suites & Verification Harnesses**:
-  - `backend/tests/test_calculator_service.cpp`, `backend/tests/test_api_key_entitlement.cpp`, `backend/tests/test_finance_service_validation.cpp`, `backend/tests/test_assistant_service.cpp`, `backend/tests/test_assistant_verification.cpp`, `backend/tests/test_mortgage_assistant_service.cpp`, `backend/tests/test_mortgage_grammar.cpp`, `backend/tests/test_mortgage_verification.cpp`, `backend/tests/test_option_pricing_service.cpp`, `backend/tests/test_state_assumptions_gate.cpp`, `backend/tests/test_state_refresh.cpp`, `backend/tests/test_strategy_store_pg.cpp`, `backend/tests/test_market_data_resilience.cpp`, `backend/tests/test_inference_admission.cpp`, `backend/tests/test_quota_tier_label.cpp`, `backend/tests/test_vendored_proto_drift.cpp`
+  - `backend/tests/test_calculator_service.cpp`, `backend/tests/test_api_key_entitlement.cpp`, `backend/tests/test_finance_service_validation.cpp`, `backend/tests/test_assistant_service.cpp`, `backend/tests/test_assistant_verification.cpp`, `backend/tests/test_option_pricing_service.cpp`, `backend/tests/test_state_assumptions_gate.cpp`, `backend/tests/test_state_refresh.cpp`, `backend/tests/test_strategy_store_pg.cpp`, `backend/tests/test_market_data_resilience.cpp`, `backend/tests/test_inference_admission.cpp`, `backend/tests/test_quota_tier_label.cpp`, `backend/tests/test_vendored_proto_drift.cpp`
   - `backend/src/smoke_client.cpp`
   - `frontend/src/**/*.test.ts`
 
@@ -179,68 +178,20 @@ Domain Breakdown (48 RPCs):
 
 ---
 
-## 3. The two assistants
+## 3. The assistant
 
-The engine hosts **two separate, fine-tuned in-process language models** (0.6B parameters, Q8_0 quantized on CPU via `sensen`):
-1. **Strategy Assistant** (`calculator.assistant.StrategyAssistant/ParseStrategy` defined in `backend/proto/assistant.proto`)
-2. **Mortgage Assistant** (`mortgage.assistant.MortgageAssistant/ParseOperation` defined in `backend/proto/mortgage_assistant.proto`)
+The engine hosts **one in-process assistant** (`calculator.assistant.StrategyAssistant/ParseStrategy`, defined in `backend/proto/assistant.proto`), served by a small model on CPU via `sensen`. A second, mortgage assistant (`mortgage.assistant.MortgageAssistant/ParseOperation`) used to run in this engine; since 2026-10 it is its own service in the `nest-egg-loan` repository, and nothing in this section describes it.
 
-### Core invariants common to both assistants
-- **Neither assistant computes anything**. They are natural-language semantic decoders, not math calculators.
-  - The Strategy Assistant converts words into parameters for `calculator.OptionsCalculator/CalculateStrategy`.
-  - The Mortgage Assistant converts words into an operation name and request JSON for `sensen.finance.Finance`.
-- **Both return gRPC status `OK` on three distinct outcomes**:
+### Core invariants
+- **The assistant computes nothing**. It is a natural-language semantic decoder, not a math calculator: it converts words into parameters for `calculator.OptionsCalculator/CalculateStrategy`.
+- **It returns gRPC status `OK` on three distinct outcomes**:
   1. `params` — Successful conversion into validated parameters.
   2. `clarification` — The model detected an ambiguous request and asks a clarifying question rather than hallucinating defaults.
   3. `refusal` — The model declined the request (unsupported structure, unknown symbol, ungrounded number, or out of scope).
   Encoding clarification or refusal as a gRPC transport error is strictly prohibited: returning an error code would corrupt service latency and error metrics when the model performed its function correctly.
-- **Both are gated by the Pro entitlement**. Unentitled callers receive status 7 (`PERMISSION_DENIED`).
+- **It is gated by the Pro entitlement**. Unentitled callers receive status 7 (`PERMISSION_DENIED`).
   - Strategy Assistant gate: `backend/src/modules/assistant_service.cpp:2877` calling `check_assistant_entitlement` with `kStrategySurface` (`backend/src/modules/api_key.cppm:430`). Refusal message: `"The natural-language strategy assistant is a Pro feature. The calculator itself remains free -- build your strategy manually with the symbol and strategy selectors, or upgrade for assisted parsing."`
-  - Mortgage Assistant gate: `backend/src/modules/mortgage_assistant_service.cpp:3139` calling `check_assistant_entitlement` with `kMortgageSurface` (`backend/src/modules/api_key.cppm:454`). Refusal message: `"The natural-language mortgage assistant is a Pro feature. The calculations themselves remain free: call the sensen.finance.Finance operation you want directly, or upgrade to have it chosen and filled in for you."`
-- **Neither gives financial, legal, or investment advice**. Advice requests are refused by design (`agent/dataset/build_mortgage_dataset.py`, `backend/proto/mortgage_assistant.proto:32-38`).
-
-### Mortgage Assistant operation label space
-
-The Mortgage Assistant's label space is derived mechanically from `backend/proto/finance.proto` and validated by `backend/src/modules/mortgage_verification.cppm` and `backend/src/modules/mortgage_grammar.cppm`.
-
-- **Label Space Size**: Exactly **27 operations** (`backend/src/modules/mortgage_assistant_service.cpp:1844` and `backend/src/modules/mortgage_verification.cppm:384`), spanning **184 distinct fields** (`mortgage_verification.cppm:197`).
-- **Complete Inventory of 27 Operation Identifiers**:
-  1. `ComputeAmortization`
-  2. `ComputeAmortizationBatch`
-  3. `ComputeClosingCosts`
-  4. `ComputeCumulative`
-  5. `ComputeDepreciation`
-  6. `ComputeDetailedAmortization`
-  7. `ComputeFutureValue`
-  8. `ComputeFutureValueDetailed`
-  9. `ComputeHeloc`
-  10. `ComputeHomeFutureValue`
-  11. `ComputeHomeNpv`
-  12. `ComputeInterestPayment`
-  13. `ComputeIrr`
-  14. `ComputeMortgageRecast`
-  15. `ComputeNpv`
-  16. `ComputePaybackPeriod`
-  17. `ComputePayment`
-  18. `ComputePayoffTiming`
-  19. `ComputePeriods`
-  20. `ComputePresentValue`
-  21. `ComputePrincipalPayment`
-  22. `ComputeRate`
-  23. `ComputeRefinance`
-  24. `ComputeRentVsBuy`
-  25. `ComputeRentalRoi`
-  26. `ComputeXirr`
-  27. `ComputeXnpv`
-
-- **Enforced Verification Gates (`mortgage_verification.cppm:48-68`)**:
-  - `G1` (Operation vocabulary): Must match one of the 27 operations in `kOperationIds` (`mortgage_verification.cppm:384`).
-  - `G2` (Field schema): Keys must match declared proto fields; enum values must match `kEnumConstants` (`mortgage_verification.cppm:407`).
-  - `G3` (Value grounding): Numerical values emitted by the model must appear in the user utterance or match approved mathematical convention values (`mortgage_verification.cppm:181-193`).
-  - `G4` (Structural presence): Emitted JSON must contain a well-formed `<params>` block.
-  - `G5` (Plausibility bounds): Numerical parameters must satisfy physiological financial bounds (e.g. loan amount $\le \$100,000,000$, rate $\le 30\%$, term $\le 50$ years).
-
----
+- **It gives no financial, legal, or investment advice**. Advice requests are refused by design (`sensen.utterance_guards`, used by `assistant_verification.cppm`).
 
 ## 4. Entitlement and quota
 
@@ -254,7 +205,7 @@ Allowances in production are configured via the `QUOTA_POLICY` environment varia
 | --- | --- | --- | --- | --- | --- |
 | `anonymous` | Single-leg strategy calculation (`legs <= 1`), live market quotes, option chain & forward curves, Treasury risk-free rate, public Finance calculations, `GetStateAssumptions`, static guides, widget. | 6,000 | 120,000 | 60 req/min, 600 CU/hr | **Shared site-wide** in a single `~anonymous` bucket, **per replica**. |
 | `free` | Authenticated user account. Same calculation capabilities as anonymous, but isolated from shared anonymous burst traffic. Multi-leg and assistants remain locked. | 120 | 3,600 | 600 req/min, 10,000 CU/hr | Dedicated bucket per authenticated caller ID, **per replica**. |
-| `pro` | Multi-leg strategy calculations (`legs > 1`), Strategy Assistant (`ParseStrategy`), Mortgage Assistant (`ParseOperation`), Saved Scenarios (`SaveStrategy`, `ListStrategies`, `DeleteStrategy`). | 600 | 240,000 | 3,000 req/min, 200,000 CU/hr | Dedicated bucket per authenticated caller ID, **per replica**. |
+| `pro` | Multi-leg strategy calculations (`legs > 1`), Strategy Assistant (`ParseStrategy`), Saved Scenarios (`SaveStrategy`, `ListStrategies`, `DeleteStrategy`). | 600 | 240,000 | 3,000 req/min, 200,000 CU/hr | Dedicated bucket per authenticated caller ID, **per replica**. |
 | `partner` | Full access to all Pro features plus administrative access to Census ACS data writing (`RefreshStateAssumptions`), custom per-key SLA overrides. | 2,400 | 1,200,000 | 6,000 req/min, 500,000 CU/hr | Dedicated bucket per API key ID, **per replica**. |
 
 > [!IMPORTANT]
@@ -272,15 +223,13 @@ Every major feature and security boundary is enforced by automated test targets 
 | --- | --- | --- | --- |
 | Strategy Payoff & SGEE Graph | In-process gRPC test against loopback server with full action graph | `test_calculator_service` (`backend/tests/test_calculator_service.cpp`) | Fails if 580/600 bull call spread does not yield maxProfit=1275, breakEven=587.25; fails if action registration is incomplete. |
 | Multi-Leg Entitlement Gate | Unit verification of `check_strategy_entitlement` | `test_api_key_entitlement` (`backend/tests/test_api_key_entitlement.cpp:105-225`) | Fails if multi-leg calculation is permitted anonymously or if refusal message does not specify leg count. |
-| Assistant Entitlement Gates | Unit verification of `check_assistant_entitlement` for both surfaces | `test_api_key_entitlement` (`backend/tests/test_api_key_entitlement.cpp:226-331`) | Fails if unentitled callers receive OK; fails if mortgage surface returns strategy selector copy. |
+| Assistant Entitlement Gates | Unit verification of `check_assistant_entitlement` (strategy surface) | `test_api_key_entitlement` (`backend/tests/test_api_key_entitlement.cpp:226-331`) | Fails if unentitled callers receive OK, or if a malformed / unknown / revoked key gets the generic "is a Pro feature" copy. |
 | Saved Scenarios Pro Gate | Integration test of `check_saved_scenarios_entitlement` | `test_calculator_service` (`backend/tests/test_calculator_service.cpp:722-850`) | Fails if anonymous caller is not rejected with `UNAUTHENTICATED`, or free caller is not rejected with `PERMISSION_DENIED`. |
 | Asian Leg Rejection | Precondition check in calculator engine | `test_calculator_service` (`backend/tests/test_calculator_service.cpp:641-710`) | Fails if Asian leg returns `OK` or is evaluated against terminal spot rather than returning `FAILED_PRECONDITION`. |
 | Matrix Price Bounds | Request parameter validation in SGEE grid builder | `test_calculator_service` (`backend/tests/test_calculator_service.cpp:932-1050`) | Fails if user min/max bounds truncate expiry curve instead of scoping to the matrix grid. |
 | Finance Service Input Validation | Direct gRPC validation suite across 27 failure sections | `test_finance_service_validation` (`backend/tests/test_finance_service_validation.cpp`) | Fails on NaN/Infinity inputs, overflow in amortization, TVM same-signed loan solve errors, or MACRS zero-class regression. |
 | Option Pricing & Trees | Closed-form put-call parity and tree convergence | `test_option_pricing_service` (`backend/tests/test_option_pricing_service.cpp`) | Fails if tree pricing deviates from Black-Scholes limits or Bermudan dead band is violated. |
 | Strategy Assistant Verification | Rule-based reasoning domain policy checks | `test_assistant_verification` (`backend/tests/test_assistant_verification.cpp`) | Fails if uncatalogued strategies, hallucinated symbols, or unsupported assets pass verification. |
-| Mortgage Grammar Constrained Decoding | State machine token mask automaton checks | `test_mortgage_grammar` (`backend/tests/test_mortgage_grammar.cpp`) | Fails if grammar generates malformed JSON, invalid field names, or uncatalogued operations. |
-| Mortgage Value Grounding | Utterance lexical grounding and plausibility bounds | `test_mortgage_verification` (`backend/tests/test_mortgage_verification.cpp`) | Fails if ungrounded numbers pass verification or proto-drift occurs between `finance.proto` and `kLabelSpace`. |
 | State Assumptions Partner Gate | Role-based gate on Census write RPC | `test_state_assumptions_gate` (`backend/tests/test_state_assumptions_gate.cpp`) | Fails if non-partner tier executes `RefreshStateAssumptions`. |
 | State Refresh Transaction & Bounds | Advisory locks and plausibility thresholds | `test_state_refresh` (`backend/tests/test_state_refresh.cpp`) | Fails if fewer than 45 states update, or if editorial columns (`insurance_annual`, `note`) are overwritten. |
 | Market Data Resilience & Circuit Breaker | Provider failure and backoff simulator | `test_market_data_resilience` (`backend/tests/test_market_data_resilience.cpp`) | Fails if HTTP error loops indefinitely without tripping `CircuitOpen`. |
@@ -457,23 +406,19 @@ The following features were specified in initial architecture proposals (`docs/P
 
 ---
 
-### Natural-Language Assistants
+### Natural-Language Assistant
 
-- **Files**: `backend/proto/assistant.proto`, `backend/src/modules/assistant_service.cpp`, `assistant_verification.cppm`, `backend/proto/mortgage_assistant.proto`, `backend/src/modules/mortgage_assistant_service.cpp`, `mortgage_grammar.cppm`, `mortgage_verification.cppm`.
-- **Purpose**: Runs in-process Qwen3-0.6B language models under `sensen` on CPU, with grammar-constrained decoding and post-generation lexical verification.
+- **Files**: `backend/proto/assistant.proto`, `backend/src/modules/assistant_service.cpp`, `assistant_verification.cppm`.
+- **Purpose**: Runs an in-process small language model under `sensen` on CPU, with grammar-constrained decoding and post-generation lexical verification.
 
 | Component | Exported Functions / Types | Role & Mechanism |
 | --- | --- | --- |
 | `StrategyAssistant` | `ParseStrategy(ParseRequest, ParseResponse)` | Natural-language strategy parser. Generates `<params>` JSON. Runs verification via `assistant_verification::verify_strategy_output` (`assistant_service.cpp:2870-2920`). |
 | `assistant_verification` | `verify_strategy_output(params, utterance)` | Five-gate fail-closed verifier: structural checks, strategy catalogue lookup, asset class classification, symbol validation, and lexical grounding (`assistant_verification.cppm:1-500`). |
-| `MortgageAssistant` | `ParseOperation(ParseRequest, ParseResponse)` | Natural-language mortgage parser. Generates target Finance RPC name and arguments JSON (`mortgage_assistant_service.cpp:3130-3200`). |
-| `mortgage_grammar` | `Schema::build()`, `GrammarMatcher` | Automaton for constrained decoding. Restricts token generation to valid JSON paths across the 27 operations (`mortgage_grammar.cppm:1-300`). |
-| `mortgage_verification` | `verify_mortgage_output(output, utterance)`, `operation_ids()` | Verifies emitted operation ID, field schema, and utterance numerical grounding (`mortgage_verification.cppm:48-68,384-395`). |
 
 #### Invariants, refusals, and failure modes
-- Both assistants require Pro entitlement; unentitled callers receive `PERMISSION_DENIED` with surface-specific messages (`assistant_service.cpp:2877`, `mortgage_assistant_service.cpp:3139`).
-- Both assistants force `config.repetition_penalty = 1.0F` and `n_gpu_layers = 0` (`assistant_service.cpp:660`, `mortgage_assistant_service.cpp:586`).
-- Emitted numerical parameters failing grounding against the utterance return `Outcome::Refusal` with status `OK` (`mortgage_verification.cppm:54-58`).
+- The assistant requires Pro entitlement; unentitled callers receive `PERMISSION_DENIED` with the surface's own message (`assistant_service.cpp:2877`).
+- The assistant forces `config.repetition_penalty = 1.0F` and `n_gpu_layers = 0` (`assistant_service.cpp:660`).
 
 ---
 
@@ -507,14 +452,11 @@ The test targets below provide regression gating across the entire system. All C
 | Test Target / Executable | Test Source File | Subsystems & Invariants Exercised |
 | --- | --- | --- |
 | `test_calculator_service` | `backend/tests/test_calculator_service.cpp` | SGEE pipeline execution; 580/600 bull call spread closed-form identity; Iron Condor breakevens; missing action silent-halt detection; Asian leg refusal (`FAILED_PRECONDITION`); matrix price bounds; saved scenario name validation. |
-| `test_api_key_entitlement` | `backend/tests/test_api_key_entitlement.cpp` | Refusal and admit paths for `check_strategy_entitlement`, `check_assistant_entitlement` (strategy vs mortgage surface message isolation), and `GateMode::Off` behavior. |
+| `test_api_key_entitlement` | `backend/tests/test_api_key_entitlement.cpp` | Refusal and admit paths for `check_strategy_entitlement`, `check_assistant_entitlement` (per-outcome message selection), and `GateMode::Off` behavior. |
 | `test_finance_service_validation` | `backend/tests/test_finance_service_validation.cpp` | 27 validation sections covering magnitude overflows, TVM same-signed loan solve errors, period payment iteration bounds, cumulative NaN handling, NPV/IRR bounds, Black-Scholes/Monte Carlo parameter validation, closing cost bases, and MACRS class completeness. |
 | `test_option_pricing_service` | `backend/tests/test_option_pricing_service.cpp` | Trinomial tree convergence against Black-Scholes closed forms; European vs American early-exercise premiums; Bermudan discrete date schedules and dead band validation. |
 | `test_assistant_service` | `backend/tests/test_assistant_service.cpp` | Strategy Assistant prompt construction, turn-role formatting, repetition penalty pinning ($1.0$), and gRPC response outcome mapping. |
 | `test_assistant_verification` | `backend/tests/test_assistant_verification.cpp` | Five-gate verification for strategy assistant: closed-vocabulary strategy IDs, asset class filtering, ticker validation, and lexical grounding against prompt. |
-| `test_mortgage_assistant_service` | `backend/tests/test_mortgage_assistant_service.cpp` | Mortgage Assistant service lifecycle, Q8_0 CPU execution, multi-turn clarification handling, and Pro gate enforcement. |
-| `test_mortgage_grammar` | `backend/tests/test_mortgage_grammar.cpp` | Constrained decoding automaton across 27 operations; token masking; valid JSON punctuation enforcement. |
-| `test_mortgage_verification` | `backend/tests/test_mortgage_verification.cpp` | Label space checking against `finance.proto`; value grounding rules; convention value exemptions; plausibility bounds ($G1$–$G5$). |
 | `test_state_assumptions_gate` | `backend/tests/test_state_assumptions_gate.cpp` | Access gate on `RefreshStateAssumptions` ensuring non-partner tiers are rejected with `PERMISSION_DENIED`. |
 | `test_state_refresh` | `backend/tests/test_state_refresh.cpp` | Census ACS data parsing; 45-state minimum floor; advisory locking; preservation of editorial columns in PostgreSQL. |
 | `test_strategy_store_pg` | `backend/tests/test_strategy_store_pg.cpp` | PostgreSQL persistence for saved scenarios using `pg::Pool`; duplicate replacement semantics; JSON serialization round-tripping. |

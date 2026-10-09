@@ -148,7 +148,7 @@ cmake --build "${BUILD}/sgee-noimportstd" -j"$(nproc)" >/dev/null \
 green "SGEE no-import-std ctest passed"
 
 # ---------------------------------------------------------------------------
-# Stage 4 -- backend, including the four services' own suites.
+# Stage 4 -- backend, including the services' own suites.
 #
 # Reuses already-populated dependency sources when present: a redundant gRPC
 # clone is ~2.5 GB against a quota that has already been exhausted twice today.

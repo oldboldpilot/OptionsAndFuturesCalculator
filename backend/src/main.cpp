@@ -13,7 +13,6 @@ import std;
 import calculator_service;
 import finance_service;
 import assistant_service;
-import mortgage_assistant_service;
 import api_key;
 import fips_mode;
 import llq_weight_store;
@@ -106,26 +105,24 @@ auto RunServer() -> void {
         }
     }
 
-    // Which numeric path each assistant's weights are served from. Decided
+    // Which numeric path the assistant's weights are served from. Decided
     // BEFORE any model loads: sensen reads SENSEN_QKV_FUSION once into a static,
     // and an LLQ store needs it off. An unrecognised value stops the process --
     // a typo in `llq` must not silently serve the dense path the operator meant
     // to leave. Printed unconditionally so a cutover check can read it.
     {
-        std::string banner = "Weight store:";
-        for (const std::string_view var : {"MORTGAGE_WEIGHT_STORE", "STRATEGY_WEIGHT_STORE"}) {
-            const auto mode = llq_weight_store::mode_from_env(var);
-            if (!mode) {
-                std::cerr << "FATAL: " << mode.error() << ". Refusing to start." << std::endl;
-                std::exit(1);
-            }
-            if (const auto ready = llq_weight_store::prepare_process_environment(*mode); !ready) {
-                std::cerr << "FATAL: " << ready.error() << ". Refusing to start." << std::endl;
-                std::exit(1);
-            }
-            banner += std::format(" {}={}", var, llq_weight_store::mode_name(*mode));
+        constexpr std::string_view var = "STRATEGY_WEIGHT_STORE";
+        const auto mode = llq_weight_store::mode_from_env(var);
+        if (!mode) {
+            std::cerr << "FATAL: " << mode.error() << ". Refusing to start." << std::endl;
+            std::exit(1);
         }
-        std::cout << banner << std::endl;
+        if (const auto ready = llq_weight_store::prepare_process_environment(*mode); !ready) {
+            std::cerr << "FATAL: " << ready.error() << ". Refusing to start." << std::endl;
+            std::exit(1);
+        }
+        std::cout << std::format("Weight store: {}={}", var, llq_weight_store::mode_name(*mode))
+                  << std::endl;
     }
 
     builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
@@ -150,22 +147,6 @@ auto RunServer() -> void {
     // assistant could not find its weights would be trading the product for a
     // feature, so the failure is reported per-call rather than at startup.
     options_calculator::assistant::RegisterAssistantService(builder);
-
-    // The mortgage / time-value-of-money assistant, fourth on the same port and
-    // optional on exactly the same terms: it needs its OWN fine-tuned model,
-    // named by MORTGAGE_MODEL_PATH, and an image may legitimately be built with
-    // one assistant's weights, both, or neither. It deliberately does not fall
-    // back to MODEL_PATH -- that names the STRATEGY model, and loading it here
-    // would put a model trained on option strategies behind a mortgage
-    // contract. Registration never throws on a missing or unloadable model; the
-    // service registers regardless and answers every call with a refusal saying
-    // it is unavailable.
-    //
-    // Envoy needs no change to reach it: the route in backend/envoy.yaml is a
-    // catch-all `- match: { prefix: "/" }` onto the one gRPC cluster, matched by
-    // prefix precisely so a new service on this port is routed without touching
-    // the proxy.
-    options_calculator::mortgage_assistant::RegisterMortgageAssistantService(builder);
 
     std::unique_ptr<grpc::Server> server(builder.BuildAndStart());
     if (server == nullptr) {

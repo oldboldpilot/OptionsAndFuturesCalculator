@@ -31,18 +31,18 @@ WARMUP, REQUESTS = 3, 6
 calls = {'n': 0}
 
 
-def scripted_call(stub_call, pb, call, last_question):
+def scripted_call(stub_call, pb, call):
     calls['n'] += 1
     error = 'UNAVAILABLE: scripted' if calls['n'] in FAILING_CALLS else None
     return 0.001, None, error, None
 
 
 probe.one_call = scripted_call
-probe.load_stubs = lambda surface: (None, lambda channel: types.SimpleNamespace(Op=None), 'Op')
-probe.load_requests = lambda surface, limit=None: [(i, [{'text': str(i)}]) for i in range(WARMUP)]
+probe.load_stubs = lambda: (None, lambda channel: types.SimpleNamespace(Op=None), 'Op')
+probe.load_requests = lambda limit=None: [(i, [{'text': str(i)}]) for i in range(WARMUP)]
 probe.make_channel = lambda args: None
 
-args = types.SimpleNamespace(surface='mortgage', concurrency=1, requests=REQUESTS, warmup=WARMUP, target='scripted')
+args = types.SimpleNamespace(concurrency=1, requests=REQUESTS, warmup=WARMUP, target='scripted')
 out = io.StringIO()
 with contextlib.redirect_stdout(out):
     status = probe.cmd_latency(args)

@@ -2,9 +2,9 @@
 # Paired, alternating comparison of ONE weight file served dense and served from
 # an LLQ image, driven through `llq_throughput_probe`.
 #
-# WHY THE PROBE AND NOT measure_llq_paired_throughput.sh. That script drives the
-# real engine and `eval_grpc_mortgage.py`, which is the stronger instrument and is
-# what the Q8_0 tier used. It cannot be used at 16 bits: sensen's 16-bit weight
+# WHY THE PROBE AND NOT AN ENGINE-DRIVEN RPC SWEEP. The Q8_0 tier was measured by
+# driving the real engine through the mortgage assistant's RPC harness (since removed
+# with that assistant, 2026-10), the stronger instrument. It cannot be used at 16 bits: sensen's 16-bit weight
 # path decodes through `resolveDotKernel` with block_values == 1, i.e. one
 # function-pointer call PER ELEMENT, so a bf16 model decodes at single-digit
 # tok/s and a 100-row RPC sweep does not finish in a usable time. The probe

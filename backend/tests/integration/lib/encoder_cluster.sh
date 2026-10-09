@@ -33,7 +33,6 @@ eqc_find_model() {
 
 eqc_init() {
     PROBE="$REPO/scripts/encoder_queue_probe.py"
-    MORTGAGE_GGUF="$(eqc_find_model mortgage-encoder.gguf)" || { echo "SKIP: mortgage-encoder.gguf not found (set ENCODER_MODEL_DIR)"; return 77; }
     STRATEGY_GGUF="$(eqc_find_model strategy-encoder.gguf)" || { echo "SKIP: strategy-encoder.gguf not found (set ENCODER_MODEL_DIR)"; return 77; }
     python3 -P -c 'import grpc, google.protobuf' 2>/dev/null || { echo "SKIP: python3 grpc/protobuf not importable"; return 77; }
     { [ -x "$NODE_BIN" ] && [ -x "$ENGINE_BIN" ]; } || { echo "SKIP: node or engine binary missing"; return 77; }
@@ -116,7 +115,6 @@ eqc_engine_env() {   # <port> <queue-mode> [K=V ...]
     local port="$1" mode="$2"; shift 2
     EQC_ENGINE_ENV=(env -i PATH="$PATH" HOME="${HOME:-/tmp}" ${LD_LIBRARY_PATH:+LD_LIBRARY_PATH="$LD_LIBRARY_PATH"}
         ENGINE_GRPC_PORT="$port" INFERENCE_QUEUE="$mode" SGEE_PEERS="$CLIENT_PEERS"
-        MORTGAGE_ASSISTANT_BACKEND=encoder MORTGAGE_ENCODER_PATH="$MORTGAGE_GGUF"
         ASSISTANT_MODEL=encoder STRATEGY_ENCODER_PATH="$STRATEGY_GGUF"
         PRO_GATE_MODE=off QUOTA_POLICY= DATABASE_URL= "$@")
 }
@@ -145,7 +143,7 @@ eqc_start_engine() {
         # Ready means the weights loaded AND this process is accepting connections on its port: the
         # boot banner is printed before the listener binds, and an engine that loses its port dies
         # after it, so the log alone has certified a dead engine.
-        if [ "$(grep -c 'ENCODER assistant ready' "$WORK/$name.log")" -ge 2 ] \
+        if [ "$(grep -c 'ENCODER assistant ready' "$WORK/$name.log")" -ge 1 ] \
            && (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
             return 0
         fi
@@ -160,13 +158,13 @@ eqc_executed()  { grep -c "$2 executed leased job" "$WORK/$1.log" || true; }   #
 eqc_fallbacks() { grep -cE 'falling back to the local backend|answering locally instead' "$WORK/$1.log" || true; }
 
 # The raw encoder answer the SERVICE logged for each request, before any verification -- the line
-# every request writes. For the strategy surface this is the only place the comparison between
-# local and queue modes is meaningful over its whole holdout: without live market data the RPC
-# answers most rows DATA_UNAVAILABLE whatever the model said, so comparing responses alone would
-# compare refusals to refusals.
-eqc_raw_tag() { case "$1" in mortgage) printf '%s' '\[mortgage-assistant\] raw model output';; *) printf '%s' '\[assistant\] raw model output';; esac; }
-eqc_raw_count() { grep -c "$(eqc_raw_tag "$2")" "$WORK/$1.log" || true; }                          # <engine> <surface>
-eqc_raw_since() { grep "$(eqc_raw_tag "$2")" "$WORK/$1.log" | tail -n "+$(( $3 + 1 ))" | sort; }    # <engine> <surface> <count0>
+# every request writes. This is the only place the comparison between local and queue modes is
+# meaningful over the whole holdout: without live market data the RPC answers most rows
+# DATA_UNAVAILABLE whatever the model said, so comparing responses alone would compare refusals to
+# refusals.
+EQC_RAW_TAG='\[assistant\] raw model output'
+eqc_raw_count() { grep -c "$EQC_RAW_TAG" "$WORK/$1.log" || true; }                          # <engine>
+eqc_raw_since() { grep "$EQC_RAW_TAG" "$WORK/$1.log" | tail -n "+$(( $2 + 1 ))" | sort; }    # <engine> <count0>
 
 # How the SERVICE says it answered each request (EncoderService::answer logs one line per request): the
 # submit-side half of the accounting, independent of the worker-side "executed" count.
@@ -195,25 +193,22 @@ eqc_degraded()  { grep -c "$2 answered locally after the shared queue degraded" 
 # and "executed + fallen back == sent" would stop being checkable from the log. One caller at a time
 # keeps the bound out of play, which is what makes the accounting exact. The overload run below is
 # the opposite on purpose.
-eqc_burst() {   # <surface> <label> <the other surface's label>
-    local surface="$1" label="$2" other_label="$3"
-    local a0 b0 a1 b1 oa0 ob0 oa1 ob1 f0 f1 l0 l1 q0 q1
+eqc_burst() {   # <surface> <label>
+    local surface="$1" label="$2"
+    local a0 b0 a1 b1 f0 f1 l0 l1 q0 q1
     a0="$(eqc_executed A "$label")"; b0="$(eqc_executed B "$label")"
-    oa0="$(eqc_executed A "$other_label")"; ob0="$(eqc_executed B "$other_label")"
     f0="$(eqc_fallbacks A)"; l0="$(eqc_applied)"; q0="$(eqc_queued A "$label")"
-    python3 -P "$PROBE" latency --target "127.0.0.1:$PORT_A" --surface "$surface" -c 1 \
+    python3 -P "$PROBE" latency --target "127.0.0.1:$PORT_A" -c 1 \
         -n "$EQC_BURST" --warmup 0 > "$WORK/burst_$surface.json" 2>&1 \
         || { fail "$surface requests reported errors"; cat "$WORK/burst_$surface.json"; }
     sleep 0.5
     a1="$(eqc_executed A "$label")"; b1="$(eqc_executed B "$label")"
-    oa1="$(eqc_executed A "$other_label")"; ob1="$(eqc_executed B "$other_label")"
     f1="$(eqc_fallbacks A)"; l1="$(eqc_applied)"; q1="$(eqc_queued A "$label")"
     eqc_log "$surface: $EQC_BURST requests sent to A: A executed $((a1-a0)), B executed $((b1-b0)), cluster log +$((l1-l0))"
     check_eq "$surface: A reports every request spilled to the queue and answered by it" "$(( q1-q0 ))" "$EQC_BURST"
     check_eq "$surface: replicas A + B executed exactly the requests sent" "$(( (a1-a0) + (b1-b0) ))" "$EQC_BURST"
     check_ge "$surface: replica B executed work submitted to A" "$(( b1-b0 ))" 1
     check_ge "$surface: replica A executed some of its own requests too" "$(( a1-a0 ))" 1
-    check_eq "$surface: the other surface's runners executed nothing" "$(( (oa1-oa0) + (ob1-ob0) ))" 0
     check_eq "$surface: no request fell back to a local answer" "$(( f1-f0 ))" 0
     if [ "${EQC_QUEUE:-sgee}" = sgee ]; then
         check_ge "$surface: the cluster log moved by at least enqueue+lease+complete per request" "$(( l1-l0 ))" "$(( 3*EQC_BURST ))"
@@ -227,12 +222,12 @@ eqc_burst() {   # <surface> <label> <the other surface's label>
 eqc_replay() {   # <surface> <label> <rows>
     local surface="$1" label="$2" rows="$3" a0 b0 a1 b1 f0 f1 calls
     local rl0 rq0 q0 q1 p0 p1
-    rl0="$(eqc_raw_count L "$surface")"
-    python3 -P "$PROBE" dump --target "127.0.0.1:$PORT_L" --surface "$surface" -c 8 --limit "$rows" --out "$WORK/local_$surface.jsonl" \
+    rl0="$(eqc_raw_count L)"
+    python3 -P "$PROBE" dump --target "127.0.0.1:$PORT_L" -c 8 --limit "$rows" --out "$WORK/local_$surface.jsonl" \
         > "$WORK/dump_local_$surface.out" 2>&1 || { fail "$surface local dump had transport errors"; cat "$WORK/dump_local_$surface.out"; }
-    a0="$(eqc_executed A "$label")"; b0="$(eqc_executed B "$label")"; f0="$(eqc_fallbacks A)"; rq0="$(eqc_raw_count A "$surface")"
+    a0="$(eqc_executed A "$label")"; b0="$(eqc_executed B "$label")"; f0="$(eqc_fallbacks A)"; rq0="$(eqc_raw_count A)"
     q0="$(eqc_queued A "$label")"; p0="$(eqc_inprocess A "$label")"
-    python3 -P "$PROBE" dump --target "127.0.0.1:$PORT_A" --surface "$surface" -c 1 --limit "$rows" --out "$WORK/queue_$surface.jsonl" \
+    python3 -P "$PROBE" dump --target "127.0.0.1:$PORT_A" -c 1 --limit "$rows" --out "$WORK/queue_$surface.jsonl" \
         > "$WORK/dump_queue_$surface.out" 2>&1 || { fail "$surface queue dump had transport errors"; cat "$WORK/dump_queue_$surface.out"; }
     sleep 0.5
     a1="$(eqc_executed A "$label")"; b1="$(eqc_executed B "$label")"; f1="$(eqc_fallbacks A)"
@@ -242,8 +237,8 @@ eqc_replay() {   # <surface> <label> <rows>
     check_eq "$surface replay: every one of them was executed by a replica" "$(( (a1-a0) + (b1-b0) ))" "$(( q1-q0 ))"
     check_eq "$surface replay: none was answered in-process (one caller at a time never meets the bound)" "$(( p1-p0 ))" 0
     check_eq "$surface replay: no call fell back to a local answer" "$(( f1-f0 ))" 0
-    eqc_raw_since L "$surface" "$rl0" > "$WORK/raw_local_$surface.txt"
-    eqc_raw_since A "$surface" "$rq0" > "$WORK/raw_queue_$surface.txt"
+    eqc_raw_since L "$rl0" > "$WORK/raw_local_$surface.txt"
+    eqc_raw_since A "$rq0" > "$WORK/raw_queue_$surface.txt"
     if [ -s "$WORK/raw_local_$surface.txt" ] && cmp -s "$WORK/raw_local_$surface.txt" "$WORK/raw_queue_$surface.txt"; then
         pass "$surface replay: the $(wc -l < "$WORK/raw_queue_$surface.txt") raw encoder answers the service logged are identical between local and queue modes"
     else

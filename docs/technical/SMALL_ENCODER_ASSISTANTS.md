@@ -1,5 +1,11 @@
 # The small-encoder assistants: architecture, training, accuracy, throughput, deployment
 
+> **Update 2026-10.** The mortgage half of this design now runs in the `nest-egg-loan` repository
+> (`services/mortgage-assistant`) and was deleted from this engine. Where this document names
+> `mortgage_verification.cppm`, measures production `ParseOperation`, or cites a `MORTGAGE_*` selector, it
+> describes the engine as it was when it was written; those files and variables no longer exist here.
+> The strategy encoder, the shared encoder chain (in sensen) and the training pipeline remain in this repository.
+
 @author Olumuyiwa Oluwasanmi
 
 Both production assistants are fine-tuned **Qwen3-0.6B** decoders served Q8_0 on

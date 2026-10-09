@@ -17,7 +17,7 @@ import sgee_queue_client;
  *
  * What an assistant needs to EXECUTE work and to SHARE it, in one place.
  *
- * The strategy and the mortgage assistants each carried the same seven members and the same
+ * The strategy and the mortgage assistants (the latter now lives in nest-egg-loan) each carried the same seven members and the same
  * hundred and fifty lines around them: the decoder that executes on this replica, the encoder that
  * may execute instead, the Postgres pool and queue, the lease source, the stand-in backend of a
  * replica with no weights, and the admission object that submits. Measured by diffing the two
@@ -40,7 +40,7 @@ export namespace options_calculator::assistant_runtime {
 
 class AssistantRuntime {
   public:
-    /** @param label the prefix of every log line: "Strategy assistant", "Mortgage assistant". */
+    /** @param label the prefix of every log line: "Strategy assistant". */
     AssistantRuntime(inference_queue::Surface surface, std::string label)
         : surface_(surface), label_(std::move(label)) {}
 
@@ -100,7 +100,7 @@ class AssistantRuntime {
      * submit-only mode). Immutable after construction, so no synchronization is needed.
      *
      * The encoder HAD TO BE TAUGHT TO BOTH this and `holds_model()` separately, and forgetting one
-     * is a measured defect: with only `holds_model()` updated, the mortgage service's boot banner
+     * is a measured defect: with only `holds_model()` updated, the removed mortgage service's boot banner
      * printed "model is LOADED" while every single RPC answered "not available right now" -- a
      * health signal from the wrong layer, across all 600 holdout rows.
      */

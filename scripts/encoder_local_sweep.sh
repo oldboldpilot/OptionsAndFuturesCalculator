@@ -12,7 +12,7 @@
 # machine the engine will serve from before trusting the number there, and set
 # ENCODER_LOCAL_MAX_IN_FLIGHT if it differs.
 #
-# One engine (INFERENCE_QUEUE=local), concurrency 1 2 4 8 16 32 64, both surfaces, three rounds
+# One engine (INFERENCE_QUEUE=local), concurrency 1 2 4 8 16 32 64, the strategy surface, three rounds
 # interleaved -- the order of the cells changes between rounds so a slow minute on a shared host is
 # not mistaken for a property of one concurrency. Prints a median table.
 #
@@ -29,11 +29,11 @@ eqc_init || exit $?
 eqc_start_engine L "$PORT_L" local || exit 1
 : > "$OUT"
 for round in 1 2 3; do
-  for surface in mortgage strategy; do
+  for surface in strategy; do
     if [ $(( round % 2 )) -eq 1 ]; then cs="1 2 4 8 16 32 64"; else cs="64 32 16 8 4 2 1"; fi
     for c in $cs; do
       n=$(( c < 8 ? 300 : 600 ))
-      python3 -P "$PROBE" latency --target "127.0.0.1:$PORT_L" --surface "$surface" -c "$c" -n "$n" --warmup 5 \
+      python3 -P "$PROBE" latency --target "127.0.0.1:$PORT_L" -c "$c" -n "$n" --warmup 5 \
         | python3 -P -c 'import json,sys; d=json.loads(sys.stdin.read()); d["round"]=int(sys.argv[1]); print(json.dumps(d))' "$round" >> "$OUT"
     done
   done

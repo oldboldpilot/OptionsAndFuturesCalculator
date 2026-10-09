@@ -73,8 +73,7 @@ using grpc::Status;
 
 // InferenceOutcome, PendingJob, InferenceBackend, QueuedBackend, and the
 // Postgres-backed PostgresLeaseSource/PostgresAdmission extension of that
-// same admission layer all live in inference_admission.cppm now -- shared
-// with mortgage_assistant_service.cpp rather than duplicated. See that
+// same admission layer all live in inference_admission.cppm now. See that
 // module's own banner for the full contract.
 using namespace options_calculator::inference_admission;
 
@@ -1453,9 +1452,9 @@ class AssistantWorker {
         //
         // DEFAULTS TO qwen3, so deploying this binary changes nothing until an operator asks.
         // An unrecognised value STOPS THE PROCESS rather than reading as the default -- the
-        // MORTGAGE_WEIGHT_STORE rule -- and the parsed value is LOGGED, because
-        // MORTGAGE_RESTRICTED_PROJECTION compared case-sensitively and read `False` and `OFF`
-        // as ON. Compared case-insensitively here for the same reason.
+        // STRATEGY_WEIGHT_STORE rule -- and the parsed value is LOGGED, because the removed
+        // mortgage assistant's MORTGAGE_RESTRICTED_PROJECTION compared case-sensitively and
+        // read `False` and `OFF` as ON. Compared case-insensitively here for the same reason.
         //
         // STRATEGY_ENCODER_PATH does NOT fall back to MODEL_PATH: that names the DECODER's
         // weights, and handing a 639 MB Qwen3 GGUF to the encoder loader would refuse at best.
@@ -2130,7 +2129,7 @@ inline constexpr std::array<std::string_view, 3> kStrategyNumericFields{
 /**
  * Render the ENCODER's parsed params as the JSON `validate_and_populate_params` reads.
  *
- * The op key comes from the SCHEMA (`strategy` here, `operation` on the mortgage surface) --
+ * The op key comes from the SCHEMA (`strategy` here; the mortgage surface, now in nest-egg-loan, used `operation`) --
  * hardcoding it is what made this service refuse every request with its own
  * "did not name a strategy" message while the chain's answer was right.
  *
@@ -2759,8 +2758,7 @@ inline constexpr std::array<std::string_view, 4> kAllActionNames{
     // placement rationale as CalculateStrategy's own gate in
     // calculator_service.cpp. With PRO_GATE_MODE unset (Off) this is inert
     // and ParseStrategy stays free, matching today's behaviour.
-    if (auto s = ::options_calculator::auth::check_assistant_entitlement(
-            ctx->identity, ::options_calculator::auth::kStrategySurface);
+    if (auto s = ::options_calculator::auth::check_assistant_entitlement(ctx->identity);
         !s.ok()) {
         ctx->status = s;
         return std::unexpected(sgee::ExecutionError::ActionFailed);
@@ -2813,8 +2811,8 @@ inline constexpr std::array<std::string_view, 4> kAllActionNames{
         // plurals and `dates_to_seconds` in a single day.
         //
         // THE QUESTION SEGMENT IS EMPTY HERE, AND THAT IS A LIMIT RATHER THAN A CHOICE.
-        // `assistant.proto`'s ParseRequest carries no `prior_question` (mortgage_assistant's
-        // does), so there is nothing to put in the middle segment -- which is exactly the
+        // `assistant.proto`'s ParseRequest carries no `prior_question` (the mortgage assistant's
+        // did), so there is nothing to put in the middle segment -- which is exactly the
         // trainer's REVISION rendering, right for the 235 revise rows and a train/serve
         // mismatch for the 278 clarify ones. Adding the field is a wire change reaching the
         // proto, both vendored copies, the client's derived allow-list and the drift gate;

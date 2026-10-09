@@ -10,7 +10,7 @@
  * from request status — fabrication by labelling — so the UI says what it is
  * doing rather than letting the symbol imply a conversion that did not happen.
  *
- * Kept deliberately parallel to mortgage-nest-egg's `src/lib/currency.ts`: two
+ * Kept deliberately parallel to nest-egg-loan's `src/lib/currency.ts`: two
  * repositories, one engine, and a user who may well visit both. The currency
  * list, the country map and `formatMoney`'s signature are the same on purpose,
  * so a divergence is visible as a diff rather than hidden behind two designs.
