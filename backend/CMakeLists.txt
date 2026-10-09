@@ -530,7 +530,7 @@ endif()
 
 # Core engine binary
 add_executable(calculator_engine src/main.cpp src/issue_key.cpp src/modules/calculator_service.cpp src/modules/finance_service.cpp src/modules/quota.cpp src/modules/api_key.cpp src/modules/assistant_service.cpp src/modules/inference_queue.cpp src/modules/inference_admission.cpp src/modules/sgee_queue_client.cpp src/modules/strategy_store.cpp src/modules/state_refresh.cpp)
-target_sources(calculator_engine PUBLIC FILE_SET CXX_MODULES FILES src/modules/calculator_service.cppm src/modules/market_data.cppm src/modules/finance_service.cppm src/modules/quota.cppm src/modules/api_key.cppm src/modules/fips_mode.cppm src/modules/state_refresh.cppm src/modules/strategy_catalogue.cppm src/modules/assistant_verification.cppm src/modules/assistant_service.cppm src/modules/mortgage_explanation.cppm src/modules/pg.cppm src/modules/inference_queue.cppm src/modules/sgee_queue_client.cppm src/modules/inference_admission.cppm src/modules/strategy_store.cppm src/modules/llq_weight_store.cppm)
+target_sources(calculator_engine PUBLIC FILE_SET CXX_MODULES FILES src/modules/calculator_service.cppm src/modules/market_data.cppm src/modules/finance_service.cppm src/modules/quota.cppm src/modules/api_key.cppm src/modules/fips_mode.cppm src/modules/state_refresh.cppm src/modules/strategy_catalogue.cppm src/modules/assistant_verification.cppm src/modules/assistant_service.cppm src/modules/mortgage_explanation.cppm src/modules/pg.cppm src/modules/inference_queue.cppm src/modules/sgee_queue_client.cppm src/modules/inference_admission.cppm src/modules/encoder_queue.cppm src/modules/assistant_runtime.cppm src/modules/strategy_store.cppm src/modules/llq_weight_store.cppm)
 target_link_libraries(calculator_engine PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto sgee)
 # PostgreSQL::PostgreSQL is linked into calculator_engine further down, right
 # after find_package(PostgreSQL REQUIRED) runs (see that comment block) --
@@ -1298,6 +1298,10 @@ target_sources(test_assistant_service
         # module is not a header and does not come along with the .cpp.
         src/modules/sgee_queue_client.cppm
         src/modules/inference_admission.cppm
+        # The service routes its encoder through the shared queue via this module.
+        src/modules/encoder_queue.cppm
+        # And joins the shared queue, as the other assistant does, through this one.
+        src/modules/assistant_runtime.cppm
 )
 target_link_libraries(test_assistant_service PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto sgee PostgreSQL::PostgreSQL)
 
@@ -1364,6 +1368,62 @@ target_sources(test_inference_admission PRIVATE src/modules/inference_queue.cpp 
 target_link_libraries(test_inference_admission PRIVATE PostgreSQL::PostgreSQL fastjson logger sgee)
 
 add_test(NAME InferenceAdmissionTest COMMAND test_inference_admission)
+
+# The encoder assistants on the shared queue: the wire codec, EncoderBackend, answer() and
+# LeaseRunner, against a stub chain and an in-memory double of the queue. No model, no cluster,
+# no Postgres -- what needs a real broker (the surface filter, work-sharing across processes) is
+# tests/integration/encoder_queue_cluster_test.sh.
+add_executable(test_encoder_queue
+    tests/test_encoder_queue.cpp
+)
+target_sources(test_encoder_queue
+    PRIVATE
+    FILE_SET CXX_MODULES FILES
+        src/modules/pg.cppm
+        src/modules/inference_queue.cppm
+        src/modules/sgee_queue_client.cppm
+        src/modules/inference_admission.cppm
+        src/modules/encoder_queue.cppm
+        src/modules/assistant_runtime.cppm
+)
+target_sources(test_encoder_queue PRIVATE src/modules/inference_queue.cpp src/modules/sgee_queue_client.cpp src/modules/inference_admission.cpp)
+target_link_libraries(test_encoder_queue PRIVATE sensen_slim PostgreSQL::PostgreSQL fastjson logger sgee)
+
+add_test(NAME EncoderQueueTest COMMAND test_encoder_queue)
+# A regression must FAIL this test, not hang it: the busy-replica cases hold chains on latches.
+set_tests_properties(EncoderQueueTest PROPERTIES TIMEOUT 120)
+
+# The probe's `answered` count, which the bench reads for arm L. Plain python3, registered only when an
+# interpreter is present; exits 77 (skipped) without grpc.
+find_program(PYTHON3_FOR_PROBE_TEST NAMES python3)
+if(PYTHON3_FOR_PROBE_TEST)
+    add_test(NAME EncoderQueueProbeTest COMMAND ${PYTHON3_FOR_PROBE_TEST} -B ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_encoder_queue_probe.py)
+    set_tests_properties(EncoderQueueProbeTest PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+endif()
+
+# The cluster test's helper that stops an engine and WAITS for it to exit (its port must be free
+# before the next engine or a port holder binds it). Hermetic: shell stand-ins, no weights.
+add_test(NAME EncoderStopEngineTest
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/encoder_stop_engine_test.sh
+                 ${CMAKE_CURRENT_SOURCE_DIR}/..)
+set_tests_properties(EncoderStopEngineTest PROPERTIES TIMEOUT 60)
+
+# The same claims against a REAL three-node SGEE cluster and REAL engines holding the real encoder
+# weights: encoders go through the queue, work is shared between engines, served answers are
+# byte-identical to local mode over the 1500-row strategy holdout, the build partition holds, and
+# a vanished cluster costs only the queue. Exit 77 (a named skip) when the weights or python gRPC
+# are absent -- the encoder GGUFs are not committed.
+add_test(NAME EncoderQueueClusterTest
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/encoder_queue_cluster_test.sh
+                 $<TARGET_FILE:sgee_queue_node> $<TARGET_FILE:calculator_engine>
+                 ${CMAKE_CURRENT_SOURCE_DIR}/..)
+set_tests_properties(EncoderQueueClusterTest PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+
+# An engine that cannot bind its listener must exit with a message, not SEGV in RunServer().
+add_test(NAME EngineBindFailureTest
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/engine_bind_failure_test.sh
+                 $<TARGET_FILE:calculator_engine>)
+set_tests_properties(EngineBindFailureTest PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
 
 add_executable(test_sgee_queue_client
     tests/test_sgee_queue_client.cpp
@@ -1904,6 +1964,21 @@ endif()
 # passes in exactly the case the test exists for -- a service dropped from the proto list with
 # envoy.yaml forgotten -- which is the stale-binary trap this block's header records.
 add_dependencies(build_tests proto_descriptor)
+
+# EncoderQueueClusterTest runs the real engine and a real queue node, neither of which matches the
+# `^test_` filter -- so without this it would exercise whatever binaries happened to be on disk,
+# which is the stale-binary trap again and the one that passes while proving nothing.
+#
+# `causality_bench` is the same shape one directory over: CausalityBenchGate and
+# CausalityBenchGateCanFail run `bin/causality_bench`, SGEE builds it EXCLUDE_FROM_ALL, and
+# `sgee_build_tests` does not list it -- so after `ninja build_tests` both read "Not Run", which is
+# indistinguishable from two failures. The root fix belongs in SGEE's aggregate; until it lands
+# here, a gate that ends in two permanent "Not Run" lines trains its reader to skip the summary.
+foreach(_t calculator_engine sgee_queue_node causality_bench)
+    if(TARGET ${_t})
+        add_dependencies(build_tests ${_t})
+    endif()
+endforeach()
 
 # workflow_check is not a ctest target -- it needs a GENERATED facts file, and a check that
 # passes because its input was missing is worse than no check. It is still built here, because

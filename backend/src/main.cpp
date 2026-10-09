@@ -149,6 +149,15 @@ auto RunServer() -> void {
     options_calculator::assistant::RegisterAssistantService(builder);
 
     std::unique_ptr<grpc::Server> server(builder.BuildAndStart());
+    if (server == nullptr) {
+        // BuildAndStart() returns null when the listener cannot bind -- the port is held by a
+        // process that did not set SO_REUSEPORT. Everything below dereferences `server`, so this
+        // used to surface as a SEGV in RunServer() (observed 2026-10-07 when a benchmark engine
+        // lost its port), which reads as an engine bug and says nothing about the port.
+        std::cerr << "FATAL: could not start the gRPC server on " << server_address
+                  << " (is the port already in use?). Refusing to continue." << std::endl;
+        std::exit(1);
+    }
 
     // State the security posture at startup, so "is authentication on?" is
     // answerable from the logs without sending traffic at it -- the same reason

@@ -204,7 +204,7 @@ echo "  timestamped after this upload:"
 echo "      railway logs --deployment ${DEPLOY_ID} | grep -c 'model is LOADED'"
 echo ""
 # 'model is LOADED' COUNTS weights and does not say WHICH model, which is the distinction
-# `local_model_loaded()` exists for -- it is true of a decoder and of an ENCODER alike, deliberately,
+# `AssistantRuntime::holds_model()` exists for -- it is true of a decoder and of an ENCODER alike, deliberately,
 # so the count above stays correct across a backend change. It is therefore blind to the one thing a
 # backend flip needs to confirm. This second line names the model, and it is the check that would
 # have caught serving a decoder from an image whose variables asked for an encoder:

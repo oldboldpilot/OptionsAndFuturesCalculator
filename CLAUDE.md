@@ -3642,6 +3642,272 @@ hostname, so the peers could not address each other.
 **It is a non-authoritative mirror. Postgres remains the system of record**, and
 `docs/SGEE_QUEUE_CLUSTER.md` carries the evidence for why.
 
+### The ENCODERS now go THROUGH the queue (2026-10-07), and what that costs
+
+**The finding that prompted it, measured in production:** with `INFERENCE_QUEUE=sgee`, ~120
+assistant calls advanced the three nodes' `last_applied` by **10** -- housekeeping. Both workers'
+encoder branch `return`ed before `configure_inference_queue()` and the service called
+`EncoderAssistant::parse()` in-process, so `admission_` was consulted only for DECODER prompts. The
+banner said `INFERENCE_QUEUE=sgee`; the encoders never saw it. The queue existed and nothing connected
+the encoder to it -- a configuration that reads as true and is not, which is this file's oldest shape.
+
+**ROUTING, DECIDED BY THE OWNER 2026-10-07: IN-PROCESS FIRST, SPILL TO THE QUEUE ONLY WHEN THE REPLICA
+IS BUSY.** The first routing sent every request to the queue first; measured at the deployed 300 ms
+heartbeat that was ~570 ms per request against ~1 ms in-process, to share work no caller was waiting on.
+`EncoderService::answer` now runs the chain in this process while fewer than `ENCODER_LOCAL_MAX_IN_FLIGHT`
+(default **8**) chain executions are in flight on the replica, and only above that does a request spill,
+if the assistant has a queue slot free (`ENCODER_QUEUE_MAX_IN_FLIGHT`, default 1, 0 = never submit); with
+no slot it is answered in-process anyway. **"Busy" is a MEASURED signal, not a configured rate:**
+`EncoderBackend` counts the chain executions in flight, and that count includes work leased FROM the queue
+(a core spent on another replica's parse is a core this replica's own request does not have). The default
+is where one replica stops scaling, measured by `scripts/encoder_local_sweep.sh` (p50 stays within ~2x of
+idle and throughput is at its peak at 8 concurrent, on the strategy surface; throughput stops growing after 8; see `kDefaultLocalMaxInFlight` for the table). It is a property of the HOST: re-run the sweep on the
+machine the engine serves from before trusting the number there. `ENCODER_LOCAL_MAX_IN_FLIGHT=0` makes every
+request busy, i.e. the old queue-first routing, and is how the tests and the benchmark exercise the queue
+path at a concurrency of one. **Re-measured after the change** (`scripts/encoder_queue_bench.sh`, one fresh cluster per heartbeat, three
+alternating rounds, medians, p50 / p95 ms; load average 4-10 from other work on the host). L is the
+in-process floor (`INFERENCE_QUEUE=local`), A is `sgee` at the DEFAULT bounds, Q is `sgee` with
+`ENCODER_LOCAL_MAX_IN_FLIGHT=0` (the first routing):
+
+| heartbeat | surface | c | L in-process | **A default** | Q queue-first |
+| --- | --- | --- | --- | --- | --- |
+| 50 ms | strategy | 1 | 0.35 / 0.49 | **0.32 / 0.47** | 151.01 / 151.60 |
+| 300 ms | strategy | 1 | 0.35 / 0.54 | **0.33 / 0.51** | 896.60 / 906.84 |
+
+At one caller the default routing is the in-process floor (0.3 ms) at BOTH heartbeats, with
+0 spilled and 63 in-process of 63 in every cell, against 151 ms and 897 ms for queue-first. (Mortgage rows
+of this table were dropped when that surface left this engine; the run that produced them is in this
+file's history.) The queue is still reachable: at 24 callers the default spilled at most 1 request in 243,
+and that request is the `max` column without touching p95. The engine-level
+mutation shows the number is a property of the ROUTING and not of the host: with `answer_below` forced to
+report busy, the SAME default engine on a 300 ms cluster answers 42 of 42 requests through the queue (0
+in-process, the cluster log +130), at **p50 572 ms / p95 904 ms**, against 0.83 / 1.16 ms, 0 spilled and
+the log +0 unmutated.
+
+**What was built, and it is one path rather than a parallel one.** `encoder_queue.cppm`:
+`EncoderBackend` is an `InferenceBackend` whose `answer()` is the only code that runs the chain and
+decides what its outcome means. Local mode calls it directly; the queue's worker and the queue's own
+degrade path call it through `submit()`. A request travels as the `prompt` string the queue already
+carries (JSON of the three `ParseRequest` fields); the answer returns as the result `text` (a verdict
+plus the SAME `<params>...</params>` block the decoder produces), so `interpret_model_output` and
+everything after it is unchanged. `LeaseRunner` drains the same `SgeeLeaseSource` /
+`PostgresLeaseSource` a decoder's owner thread would -- surface filter and write-back included, none
+reimplemented -- into the inline-executing encoder. `EncoderService` owns the encoder side of one
+assistant (backend, bound, runner) so their lifetimes are one lifetime and every assistant shares the
+one definition. (When this was written both the strategy and the mortgage assistants were wired; the
+mortgage one now lives in nest-egg-loan.) Each replica is both a submitter and a worker of its own
+surface.
+
+**`assistant_runtime.cppm` holds how an assistant's Worker joins the queue, ONCE.** The two Worker
+classes carried the same seven members and ~150 lines around them; diffed after substituting the
+surface's name, `configure_sgee_queue` differed by ONE integer (the worker-id parity) and
+`configure_inference_queue` by comments only -- one piece of knowledge written twice, then a third time
+as five more helpers (`local_executor`, `remote_deadline`, `install_lease_source`, `encoder_answer`,
+`encoder_enabled`) added with the encoder. `AssistantRuntime` owns the decoder or the encoder, the
+Postgres pool and queue, the lease source, the stand-in backend of a weightless replica and the
+admission object; a Worker now keeps only what really differs (how its model is chosen and loaded). The
+two services deleted 612 lines and gained 63 (net -549) against a 320-line runtime that is mostly the
+comments both copies carried. The mortgage Worker has since been deleted with its service; the runtime stays.
+
+**A chain refusal and `<NONE>` are ANSWERS that complete the task.** They are deterministic, and a
+failed task would burn its attempts on re-leases that cannot change the outcome and leave the submitter
+polling a Dead task -- the defect-3 lesson ("a rejection is an answer") applied at the payload level.
+A worker handed a task that is not an encoder task (a decoder prompt) fails it BY NAME. A fleet must
+still run one backend kind per surface: the surface filter cannot tell an encoder task from a decoder
+one, and a decoder replica leasing an encoder task would decode JSON.
+
+**HOW TO READ `last_applied` AS THE PROOF.** A queued request is three replicated writes: enqueue,
+lease, complete. Measured on a local three-node cluster, 96 sequential requests moved `last_applied` by
+**289 / 290 / 291** (3 x 96 = 288 plus one or two housekeeping entries). A delta near zero over real
+traffic is exactly the 2026-10-07 production finding. The engines say the rest in their own logs, one
+line per request, ONE of three: `<surface> encoder answered in-process` (idle, or busy with no queue slot
+free), `<surface> encoder spilled to the queue and was answered by it` (submit side) and `<surface>
+encoder answered locally after the shared queue degraded` (the queue failed and the admission object
+answered for itself); plus one per leased job executed, `<surface> encoder executed leased job #N on this
+replica` (worker side, `N` is a per-process counter). Summed across replicas, executed == spilled; and a
+burst sent to ONE engine (queue-first lever) was executed 49/47 and 41/55 by the two.
+
+**THE FIRST VERSION OF THAT LINE LIED, and the review that found it is the reason the fourth exists.**
+Every degrade branch of `SgeeAdmission` / `PostgresAdmission` ends in `return local_.submit(...)`, whose
+outcome for an encoder is `ok = true` with a decodable answer -- the same bytes a queue success has --
+so a request answered right here was logged as the queue having answered (then `answered through the
+shared queue`, now `spilled to the queue ...`), and `queued ==
+executed` was false by exactly the number of fallbacks, in the one situation (the queue is down) in
+which an operator reads it. The cluster test did not notice: it asserted `fallbacks == 0` beside
+`queued == N`, a second counter covering for the first. `InferenceOutcome::degraded` is now stamped in
+the ONE function each admission degrades through (`degrade_to_local`), and the cluster-down section
+asserts that the through-the-queue count stayed FLAT and that every fallback has a matching degraded
+line. A count of what happened is only as honest as the layer that knows what happened.
+
+**WHAT THE QUEUE COSTS, and it is not the polling.** Every queue operation is a replicated write; the
+leader serialises them and each costs about a Raft heartbeat. Local three-node cluster (measured on
+the mortgage surface before it left this engine; the cost is the queue's, not the surface's), p50 / p95 ms, throughput in requests per second:
+
+| Raft heartbeat | callers | in-process | queue, unbounded | queue, default bound |
+| --- | --- | --- | --- | --- |
+| 10 ms | 1 | 1.0 / 1.2 | 30 / 48 (31 rps) | not measured |
+| 10 ms | 24 | 3.2 / 6.1 | 728 / 1138 (30 rps) | not measured |
+| **50 ms** (SGEE default) | 1 | 0.8 / 1.1 | 102 / 152 (9 rps) | 151 / 152 (7 rps) |
+| 50 ms | 8 | 1.3 / 2.2 | 604 / 954 (13 rps) | 1.3 / 1.8 |
+| 50 ms | 24 | 3.0 / 4.9 | 1704 / 2359 (13 rps) | 3.0 / 4.8 |
+| **300 ms** (DEPLOYED) | 1 | 0.8 / 1.1 | **573 / 3289 (1-2 rps)** | **571 / 600 (2 rps)** |
+| 300 ms | 8 | 1.4 / 2.1 | 2401 / 3299 (3 rps) | 1.4 / 2.0 |
+| 300 ms | 24 | 3.1 / 5.2 | 5695 / 6317 (4 rps), deadline expiries | 3.2 / 5.5 |
+
+Median over three alternating rounds, one cluster per heartbeat, box load average ~1.
+At one caller a queued request is three heartbeat-bound writes, so its latency is quantised to the
+heartbeat (75 or 150 ms at 50 ms; the 102 vs 151 above are the same code on two clusters). "Default
+bound" at 8 and 24 callers is mostly the replica answering for itself, which is the point of it.
+The unbounded 300 ms row's p95 of 3289 ms at ONE caller is the collapse persisting: the previous
+cell's timed-out requests left hundreds of orphan tasks that the cluster was still working off at
+3 writes per ~150 ms, and the next round's single caller queued behind them.
+
+**At the deployed heartbeat an encoder parse through the queue costs ~0.6 s instead of ~1 ms, and the
+queue saturates at ~3 requests per second.** The owner decided the queue is how the service scales
+across backends, and that is what is built; this is the price, measured, so the decision is made with
+it in view. Two levers existed: a lower `SGEE_HEARTBEAT_MS` on the nodes (the `heartbeat * 2 <=
+election_base` rule leaves room under 1500 ms; whether the election churn that motivated 300 ms returns is
+an operations question that was not asked), and routing in-process unless the replica is busy. THE OWNER
+TOOK THE SECOND (see "ROUTING" above): the table in this paragraph is now the cost of a SPILL, paid only by
+a request that arrived at a busy replica, and no longer the cost of every request.
+
+**THE POLL INTERVALS WERE MEASURED AND LEFT ALONE.** The brief's lever was the submitter's 25 ms poll
+and the lease tick. A 2..25 ms doubling poll with a 10 ms idle tick gave the SAME c=1 latency as the
+original 25 / 50 ms -- p50 150.9 vs 150.7, 80.3 vs 75.4, 69.4 vs 75.9 over three alternating rounds on
+one cluster, the values quantised by the heartbeat -- at three times the idle CPU of the two engines
+(2.8-3.2 % against 0.8-1.2 % of a core). Three heartbeat-bound writes per request dwarf any interval.
+Several lease lanes per replica were tried too (1 / 4 / 8): no throughput change, because the writes
+are serialised at the leader, and more idle CPU. Removed.
+
+**THE QUEUE BOUND (`ENCODER_QUEUE_MAX_IN_FLIGHT`) EXISTS BECAUSE UNBOUNDED, THE QUEUE COLLAPSES.** Past its ceiling a request
+waits out the 2 s deadline, is answered in-process anyway, and leaves an ORPHAN task that a worker
+executes later for nobody -- three more writes, in the one resource that was already saturated, which
+delays the next request further. So each assistant on a replica keeps at most
+`ENCODER_QUEUE_MAX_IN_FLIGHT` (default **1**) requests on the queue and answers the overflow itself. Measured: the bound removes every
+deadline expiry at every heartbeat tried, and an overload run (24 callers) moves the cluster log by
+exactly three writes per executed request -- no orphans. The cost is that under concurrency most
+requests are NOT carried by the queue, which is the right outcome for a 1 ms task against a 3-30 rps
+ceiling and the wrong one if the intent is to demonstrate sharing under load: the sharing proof uses
+one caller at a time. `ENCODER_QUEUE_MAX_IN_FLIGHT=64` restores the unbounded behaviour measured above.
+
+**THE SWITCHES ARE READ STRICTLY, as every operator switch in this tree is.** `ENCODER_QUEUE_MAX_IN_FLIGHT`
+was parsed silently: `=abc`, `=0` and `= 64` all became 1 with no line anywhere, so an operator who set it
+had no way to learn it had not taken. Now, for it and for `ENCODER_LOCAL_MAX_IN_FLIGHT`, an unset value is
+the default; `0` is a VALUE (queue: the assistant never submits and answers every request itself while its
+runner still executes what others submit; local: every request is busy, i.e. queue first); and anything
+that is not a whole number stops the engine at boot naming the variable and the value. The effective
+bounds are logged once per assistant (`answers in-process, and spills to the shared queue only when N are
+already executing here -- at most M at a time`).
+
+**BLUE/GREEN MIXED BUILDS ON ONE QUEUE, and nothing could see it.** The lease filter partitioned by
+surface only, which is right for a decoder (every replica of a surface runs the same weights) and wrong
+for anything whose answer is a function of the build that computed it. Railway stands the new containers
+up and health-gates them while the old ones still carry traffic, all against the same queue, so about
+half of the old engines' encoder tasks were executed by the NEW binary before cutover -- and an old
+binary parses a new renderer's keys through an unknown-key rejection that turns the row into a refusal.
+The lane's own cluster test could not see it: every engine in it was one binary. Fixed by routing on
+the build: an encoder task carries `"route":"<surface>/<model digest>.<executable digest>"`, and a
+worker's lease filter is that same string (`RouteTag`, one function writes and matches it), so old and
+new cohorts each lease only their own and same-build replicas still share. **Both digests are DERIVED
+from bytes** -- the GGUF the chain loaded (weights, schema, tokenizer) and `/proc/self/exe` (the chain's
+code and the renderer) -- because the alternative was a hand-bumped "renderer version" constant, and a
+recorded value that must be regenerated by hand is the one that goes stale; the same reasoning that
+makes `check_vendored_protos.sh` compare bytes and `pending_enqueues_in_log()` derive its count. A
+replica that cannot read either file ISOLATES itself behind a random fingerprint rather than falling
+back to sharing: unable to establish what it is, it answers its own requests and executes no one
+else's. The surface is part of the route string because the broker's filter is ONE byte substring; a
+filter naming only the build would let the same build lease another surface's task. The Postgres queue
+applies it in its lease query (`payload->>'route' = $4`, extracted text, because jsonb re-renders its
+input and a byte filter would silently never match). A decoder carries no build, and its payload is
+byte-identical to what it was.
+
+**The remote deadline for an encoder is 2 s, not the decoder's 90 s:** the local answer costs a
+millisecond, so waiting a minute and a half on a stopped cluster would cost the visitor more than the
+answer it is waiting to avoid.
+
+**AN INSTRUMENT LESSON THAT COST A RUN: engine stdout redirected to a file is block-buffered.** The
+first accounting run counted 79 executions for 96 requests and 16 mortgage executions "during" the
+strategy burst; the work was all done, the lines had not been flushed. `stdbuf -oL -eL` on the engine
+makes the counts exact (48 / 48). The same trap is recorded for the queue nodes, and it applies to any
+test that counts log lines from a process whose stdout is not a terminal.
+
+**A FAILED BIND WAS A SEGV, FOUND BY THAT BENCHMARK.** One engine lost its port between the port
+window being reserved and the engine binding it; `BuildAndStart()` returned null, `RunServer()`
+dereferenced it, and the bring-up -- which certified readiness from the weights-loaded banner, printed
+BEFORE the listener binds -- carried on with a dead engine and reported 120 transport errors.
+`main.cpp` now exits 1 naming the address (`EngineBindFailureTest`, RED on the old engine: status 139),
+and the bring-up waits for a TCP connect to the port, not for the banner.
+
+Gated by `test_encoder_queue` (103 checks, hermetic: codec, one-place semantics, two runners sharing a
+queue, degrade and its accounting lines, refusal-completes-task, the bound, the strict switch, the
+fingerprint, a throwing lease source, `AssistantRuntime`'s availability and its unbuildable-queue paths,
+and the routing: idle never touches the queue, busy spills, leased work counts as busy, the local bound is
+never exceeded, 0 on either bound), `test_inference_admission` (the route codec), the real-Postgres
+`test_inference_queue_pg` (the route in the lease query; not a ctest) and `EncoderQueueClusterTest` (a
+real three-node cluster and real engines with the real weights, now including a second BUILD on the same
+queue; ~3 min; exits 77 when the encoder GGUFs or python gRPC are absent). Against the pre-change engine the cluster test fails 21 checks. Mutation-checked, each arm
+failing exactly the checks that name it: `answer()` ignoring the queue (7), no local fallback (2), a
+refusal reported as a failed task (2), an executor that throws leaving a promise broken (abort), a
+decoder prompt accepted as a task (2), the bound admitting everyone (2), a slot never released (2);
+and at engine level the service not handing the encoder to the queue, the mortgage worker leasing
+under the STRATEGY surface, and neither layer degrading.
+
+The review-fix arms (2026-10-07), each reverted with `CCACHE_DISABLE=1`, rebuilt and restored byte for
+byte: the admission not stamping `degraded` (3 checks: the flag, the through-the-queue count, the
+degraded count); the reader ignoring the flag (2); the lease runner's `fill()` unguarded (abort,
+`fill boom`); a typo coerced to the default (9); `0` coerced to the default (1); the route ignoring the
+build (3); the route dropping the surface (1); the fingerprint ignoring the executable (2), the model
+(1) or sharing when unreadable (1); the Postgres route clause made inert (3 of the 153 real-database
+checks -- a first arm that DELETED the clause left `$4` unreferenced, Postgres refused every lease and
+57 checks failed, which proves the arm and not the filter, so it was thrown away); and, at engine level,
+the runtime tagging with the surface alone, which reproduces the defect in the cluster test as
+`the other build executed 43 of A's 96 tasks` and `A and B executed 52 of the other build's`.
+
+The routing arms (2026-10-07), same discipline: **"busy always true"** fails 18 checks (the idle replica
+submits 10 of 10 to the queue, the two routes are never both used) and, at ENGINE level, reproduces the
+original defect exactly (above: p50 572 ms, 42 of 42 spilled); "busy never true" (the bound never
+consulted) fails 16 (the local peak reaches 24 against a bound of 2); work leased from the queue not
+counted as busy fails 1; the queue slot never released fails 1. A first version of the "busy always
+true" arm did not FAIL, it HUNG: the test waited with an unbounded `while (!entered)` for a state the
+mutated code never produces, the driver timed out after 900 s and the mutated file was left on disk
+until the driver's `finally` ran. A test that waits for the code under test to do something must bound
+the wait (`wait_until`, 2 s), or a wrong implementation reports nothing.
+
+**SANITIZERS (owner rule 2026-10-07).** OFC has no sanitizer switch of its own: `SGEE_SANITIZE` is SGEE's
+overlay and, embedded, it does not reach this repository's targets or the ONE `std.pcm` they share (a BMI
+built without the flags is refused by every consumer built with them). What works is putting the flags in
+`CMAKE_CXX_FLAGS` itself, which `sensen_canonical_flags()` APPENDS to, so the std module, every BMI and
+gRPC's ~3000 translation units agree -- and sensen already expects it (`CMAKE_CXX_FLAGS MATCHES
+"fsanitize=address"` at `sensen/CMakeLists.txt:1776`). Two SEPARATE build directories, never `build-lane`:
+
+```
+cmake -S backend -B backend/build-asan -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=/usr/local/bin/clang++ \
+  -DCMAKE_C_COMPILER=/usr/local/bin/clang -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DFETCHCONTENT_SOURCE_DIR_<DEP>=<existing _deps/...-src> ... \
+  -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" -DCMAKE_C_FLAGS=<same> \
+  -DCMAKE_EXE_LINKER_FLAGS=<same> -DCMAKE_SHARED_LINKER_FLAGS=<same>        # and -fsanitize=thread for build-tsan
+CCACHE_DISABLE=1 SKIP_CLANG_TIDY=1 ninja -j5 -l 28 -C backend/build-asan test_encoder_queue test_inference_admission ...
+```
+(TSan cannot be combined with ASan.) The full dependency closure is rebuilt instrumented, tens
+of minutes each on a loaded host. Results on the routing change, all **0 reports**: ASan+UBSan+LSan
+(`detect_leaks=1`, `detect_stack_use_after_return=1`) over `test_encoder_queue` (103 checks),
+`test_inference_admission` (51), and the real-Postgres `test_inference_queue_pg` (153) and
+`test_inference_admission_pg` (32); TSan over `test_encoder_queue` and `test_inference_admission`, which
+carry the concurrency (`InFlightCount`, `LeaseRunner`, the busy tests, `AssistantRuntime`).
+**Positive controls, in the SAME instrumented binaries:** a planted `p[4]` read of a `new int[4]` fired
+`AddressSanitizer: heap-buffer-overflow` (and UBSan's bounds report), a planted never-freed array fired
+`LeakSanitizer: 400 byte(s) leaked`, a planted `1 << 40` fired UBSan's `shift exponent 40 is too large`,
+and a planted unsynchronised counter in two threads fired `ThreadSanitizer: data race`; the plants were
+removed and the binaries rebuilt before the clean runs. **TSan found one real report, and it was not in
+the new code:** `test_inference_admission`'s shutdown test read the `unique_ptr<GatedEchoBackend>`
+variable from two helper threads while `backend.reset()` wrote it, ordered only by two `sleep_for`s (TSan:
+"As if synchronized via sleep"). The unchanged lines predate this lane; the threads now hold a reference to
+the backend instead of the variable.
+
+**One thing the cluster test cannot reach:** `SgeeLeaseSource::fill`'s post-lease build check (the
+defence in depth for a broker that ignores the filter) fires only when the broker is wrong, and the
+real broker is right. It is the same branch, extended with `foreign_owner`, that already guarded the
+surface; it is exercised by reading, not by a gate.
+
 ### The queue nodes went FIVE WEEKS stale, and nothing was watching them
 
 Rolled to `f73cb606` on 2026-09-28. The previous deployment on all three was
@@ -4176,10 +4442,10 @@ correctness one, or do not quote it.**
 
 What survives and is worth keeping:
 
-- `NoLocalBackend`, the submit-only paths, and `local_model_loaded()` are still
+- `NoLocalBackend`, the submit-only paths, and `AssistantRuntime::holds_model()` are still
   in the tree and still correct — a replica with no weights CAN serve the
   assistant RPCs through the queue. Nothing enables it today.
-- **`local_model_loaded()` vs `available()` is load-bearing regardless.** The
+- **`AssistantRuntime::holds_model()` vs `available()` is load-bearing regardless.** The
   first is "are the weights in THIS process", the second is "can this replica
   serve the RPC at all". The startup banner must read the first: it keyed on
   `available()` for one build, so a model-less replica logged `model is LOADED`
@@ -5126,6 +5392,15 @@ remotes. Two things about that merge are worth keeping:
   the sensen objects relinked at 07:35 while `calculator_engine` still dated from
   the previous evening. Run plain `ninja -C backend/build` as well before
   deploying, and check the binary's mtime rather than trusting "no work to do".
+
+  **CORRECTION, 2026-10-07: that is no longer true.** `build_tests` now also
+  builds `calculator_engine`, `sgee_queue_node` and `causality_bench`
+  (`backend/CMakeLists.txt`, the loop after the `dbg_derivation` dependency),
+  because `EncoderQueueClusterTest` and the two `CausalityBench` gates run those
+  binaries and a ctest reading a binary that nothing rebuilt passes while proving
+  nothing. The paragraph above is kept because its mechanism is still the reason
+  the loop exists; the check that REMAINS worth making before a deploy is the
+  binary's mtime against the change, not whether `build_tests` was run.
 
 A C++20 module symbol also carries its module in the mangled name —
 `sensen::RotaryEmbedding@sensen.rotary_embedding::shared(...)` — so
@@ -7388,6 +7663,13 @@ every turn, so there is nothing left to ask about. Testing ask -> answer -> pars
 harness's two-call protocol with `prior_question` echoed back. The encoder cannot ask a question
 itself -- `refine_unstated` in the serving layer is what asks, and whether it still does on this
 path is UNTESTED.
+
+### The deployed encoders did NOT use `INFERENCE_QUEUE=sgee` until 2026-10-07
+
+Everything in the next section is true of the encoders as deployed, and one thing the boot banner
+implied was not: `INFERENCE_QUEUE=sgee` was set and the encoders ran in-process regardless. They go
+through the queue now, with a bound, at a measured cost -- see "The ENCODERS now go THROUGH the queue"
+under "SGEE queue cluster", including the table that says what that costs at the deployed heartbeat.
 
 ### BOTH ENCODERS ARE DEPLOYED AND THE DECODERS ARE GONE, and the strategy one was refusing 1 row in 3
 

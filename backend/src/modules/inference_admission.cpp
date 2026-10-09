@@ -19,12 +19,34 @@ namespace options_calculator::inference_admission {
 
 namespace {
 
+/**
+ * The value of a payload's `route` member: the surface AND the build, in one string. Written by the
+ * submitter, matched by the worker's lease filter, and compared again after the lease -- all from
+ * this one function, so the three cannot disagree. The surface is part of it (rather than left to
+ * the separate `surface` member) because the broker's filter is a single byte substring: a filter
+ * that named only the build would let the same build lease another surface's task.
+ *
+ * EMPTY when the tag carries no build, which is every decoder: they route on the surface alone.
+ */
+[[nodiscard]] auto route_value(const RouteTag& tag) -> std::string {
+    if (tag.build.empty()) return {};
+    return std::format("{}/{}", to_string(tag.surface), tag.build);
+}
+
+/** Adds the `route` member when there is one to add, leaving a build-less payload byte-identical
+ *  to the format that existed before routes did. */
+auto add_route(fastjson::json_object& obj, std::string_view route) -> void {
+    if (!route.empty()) obj["route"] = fastjson::json_value(std::string(route));
+}
+
 /** Encodes one prompt as the small JSON payload `inference_queue::Queue`
  *  stores opaquely -- see that module's own banner for why it never
  *  interprets this text itself. */
-[[nodiscard]] auto encode_prompt(const std::string& prompt) -> std::string {
+[[nodiscard]] auto encode_prompt(const std::string& prompt, std::string_view route = {})
+    -> std::string {
     fastjson::json_object obj;
     obj["prompt"] = fastjson::json_value(prompt);
+    add_route(obj, route);
     return fastjson::json_value(std::move(obj)).to_string();
 }
 
@@ -150,6 +172,55 @@ struct DecodedSurface {
     return {SurfaceTag::Unknown, {}};
 }
 
+/** The `route` a payload carries, or nullopt when it carries none (a decoder's, or one written
+ *  before routes existed). */
+[[nodiscard]] auto decode_route(std::string_view payload_json) -> std::optional<std::string> {
+    auto parsed = fastjson::parse(payload_json);
+    if (!parsed.has_value() || !parsed->is_object()) return std::nullopt;
+    const auto& obj = parsed.value();
+    if (!obj.contains("route") || !obj["route"].is_string()) return std::nullopt;
+    return std::string(obj["route"].as_string());
+}
+
+/**
+ * What a leased payload says it belongs to when it is NOT this worker's, or nullopt when it is.
+ * Only reachable when the broker did not apply the lease filter; see SgeeLeaseSource::fill.
+ *
+ * A worker with a build also refuses a payload that carries NO route: it is a decoder's, or an
+ * older build's, and either way not something this worker would answer identically.
+ */
+[[nodiscard]] auto foreign_owner(std::string_view payload_json, const RouteTag& mine)
+    -> std::optional<std::string> {
+    const auto tagged = decode_surface(payload_json);
+    if (tagged.tag == SurfaceTag::Unknown) return std::string("an unrecognised surface");
+    if (tagged.tag == SurfaceTag::Known && tagged.surface != mine.surface) {
+        return std::format("the '{}' surface", to_string(tagged.surface));
+    }
+    if (const auto wanted = route_value(mine); !wanted.empty()) {
+        const auto claimed = decode_route(payload_json);
+        if (claimed != wanted) {
+            return claimed.has_value() ? std::format("the route '{}'", *claimed)
+                                       : std::string("no route (another build, or a decoder)");
+        }
+    }
+    return std::nullopt;
+}
+
+/**
+ * The ONE place an admission object gives up on the shared queue and answers for itself.
+ *
+ * `SgeeAdmission` and `PostgresAdmission` each have several ways to reach this -- a submit that
+ * failed, a task that vanished, a task reported Dead, a deadline that passed -- and every one of
+ * them used to `return local_.submit(...)` directly, whose outcome is indistinguishable from a
+ * queue success. The provenance is stamped here, once, so a new degrade branch cannot forget it.
+ */
+[[nodiscard]] auto degrade_to_local(InferenceBackend& local, std::string prompt)
+    -> std::optional<InferenceOutcome> {
+    auto outcome = local.submit(std::move(prompt));
+    if (outcome.has_value()) outcome->degraded = true;
+    return outcome;
+}
+
 }  // namespace
 
 /**
@@ -160,11 +231,12 @@ struct DecodedSurface {
  * payload written after it. That is what makes a rolling deploy safe in either
  * order -- an old worker simply cannot honour a tag it does not read.
  */
-[[nodiscard]] auto encode_prompt_for_surface(options_calculator::inference_queue::Surface surface,
-                                             const std::string& prompt) -> std::string {
+[[nodiscard]] auto encode_prompt_for_surface(const RouteTag& tag, const std::string& prompt)
+    -> std::string {
     fastjson::json_object obj;
-    obj["surface"] = fastjson::json_value(std::string(to_string(surface)));
+    obj["surface"] = fastjson::json_value(std::string(to_string(tag.surface)));
     obj["prompt"] = fastjson::json_value(prompt);
+    add_route(obj, route_value(tag));
     return fastjson::json_value(std::move(obj)).to_string();
 }
 
@@ -174,10 +246,16 @@ struct DecodedSurface {
  * twice. Returns the `"surface":"..."` member without the enclosing braces:
  * what has to appear inside the real payload is the member, not a whole object.
  */
-[[nodiscard]] auto surface_lease_filter(options_calculator::inference_queue::Surface surface)
-    -> std::string {
+[[nodiscard]] auto surface_lease_filter(const RouteTag& tag) -> std::string {
     fastjson::json_object probe;
-    probe["surface"] = fastjson::json_value(std::string(to_string(surface)));
+    // A tag with a build filters on the `route` member ALONE: it already names the surface, and
+    // one contiguous member is all a byte-substring filter can express. A tag without one is the
+    // decoder's and filters on the surface exactly as it always has.
+    if (const auto route = route_value(tag); !route.empty()) {
+        add_route(probe, route);
+    } else {
+        probe["surface"] = fastjson::json_value(std::string(to_string(tag.surface)));
+    }
     const auto rendered = fastjson::json_value(std::move(probe)).to_string();
     // Returns the bare `"surface":"..."` member, unanchored.
     //
@@ -234,8 +312,9 @@ struct DecodedSurface {
 
 PostgresLeaseSource::PostgresLeaseSource(
     std::shared_ptr<options_calculator::inference_queue::Queue> queue,
-    options_calculator::inference_queue::Surface surface, std::string worker_id)
-    : queue_(std::move(queue)), surface_(surface), worker_id_(std::move(worker_id)) {}
+    RouteTag tag, std::string worker_id)
+    : queue_(std::move(queue)), tag_(std::move(tag)), route_(route_value(tag_)),
+      worker_id_(std::move(worker_id)) {}
 
 PostgresLeaseSource::~PostgresLeaseSource() {
     // Every helper thread is joined before any member (in particular queue_,
@@ -258,7 +337,7 @@ auto PostgresLeaseSource::fill(std::size_t want) -> std::vector<PendingJob> {
     }
 
     for (std::size_t i = 0; i < want; ++i) {
-        auto leased = queue_->lease(surface_, worker_id_);
+        auto leased = queue_->lease(tag_.surface, worker_id_, route_);
         if (!leased.has_value()) {
             logger::Logger::getInstance().warn(
                 "inference_admission: PostgresLeaseSource::lease() failed ({}) -- stopping this "
@@ -380,16 +459,16 @@ auto PostgresLeaseSource::reap_finished_locked() -> void {
 
 PostgresAdmission::PostgresAdmission(
     std::shared_ptr<options_calculator::inference_queue::Queue> queue,
-    options_calculator::inference_queue::Surface surface, InferenceBackend& local,
-    std::chrono::milliseconds remote_deadline)
-    : queue_(std::move(queue)), surface_(surface), local_(local), remote_deadline_(remote_deadline),
+    RouteTag tag, InferenceBackend& local, std::chrono::milliseconds remote_deadline)
+    : queue_(std::move(queue)), tag_(std::move(tag)), route_(route_value(tag_)), local_(local),
+      remote_deadline_(remote_deadline),
       sgee_client_(SgeeQueueClient::create_from_env()) {}
 
 auto PostgresAdmission::submit(std::string prompt) -> std::optional<InferenceOutcome> {
     const auto deadline = std::chrono::system_clock::now() + remote_deadline_;
-    const std::string payload_json = encode_prompt(prompt);
+    const std::string payload_json = encode_prompt(prompt, route_);
 
-    auto submitted = queue_->submit_remote(surface_, payload_json, deadline);
+    auto submitted = queue_->submit_remote(tag_.surface, payload_json, deadline);
     if (!submitted.has_value()) {
         // ANY submit_remote failure -- QueueFull, ConnectFailed, CircuitOpen,
         // PoolExhausted, Timeout, DatabaseError, InvalidSurface -- degrades to
@@ -401,7 +480,7 @@ auto PostgresAdmission::submit(std::string prompt) -> std::optional<InferenceOut
         logger::Logger::getInstance().warn(
             "inference_admission: submit_remote failed ({}) -- falling back to the local backend",
             options_calculator::inference_queue::to_string(submitted.error()));
-        return local_.submit(std::move(prompt));
+        return degrade_to_local(local_, std::move(prompt));
     }
 
     if (sgee_client_.has_value()) {
@@ -417,7 +496,7 @@ auto PostgresAdmission::submit(std::string prompt) -> std::optional<InferenceOut
             "inference_admission: await_result failed ({}) for job {} -- falling back to the "
             "local backend",
             options_calculator::inference_queue::to_string(job.error()), submitted->job_id);
-        return local_.submit(std::move(prompt));
+        return degrade_to_local(local_, std::move(prompt));
     }
 
     switch (job->state) {
@@ -446,7 +525,7 @@ auto PostgresAdmission::submit(std::string prompt) -> std::optional<InferenceOut
                 "inference_admission: await_result returned non-terminal state {} for job {} -- "
                 "falling back to the local backend",
                 options_calculator::inference_queue::to_string(job->state), submitted->job_id);
-            return local_.submit(std::move(prompt));
+            return degrade_to_local(local_, std::move(prompt));
     }
 }
 
@@ -454,12 +533,10 @@ auto PostgresAdmission::submit(std::string prompt) -> std::optional<InferenceOut
 // SgeeLeaseSource
 // ---------------------------------------------------------------------------
 
-SgeeLeaseSource::SgeeLeaseSource(SgeeQueueClient client,
-                                   options_calculator::inference_queue::Surface surface,
-                                   std::uint64_t worker_id, std::uint64_t visibility_ms)
-    : client_(std::move(client)), surface_(surface),
-      lease_filter_(surface_lease_filter(surface)), worker_id_(worker_id),
-      visibility_ms_(visibility_ms) {}
+SgeeLeaseSource::SgeeLeaseSource(SgeeQueueClient client, RouteTag tag, std::uint64_t worker_id,
+                                   std::uint64_t visibility_ms)
+    : client_(std::move(client)), tag_(std::move(tag)), lease_filter_(surface_lease_filter(tag_)),
+      worker_id_(worker_id), visibility_ms_(visibility_ms) {}
 
 SgeeLeaseSource::~SgeeLeaseSource() {
     // Same contract as PostgresLeaseSource's destructor: every helper is joined
@@ -508,10 +585,9 @@ auto SgeeLeaseSource::fill(std::size_t want) -> std::vector<PendingJob> {
         // in seconds without executing it. One failure is answered by
         // SgeeAdmission::submit falling back to the LOCAL backend: a correct
         // answer, on the right model, slightly slower. Unknown counts as foreign,
-        // for the reason DecodedSurface documents.
-        if (const auto tagged = decode_surface(leased->payload);
-            (tagged.tag == SurfaceTag::Known && tagged.surface != surface_) ||
-            tagged.tag == SurfaceTag::Unknown) {
+        // for the reason DecodedSurface documents. A worker with a BUILD checks that too: a task
+        // routed to another build is exactly as wrong to run as one from another surface.
+        if (const auto foreign = foreign_owner(leased->payload, tag_); foreign.has_value()) {
             const bool reported = client_.fail_blocking(*leased);
             ++foreign_leases_;
             foreign_backoff_until_ = std::chrono::steady_clock::now() + kForeignLeaseBackoff;
@@ -521,13 +597,11 @@ auto SgeeLeaseSource::fill(std::size_t want) -> std::vector<PendingJob> {
             // the writeback path names its own -- "it failed" without "why" cannot
             // tell a refused task from a moved leader.
             logger::Logger::getInstance().error(
-                "inference_admission: SGEE handed a '{}' task ({}) to the '{}' worker despite a "
-                "payload filter -- the broker is not applying it (an older queue node?). "
+                "inference_admission: SGEE handed a task belonging to {} (task {}) to the '{}' worker "
+                "despite a payload filter -- the broker is not applying it (an older queue node?). "
                 "Reporting the task failed so the submitter falls back locally{}; {} foreign "
                 "lease(s) so far.",
-                tagged.tag == SurfaceTag::Unknown ? std::string("unrecognised")
-                                                  : std::string(to_string(tagged.surface)),
-                leased->task_id, to_string(surface_),
+                *foreign, leased->task_id, to_string(tag_.surface),
                 reported ? std::string{}
                          : std::format(" -- BUT THE REPORT ITSELF FAILED ({}), so the task stays "
                                        "leased until its {} ms visibility window expires",
@@ -647,22 +721,20 @@ auto SgeeLeaseSource::reap_finished_locked() -> void {
 // SgeeAdmission
 // ---------------------------------------------------------------------------
 
-SgeeAdmission::SgeeAdmission(SgeeQueueClient client,
-                               options_calculator::inference_queue::Surface surface,
-                               InferenceBackend& local,
+SgeeAdmission::SgeeAdmission(SgeeQueueClient client, RouteTag tag, InferenceBackend& local,
                                std::chrono::milliseconds remote_deadline)
-    : client_(std::move(client)), surface_(surface), local_(local),
+    : client_(std::move(client)), tag_(std::move(tag)), local_(local),
       remote_deadline_(remote_deadline) {}
 
 auto SgeeAdmission::submit(std::string prompt) -> std::optional<InferenceOutcome> {
     const auto deadline = std::chrono::steady_clock::now() + remote_deadline_;
-    const std::string payload_json = encode_prompt_for_surface(surface_, prompt);
+    const std::string payload_json = encode_prompt_for_surface(tag_, prompt);
 
     auto task_id = client_.submit_blocking(payload_json);
     if (!task_id.has_value()) {
         logger::Logger::getInstance().warn(
             "inference_admission: SGEE submit failed -- falling back to the local backend");
-        return local_.submit(std::move(prompt));
+        return degrade_to_local(local_, std::move(prompt));
     }
 
     // Poll rather than await. The interval is a compromise with one real cost on
@@ -670,6 +742,12 @@ auto SgeeAdmission::submit(std::string prompt) -> std::optional<InferenceOutcome
     // short multiplies GetTask RPCs against a three-node cluster for no benefit.
     // 25 ms is well under the smallest plausible decode and cheap at this
     // concurrency.
+    //
+    // MEASURED FOR ENCODER TASKS (2026-10-07) AND LEFT ALONE: a 2..25 ms doubling schedule here
+    // plus a 10 ms idle lease tick gave the same c=1 latency as this fixed 25 ms plus the 50 ms
+    // tick -- p50 150.9 vs 150.7, 80.3 vs 75.4, 69.4 vs 75.9 ms over three alternating rounds on
+    // one cluster -- at three times the idle CPU. Every queue operation is a replicated write that
+    // costs about a Raft heartbeat, and three of them per request dwarf any poll interval.
     constexpr auto kPollInterval = std::chrono::milliseconds(25);
     while (std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(kPollInterval);
@@ -690,7 +768,7 @@ auto SgeeAdmission::submit(std::string prompt) -> std::optional<InferenceOutcome
                 "inference_admission: SGEE task {} is no longer present -- falling back to the "
                 "local backend",
                 *task_id);
-            return local_.submit(std::move(prompt));
+            return degrade_to_local(local_, std::move(prompt));
         }
         if (!outcome->terminal) continue;
 
@@ -710,14 +788,80 @@ auto SgeeAdmission::submit(std::string prompt) -> std::optional<InferenceOutcome
             "inference_admission: SGEE task {} reached a terminal failure -- falling back to the "
             "local backend rather than failing the request",
             *task_id);
-        return local_.submit(std::move(prompt));
+        return degrade_to_local(local_, std::move(prompt));
     }
 
     logger::Logger::getInstance().warn(
         "inference_admission: SGEE task {} did not reach a terminal state before the deadline -- "
         "falling back to the local backend",
         *task_id);
-    return local_.submit(std::move(prompt));
+    return degrade_to_local(local_, std::move(prompt));
+}
+
+// ---------------------------------------------------------------------------
+// LeaseRunner
+// ---------------------------------------------------------------------------
+
+LeaseRunner::LeaseRunner(std::shared_ptr<LeaseSource> source, InferenceBackend& executor,
+                         std::string label)
+    : source_(std::move(source)), executor_(executor), label_(std::move(label)),
+      thread_([this](std::stop_token stoken) { run(stoken); }) {}
+
+auto LeaseRunner::fill_one() -> std::vector<PendingJob> {
+    // fill() allocates and spawns a write-back thread for each job it leases, and either can throw
+    // under a container's memory or thread limit. This runs on a std::jthread, so an exception
+    // that escaped it would be std::terminate -- both assistants and the calculator with them --
+    // for a condition the next tick may well not repeat. Same guarantee the executor call below
+    // gives a throwing backend: nothing a job or a source does ends the process.
+    try {
+        return source_->fill(1);
+    } catch (const std::exception& e) {
+        note_fill_failure(e.what());
+    } catch (...) {
+        note_fill_failure("unknown exception");
+    }
+    return {};
+}
+
+auto LeaseRunner::note_fill_failure(std::string_view what) -> void {
+    // The first failure and then every hundredth: at one attempt per tick a condition that
+    // persists would otherwise write twenty error lines a second and bury everything else.
+    if (++fill_failures_ % 100 != 1) return;
+    logger::Logger::getInstance().error(
+        "inference_admission: {} lease source threw ({}) -- the runner keeps going; {} failure(s) "
+        "so far",
+        label_, what, fill_failures_);
+}
+
+auto LeaseRunner::run(std::stop_token stoken) -> void {
+    while (!stoken.stop_requested()) {
+        auto jobs = fill_one();
+        if (jobs.empty()) {
+            // Nothing eligible, or the cluster did not answer (already logged by the source).
+            // Both are answered the same way: wait one tick, then ask again.
+            std::this_thread::sleep_for(kLeasePollTick);
+            continue;
+        }
+        for (auto& job : jobs) {
+            InferenceOutcome outcome;
+            try {
+                auto answered = executor_.submit(std::move(job.prompt));
+                outcome = answered.has_value()
+                              ? std::move(*answered)
+                              : InferenceOutcome{.ok = false, .text = {},
+                                                 .error = "the executing backend was at capacity"};
+            } catch (const std::exception& e) {
+                outcome = InferenceOutcome{.ok = false, .text = {}, .error = e.what()};
+            } catch (...) {
+                outcome = InferenceOutcome{.ok = false, .text = {},
+                                           .error = "unknown failure executing a leased job"};
+            }
+            job.promise.set_value(std::move(outcome));
+            logger::Logger::getInstance().info(
+                "inference_admission: {} executed leased job #{} on this replica", label_,
+                ++executed_);
+        }
+    }
 }
 
 }  // namespace options_calculator::inference_admission
