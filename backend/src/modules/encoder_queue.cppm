@@ -467,7 +467,7 @@ class EncoderService {
     /**
      * The service the engine builds: its bounds come from `ENCODER_LOCAL_MAX_IN_FLIGHT` and
      * `ENCODER_QUEUE_MAX_IN_FLIGHT`, the effective values are LOGGED, and an unusable one stops the
-     * process. Both assistants build theirs here, so the rule is written once.
+     * process. Every assistant builds its service here, so the rule is written once.
      */
     [[nodiscard]] static auto from_environment(EncoderBackend::Chain chain, EncoderBackend::Render render,
                                                std::string label, const std::filesystem::path& model)

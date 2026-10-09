@@ -128,7 +128,7 @@ cp "$STRATEGY_GGUF" "$OTHER_BUILD_GGUF" && printf '\0' >> "$OTHER_BUILD_GGUF" ||
 eqc_start_engine S "$PORT_S" sgee ENCODER_LOCAL_MAX_IN_FLIGHT=0 STRATEGY_ENCODER_PATH="$OTHER_BUILD_GGUF" || exit 1
 sleep 1
 skew strategy "strategy encoder"
-kill -TERM "${ENGINE_PIDS[-1]}" 2>/dev/null || true   # the pid this script captured; never by name
+eqc_stop_last_engine
 
 # ---- 3d. the two bounds are operator switches, and are read as ones ----------------------------
 #
@@ -151,7 +151,7 @@ python3 -P "$PROBE" latency --target "127.0.0.1:$PORT_S" -c 1 -n 24 --warmup 0 \
 sleep 0.5
 check_eq "with a queue bound of 0 even a request that is always busy is answered in-process" "$(( $(eqc_inprocess Z "strategy encoder") - z0 ))" 24
 check_eq "and none is reported as spilled to the queue" "$(( $(eqc_queued Z "strategy encoder") - zq0 ))" 0
-kill -TERM "${ENGINE_PIDS[-1]}" 2>/dev/null || true   # the pid this script captured; never by name
+eqc_stop_last_engine
 
 # ---- 3e. a listener that cannot bind exits cleanly even with queue runners already polling -------
 #

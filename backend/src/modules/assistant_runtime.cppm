@@ -17,7 +17,7 @@ import sgee_queue_client;
  *
  * What an assistant needs to EXECUTE work and to SHARE it, in one place.
  *
- * The strategy and the mortgage assistants (the latter now lives in nest-egg-loan) each carried the same seven members and the same
+ * History: the strategy and the mortgage assistants (the latter now lives in nest-egg-loan) each carried the same seven members and the same
  * hundred and fifty lines around them: the decoder that executes on this replica, the encoder that
  * may execute instead, the Postgres pool and queue, the lease source, the stand-in backend of a
  * replica with no weights, and the admission object that submits. Measured by diffing the two
@@ -29,7 +29,8 @@ import sgee_queue_client;
  *
  * What stays in a Worker is what really differs between the assistants: how its model is chosen
  * and loaded, which environment variables name it, what its prompt and grammar are, and how its
- * answer is rendered. Everything below this line is the same for both.
+ * answer is rendered. Everything below this line is the same for any assistant, and the strategy
+ * assistant is the one that uses it in production.
  *
  * ORDER IS LOAD-BEARING AND IS THE CALLER'S. `configure_queue()` installs the lease source, and
  * `QueuedBackend::start()` documents that as part of construction: a decoder whose owner thread
@@ -100,7 +101,7 @@ class AssistantRuntime {
      * submit-only mode). Immutable after construction, so no synchronization is needed.
      *
      * The encoder HAD TO BE TAUGHT TO BOTH this and `holds_model()` separately, and forgetting one
-     * is a measured defect: with only `holds_model()` updated, the removed mortgage service's boot banner
+     * is a measured defect: with only `holds_model()` updated, the since-removed mortgage service's boot banner
      * printed "model is LOADED" while every single RPC answered "not available right now" -- a
      * health signal from the wrong layer, across all 600 holdout rows.
      */
@@ -218,7 +219,8 @@ class AssistantRuntime {
     }
 
     /** The worker id only has to be unique among live leaseholders; the pid is what both queues
-     *  use. The surface is folded in so the two assistants of ONE process never collide on it. */
+     *  use. The surface is folded in so two assistants of ONE process (the strategy assistant and,
+     *  in a test, a mortgage one) never collide on it. */
     [[nodiscard]] auto worker_id() const -> std::uint64_t {
         return static_cast<std::uint64_t>(::getpid()) * 2ULL + static_cast<std::uint64_t>(surface_);
     }

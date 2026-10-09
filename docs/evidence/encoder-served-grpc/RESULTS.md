@@ -46,7 +46,7 @@ right behaviour. gold_as_served() models some of them and not these two.
 ## THREE MEASUREMENT DEFECTS ON THE WAY TO THAT NUMBER, in order
 
 1. EVERY ROW REFUSED "not available right now" while the boot banner said LOADED.
-   available() and local_model_loaded() answer DIFFERENT questions -- the first is
+   available() and AssistantRuntime::holds_model() answer DIFFERENT questions -- the first is
    "can this replica serve the RPC", the second "are the weights in THIS process" --
    and only the second had been taught about the encoder. A health signal from the
    wrong layer, which is the defect class this repo records against last_applied, the

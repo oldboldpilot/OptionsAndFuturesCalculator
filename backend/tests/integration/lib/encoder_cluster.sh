@@ -153,6 +153,21 @@ eqc_start_engine() {
     echo "engine $name did not become ready:"; tail -n 8 "$WORK/$name.log"; return 1
 }
 
+# Stop the engine started last (by the pid this script captured, never by name) and WAIT for it to
+# exit, bounded to ~10 s: its port is only free for the next process once it has gone, and a
+# still-listening predecessor would satisfy eqc_start_engine's readiness probe or make a holder's
+# bind fail.
+eqc_stop_last_engine() {
+    local pid="${ENGINE_PIDS[-1]}" tick=0
+    kill -TERM "$pid" 2>/dev/null || true
+    for (( tick = 0; tick < 100; tick++ )); do
+        kill -0 "$pid" 2>/dev/null || return 0
+        sleep 0.1
+    done
+    fail "engine pid $pid did not exit within 10 s of SIGTERM"
+    return 1
+}
+
 # Counts read from an engine's own log: the per-replica half of the work-sharing proof.
 eqc_executed()  { grep -c "$2 executed leased job" "$WORK/$1.log" || true; }   # <engine> <label>
 eqc_fallbacks() { grep -cE 'falling back to the local backend|answering locally instead' "$WORK/$1.log" || true; }

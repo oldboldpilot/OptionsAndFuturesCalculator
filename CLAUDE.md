@@ -3693,8 +3693,9 @@ plus the SAME `<params>...</params>` block the decoder produces), so `interpret_
 everything after it is unchanged. `LeaseRunner` drains the same `SgeeLeaseSource` /
 `PostgresLeaseSource` a decoder's owner thread would -- surface filter and write-back included, none
 reimplemented -- into the inline-executing encoder. `EncoderService` owns the encoder side of one
-assistant (backend, bound, runner) so their lifetimes are one lifetime and both assistants share the
-one definition. Both assistants are wired; each replica is both a submitter and a worker of its own
+assistant (backend, bound, runner) so their lifetimes are one lifetime and every assistant shares the
+one definition. (When this was written both the strategy and the mortgage assistants were wired; the
+mortgage one now lives in nest-egg-loan.) Each replica is both a submitter and a worker of its own
 surface.
 
 **`assistant_runtime.cppm` holds how an assistant's Worker joins the queue, ONCE.** The two Worker
@@ -4441,10 +4442,10 @@ correctness one, or do not quote it.**
 
 What survives and is worth keeping:
 
-- `NoLocalBackend`, the submit-only paths, and `local_model_loaded()` are still
+- `NoLocalBackend`, the submit-only paths, and `AssistantRuntime::holds_model()` are still
   in the tree and still correct — a replica with no weights CAN serve the
   assistant RPCs through the queue. Nothing enables it today.
-- **`local_model_loaded()` vs `available()` is load-bearing regardless.** The
+- **`AssistantRuntime::holds_model()` vs `available()` is load-bearing regardless.** The
   first is "are the weights in THIS process", the second is "can this replica
   serve the RPC at all". The startup banner must read the first: it keyed on
   `available()` for one build, so a model-less replica logged `model is LOADED`

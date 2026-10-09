@@ -1401,11 +1401,18 @@ if(PYTHON3_FOR_PROBE_TEST)
     set_tests_properties(EncoderQueueProbeTest PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
 endif()
 
+# The cluster test's helper that stops an engine and WAITS for it to exit (its port must be free
+# before the next engine or a port holder binds it). Hermetic: shell stand-ins, no weights.
+add_test(NAME EncoderStopEngineTest
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/encoder_stop_engine_test.sh
+                 ${CMAKE_CURRENT_SOURCE_DIR}/..)
+set_tests_properties(EncoderStopEngineTest PROPERTIES TIMEOUT 60)
+
 # The same claims against a REAL three-node SGEE cluster and REAL engines holding the real encoder
-# weights: encoders go through the queue, work is shared between engines, the surface partition
-# holds, served answers are byte-identical to local mode over the 272-row visitor regression and
-# the 1500-row strategy holdout, and a vanished cluster costs only the queue. Exit 77 (a named
-# skip) when the weights or python gRPC are absent -- the encoder GGUFs are not committed.
+# weights: encoders go through the queue, work is shared between engines, served answers are
+# byte-identical to local mode over the 1500-row strategy holdout, the build partition holds, and
+# a vanished cluster costs only the queue. Exit 77 (a named skip) when the weights or python gRPC
+# are absent -- the encoder GGUFs are not committed.
 add_test(NAME EncoderQueueClusterTest
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/encoder_queue_cluster_test.sh
                  $<TARGET_FILE:sgee_queue_node> $<TARGET_FILE:calculator_engine>

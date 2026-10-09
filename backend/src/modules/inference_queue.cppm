@@ -198,7 +198,7 @@ export struct QueueConfig {
      *  concurrent submit_remote() calls racing this exact statement for
      *  the SAME surface, which is hard-capped by each process's own
      *  `pg::PoolConfig::size` (4, unmodified by
-     *  assistant_service.cpp's `configure_inference_queue()`) -- submit_remote() must first
+     *  `AssistantRuntime::configure_queue()`) -- submit_remote() must first
      *  acquire a pooled connection, so no more than `pool_size` callers
      *  can even be mid-INSERT at once per process. Worst case, with the
      *  current single-container Railway deployment (one replica, one pool

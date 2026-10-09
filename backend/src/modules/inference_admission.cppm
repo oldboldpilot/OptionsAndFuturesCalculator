@@ -332,10 +332,9 @@ export class NoLocalBackend final : public InferenceBackend {
 };
 
 /** The idle-poll interval of every shared-queue consumer: `take_jobs()`'s BACKSTOP in postgres/sgee mode, and
- *  an idle `LeaseRunner` lane --
- *  only ever paid when an immediate lease attempt already came up empty
- *  (see that function's own doc for the try-first ordering this backs
- *  up). Local mode never uses this constant at all.
+ *  an idle `LeaseRunner` lane. Only ever paid when an immediate lease attempt already came up empty
+ *  (see that function's own doc for the try-first ordering this backs up). Local mode never uses
+ *  this constant at all.
  *
  *  50ms, not the 200ms this was originally set to: the try-first fix
  *  means this value no longer gates the common case (a job already
@@ -501,7 +500,7 @@ export class QueuedBackend : public InferenceBackend {
      * accumulates rows and serves none of them, indistinguishable from the
      * outside from Postgres itself being broken. This is exactly the failure
      * this ordering contract exists to make impossible: every production
-     * Worker constructor calls `configure_inference_queue()` (which calls
+     * Worker constructor calls `AssistantRuntime::configure_queue()` (which calls
      * `set_lease_source()` when `INFERENCE_QUEUE=postgres`) BEFORE calling
      * `backend_->start()`, so the owner thread's first take_jobs() call
      * always observes the correct, final `lease_source_` -- non-null in

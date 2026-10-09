@@ -322,7 +322,7 @@ Census ACS 1-year data releases experience an approximate 18-month publication l
 
 Inference admission routing is configured via the `INFERENCE_QUEUE` environment variable (`backend/src/modules/assistant_service.cpp:1700`):
 - `"sgee"`: Executes `configure_sgee_queue()` (`backend/src/modules/assistant_service.cpp:1705`). Instantiates `SgeeQueueClient::create_for_admission()`, installs `SgeeLeaseSource` with a 90-second lease visibility timeout, and wraps the submission pipeline in `SgeeAdmission` (90-second deadline).
-- `"postgres"`: Executes `configure_inference_queue()` (`backend/src/modules/assistant_service.cpp:1754`). Requires `DATABASE_URL`, initializes a dedicated 16-connection pool, installs `PostgresLeaseSource`, and wraps submission in `PostgresAdmission` (90-second deadline).
+- `"postgres"`: Executes `AssistantRuntime::configure_queue()` (`backend/src/modules/assistant_runtime.cppm`). Requires `DATABASE_URL`, initializes a dedicated 16-connection pool, installs `PostgresLeaseSource`, and wraps submission in `PostgresAdmission` (90-second deadline).
 - `"local"` / Unset / Other: Bypasses distributed admission queues. The service interacts directly with the local engine (`backend_`), leaving `admission_` and `lease_source_` null.
 
 ### Surface Partitioning & Routing
