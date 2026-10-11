@@ -81,3 +81,59 @@ measured a five-day-old client against a new engine.
 Engine banner at the new pin: `SIMD: runtime tier avx512 (avx512f=1 avx512vnni=1
 avx512bf16=1 avx2=1 fma3=1), compiled floor x86-64-v3` and `Built by: clang 23.1.2,
 libc++ _LIBCPP_VERSION=230102, C++23`.
+
+## The usability lane, merged -- and it was not only usability
+
+`fix/ofc-usability` had sat unmerged with **13 commits**, and the reason it should not have
+is that four of them are CORRECTNESS fixes, not polish:
+
+- `22294f8` max profit and max loss are the POSITION's extremes, not the grid's edge
+- `6f18a94` refuse a CRYPTO quote instead of pricing the equity of the same name (the
+  ES/Eversource root-collision class, on the other asset class)
+- `39969d5` switching symbol no longer re-prices the old position, and futures and crypto
+  are not priced as equity options
+- `f004ade` count an expiration's days at READ time, from the one date source the matrix uses
+
+**Its tip-to-tip diff was misleading and the merge-base diff is the real one.** `git diff
+origin/master..HEAD` showed 266 files and +38,907/-17,124, which is not a 13-commit lane --
+it is the lane's own work plus master's movement inverted. Against the merge base the
+contribution is **85 files, +7,147/-1,410**, 80 frontend and 5 backend. The lane was **41
+commits behind**, so master was merged into it first.
+
+Gate, in master after the merge rather than only in the lane:
+
+| | result |
+| --- | --- |
+| `ctest` (bump + usability + slim) | **211 / 0 failed**, 897.58 s, the same 7 skips by name |
+| `smoke_client ... finance` | rc=0 |
+| `smoke_client ... ` (options) | rc=0 -- the lane's own path; the assistant suite honestly SKIPS with no local model |
+| frontend `npm test` | 36 files / 448 tests |
+| frontend `npm run build` + `check-export` | rc=0; 26 article pages >= 600 words and distinct, 35 others (404 and every calculator page) carrying NO ad code, similarity 0.5 median / 0.54 max |
+| `scripts/check_start_memory_knobs.sh` | all arms, re-run IN MASTER |
+
+`lane/slim-containers` (2 commits, 4 files) went in the same pass: Envoy's worker cap and
+the allocator knobs for the engine and the gateway, with its own gate script -- which
+refuses `abc`, `0`, `-1`, `2.5`, ` 3` and `4 ` rather than defaulting them, the strict-switch
+rule this tree applies to every operator variable.
+
+## The straggler count was wrong twice, and both errors had one cause
+
+Reported as "30 remote sensen lane branches, each 8-61 commits unmerged". Re-measured, the
+local view said **68** branches of which **37** had zero unmerged commits -- and deleting
+those 37 failed with `remote ref does not exist` on BOTH remotes, because
+`refs/remotes/origin/*` is a LOCAL CACHE and `git for-each-ref` reads the cache while
+`git ls-remote` asks the server. A branch someone else deleted stays in the cache until a
+prune. After `git remote prune` (**38 stale refs on origin, 5 on gitea**) the real figure is
+**30 lane branches, 0 of them merged** -- so the original number was right and both
+corrections were artifacts of dead local state.
+
+Same family as this repository's own rule that a push's output is not proof a ref persisted:
+only `ls-remote` is. It applies to counting refs as well as to pushing them.
+
+Also cleared: an **orphaned `calculator_engine`** from the deleted `lane-mfva` worktree,
+running **3 days 16 hours** and holding port 50877, killed by PID (never by name, on a shared
+box). Its 6.2 GB scratch directory was **left alone deliberately** -- it holds
+`mortgage-encoder.gguf`, `strategy-encoder.gguf` and three earlier encoder revisions, and a
+quantised GGUF on this host may be its only copy. The two `sensen-gateway` processes running
+since 2026-10-06 were also left alone: one is `admin reap-loop`, which is the documented
+maintainer mechanism for the PostgreSQL tier, not debris.
