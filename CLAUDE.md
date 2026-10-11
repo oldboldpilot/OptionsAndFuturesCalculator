@@ -7673,6 +7673,47 @@ under "SGEE queue cluster", including the table that says what that costs at the
 
 ### BOTH ENCODERS ARE DEPLOYED AND THE DECODERS ARE GONE, and the strategy one was refusing 1 row in 3
 
+**MEASURED 2026-10-10: ONLY THE STRATEGY ENCODER IS ON THIS ENGINE, and the
+`railway ssh` line below no longer answers what it claims.** The mortgage
+surface left this engine (see the MOVED note under "gRPC Surface"), so run
+against `options-calculator-backend` today it reports
+`/app/model/mortgage-encoder.gguf: No such file or directory` and
+`/app/model` holds exactly one file:
+
+```
+railway ssh --service options-calculator-backend -- ls -la /app/model
+-rw-r--r-- 1 root root 2796448 Oct 10 21:50 strategy-encoder.gguf
+abd40b21e4971c2d27700cf1fd468c4c4934c2b2fdc32edf7b8b5685f74c2f84   <- unchanged
+```
+
+**`40b4e420...` IS HISTORY AND IS NOT THE MORTGAGE ENCODER ANYWHERE TODAY.** The
+surface runs as `mfv-assistant`, and measured there the same day it serves the
+**v5e** encoder:
+
+```
+railway ssh --service mfv-assistant -- sha256sum /app/model/mortgage-encoder.gguf
+b03dcdeff5da7c18d0e0871457d54ef1a9e41b674fe9e3af496f2bb2af3434db
+```
+
+`nest-egg-loan` owns that record and already states the ambiguity in as many
+words -- `RAILWAY_DEPLOY.md` tells its reader to take `MORTGAGE_ENCODER_SHA256`
+from the live service rather than a local file *because* its own records name
+two encoders, v5e `b03dcdef...` and this section's `40b4e420...`. Three session
+logs there name `b03dcdef` as the deployed one. Do not quote `40b4e420` to
+verify anything.
+
+**AND THIS TREE STILL HOLDS A `mortgage-encoder.gguf` THAT MATCHES NEITHER.**
+`backend/models/mortgage-encoder.gguf` is `2d5beb8c197c9b37...`, dated
+2026-10-04 -- not this section's `40b4e420`, not production's `b03dcdef`. It is
+gitignored, so nothing in the build or the upload reaches it (`.railwayignore`
+excludes every `.gguf`) and it is inert where it sits. It is **deliberately not
+deleted**, for the reason the four decoder GGUFs above are not: a quantised file
+on this host may be its only copy. Treat the NAME as a trap rather than an
+identifier -- a third artefact under the filename of a model two other places
+record differently, which is the stale-recorded-sha defect this file has now
+paid for twice.
+
+
 Deployed 2026-10-03, deployment `f41229ab`. `/app/model/` now holds EXACTLY the two
 encoders and neither 639 MB decoder:
 
