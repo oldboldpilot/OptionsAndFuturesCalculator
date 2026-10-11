@@ -6777,7 +6777,15 @@ answers by being read, not by being argued.
   with`) and carry a positive control proving the pattern still fires on a planted
   trailer. Same defect family as the `[WARN ]` padding that made a zero look clean.
 - **Backend Tests:** `ninja -C backend/build build_tests && ctest --test-dir backend/build`
-  (ctest is **211 TESTS: 201 PASSED, 0 FAILED, 8 SKIPPED, 2 NOT RUN as of 2026-10-08**, measured on the
+  (ctest is **211 TESTS, 0 FAILED as of 2026-10-10**, measured TWICE in one session either side of the
+  sensen bump `8d39843dd -> fcaaa3760`: 211/0 in 899.51 s at the old pin and 211/0 in 911.92 s at the new
+  one, with the SKIP SET compared by NAME rather than by count -- the same seven both times
+  (`AmqpTransportTests`, `CausalHookMissingFailsByName`, `KafkaTransportTests`, `NcclCollectiveGate`,
+  `SanitizerOverlayCoversEveryObject`, `TransportConformanceAmqpTests`, `TransportConformanceKafkaTests`:
+  absent brokers, no GPU, the sanitizer overlay). A count cannot tell an absent broker from a test that
+  quietly stopped being built, which is why the names are written down. The 2026-10-08 reading of this
+  line said "201 PASSED, 8 SKIPPED, 2 NOT RUN"; ctest counts a skip as passed in its own summary, so
+  quote the FAILED figure and the skip names, not the passed figure. Earlier readings follow, measured on the
   deletion of the mortgage assistant against a same-build-directory baseline of 218 (207 passed, 1 failed, 8
   skipped, 2 not run). By name, eight tests left with the service -- `MortgageAssistantServiceTest`,
   `MortgageVerificationTest`, `MortgageDerivationTest`, `MortgageGrammarTest`, `LabelSpaceDriftTest`,
