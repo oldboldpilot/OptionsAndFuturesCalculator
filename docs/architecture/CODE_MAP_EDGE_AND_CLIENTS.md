@@ -45,6 +45,8 @@ This document provides reference documentation for the edge, client, deployment,
   - `backend/migrations/05_saved_strategies_auth_fk.sql`
   - `backend/migrations/06_user_tables_rls.sql`
   - `backend/migrations/07_state_assumptions.sql`
+  - `backend/migrations/08_data_hazard_guards.sql`
+  - `backend/migrations/09_auth_users_null_tokens.sql`
 - Deployment Automation and Configuration:
   - `deploy/queue-node/deploy.sh`
   - `deploy/queue-node/set-vars.sh`
@@ -294,6 +296,16 @@ Configures self-hosted open-source Supabase services (GoTrue auth, PostgREST dat
 - **What it guards on**: `CREATE TABLE IF NOT EXISTS`, `INSERT ... ON CONFLICT (slug) DO NOTHING`, `IF NOT EXISTS` in `pg_roles`, `DROP POLICY IF EXISTS`.
 - **Idempotency**: Fully idempotent.
 
+### 08_data_hazard_guards.sql
+- **What it changes**: Guards against accidental table loss and mass row loss. The engine and operator sessions connect as superuser `postgres` (`rolbypassrls = true`), which RLS, `FORCE ROW LEVEL SECURITY` and `REVOKE` do not bind; only event triggers and statement triggers do, so the guards are built from those. Creates the metadata table `public.protected_relations` (`schema_name`, `table_name`, `block_drop`, `block_truncate`, `mass_delete_fraction`, `mass_delete_floor`, `reason`; primary key `(schema_name, table_name)`) and seeds it with `public.saved_strategies`, `public.users`, `public.profiles`, `public.state_assumptions`, `public.job_runs`, `public.inference_jobs`, `auth.users` and the list table itself. `public.inference_jobs` is drop-protected only (it is a work queue, so `TRUNCATE` and bulk deletes stay allowed), and `public.job_runs` and the list table carry no mass-delete rule. Creates event trigger `guard_protected_drop_trg` (`sql_drop`, function `public.guard_protected_drop()`) refusing to drop a listed table, and event trigger `guard_protected_schema_trg` (`ddl_command_start`, `DROP SCHEMA`, function `public.guard_protected_schema()`). For each listed table that exists it creates a `BEFORE TRUNCATE` statement trigger `guard_truncate_trg` (function `public.guard_protected_truncate()`) where `block_truncate` is set, and an `AFTER DELETE` statement trigger `guard_mass_delete_trg` (function `public.guard_mass_delete()`) where `mass_delete_fraction` is set: a single `DELETE` is refused when it removes more than 25 rows and more than 50% of the table's rows. Refusals use SQLSTATE `insufficient_privilege`. Escape hatch: `BEGIN; SET LOCAL app.allow_destructive = 'on'; ...; COMMIT;` disarms every guard for that transaction only. Enables RLS on `protected_relations` and revokes `PUBLIC` access to it. It prevents the accidents it anticipates and is not a backup; `scripts/backup_database_to_nas.sh` is the recovery side.
+- **What it guards on**: `CREATE TABLE IF NOT EXISTS`, `ON CONFLICT (schema_name, table_name) DO UPDATE` (the seed), `CREATE OR REPLACE FUNCTION`, `DROP EVENT TRIGGER IF EXISTS` / `DROP TRIGGER IF EXISTS` before each create, and `to_regclass(...) IS NULL` to skip a listed table that is absent from the database.
+- **Idempotency**: Fully idempotent.
+
+### 09_auth_users_null_tokens.sql
+- **What it changes**: Fixes GoTrue admin endpoints answering 500 (`converting NULL to string is unsupported`, for example on `GET /auth/v1/admin/users`) because restored `auth.users` rows held `NULL` in columns GoTrue scans into non-nullable strings. For each of the eight token columns (`confirmation_token`, `recovery_token`, `email_change`, `email_change_token_new`, `email_change_token_current`, `phone_change`, `phone_change_token`, `reauthentication_token`) that exists, it rewrites `NULL` to `''` and sets the column default to `''`, so a later import cannot reintroduce the defect. It also rewrites `NULL` `encrypted_password` (an account with no password) to `''`, which is GoTrue's own spelling of "no password"; only `NULL` rows are touched, and no column default is set. `phone` is left `NULL` on purpose.
+- **What it guards on**: `to_regclass('auth.users') IS NULL` (no GoTrue in this database: notice and return) and an `information_schema.columns` check before altering each column.
+- **Idempotency**: Fully idempotent.
+
 ---
 
 ## Deployment Automation (`deploy/`)
@@ -332,7 +344,7 @@ Configures self-hosted open-source Supabase services (GoTrue auth, PostgREST dat
 - **Success Gate and Verification**:
   - Asserts deployment status via `railway deployment list --service assistant-worker` (`deploy/assistant-worker/deploy.sh:127-128`).
   - Checks log output for loaded model weights: `railway logs --service assistant-worker --deployment <id> | grep 'model is LOADED'` (`deploy/assistant-worker/deploy.sh:130-131`).
-  - Invariant: `assistant-worker` must have `MODEL_URL` and `MORTGAGE_MODEL_URL` configured and log "model is LOADED"; the main engine (`options-calculator-backend`) must have them unset and log "NOT LOCAL -- submitting to the shared inference queue" (`deploy/assistant-worker/README.md:33-44`).
+  - Invariant (split-fleet design, REVERTED 2026-08-23 and the service deleted; a template only): `assistant-worker` had `MODEL_URL` configured and logged "model is LOADED", while the engine had it unset and logged "NOT LOCAL -- submitting to the shared inference queue" (`deploy/assistant-worker/README.md:38-50`). **This does not describe production:** `options-calculator-backend` serves the strategy encoder in-process and must keep `STRATEGY_ENCODER_URL` / `STRATEGY_ENCODER_SHA256` set.
 
 ### MortgageFV Gateway (`deploy/mfv-gateway/`)
 - **Purpose**: Minimal Caddy-based API reverse proxy presenting GoTrue and PostgREST behind a single origin matching Supabase client URL expectations (`deploy/mfv-gateway/Caddyfile:1-9`).
@@ -374,7 +386,7 @@ Configures Envoy as the public ingress proxy fronting the C++ calculation engine
   2. `envoy.filters.http.grpc_web`: Decodes gRPC-Web framing into native gRPC (`backend/envoy.yaml:128-130`).
   3. `envoy.filters.http.grpc_json_transcoder`:
      - Must follow `grpc_web`: Translates HTTP JSON requests to gRPC against descriptor `/etc/envoy/api_descriptor.pb` (`backend/envoy.yaml:137-157`).
-     - Registered services: `calculator.OptionsCalculator`, `sensen.finance.Finance`, `calculator.assistant.StrategyAssistant`, `mortgage.assistant.MortgageAssistant` (`backend/envoy.yaml:158-162`).
+     - Registered services: `calculator.OptionsCalculator`, `sensen.finance.Finance`, `calculator.assistant.StrategyAssistant` (`backend/envoy.yaml:158-162`). `mortgage.assistant.MortgageAssistant` was removed from the list in 2026-10 together with its descriptor entry; `EnvoyTranscoderServicesTest` keeps the list and the descriptor equal.
      - Settings: `auto_mapping: true`, `convert_grpc_status: true`, `print_options: { always_print_primitive_fields: true }` (`backend/envoy.yaml:163-169`).
   4. `envoy.filters.http.cors`: Handles CORS preflight and headers (`backend/envoy.yaml:170-172`).
   5. `envoy.filters.http.router`: Terminal routing filter (`backend/envoy.yaml:173-175`).
@@ -386,7 +398,7 @@ Configures Envoy as the public ingress proxy fronting the C++ calculation engine
   - TLS Configuration: If `GRPC_TLS_CERT` and `GRPC_TLS_KEY` are provided, writes `/etc/envoy/tls/tls.crt` and `/etc/envoy/tls/tls.key` (chmod 600) and configures `envoy.transport_sockets.tls` with ALPN `["h2"]` (`backend/start.sh:45-66`).
   - Plaintext Fallback: If TLS material is absent and `GRPC_ALLOW_PLAINTEXT=1`, logs warning and runs plaintext (`backend/start.sh:68-75`). If `GRPC_ALLOW_PLAINTEXT` is not set, terminates with fatal exit code 1 (`backend/start.sh:76-83`).
   - Listener Appended: Appends `listener_grpc_native` on `:GRPC_NATIVE_PORT` with `codec_type: http2`, route timeout `120s`, cluster `backend_grpc_service`, and no `grpc_web` or transcoder filters (`backend/start.sh:85-129`).
-- **Model Path Verification**: Iterates over `MODEL_PATH` and `MORTGAGE_MODEL_PATH`; unsets the variable if the target file does not exist on disk, ensuring the service cleanly reports models unavailable rather than crashing on dangling paths (`backend/start.sh:142-148`).
+- **Model Path Verification**: Checks `MODEL_PATH`; unsets the variable if the target file does not exist on disk, ensuring the service cleanly reports models unavailable rather than crashing on dangling paths (`backend/start.sh:142-148`).
 - **Line Buffering**: Launches `/app/calculator_engine` using `stdbuf -oL -eL` so stdout/stderr are line-buffered across container pipes, avoiding 4 KB block buffering of startup telemetry (`backend/start.sh:165-171`).
 - **Process Supervision**: Starts Envoy (`backend/start.sh:174`). Traps SIGTERM and SIGINT (`backend/start.sh:182`). Uses `wait -n "${BACKEND_PID}" "${ENVOY_PID}"` to detect process termination and stops the entire container immediately if either process exits (`backend/start.sh:185-189`).
 

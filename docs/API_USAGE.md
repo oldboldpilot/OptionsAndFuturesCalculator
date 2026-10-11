@@ -84,9 +84,11 @@ allow-list would not solve anyway, since it only constrains browsers.
 | `grpc-status: 0` | success | — |
 | `grpc-status: 3` (`INVALID_ARGUMENT`) | your input was rejected | malformed decimal string, missing required field |
 | `grpc-status: 7` (`PERMISSION_DENIED`) | entitlement refusal | a Pro-gated feature without entitlement |
+| `grpc-status: 8` (`RESOURCE_EXHAUSTED`) | quota or capacity exhaustion | the caller's request-rate or compute-unit quota is spent; the assistant's admission queue is full; or the saved-scenarios cap (100 per user) is reached |
 | `grpc-status: 9` (`FAILED_PRECONDITION`) | the maths has no answer | payment below periodic interest; a solver that cannot converge |
 | `grpc-status: 12` (`UNIMPLEMENTED`) | that method is not on the deployed build | your proto is newer than the server |
 | `grpc-status: 13` (`INTERNAL`) | malformed request framing | a body that is not a valid gRPC-Web frame |
+| `grpc-status: 16` (`UNAUTHENTICATED`) | the caller could not be identified | an unusable API key when key enforcement is on; an invalid or expired session token; saved-scenario calls without a signed-in account |
 | **HTTP 429, no `grpc-status`** | **proxy rate limit** — see §5 | too many requests per second |
 
 Two of these mislead if you are not expecting them:
@@ -246,16 +248,14 @@ A CORS preflight from an unrelated origin returns `204` with that origin echoed 
 
 ## 8. Verifying an integration
 
-1. `GET https://api.optionsandfuturescalculator.com/healthz` → `200` **with
-   `content-type: text/plain` and the body `ok`**.
+1. `GET https://api.optionsandfuturescalculator.com/healthz` (or `/health`, `/live`,
+   `/livez`, `/ready`, `/readyz`) → `200` **with `content-type: text/plain` and the
+   body `ok`**.
 
-   Assert the body, not the status. `/healthz` is the only path Envoy matches
-   exactly (`backend/envoy.yaml`); every other path falls through to the
-   catch-all gRPC route, and a gRPC-Web failure is *itself* an HTTP `200` with
-   the error in `grpc-status`. `GET /health` — one letter off — answers `200`,
-   `content-type: application/grpc`, `grpc-status: 2`, `grpc-message: Bad method
-   header`, empty body. A liveness probe that checks only the status code passes
-   against that forever.
+   Envoy answers these six paths itself and does not proxy them to the engine.
+   Any other `GET` or `HEAD` request receives an immediate HTTP 404 `not found`
+   (gRPC and gRPC-Web are always `POST`). Assert the body `ok` as well as the
+   status code.
 2. Call `ComputePayment` with a known loan; assert the value matches the
    closed-form annuity payment, not merely that a response arrived.
 3. Send a deliberately malformed decimal; assert you get `grpc-status: 3` and that

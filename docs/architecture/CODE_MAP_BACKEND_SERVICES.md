@@ -16,7 +16,9 @@ This document covers the implementation, interfaces, invariants, error handling,
 - `backend/src/modules/calculator_service.cppm` and `backend/src/modules/calculator_service.cpp`
 - `backend/src/modules/finance_service.cppm` and `backend/src/modules/finance_service.cpp`
 - `backend/src/modules/assistant_service.cppm` and `backend/src/modules/assistant_service.cpp`
-- `backend/src/modules/mortgage_assistant_service.cppm` and `backend/src/modules/mortgage_assistant_service.cpp`
+
+> The mortgage assistant service (`mortgage_assistant_service.cppm/.cpp`) that this map used to cover
+> left this repository in 2026-10 and now lives in `nest-egg-loan` (`services/mortgage-assistant`).
 
 ---
 
@@ -35,7 +37,6 @@ The boot sequence proceeds sequentially in `RunServer()` (`backend/src/main.cpp:
    - `options_calculator::service::RegisterCalculatorService(builder)` (`backend/src/main.cpp:106`): Registers the core options and futures pricing service (`calculator.OptionsCalculator`).
    - `options_calculator::finance::RegisterFinanceService(builder, {.refresh = &state_refresh::run_refresh, .read = &state_refresh::read_assumptions})` (`backend/src/main.cpp:112-114`): Registers the financial mathematics service (`sensen.finance.Finance`), injecting hooks for state assumption refreshes and reads.
    - `options_calculator::assistant::RegisterAssistantService(builder)` (`backend/src/main.cpp:124`): Registers the options strategy assistant service (`calculator.assistant.StrategyAssistant`).
-   - `options_calculator::mortgage_assistant::RegisterMortgageAssistantService(builder)` (`backend/src/main.cpp:140`): Registers the mortgage/TVM assistant service (`mortgage.assistant.MortgageAssistant`).
 6. **Server Start** (`backend/src/main.cpp:142`): `std::unique_ptr<grpc::Server> server(builder.BuildAndStart());` binds the socket and starts request worker threads.
 7. **Security Posture Logging** (`backend/src/main.cpp:147-158`): Queries `options_calculator::auth::KeyRegistry::instance()` to log whether API key authentication is disabled or active (`ENFORCE`, `WARN`, or `OBSERVE`), the registered key count, and transport limits.
 8. **Background Scheduler Startup** (`backend/src/main.cpp:163-164`): Instantiates and starts `static state_refresh::Scheduler state_scheduler;`. Started strictly after the listener binds so slow initial ticks cannot delay orchestrator health checks.
@@ -51,8 +52,6 @@ The boot sequence proceeds sequentially in `RunServer()` (`backend/src/main.cpp:
 | `CENSUS_API_KEY` | Unset / empty | `backend/src/main.cpp:161`, `backend/src/modules/state_refresh.cpp:21` | Provides access credentials for automated Census ACS demographic/economic state assumption updates in `state_refresh::Scheduler`. |
 | `MODEL_PATH` | Unset / empty | `backend/src/modules/assistant_service.cpp:187, 3142-3160` | Filesystem path to the fine-tuned GGUF weights for the options strategy assistant. Missing or invalid weights degrade `calculator.assistant.StrategyAssistant` to `MODEL_UNAVAILABLE` without halting boot. |
 | `ASSISTANT_DEVICE` | `cpu` | `backend/src/modules/assistant_service.cpp:258-275` | Selects offload device for the strategy assistant (`cpu` or `cuda`). |
-| `MORTGAGE_MODEL_PATH` | Unset / empty | `backend/src/modules/mortgage_assistant_service.cpp:232, 3367-3381` | Filesystem path to the fine-tuned GGUF weights for the mortgage assistant. Missing or invalid weights degrade `mortgage.assistant.MortgageAssistant` to `MODEL_UNAVAILABLE` without halting boot. |
-| `MORTGAGE_DEVICE` | `cpu` | `backend/src/modules/mortgage_assistant_service.cpp:303-320` | Selects offload device for the mortgage assistant (`cpu` or `cuda`). |
 
 ### Hook Injection & Architecture Rationale
 `backend/src/main.cpp` is the sole compilation unit that binds the concrete database-backed implementations of `state_refresh` and `strategy_store`:
@@ -240,41 +239,6 @@ Automated reasoning verification failures (`verify::ReasonCode`) are mapped to p
 
 ---
 
-## backend/src/modules/mortgage_assistant_service.cppm and mortgage_assistant_service.cpp
-`mortgage_assistant_service` implements the `mortgage.assistant.MortgageAssistant` gRPC service. It parses natural-language home finance utterances into structured parameters for the 26 in-scope RPCs of `sensen.finance.Finance`, applying schema validation, variant field dropping, automated reasoning verification (GP-ARA), and wire TVM sign conversions.
-
-### Exported Symbols
-| Symbol | Kind | File & Line | Purpose |
-| :--- | :--- | :--- | :--- |
-| `RegisterMortgageAssistantService` | Function | `backend/src/modules/mortgage_assistant_service.cppm:37`, `backend/src/modules/mortgage_assistant_service.cpp:3357` | Registers `MortgageAssistantImpl` on a `grpc::ServerBuilder` and eagerly constructs `MortgageAssistantWorker::instance()` (`backend/src/modules/mortgage_assistant_service.cpp:3375`). |
-| `RegisterMortgageAssistantServiceForTest` | Function | `backend/src/modules/mortgage_assistant_service.cppm:50-52`, `backend/src/modules/mortgage_assistant_service.cpp:3384` | Test-only registration hook. Constructs `MortgageAssistantImpl` binding only the specified subset of action names. Leaks service instance memory by design to avoid freezing singletons across test cases. |
-
-### RPC Inventory: `mortgage.assistant.MortgageAssistant`
-| RPC Name | Request / Response Message | Computation / Delegation | Entitlement & Quota Gate | gRPC Status Codes & Conditions |
-| :--- | :--- | :--- | :--- | :--- |
-| `ParseOperation` | `::mortgage::assistant::ParseRequest`<br>`::mortgage::assistant::ParseResponse` | SGEE `MortgageAssistantWorkflow` pipeline (`Admission` $\to$ `CheckModel` $\to$ `Generate` $\to$ `ParseAndVerify` $\to$ `Done`/`Refused`) (`backend/src/modules/mortgage_assistant_service.cpp:3217-3243`). Generates structured JSON, drops inert/excluded variant fields, enforces GP-ARA verification, and applies TVM sign conventions. | Enforced in `action_admission` (`backend/src/modules/mortgage_assistant_service.cpp:3078-3108`):<br>1. `KeyRegistry::authenticate` (`:3079-3083`).<br>2. `QuotaEnforcer::admit_identity` charged via `cost_llm_generate(1, kMaxNewTokens)` (`:3087-3094`). | - `INTERNAL`: null context/request/response (`:3288`); uninitialized graph (`:3291`); entity halted before reaching `Done` or `Refused` (`:3322-3326`); entity reached terminal without producing params, clarification, or refusal payload (`:3343-3347`).<br>- `INVALID_ARGUMENT`: `utterance.size() > 2000` (`kMaxUtteranceLength`, `:3097-3100`); `prior_clarification.size() > 1000` (`kMaxPriorClarificationLength`, `:3103-3106`).<br>- `UNAUTHENTICATED`: API key authentication failure.<br>- `RESOURCE_EXHAUSTED`: quota rate or compute limits exceeded.<br>- `OK`: successful parse (`response.params`), or benign refusal (`response.refusal` carrying `MODEL_UNAVAILABLE`, `OUT_OF_SCOPE`, `UNSUPPORTED_OPERATION`, or `INVALID_PARAMETERS`), or clarification prompt (`response.clarification`). |
-
-### Engine Error Mapping Helper
-GP-ARA verification reason codes (`mv::ReasonCode`) are mapped to proto refusal reasons by `map_verification_reason` (`backend/src/modules/mortgage_assistant_service.cpp:2040-2053`):
-- `mv::ReasonCode::UnknownOperation` $\to$ `::mortgage::assistant::Refusal::UNSUPPORTED_OPERATION` (`:2043-2044`)
-- All other reason codes (ungrounded values, out-of-bounds numbers, missing fields, schema violations) $\to$ `::mortgage::assistant::Refusal::INVALID_PARAMETERS` (`:2045-2050`)
-
-### Key Invariants, Refusals & Failure Modes
-- **Generation-Config Pins**:
-  - `config.n_gpu_layers = 0;` (`backend/src/modules/mortgage_assistant_service.cpp:551`): forces inference onto CPU unless `device_ == Device::Cuda` (`:584-587`), where it sets `n_gpu_layers` to total model layers and `compute_backend` to `CUDA`.
-  - `config.repetition_penalty = 1.0F;` (`backend/src/modules/mortgage_assistant_service.cpp:574`): prevents exponential logit suppression of digits in structured JSON.
-- **Dropping Excluded & Inert Variant Fields**:
-  - *Operation-level exclusions*: Enforced at `backend/src/modules/mortgage_assistant_service.cpp:2729-2731`: `if (mv::operation_excludes_field(operation, key)) continue;`. Drops fields defined on shared protobuf messages that the target operation ignores (e.g. `ComputeRate.guess`, where model-invented starting seeds would corrupt Newton solver convergence).
-  - *Variant-level exclusions*: Enforced at `backend/src/modules/mortgage_assistant_service.cpp:2746-2752`: `if (mv::field_is_inert_for_variant(operation, method, key)) continue;`. In multi-method messages like `DepreciationRequest`, fields that do not apply to the selected method (e.g. `factor` when method is straight-line) are dropped so ungrounded model outputs do not cause false refusals.
-- **Verification Verdict Gating**: Enforced at `backend/src/modules/mortgage_assistant_service.cpp:2804-2820`. Evaluates `mv::verify_mortgage_output(verifiable, user_text)` (`:2805`). Only `verdict.outcome == mv::Outcome::Proven` is permitted to populate `response.params`. Both `Unsafe` and `Indeterminate` outcomes trigger immediate refusal via `populate_refusal(response, map_verification_reason(verdict.reason), ...)` (`:2813-2820`).
-- **TVM Sign Convention on Outgoing Parameters**: Enforced by `apply_tvm_sign_convention` (`backend/src/modules/mortgage_assistant_service.cpp:2346-2370`), invoked at `backend/src/modules/mortgage_assistant_service.cpp:2822` immediately after verification passes. When solving TVM equations (`ComputeRate` or `ComputePeriods`) with $FV = 0$, `present_value` and `payment` must have opposite signs. Users and training corpora state both as positive magnitudes (e.g. "$1,275,100 loan, $7,751.77/month"). `apply_tvm_sign_convention` negates `payment` (`:2360-2365`) before returning parameters to the client, bridging human phrasing to the cash-flow sign convention demanded by the finance engine.
-
-### Gotchas
-- **Independent Assistant Pipelines**: `mortgage_assistant_service` and `assistant_service` instantiate entirely separate LLM pipelines, worker threads, and model weights (`MORTGAGE_MODEL_PATH` vs `MODEL_PATH`). They never share pipeline state or fallback to each other's weights (`backend/src/modules/mortgage_assistant_service.cppm:20-25`).
-- **TVM Sign Inversion Applied After Grounding**: `apply_tvm_sign_convention` runs strictly **after** GP-ARA verification (`backend/src/modules/mortgage_assistant_service.cpp:2805, 2822`). Grounding requires emitted numbers to match the user's literal text ("$7,751.77"). Applying sign negation before verification would cause the grounding gate to reject the negative value as ungrounded.
-
----
-
 ## Test Coverage
 | Test Target Binary | Source File | Service / Functionality Exercised | Key Assertions & Scenarios |
 | :--- | :--- | :--- | :--- |
@@ -283,7 +247,6 @@ GP-ARA verification reason codes (`mv::ReasonCode`) are mapped to proto refusal 
 | `test_finance_service_validation` | `backend/tests/test_finance_service_validation.cpp` | `finance_service.cpp` (all ~46 non-tree RPCs) | - Magnitude overflow prevention in amortization and TVM RPCs (`:130-310`).<br>- Unbounded loop iteration guards on `period_payment` (`:312-380`).<br>- Raw double NaN and magnitude overflow protections in `ComputeCumulative` and batch RPCs (`:382-520`).<br>- 24-cell total classification matrix for `decide_rent_vs_buy_shape` (`:1940-2110`).<br>- TVM solvability sign pre-check on `ComputeRate` and `ComputePeriods` (`:2112-2190`).<br>- `ComputePeriods` non-positive result post-check (`:2192-2240`).<br>- MACRS unsupported recovery periods (27.5 and 39 years) refusal (`:2242-2310`).<br>- Cash flow dates-in-days to seconds conversion and day span bounds (`:2312-2430`). |
 | `test_state_assumptions_gate` | `backend/tests/test_state_assumptions_gate.cpp` | `finance_service.cpp` (`RefreshStateAssumptions`, `GetStateAssumptions`) | - Verifies write-side gate on `RefreshStateAssumptions`: anonymous callers and Pro subscriber keys are rejected with `PERMISSION_DENIED` (`:120-155`).<br>- Partner and admin credentials pass the authorization gate and reach the hook layer (`:157-180`).<br>- Unconfigured hooks return `FAILED_PRECONDITION` (`:170-175`). |
 | `test_assistant_service` | `backend/tests/test_assistant_service.cpp` | `assistant_service.cpp` (`ParseStrategy`, `apply_averaging_to_legs`) | - End-to-end execution of `StrategyAssistantWorkflow` without model returning `MODEL_UNAVAILABLE` (`:130-180`).<br>- `action_admission` hard-error edge on oversized utterances returning `INVALID_ARGUMENT` (`:182-220`).<br>- Prompt injection refusal returning `Status::OK` with `Refusal::OUT_OF_SCOPE` (`:222-260`).<br>- Discriminating proof: unbound `CheckModel` action caught by did-compute postcondition, returning `INTERNAL` (`:262-350`).<br>- Stamping of Asian averaging style onto option legs vs linear legs (`:390-445`). |
-| `test_mortgage_assistant_service` | `backend/tests/test_mortgage_assistant_service.cpp` | `mortgage_assistant_service.cpp` (`ParseOperation`) | - End-to-end execution of `MortgageAssistantWorkflow` without model returning `MODEL_UNAVAILABLE` (`:110-160`).<br>- Oversized utterance rejection with `INVALID_ARGUMENT` (`:162-195`).<br>- Prompt injection refusal with `Refusal::OUT_OF_SCOPE` (`:197-230`).<br>- Discriminating proof: unbound `ParseAndVerify` action caught by did-compute postcondition, returning `INTERNAL` (`:232-315`).<br>- Verified routing where `Outcome::Proven` is the sole path to populated parameters (`:317-355`). |
 
 ---
 

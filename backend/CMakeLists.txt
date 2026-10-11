@@ -21,7 +21,7 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/ToolchainBMIGuard.cmake)
 #
 # The failure it avoided needs TWO std modules built from two flag sets. This
 # tree now builds exactly one -- sensen's std_module_precompile, from
-# ${CMAKE_CXX_FLAGS}, which is CANONICAL_FLAGS below and therefore the union of
+# ${CMAKE_CXX_FLAGS}, which is CANONICAL_FLAGS (sensen_canonical_flags(), below) and therefore the union of
 # what every subdirectory compiles with. SGEE imports that same file rather than
 # building its own (SGEE_EXTERNAL_STD_PCM), and so does this directory. One BMI
 # cannot disagree with itself.
@@ -38,140 +38,14 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/ToolchainBMIGuard.cmake)
 # `import std;` consumer interoperate, because std::string from a textual header
 # and from the std module are the same entity.
 
-# libc++ tags most of its inline, header-only functions with
-# __attribute__((__abi_tag__(<odr-signature>))) so that two objects built
-# against different libc++ configurations cannot silently share a definition.
-# The tag is part of the mangled name. That is exactly why this define has to be
-# set HERE, at the top level, rather than left to whoever happens to set it:
-# sensen/CMakeLists.txt:351 defines it unconditionally for everything in its own
-# directory scope, so fastjson and the logger get it, while proto_lib,
-# sensen_slim, calculator_engine, smoke_client, sgee and the whole FetchContent'd
-# gRPC subtree would not. Half a binary mangling std:: inline functions with an
-# ABI tag and half without is an ODR violation between objects that otherwise
-# look interchangeable -- the linker either fails on a symbol that plainly
-# should exist, or picks one definition arbitrarily and the mismatch survives to
-# runtime. Under libstdc++ this define was inert, which is why it was previously
-# safe to leave to sensen alone; that is no longer true.
-add_compile_definitions(_LIBCPP_NO_ABI_TAG)
-
-# Enforce C++23 (and prepare for C++26)
-set(CMAKE_CXX_STANDARD 23)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
-
-# Enable C++23 modules scanning
-set(CMAKE_EXPERIMENTAL_CXX_MODULE_CMAKE_API "2182bf5c-ef0d-489a-91da-49dbc3090d2a")
-set(CMAKE_CXX_SCAN_FOR_MODULES ON)
-
-# Canonical build flags from config/cpp_details.txt
-# NO fast-math, NO native march
-#
-# -stdlib=libc++ is the standard library for this ENTIRE binary, which is what
-# sensen's own code policy (config/cpp_details.txt rule 50) has always required
-# and what this tree previously could not give it. It belongs in CANONICAL_FLAGS
-# rather than in an add_compile_options() call for a reason that is easy to get
-# wrong: CMAKE_CXX_FLAGS is what CMake's configure-time probes
-# (check_cxx_source_compiles, check_include_file_cxx, try_compile) are run with,
-# and add_compile_options() is not. Setting it here means every feature the
-# build detects is detected against the standard library the build will actually
-# use. Put it anywhere else and configure can conclude a header exists, or a
-# snippet compiles, under libstdc++ and then hand that answer to a libc++ build.
-#
-# It is also set BEFORE FetchContent_MakeAvailable(grpc) further down, which is
-# the whole mechanism by which gRPC, protobuf, abseil, re2 and upb are built
-# against libc++ too: CMAKE_CXX_FLAGS is inherited by every subdirectory added
-# after it, so those ~3000 translation units need no per-target treatment.
-#
-# The flag deliberately does NOT go into the C flags. c-ares and zlib are C, and
-# a C compilation has no standard library to select; clang would only warn that
-# the argument went unused.
-#
-# -fexperimental-library was already here and is now load-bearing rather than
-# inert: under libc++ it defines _LIBCPP_ENABLE_EXPERIMENTAL and links
-# libc++experimental. Because it sits in the same global CMAKE_CXX_FLAGS as
-# everything else, it is uniform across the C++23 side and the C++17 gRPC side,
-# which is what matters -- an experimental-library split across a link boundary
-# would be its own ABI hazard.
-#
-# _GLIBCXX_USE_TBB_PAR_BACKEND=0 used to be defined alongside these flags. It was
-# a libstdc++ macro, telling libstdc++'s parallel algorithms not to route through
-# TBB; with libstdc++ out of the picture it names nothing and has been dropped
-# rather than left as a define that only looks meaningful.
-#
-# -maes -mpclmul ARE DELIBERATELY *NOT* HERE, AND THIS BLOCK RECORDS A MISTAKE
-# RATHER THAN A RULE, because the reasoning that put them here for one commit was
-# wrong in a way that reads as careful.
-#
-# The mismatch they were added to fix is real: sensen appends the pair to
-# CMAKE_CXX_FLAGS in SENSEN's directory scope and declares std_module_precompile
-# afterwards, so the single std.pcm recorded "+aes"/"+pclmul" while every TU here
-# was built from CANONICAL_FLAGS without them, and clang refuses such a consumer
-# per translation unit ("compiled with the target feature '+aes' but the current
-# translation unit is not" -- a diagnostic naming the BMI, not the flag).
-#
-# ADDING THEM HERE MADE THAT GO AWAY AND INTRODUCED A WORSE PROBLEM. Three
-# measurements, none of which the original audit made:
-#
-#   1. The justification was "every v3-class CPU has both", which is true of real
-#      silicon and FALSE of the architecture level -- and a floor states the
-#      level. The x86-64 psABI puts AES and PCLMULQDQ in NO micro-architecture
-#      level; both are independent CPUID bits, and `clang -march=x86-64-v3 -dM -E`
-#      defines __AVX__/__AVX2__/__BMI2__/__F16C__/__FMA__/__LZCNT__ and neither
-#      __AES__ nor __PCLMUL__.
-#   2. A floor flag is NOT inert metadata even when this project's own code emits
-#      nothing. It defines __PCLMUL__ for every dependency built with the floor,
-#      and abseil's CRC32 gates on exactly that -- `#if defined(__x86_64__) &&
-#      defined(__SSE4_2__) && defined(__PCLMUL__)` -> ABSL_CRC_INTERNAL_HAVE_X86_SIMD
-#      -> ABSL_INTERNAL_CAN_USE_SIMD_CRC32C. __SSE4_2__ is already set two flags
-#      to the left, so __PCLMUL__ was the only missing term, and 756 vpclmul*
-#      instructions duly appeared in crc_x86_arm_combined.cc.o, which does not
-#      pass -mpclmul on its own target. (randen_hwaes.cc.o does, carrying -maes
-#      twice, and was unaffected -- which is what makes this attributable.)
-#   3. abseil's x86 dispatch has NO runtime guard for it: its `default:` case
-#      returns an accelerated implementation for any unrecognised CPU, where the
-#      aarch64 `default:` asks SupportsArmCRC32PMULL() first and may return
-#      nullptr. On a host without PCLMUL those instructions are reachable, so the
-#      failure mode is SIGILL, not a slow path.
-#
-# THE FIRST AUDIT "PROVED" THE OPPOSITE WITH A BROKEN GREP, which is the part
-# worth keeping. It counted `\baesenc\b` and `\bpclmul` and found zero -- but
-# under -mavx/-mavx2 the assembler emits VEX forms, `vaesenc` and
-# `vpclmullqlqdq`, and \b cannot match between 'v' and 'a'. The correct pattern
-# finds 32 and 756. A negative grep needs a positive control, which this file
-# already says elsewhere and which was not done here.
-#
-# FIXED AT THE SOURCE INSTEAD. sensen's own comment says the pair is there for
-# the embedded ThinButQuickWebFramework build, and TBQWF is NOT embedded here
-# (external/tbqwf has 0 entries and the generated build has 0 tbqwf targets), so
-# the flags were buying nothing. sensen now gates the append on TBQWF actually
-# being present and ANNOUNCES which arm it took at configure time ("SIMD floor:
-# ..."), so this tree's std.pcm no longer records the features and no consumer
-# needs them. Do not add them back to work around a BMI mismatch; check what
-# sensen's configure line says about the SIMD floor first.
-set(CANONICAL_FLAGS "-stdlib=libc++ -fPIC -O3 -march=x86-64-v3 -mtune=generic -mavx -mavx2 -mfma -msse2 -msse3 -mssse3 -msse4.1 -msse4.2 -pthread -fstack-protector-strong -DNDEBUG -Wno-error=stringop-overflow -Wno-error=array-bounds -Wno-error=unused-variable -Wno-error=unused-parameter -Wno-error=unused-but-set-variable -Wno-error=pedantic -Wno-error=global-module -Wno-unknown-warning-option -fexperimental-library")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${CANONICAL_FLAGS}")
-
-# The linker needs to be told as well, and separately: -stdlib= is a driver
-# option, and the driver only puts -lc++ (and the libc++abi it depends on) on the
-# link line if it sees the flag at LINK time. Compiling every object against
-# libc++ headers and then linking without it produces a link against libstdc++
-# that fails on std::__1:: symbols nothing defines.
-#
-# -lc++abi is NOT listed explicitly. It does not need to be: libc++.so.1 carries
-# libc++abi.so.1 as its own DT_NEEDED, so the dynamic linker pulls it in
-# transitively -- verified directly by linking a trivial program with nothing but
-# -stdlib=libc++ and reading its NEEDED list. Naming it by hand is how a build
-# ends up ordering it wrongly on a static link.
-#
-# No -L or -Wl,-rpath to a libc++ directory either, deliberately. sensen's own
-# CMakeLists auto-detects a libc++ lib path and bakes an rpath to it, which is
-# right for a library that may be installed next to an unusual toolchain and
-# wrong here: an absolute host path baked into the engine is a path that does not
-# exist inside the deploy container. The toolchain's own default search path
-# resolves libc++ in both places, and the container carries its libc++ the same
-# way it already carries everything else the binary needs.
-set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -stdlib=libc++")
-set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -stdlib=libc++")
+# The canonical compile flags -- libc++, the x86-64-v3 floor, the ABI-tag define, C++23, module
+# scanning, the linker's -stdlib -- are sensen's, not this file's: one copy for every service built
+# on this engine's tree, with the reasons for each flag beside them. Every translation unit in this
+# build (gRPC, protobuf, abseil, sensen, SGEE, this engine) must agree on them, because a BMI records
+# its flags and clang refuses a consumer whose flags differ. Called HERE, before any target or probe,
+# so CMAKE_CXX_FLAGS reaches every directory added below.
+include(${CMAKE_CURRENT_SOURCE_DIR}/sensen/cmake/SensenCanonicalFlags.cmake)
+sensen_canonical_flags()
 
 # ON, and it has to be: this is the switch that decides whether TBB is built
 # from source at all. sensen guards its FetchContent TBB block with
@@ -328,27 +202,7 @@ add_custom_command(
     DEPENDS ${ASSISTANT_PROTO_FILE} ${FINANCE_PROTO_FILE}
 )
 
-# The MORTGAGE assistant's contract: free-text mortgage / time-value-of-money /
-# cash-flow requests in, the NAME OF A sensen.finance.Finance RPC plus that
-# RPC's own parameters (or a clarifying question, or a refusal) out. A separate
-# file from assistant.proto rather than a second service inside it, because the
-# two assistants are backed by two different fine-tuned models with two
-# different label spaces -- see that file's own banner. Same binary, same port,
-# fourth contract.
-set(MORTGAGE_ASSISTANT_PROTO_FILE "${CMAKE_CURRENT_SOURCE_DIR}/proto/mortgage_assistant.proto")
-
-add_custom_command(
-    OUTPUT "${PROTO_GEN_DIR}/mortgage_assistant.pb.cc" "${PROTO_GEN_DIR}/mortgage_assistant.pb.h" "${PROTO_GEN_DIR}/mortgage_assistant.grpc.pb.cc" "${PROTO_GEN_DIR}/mortgage_assistant.grpc.pb.h"
-    COMMAND $<TARGET_FILE:protoc>
-    ARGS --cpp_out=${PROTO_GEN_DIR}
-         --grpc_out=${PROTO_GEN_DIR}
-         --plugin=protoc-gen-grpc=$<TARGET_FILE:grpc_cpp_plugin>
-         -I${CMAKE_CURRENT_SOURCE_DIR}/proto
-         ${MORTGAGE_ASSISTANT_PROTO_FILE}
-    DEPENDS ${MORTGAGE_ASSISTANT_PROTO_FILE}
-)
-
-# One descriptor set covering ALL FOUR contracts, for Envoy's gRPC-JSON transcoder.
+# One descriptor set covering ALL THREE contracts, for Envoy's gRPC-JSON transcoder.
 #
 # Envoy resolves method names, field names and types from this at runtime, which
 # is what lets a caller POST JSON without holding a .proto or running codegen.
@@ -365,8 +219,8 @@ add_custom_command(
     ARGS --include_imports
          --descriptor_set_out=${PROTO_DESCRIPTOR}
          -I${CMAKE_CURRENT_SOURCE_DIR}/proto
-         ${PROTO_FILE} ${FINANCE_PROTO_FILE} ${ASSISTANT_PROTO_FILE} ${MORTGAGE_ASSISTANT_PROTO_FILE}
-    DEPENDS ${PROTO_FILE} ${FINANCE_PROTO_FILE} ${ASSISTANT_PROTO_FILE} ${MORTGAGE_ASSISTANT_PROTO_FILE}
+         ${PROTO_FILE} ${FINANCE_PROTO_FILE} ${ASSISTANT_PROTO_FILE}
+    DEPENDS ${PROTO_FILE} ${FINANCE_PROTO_FILE} ${ASSISTANT_PROTO_FILE}
     COMMENT "Generating proto descriptor set for Envoy JSON transcoding"
 )
 add_custom_target(proto_descriptor ALL DEPENDS ${PROTO_DESCRIPTOR})
@@ -378,8 +232,6 @@ add_library(proto_lib STATIC
     "${PROTO_GEN_DIR}/finance.grpc.pb.cc"
     "${PROTO_GEN_DIR}/assistant.pb.cc"
     "${PROTO_GEN_DIR}/assistant.grpc.pb.cc"
-    "${PROTO_GEN_DIR}/mortgage_assistant.pb.cc"
-    "${PROTO_GEN_DIR}/mortgage_assistant.grpc.pb.cc"
 )
 target_include_directories(proto_lib PUBLIC ${PROTO_GEN_DIR})
 target_link_libraries(proto_lib PUBLIC grpc++ libprotobuf)
@@ -500,7 +352,7 @@ add_subdirectory(sensen EXCLUDE_FROM_ALL)
 #
 # The BMI they import is the ONE sensen precompiles. There is deliberately no
 # second std.pcm for this directory: sensen builds it from ${CMAKE_CXX_FLAGS},
-# which at that point IS this file's CANONICAL_FLAGS, so a single BMI is
+# which at that point IS sensen_canonical_flags()'s CANONICAL_FLAGS, so a single BMI is
 # compatible with every consumer here by construction.
 #
 # sensen_use_shared_std_module() points every C++ target declared AFTER it in this
@@ -571,7 +423,7 @@ sensen_add_slim_library(sensen_slim GROUPS ALL)
 # The right answer is ONE std module built from the UNION of the flags, which is
 # what SGEE_EXTERNAL_STD_PCM below supplies:
 #
-#   * CANONICAL_FLAGS goes into CMAKE_CXX_FLAGS at the top of this file, BEFORE
+#   * sensen_canonical_flags() puts CANONICAL_FLAGS into CMAKE_CXX_FLAGS at the top of this file, BEFORE
 #     every add_subdirectory, so it is a prefix of what sensen, SGEE and this
 #     directory each compile with. It is already the union.
 #   * sensen precompiles std.pcm from exactly ${CMAKE_CXX_FLAGS}, so that one
@@ -677,8 +529,8 @@ endif()
 # add_subdirectory(cpp23-logger EXCLUDE_FROM_ALL)
 
 # Core engine binary
-add_executable(calculator_engine src/main.cpp src/issue_key.cpp src/modules/calculator_service.cpp src/modules/finance_service.cpp src/modules/quota.cpp src/modules/api_key.cpp src/modules/assistant_service.cpp src/modules/mortgage_assistant_service.cpp src/modules/inference_queue.cpp src/modules/inference_admission.cpp src/modules/sgee_queue_client.cpp src/modules/strategy_store.cpp src/modules/state_refresh.cpp)
-target_sources(calculator_engine PUBLIC FILE_SET CXX_MODULES FILES src/modules/calculator_service.cppm src/modules/market_data.cppm src/modules/finance_service.cppm src/modules/quota.cppm src/modules/api_key.cppm src/modules/fips_mode.cppm src/modules/state_refresh.cppm src/modules/strategy_catalogue.cppm src/modules/assistant_verification.cppm src/modules/assistant_service.cppm src/modules/mortgage_verification.cppm src/modules/mortgage_explanation.cppm src/modules/mortgage_derivation.cppm src/modules/mortgage_grammar.cppm src/modules/mortgage_assistant_service.cppm src/modules/pg.cppm src/modules/inference_queue.cppm src/modules/sgee_queue_client.cppm src/modules/inference_admission.cppm src/modules/strategy_store.cppm src/modules/llq_weight_store.cppm)
+add_executable(calculator_engine src/main.cpp src/issue_key.cpp src/modules/calculator_service.cpp src/modules/finance_service.cpp src/modules/quota.cpp src/modules/api_key.cpp src/modules/assistant_service.cpp src/modules/inference_queue.cpp src/modules/inference_admission.cpp src/modules/sgee_queue_client.cpp src/modules/strategy_store.cpp src/modules/state_refresh.cpp)
+target_sources(calculator_engine PUBLIC FILE_SET CXX_MODULES FILES src/modules/calculator_service.cppm src/modules/market_data.cppm src/modules/finance_service.cppm src/modules/quota.cppm src/modules/api_key.cppm src/modules/fips_mode.cppm src/modules/state_refresh.cppm src/modules/strategy_catalogue.cppm src/modules/assistant_verification.cppm src/modules/assistant_service.cppm src/modules/mortgage_explanation.cppm src/modules/pg.cppm src/modules/inference_queue.cppm src/modules/sgee_queue_client.cppm src/modules/inference_admission.cppm src/modules/encoder_queue.cppm src/modules/assistant_runtime.cppm src/modules/strategy_store.cppm src/modules/llq_weight_store.cppm)
 target_link_libraries(calculator_engine PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto sgee)
 # PostgreSQL::PostgreSQL is linked into calculator_engine further down, right
 # after find_package(PostgreSQL REQUIRED) runs (see that comment block) --
@@ -833,78 +685,31 @@ target_link_libraries(test_runner PRIVATE proto_lib sensen_slim fastjson logger 
 
 add_test(NAME CoreEngineTest COMMAND test_runner)
 
-# CorpusInvariantsTest: deterministic properties of the assistant's TRAINING
-# DATA, asserted without a model, a checkpoint or a GPU.
+# EnvoyTranscoderServicesTest: the JSON transcoder's service list in envoy.yaml must
+# equal the services in the descriptor set built above. A service named in envoy.yaml
+# and missing from the descriptor makes Envoy refuse the configuration at startup, so
+# /healthz (which Envoy itself answers) never responds and the deploy fails its
+# healthcheck while the previous deployment keeps serving; a service in the descriptor
+# and not in envoy.yaml silently has no JSON route. The CMake proto list and envoy.yaml are
+# edited in different files and nothing else connects them, which is what this does.
 #
-# Every corpus defect this project has paid for was visible in the data before
-# any model was trained, and every one was found only after a retrain measured
-# worse -- `phrase_money` rounding away the cents its label kept (0/98 on eight
-# operations), `prepaid_interest_days` labelling a convention the utterance
-# never states (21 of 26 closing-cost failures), and the dated cash-flow grid
-# generated at ~365-day intervals and labelled ComputeXnpv, whose entire
-# distinction from ComputeNpv is IRREGULAR spacing (8 of 9 held-out rows
-# answered as the wrong operation). The generator is a pure function of
-# (seed, n, val_frac, its own source), so all of it is checkable in a second.
-#
-# Plain `python3`, deliberately NOT ${Python_EXECUTABLE}: that variable only
-# exists when BUILD_PYTHON_BINDINGS is ON, which the production container build
-# must never require. Registered only if an interpreter is present, so a host
-# without one skips the test rather than failing it.
-find_program(PYTHON3_FOR_CORPUS_TEST NAMES python3)
-if(PYTHON3_FOR_CORPUS_TEST)
+# Plain `python3`, deliberately NOT ${Python_EXECUTABLE}: that variable only exists when
+# BUILD_PYTHON_BINDINGS is ON, which the production container build must never require.
+# Registered only if an interpreter is present, so a host without one skips the test
+# rather than failing it. The descriptor is decoded by the protoc that built it.
+find_program(PYTHON3_FOR_TESTS NAMES python3)
+if(PYTHON3_FOR_TESTS)
     add_test(
-        NAME CorpusInvariantsTest
-        COMMAND ${PYTHON3_FOR_CORPUS_TEST}
-                ${CMAKE_CURRENT_SOURCE_DIR}/../agent/dataset/test_corpus_invariants.py
+        NAME EnvoyTranscoderServicesTest
+        COMMAND ${PYTHON3_FOR_TESTS}
+                ${CMAKE_CURRENT_SOURCE_DIR}/../scripts/check_envoy_services.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/envoy.yaml
+                ${PROTO_DESCRIPTOR}
+                $<TARGET_FILE:protoc>
+                ${grpc_SOURCE_DIR}/third_party/protobuf/src
     )
 else()
-    message(STATUS "python3 not found -- CorpusInvariantsTest not registered")
-endif()
-
-# DerivationCorpusSweepTest: prove the derivation layer never CORRUPTS a correct
-# answer, against a corpus generated from the generator itself.
-#
-# Accuracy cannot see this failure. The sweep hands the layer the GOLD params as
-# though the model had emitted them perfectly and reports every field the layer
-# then REWRITES -- and rewriting a correct value is a served regression by
-# construction, because the row still scores raw-exact and serves wrong. A
-# recency rule keyed on percent alone cost 19 holdout rows exactly that way: a
-# HELOC reply of "75%" is a max-LTV, and letting it supersede the stated 8.33%
-# derived annual_rate = 0.7500 on rows the model had answered perfectly.
-# `raw_exact` was byte-identical across that regression; only served_exact moved.
-#
-# The corpus is GENERATED rather than checked in, for the reason
-# CorpusInvariantsTest gives: it is a pure function of (seed, n, the generator),
-# so the gate re-derives itself whenever the corpus changes and cannot go stale
-# beside it.
-if(PYTHON3_FOR_CORPUS_TEST)
-    add_test(
-        NAME DerivationCorpusSweepTest
-        COMMAND ${PYTHON3_FOR_CORPUS_TEST}
-                ${CMAKE_CURRENT_SOURCE_DIR}/../scripts/sweep_corpus.py
-                --gate $<TARGET_FILE:dbg_derivation> 500
-    )
-endif()
-
-# GroundingCorpusSweepTest: the same sweep, one layer down -- prove the GROUNDING
-# gate never refuses a label the corpus itself teaches.
-#
-# `mortgage_verification.cppm` has claimed this property in a comment since
-# 2026-08-05 (the misuse spec's WU-M2 criterion) and nothing ever ran it. The
-# criterion was checked once by hand and the corpus then moved underneath it.
-#
-# What that cost, measured 2026-09-16: `ComputePaybackPeriod` teaches
-# `rate: 0.0` for an UNDISCOUNTED payback -- the convention meaning "no
-# discounting", which the engine never reads -- and grounding refused it as an
-# ungrounded zero. 17 of 28 holdout rows, with the model's output byte-identical
-# to the gold. `raw_exact` scored every one of them correct.
-if(PYTHON3_FOR_CORPUS_TEST)
-    add_test(
-        NAME GroundingCorpusSweepTest
-        COMMAND ${PYTHON3_FOR_CORPUS_TEST}
-                ${CMAKE_CURRENT_SOURCE_DIR}/../scripts/sweep_corpus.py
-                --gate $<TARGET_FILE:dbg_grounding> 500
-    )
+    message(STATUS "python3 not found -- EnvoyTranscoderServicesTest not registered")
 endif()
 
 # Retry-with-backoff + circuit-breaker orchestration around market_data.cppm's
@@ -961,77 +766,29 @@ target_sources(test_assistant_verification
 
 add_test(NAME AssistantVerificationTest COMMAND test_assistant_verification)
 
-# GP-ARA mandatory verification stage for the MORTGAGE assistant. Same
-# rationale as the options block above: proto- and gRPC-free, and deliberately
-# NOT linked against sensen_slim -- the only sensen module it needs,
-# sensen.gp_ara_interfaces, has no dependencies beyond std, so it is compiled
-# here as this target's own FILE_SET source.
-# mortgage_derivation: the Horn-clause derivation layer. Links sensen_slim
-# because it imports sensen.logic and sensen.logic_parser, which the engine now
-# carries -- see the logic.cppm entry in the slim list for why that is the right
-# engine for this and z3 is not.
-add_executable(bench_derivation tests/bench_derivation.cpp)
-target_sources(bench_derivation PRIVATE FILE_SET CXX_MODULES FILES
-    sensen/src/gp_ara_interfaces.cppm
-    src/modules/mortgage_verification.cppm
-    src/modules/mortgage_derivation.cppm)
-target_link_libraries(bench_derivation PRIVATE sensen_slim fastjson logger)
-
 # bench_finance_compute: raw kernel latency with no gRPC and no network. It
 # needs no module FILE_SET of its own -- every symbol it times is exported by
 # sensen_slim's financial/bigdecimal modules, which it imports directly.
 add_executable(bench_finance_compute tests/bench_finance_compute.cpp)
 target_link_libraries(bench_finance_compute PRIVATE sensen_slim fastjson logger)
 
-add_executable(dbg_grounding tests/dbg_grounding.cpp)
-target_sources(dbg_grounding PRIVATE FILE_SET CXX_MODULES FILES
-    sensen/src/gp_ara_interfaces.cppm
-    src/modules/mortgage_verification.cppm)
-target_link_libraries(dbg_grounding PRIVATE sensen_slim fastjson logger)
-
-add_executable(dbg_derivation tests/dbg_derivation.cpp)
-target_sources(dbg_derivation PRIVATE FILE_SET CXX_MODULES FILES
-    sensen/src/gp_ara_interfaces.cppm
-    src/modules/mortgage_verification.cppm
-    src/modules/mortgage_derivation.cppm)
-target_link_libraries(dbg_derivation PRIVATE sensen_slim fastjson logger)
-
-# Two consistency checkers over rule systems this project spreads across files
-# no compiler reads together -- the mortgage assistant's per-operation coverage,
-# and mortgagefvcalculator.com's monetization workflow. Both ask the Horn-clause
-# engine "which member of this family has no rule", which is the defect shape
-# every coverage miss recorded in CLAUDE.md has taken.
+# A consistency checker over a rule system this project spreads across files no
+# compiler reads together -- mortgagefvcalculator.com's monetization workflow. It asks
+# the Horn-clause engine "which member of this family has no rule", which is the defect
+# shape every coverage miss recorded in CLAUDE.md has taken.
 #
-# THEY LIVE HERE BECAUSE THIS IS THE ONLY TREE THAT CAN BUILD THEM. The facts
-# they consume are GENERATED -- scripts/emit_assistant_facts.py in this repo,
-# nest-egg-loan/scripts/emit-workflow-facts.mjs in the other -- and both
-# emitters were committed while their readers existed only in an untracked
-# worktree. A generator whose only consumer is uncommitted is a generator
-# nothing gates.
+# IT LIVES HERE BECAUSE THIS IS THE ONLY TREE THAT CAN BUILD IT. The facts it consumes
+# are GENERATED -- nest-egg-loan/scripts/emit-workflow-facts.mjs in the other repository
+# -- and the emitter was committed while its reader existed only in an untracked
+# worktree. A generator whose only consumer is uncommitted is a generator nothing gates.
 #
-# Deliberately NOT registered with add_test: each needs a generated facts file,
-# and a check that passes because its input was missing is worse than no check.
-add_executable(assistant_check tests/assistant_check.cpp)
-target_link_libraries(assistant_check PRIVATE sensen_slim fastjson logger)
-
+# Deliberately NOT registered with add_test: it needs a generated facts file, and a check
+# that passes because its input was missing is worse than no check.
 add_executable(workflow_check tests/workflow_check.cpp)
 target_link_libraries(workflow_check PRIVATE sensen_slim fastjson logger)
 
-add_executable(test_mortgage_derivation tests/test_mortgage_derivation.cpp)
-target_sources(test_mortgage_derivation
-    PRIVATE
-    FILE_SET CXX_MODULES FILES
-        sensen/src/gp_ara_interfaces.cppm
-        src/modules/mortgage_verification.cppm
-        src/modules/mortgage_derivation.cppm
-)
-target_link_libraries(test_mortgage_derivation PRIVATE sensen_slim fastjson logger)
-target_compile_definitions(test_mortgage_derivation PRIVATE
-    MORTGAGE_FINANCE_PROTO_PATH="${CMAKE_CURRENT_SOURCE_DIR}/proto/finance.proto")
-add_test(NAME MortgageDerivationTest COMMAND test_mortgage_derivation)
-
-# mortgage_explanation: the PMI scenario put into words by the SAME Horn-clause
-# solver the derivation layer uses. It needs no verifier and no proto: it reasons
+# mortgage_explanation: the PMI scenario put into words by sensen's Horn-clause
+# solver (sensen.logic). It needs no verifier and no proto: it reasons
 # over FACTS the amortisation already produced, which is the property that keeps
 # a number out of the prose unless the engine computed it.
 add_executable(test_mortgage_explanation tests/test_mortgage_explanation.cpp)
@@ -1075,21 +832,6 @@ add_executable(test_rent_vs_buy_costs tests/test_rent_vs_buy_costs.cpp)
 target_link_libraries(test_rent_vs_buy_costs PRIVATE sensen_slim fastjson logger)
 add_test(NAME RentVsBuyCostsTest COMMAND test_rent_vs_buy_costs)
 
-# test_label_space_drift: the FOURTH table, which had no check at all and was
-# the one that drifted. It reads `kOperations` out of the service .cpp as text
-# -- the table is not in a module interface, and a derived check against the
-# real artifact beats a hand-written list that can drift exactly as the thing
-# it checks just did. The source root is passed so it does not depend on cwd.
-add_executable(test_label_space_drift tests/test_label_space_drift.cpp)
-target_sources(test_label_space_drift
-    PRIVATE
-    FILE_SET CXX_MODULES FILES
-        src/modules/mortgage_verification.cppm
-)
-target_link_libraries(test_label_space_drift PRIVATE sensen_slim fastjson logger)
-add_test(NAME LabelSpaceDriftTest
-         COMMAND test_label_space_drift ${CMAKE_CURRENT_SOURCE_DIR})
-
 # test_pmi_policy: the byte-identity gate over the PMI cancellation refactor,
 # plus the new basis/threshold behaviour. It links sensen_slim and calls
 # sensen::calculate_mortgage_amortization DIRECTLY rather than through the
@@ -1122,26 +864,6 @@ target_sources(test_rental_tax PRIVATE FILE_SET CXX_MODULES FILES
     src/modules/rental_tax.cppm)
 target_link_libraries(test_rental_tax PRIVATE fastjson logger)
 add_test(NAME RentalTaxTest COMMAND test_rental_tax)
-
-add_executable(test_mortgage_verification tests/test_mortgage_verification.cpp)
-target_sources(test_mortgage_verification
-    PRIVATE
-    FILE_SET CXX_MODULES FILES
-        sensen/src/gp_ara_interfaces.cppm
-        # The lexer and Decimal the verifier grounds against live in sensen now; both import
-        # only std, so they are compiled here as this target's own sources, as gp_ara is.
-        sensen/src/ascii_text.cppm
-        sensen/src/numeric_lexer.cppm
-        src/modules/mortgage_verification.cppm
-)
-# The label-space drift check re-parses finance.proto at RUN time, so the test
-# fails rather than silently skipping if the path is wrong. The test also falls
-# back to $FINANCE_PROTO_PATH and to ../proto/finance.proto (which resolves when
-# ctest runs from the build dir); this define is belt and braces.
-target_compile_definitions(test_mortgage_verification PRIVATE
-    MORTGAGE_FINANCE_PROTO_PATH="${CMAKE_CURRENT_SOURCE_DIR}/proto/finance.proto")
-
-add_test(NAME MortgageVerificationTest COMMAND test_mortgage_verification)
 
 # PARITY PROBE for encoder_reconstruct.cppm -- the C++ port of Python's
 # reconstruct() (agent/train/encoder_corpus.py). The small-encoder assistants
@@ -1204,28 +926,22 @@ target_link_libraries(test_encoder_tokenizer_parity PRIVATE sensen_slim fastjson
 # are conversions rather than disagreements. Driven by
 # scripts/check_encoder_lexer_parity.py. A probe, not a ctest test: generated input.
 add_executable(test_encoder_lexer_parity tests/encoder_lexer_parity.cpp)
-# The lexer is sensen.numeric_lexer now (it imports only std and sensen.ascii_text), so this probe
-# compiles those two as its own sources rather than linking the whole of sensen_slim -- the same
-# light shape it had when the lexer lived inside mortgage_verification.
+# The lexer is sensen.numeric_lexer now (it imports sensen.ascii_text and sensen.float_types, which
+# imports sensen.cpu_features), so this probe compiles those four as its own sources rather than
+# linking the whole of sensen_slim.
 target_sources(test_encoder_lexer_parity PRIVATE FILE_SET CXX_MODULES FILES
-    sensen/src/ascii_text.cppm sensen/src/numeric_lexer.cppm)
+    sensen/src/ascii_text.cppm sensen/src/cpu_features.cppm sensen/src/float_types.cppm
+    sensen/src/numeric_lexer.cppm)
 target_link_libraries(test_encoder_lexer_parity PRIVATE fastjson)
 
-# The small-encoder mortgage assistant, end to end (lex -> tokenize -> encode -> mask ->
-# reconstruct). A probe that runs the WHOLE chain over the 600-row holdout IN PROCESS: it is
+# The small-encoder assistant chain, end to end (lex -> tokenize -> encode -> mask ->
+# reconstruct) over any GGUF and JSONL holdout. A probe that runs the WHOLE chain IN PROCESS: it is
 # the first thing that exercises the four gated pieces together rather than one at a time,
 # and it isolates "does the chain work" from "does the RPC plumbing work". Needs the sensen
 # encoder and tokenizer (sensen_slim), the reconstruct port and the deployed lexer.
 add_executable(test_encoder_assistant_probe tests/encoder_assistant_probe.cpp)
 target_link_libraries(test_encoder_assistant_probe PRIVATE sensen_slim fastjson)
 
-# Proto-derived CONSTRAINED DECODING for the mortgage assistant
-# (mortgage_grammar.cppm). Same rationale as the verification blocks above:
-# proto- and gRPC-free, and deliberately NOT linked against sensen_slim. It
-# needs two sensen modules -- sensen.gp_ara_interfaces (via
-# mortgage_verification) and sensen.grammar, whose IGrammar contract this
-# module implements -- and neither depends on anything beyond std, so both are
-# compiled here as this target's own FILE_SET sources.
 # Pure text comparison of two files -- no engine, no protobuf, no links.
 # Gates the ACS validator directly. No engine, no network, no database -- the
 # validator is split out of the service precisely so it can be tested here.
@@ -1286,30 +1002,9 @@ target_compile_definitions(test_vendored_proto_drift PRIVATE
     kRepoRoot="${CMAKE_CURRENT_SOURCE_DIR}/..")
 add_test(NAME VendoredProtoDriftTest COMMAND test_vendored_proto_drift)
 
-add_executable(test_mortgage_grammar tests/test_mortgage_grammar.cpp)
-target_sources(test_mortgage_grammar
-    PRIVATE
-    FILE_SET CXX_MODULES FILES
-        sensen/src/gp_ara_interfaces.cppm
-        sensen/src/grammar.cppm
-        sensen/src/ascii_text.cppm
-        sensen/src/numeric_lexer.cppm
-        src/modules/mortgage_verification.cppm
-        src/modules/mortgage_grammar.cppm
-)
-# Both structural gates read a real file at RUN time -- the label-space drift
-# check re-parses finance.proto, and the control set is the gold val.jsonl --
-# so the test FAILS rather than silently skipping if a path is wrong.
-target_compile_definitions(test_mortgage_grammar PRIVATE
-    MORTGAGE_FINANCE_PROTO_PATH="${CMAKE_CURRENT_SOURCE_DIR}/proto/finance.proto"
-    MORTGAGE_VAL_JSONL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../agent/dataset/data_mortgage/val.jsonl")
-
-add_test(NAME MortgageGrammarTest COMMAND test_mortgage_grammar)
-
 # Formal Z3-backed automated reasoning for SGEE workflow graphs
-# (OptionsWorkflow, FinanceRequestLifecycle, StrategyAssistantWorkflow, MortgageAssistantWorkflow).
-# Encodes architectural invariants (action bindings, reachability, termination, error routing,
-# mortgage refusal isolation) as SMT-LIB2 formulas and discharges them via sensen GP-ARA Z3Reasoner.
+# (OptionsWorkflow, FinanceRequestLifecycle, StrategyAssistantWorkflow).
+# Encodes architectural invariants (action bindings, reachability, termination, error routing) as SMT-LIB2 formulas and discharges them via sensen GP-ARA Z3Reasoner.
 add_executable(test_sgee_automated_reasoning tests/test_sgee_automated_reasoning.cpp)
 target_sources(test_sgee_automated_reasoning
     PRIVATE
@@ -1493,16 +1188,15 @@ add_test(NAME QuotaTierLabelTest COMMAND test_quota_tier_label)
 # ---------------------------------------------------------------------------
 # Shared inference queue substrate (pg.cppm + inference_queue.cppm), and the
 # admission layer built on top of it (inference_admission.cppm) -- the
-# Postgres-backed queue that lets more than one engine replica share the two
-# fine-tuned Qwen3-0.6B assistants as a pool of workers, wired into
-# assistant_service.cpp/mortgage_assistant_service.cpp behind the
+# Postgres-backed queue that lets more than one engine replica share the
+# assistant as a pool of workers, wired into assistant_service.cpp behind the
 # INFERENCE_QUEUE env var (default `local`, unchanged behaviour;
 # `postgres` opts in). THIS IS NO LONGER "a later, separate wave" -- this
 # comment used to say wiring a caller/worker was future work; that wave is
 # this commit, and calculator_engine (below, via its own
 # `target_link_libraries(calculator_engine PRIVATE PostgreSQL::PostgreSQL)`
 # right after find_package() runs) DOES now link PostgreSQL::PostgreSQL,
-# because assistant_service.cpp and mortgage_assistant_service.cpp both
+# because assistant_service.cpp
 # `import inference_admission;` (which itself imports `inference_queue`,
 # which imports `pg`).
 #
@@ -1559,23 +1253,21 @@ find_package(PostgreSQL REQUIRED)
 target_link_libraries(calculator_engine PRIVATE PostgreSQL::PostgreSQL)
 
 # ---------------------------------------------------------------------------
-# StrategyAssistant / MortgageAssistant SGEE-graph coverage.
+# StrategyAssistant SGEE-graph coverage.
 #
-# ParseStrategy and ParseOperation are now real SGEE workflow graphs (see the
-# "SGEE execution context and graph actions" banner in each .cpp) instead of a
+# ParseStrategy is now a real SGEE workflow graph (see the
+# "SGEE execution context and graph actions" banner in assistant_service.cpp) instead of a
 # chain of hand-rolled `if (...) return ...;` checks. Same shape as
 # test_calculator_service just above: a real in-process grpc::Server through a
-# real Stub, plus RegisterAssistantServiceForTest / RegisterMortgageAssistant
-# ServiceForTest for the discriminating section that proves interpreter.Run()'s
+# real Stub, plus RegisterAssistantServiceForTest for the discriminating
+# section that proves interpreter.Run()'s
 # postconditions actually catch a partial action registry.
 #
-# Needs the same closure calculator_engine itself needs for these two files:
+# Needs the same closure calculator_engine itself needs for this file:
 # sensen_slim (LLMPipeline/cuda_backend), market_data (assistant only --
 # probe_symbol's live-quote check), quota/api_key (admission and the Pro
-# gate), strategy_catalogue (assistant only), assistant_verification (both --
-# shared prompt-injection/advice-request guards), mortgage_verification/
-# mortgage_grammar (mortgage only), and the inference_admission/inference_
-# queue/pg substrate both assistants sit on top of -- hence PostgreSQL::
+# gate), strategy_catalogue (assistant only), assistant_verification, and the inference_admission/inference_
+# queue/pg substrate the assistant sits on top of -- hence PostgreSQL::
 # PostgreSQL, linked here (after find_package(PostgreSQL) above) for the same
 # reason calculator_engine's own PostgreSQL link is deferred to this point
 # rather than its initial declaration.
@@ -1606,42 +1298,14 @@ target_sources(test_assistant_service
         # module is not a header and does not come along with the .cpp.
         src/modules/sgee_queue_client.cppm
         src/modules/inference_admission.cppm
+        # The service routes its encoder through the shared queue via this module.
+        src/modules/encoder_queue.cppm
+        # And joins the shared queue, as the other assistant does, through this one.
+        src/modules/assistant_runtime.cppm
 )
 target_link_libraries(test_assistant_service PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto sgee PostgreSQL::PostgreSQL)
 
 add_test(NAME AssistantServiceTest COMMAND test_assistant_service)
-
-add_executable(test_mortgage_assistant_service
-    tests/test_mortgage_assistant_service.cpp
-    src/modules/mortgage_assistant_service.cpp
-    src/modules/quota.cpp
-    src/modules/api_key.cpp
-    src/modules/inference_queue.cpp
-    src/modules/sgee_queue_client.cpp
-    src/modules/inference_admission.cpp
-)
-target_sources(test_mortgage_assistant_service
-    PRIVATE
-    FILE_SET CXX_MODULES FILES
-        src/modules/mortgage_assistant_service.cppm
-        # The service imports it to honour *_WEIGHT_STORE; inert unless that is set.
-        src/modules/llq_weight_store.cppm
-        src/modules/mortgage_verification.cppm
-        # Graph C imports this; a target compiling the service must carry it.
-        src/modules/mortgage_derivation.cppm
-        src/modules/mortgage_grammar.cppm
-        src/modules/quota.cppm
-        src/modules/api_key.cppm
-        src/modules/pg.cppm
-        src/modules/inference_queue.cppm
-        # See test_assistant_service above: inference_admission.cppm's import of
-        # sgee_queue_client must be satisfied per target.
-        src/modules/sgee_queue_client.cppm
-        src/modules/inference_admission.cppm
-)
-target_link_libraries(test_mortgage_assistant_service PRIVATE proto_lib sensen_slim fastjson logger httplib::httplib OpenSSL::SSL OpenSSL::Crypto sgee PostgreSQL::PostgreSQL)
-
-add_test(NAME MortgageAssistantServiceTest COMMAND test_mortgage_assistant_service)
 
 # sgee (not sensen_slim) for the same reason test_market_data_resilience links
 # it above: the only sensen-family module this needs is
@@ -1704,6 +1368,62 @@ target_sources(test_inference_admission PRIVATE src/modules/inference_queue.cpp 
 target_link_libraries(test_inference_admission PRIVATE PostgreSQL::PostgreSQL fastjson logger sgee)
 
 add_test(NAME InferenceAdmissionTest COMMAND test_inference_admission)
+
+# The encoder assistants on the shared queue: the wire codec, EncoderBackend, answer() and
+# LeaseRunner, against a stub chain and an in-memory double of the queue. No model, no cluster,
+# no Postgres -- what needs a real broker (the surface filter, work-sharing across processes) is
+# tests/integration/encoder_queue_cluster_test.sh.
+add_executable(test_encoder_queue
+    tests/test_encoder_queue.cpp
+)
+target_sources(test_encoder_queue
+    PRIVATE
+    FILE_SET CXX_MODULES FILES
+        src/modules/pg.cppm
+        src/modules/inference_queue.cppm
+        src/modules/sgee_queue_client.cppm
+        src/modules/inference_admission.cppm
+        src/modules/encoder_queue.cppm
+        src/modules/assistant_runtime.cppm
+)
+target_sources(test_encoder_queue PRIVATE src/modules/inference_queue.cpp src/modules/sgee_queue_client.cpp src/modules/inference_admission.cpp)
+target_link_libraries(test_encoder_queue PRIVATE sensen_slim PostgreSQL::PostgreSQL fastjson logger sgee)
+
+add_test(NAME EncoderQueueTest COMMAND test_encoder_queue)
+# A regression must FAIL this test, not hang it: the busy-replica cases hold chains on latches.
+set_tests_properties(EncoderQueueTest PROPERTIES TIMEOUT 120)
+
+# The probe's `answered` count, which the bench reads for arm L. Plain python3, registered only when an
+# interpreter is present; exits 77 (skipped) without grpc.
+find_program(PYTHON3_FOR_PROBE_TEST NAMES python3)
+if(PYTHON3_FOR_PROBE_TEST)
+    add_test(NAME EncoderQueueProbeTest COMMAND ${PYTHON3_FOR_PROBE_TEST} -B ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_encoder_queue_probe.py)
+    set_tests_properties(EncoderQueueProbeTest PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+endif()
+
+# The cluster test's helper that stops an engine and WAITS for it to exit (its port must be free
+# before the next engine or a port holder binds it). Hermetic: shell stand-ins, no weights.
+add_test(NAME EncoderStopEngineTest
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/encoder_stop_engine_test.sh
+                 ${CMAKE_CURRENT_SOURCE_DIR}/..)
+set_tests_properties(EncoderStopEngineTest PROPERTIES TIMEOUT 60)
+
+# The same claims against a REAL three-node SGEE cluster and REAL engines holding the real encoder
+# weights: encoders go through the queue, work is shared between engines, served answers are
+# byte-identical to local mode over the 1500-row strategy holdout, the build partition holds, and
+# a vanished cluster costs only the queue. Exit 77 (a named skip) when the weights or python gRPC
+# are absent -- the encoder GGUFs are not committed.
+add_test(NAME EncoderQueueClusterTest
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/encoder_queue_cluster_test.sh
+                 $<TARGET_FILE:sgee_queue_node> $<TARGET_FILE:calculator_engine>
+                 ${CMAKE_CURRENT_SOURCE_DIR}/..)
+set_tests_properties(EncoderQueueClusterTest PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+
+# An engine that cannot bind its listener must exit with a message, not SEGV in RunServer().
+add_test(NAME EngineBindFailureTest
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/engine_bind_failure_test.sh
+                 $<TARGET_FILE:calculator_engine>)
+set_tests_properties(EngineBindFailureTest PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
 
 add_executable(test_sgee_queue_client
     tests/test_sgee_queue_client.cpp
@@ -2016,7 +1736,7 @@ if(ENABLE_LLAMACPP_BACKEND)
     # the Railway builder image (backend/Dockerfile's apt-get list), and a
     # CMake option silently probing for a tool the reproducible build does
     # not promise to provide is the kind of environment-dependent branch
-    # CANONICAL_FLAGS's own comments (this file's top) already go out of
+    # CANONICAL_FLAGS's own comments (cmake/SensenCanonicalFlags.cmake) already go out of
     # their way to avoid elsewhere.
     set(GGML_CCACHE OFF CACHE BOOL "" FORCE)
 
@@ -2115,30 +1835,10 @@ endif()  # ENABLE_LLAMACPP_BACKEND -- everything above here needs llama or ggml
     # (schedulerPrefill + schedulerPrefillContinue) numerically diverge from
     # an equivalent one-shot schedulerPrefill on this build -- the reason a
     # system-prompt KV prefix-reuse fast path was investigated and NOT
-    # shipped for the strategy/mortgage assistants. Links sensen alone; it
+    # shipped for the assistants. Links sensen alone; it
     # compares two code paths within one process, not two engines.
     add_executable(prefix_cache_verify_probe src/prefix_cache_verify_probe.cpp)
     target_link_libraries(prefix_cache_verify_probe PRIVATE sensen_slim)
-
-    # Diagnostic-only: real per-token cost of MortgageParamsGrammar::accept()
-    # (recompute() over the real tokenizer vocabulary) against a REAL model's
-    # tokenizer, measured on this machine, rather than the unspecified-machine
-    # figure quoted in mortgage_grammar.cppm's own header comment. Needs
-    # sensen_slim (for the tokenizer via LLMPipeline) PLUS the app's own
-    # mortgage_verification/mortgage_grammar modules -- gp_ara_interfaces and
-    # sensen.grammar are already provided by sensen_slim (see its own FILE_SET
-    # a few hundred lines up), so they are NOT re-added here to avoid a
-    # duplicate-PCM conflict.
-    add_executable(bench_mortgage_grammar_timing src/bench_mortgage_grammar_timing.cpp)
-    target_sources(bench_mortgage_grammar_timing
-        PRIVATE
-        FILE_SET CXX_MODULES FILES
-            src/modules/mortgage_verification.cppm
-            src/modules/mortgage_grammar.cppm
-    )
-    target_compile_definitions(bench_mortgage_grammar_timing PRIVATE
-        MORTGAGE_FINANCE_PROTO_PATH="${CMAKE_CURRENT_SOURCE_DIR}/proto/finance.proto")
-    target_link_libraries(bench_mortgage_grammar_timing PRIVATE sensen_slim)
 
     # Bit-exactness gate for the decode path. Captures the exact token-id stream
     # for a fixed prompt battery under greedy deterministic decoding, and later
@@ -2258,23 +1958,30 @@ endforeach()
 if(TARGET sgee_build_tests)
     add_dependencies(build_tests sgee_build_tests)
 endif()
-# DerivationCorpusSweepTest runs `dbg_derivation`, which does NOT match the
-# `^test_` filter above -- so without this the gate would run whatever binary
-# happened to be on disk. That is precisely the stale-binary trap this file
-# records against `ninja && ctest`, and a gate reading a stale binary passes
-# while proving nothing.
-if(TARGET dbg_derivation)
-    add_dependencies(build_tests dbg_derivation)
-endif()
+# EnvoyTranscoderServicesTest compares envoy.yaml with the descriptor set ON DISK, and the
+# descriptor is not a `^test_` executable, so the filter above never reaches it. Without this
+# edge `ninja build_tests && ctest` reads whatever descriptor an earlier build left behind, and
+# passes in exactly the case the test exists for -- a service dropped from the proto list with
+# envoy.yaml forgotten -- which is the stale-binary trap this block's header records.
+add_dependencies(build_tests proto_descriptor)
 
-# assistant_check / workflow_check are not ctest targets -- each needs a
-# GENERATED facts file, and a check that passes because its input was missing is
-# worse than no check. They are still built here, because a binary nothing
-# compiles rots exactly the way a binary nothing commits does: both of these
-# sat untracked in a worktree while their generators sat in version control,
-# gated by nothing.
-foreach(_t assistant_check workflow_check)
+# EncoderQueueClusterTest runs the real engine and a real queue node, neither of which matches the
+# `^test_` filter -- so without this it would exercise whatever binaries happened to be on disk,
+# which is the stale-binary trap again and the one that passes while proving nothing.
+#
+# `causality_bench` is the same shape one directory over: CausalityBenchGate and
+# CausalityBenchGateCanFail run `bin/causality_bench`, SGEE builds it EXCLUDE_FROM_ALL, and
+# `sgee_build_tests` does not list it -- so after `ninja build_tests` both read "Not Run", which is
+# indistinguishable from two failures. The root fix belongs in SGEE's aggregate; until it lands
+# here, a gate that ends in two permanent "Not Run" lines trains its reader to skip the summary.
+foreach(_t calculator_engine sgee_queue_node causality_bench)
     if(TARGET ${_t})
         add_dependencies(build_tests ${_t})
     endif()
 endforeach()
+
+# workflow_check is not a ctest target -- it needs a GENERATED facts file, and a check that
+# passes because its input was missing is worse than no check. It is still built here, because
+# a binary nothing compiles rots exactly the way a binary nothing commits does: it sat
+# untracked in a worktree while its generator sat in version control, gated by nothing.
+add_dependencies(build_tests workflow_check)

@@ -63,8 +63,6 @@ This policy covers everything in the repository:
          what is lost, and WHICH DIRECTION each failure takes. A refusal the
          user sees is not the same defect as a plausible answer to a question
          nobody asked.
-       * `scripts/emit_assistant_facts.py` + `assistant_check`: `feature_absent`
-         must be zero, or the corpus change did not take
        * score each feature the corpus added SEPARATELY. 29 feature rows in a
          567-row holdout move the pooled figure by at most five points.
      Written after item 8 of docs/guides/ASSISTANT_EVALUATION.md -- which

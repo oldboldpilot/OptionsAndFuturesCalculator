@@ -26,12 +26,16 @@ Configuration, all environment variables read at startup:
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `MODEL_PATH` | none | Absolute path to the Q8_0 GGUF. Unset ⇒ the assistant returns a Refusal on every call. |
+| `MODEL_PATH` | none | Absolute path to the Q8_0 GGUF decoder weights. Unset ⇒ the assistant returns a Refusal on every call (unless served via a shared inference queue). |
 | `ASSISTANT_BACKEND` | `sensen` | `sensen` or `llamacpp`. Production runs `sensen`. |
-| `ASSISTANT_CONTEXT_TOKENS` | 4096 | KV cache is F16/Q8; see CLAUDE.md. |
-| `ASSISTANT_INFERENCE_THREADS` | 4 | |
-| `ASSISTANT_MAX_CONCURRENT` | 4 | Scheduler slots, not threads. |
-| `ASSISTANT_QUEUE_DEPTH` | 8 | |
+| `ASSISTANT_DEVICE` | `cpu` | `cpu` or `cuda`. Requesting `cuda` on a build without CUDA leaves the assistant unavailable (a Refusal on every call); on a CUDA build with no usable device it logs an error and serves on CPU. |
+| `STRATEGY_WEIGHT_STORE` | `dense` | Weight storage format: `dense`, `llq`, or `llq-fused`. An unrecognised value stops the engine at boot. |
+| `ASSISTANT_MODEL` | `qwen3` | `qwen3` (fine-tuned decoder) or `encoder` (small bidirectional encoder). An unrecognised value stops the engine at boot. |
+| `STRATEGY_ENCODER_PATH` | none | Absolute path to the encoder GGUF when `ASSISTANT_MODEL=encoder`. |
+| `ASSISTANT_CONTEXT_TOKENS` | 4096 | KV cache is F16/Q8; sized per concurrent slot. |
+| `ASSISTANT_INFERENCE_THREADS` | 4 | Internal thread fan-out per forward pass. |
+| `ASSISTANT_MAX_CONCURRENT` | 4 | Concurrent decoding scheduler slots. |
+| `ASSISTANT_QUEUE_DEPTH` | 8 | How many requests may wait for a slot. |
 
 The backend selection is deliberately not self-correcting: asking for a backend
 that fails to initialise leaves the assistant unavailable rather than quietly
@@ -90,9 +94,9 @@ argue about whether to retrain. The same weights through the real RPC scored
 **0/279**. Nothing about the retrain question was answerable from the transformers
 number, in either direction.
 
-**Discriminator.** `agent/train/eval_grpc.py` (options) and
-`agent/train/eval_grpc_mortgage.py` (mortgage). Both drive the real RPC against a
-running `calculator_engine`. `eval_grpc.py`'s own docstring already said this in
+**Discriminator.** `agent/train/eval_grpc.py` (options) drives the real RPC against a
+running `calculator_engine`. (Its mortgage twin, `eval_grpc_mortgage.py`, was deleted with the
+mortgage assistant in 2026-10; the deleting commit's parent still holds it.) `eval_grpc.py`'s own docstring already said this in
 so many words — "evaluate.py measures the merged 16-bit weights straight out of
 training … but NOT what ships" — and was not read.
 
@@ -144,8 +148,8 @@ So an engine with no credentials at all still reports `2/2 non-params` and
 reason on every mismatch and **hard-fail** any run containing a
 `DATA_UNAVAILABLE` or `MODEL_UNAVAILABLE` refusal. An infrastructure refusal
 scored as a model miss is indistinguishable from a real failure, and the run
-should refuse to produce a number rather than produce a wrong one. The sibling
-`eval_grpc_mortgage.py` already does the reporting half — it carries
+should refuse to produce a number rather than produce a wrong one. The mortgage
+harness (since removed, see git history) already did the reporting half — it carried
 `resp.refusal.reason` out of `call()` (line 275), buckets it in
 `classify_refusal()`, and prints a refusal-shape histogram — so this is porting
 existing code, not designing it.
@@ -511,9 +515,10 @@ turn contains a `<params>` block.
     row, and on any operation that goes to zero. It does NOT decide the
     trade-off — it prints both columns and stops you calling a dead operation
     noise.
-12. **Run the reasoning pass** — `scripts/emit_assistant_facts.py` then
-    `assistant_check` (see `agent/eval/README.md`). `feature_absent` must be
-    zero: a non-zero answer means the corpus change did not take.
+12. **Run the reasoning pass** — this step was `scripts/emit_assistant_facts.py` then
+    `assistant_check`, which read the MORTGAGE harness's output; both were deleted with that
+    assistant in 2026-10 (preserved at `c850701`). No equivalent exists for the options assistant. The lesson
+    it encoded stands: a non-zero `feature_absent` meant the corpus change did not take.
 
 ### Steps 8, 10 and 11 exist because step 8 was skipped
 
@@ -533,9 +538,9 @@ on itself.
 
 - `docs/STRATEGY_ASSISTANT_PIPELINE.md` — training-to-serving chain, model of
   record, and the procedure for swapping the served model.
-- `docs/MORTGAGE_ASSISTANT_PIPELINE.md` — the mortgage assistant's equivalent,
-  whose harness `agent/train/eval_grpc_mortgage.py` already reports refusal
-  reasons and separates raw-model accuracy from post-verification accuracy.
+- `docs/MORTGAGE_ASSISTANT_PIPELINE.md` — the mortgage assistant's equivalent (history:
+  that assistant left this repository in 2026-10). Its harness reported refusal
+  reasons and separated raw-model accuracy from post-verification accuracy.
 - `docs/MORTGAGEFV_INTEGRATION.md` and `clients/mortgagefv/` — the downstream
   client of that contract.
 - `docs/session_logs/session_2026-08-05_penalty_hosting_and_harness.md` — the

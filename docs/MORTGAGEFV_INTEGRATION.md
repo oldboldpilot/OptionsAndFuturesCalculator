@@ -340,7 +340,7 @@ spell the same intent differently:
 
 - a JSON caller through the transcoder OMITS what it does not use, so the field
   arrives as `""`;
-- the mortgage assistant CANNOT omit — `mortgage_verification.cppm`'s G2b
+- the mortgage assistant (now in `nest-egg-loan`) CANNOT omit — its verifier's G2b
   refuses a missing key — so it emits every declared field and says "not this
   shape" with the value `0`.
 
@@ -684,13 +684,10 @@ decision.
 
 Adapted from [`docs/API_USAGE.md`](API_USAGE.md) §8 for this site:
 
-1. `GET https://api.optionsandfuturescalculator.com/healthz` → `200 ok`.
-   **Note the `z`.** `docs/API_USAGE.md` §8 currently writes this as `/health`,
-   which is wrong: `backend/envoy.yaml` matches the exact path `/healthz` and
-   direct-responds `200 ok`. Any other path — `/health` included — falls through
-   to the catch-all gRPC route and is answered as a malformed gRPC call, so a
-   liveness check pointed at `/health` will look broken while the service is
-   perfectly healthy.
+1. `GET https://api.optionsandfuturescalculator.com/healthz` (or `/health`) → `200 ok`.
+   Envoy matches the paths `/health`, `/healthz`, `/live`, `/livez`, `/ready` and
+   `/readyz` and direct-responds `200 ok` without invoking the gRPC engine. Any
+   other `GET` or `HEAD` request receives an immediate 404 `not found`.
 2. Call `ComputePayment` with `rate="0.005"`, `periods=360`,
    `present_value="300000"`. Assert the value is exactly
    `-1798.651575458257198999` — matching the closed-form annuity payment, not

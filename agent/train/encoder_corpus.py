@@ -109,7 +109,7 @@ fill: "invest $X today" states no day count.
 
 INPUT RENDERING. The encoder sees `first_user [SEP] question [SEP] later_user`.
 Only the two USER segments are lexed: the serving layer's grounding text is
-the user's own words (`grounding_text` in mortgage_assistant_service.cpp), and a
+the user's own words (`grounding_text` in nest-egg-loan's mortgage_assistant_service.cpp), and a
 "30" inside the assistant's question ("30, 15, or something else?") is not a
 value the user stated. The question text is passed through as context (it binds
 an untyped reply such as "$700" to its slot) even though the decoder contract
@@ -194,7 +194,7 @@ _UNIT_AFTER = re.compile(
     r"^[\s-]*(years?|yrs?|months?|mos?|days?|weeks?|quarters?)\b", re.IGNORECASE
 )
 # A SPELLED scale -- "1.2 million", "350 thousand" -- which the DEPLOYED lexer
-# (`mortgage_verification.cppm`: word == "million" / "millions" / "mm" / "thousand") reads as a
+# (nest-egg-loan's `mortgage_verification.cppm`: word == "million" / "millions" / "mm" / "thousand") reads as a
 # money literal times the scale, with the SPAN ending after the digits and the word outside it,
 # exactly like "years" or "months". The trainer's lexer did not know the word, so "payment on 1.2
 # million at 6.25%" lexed as the bare number 1.2 and a label of 1,200,000 had no literal that
@@ -401,7 +401,7 @@ def cadence_hit(gold, utterance):
 
 
 # Small-cardinality convention constants the reference hard-coded
-# (kConventionValues / kUngroundedFields in mortgage_verification.cppm). This
+# (kConventionValues / kUngroundedFields in nest-egg-loan's mortgage_verification.cppm). This
 # file DERIVES the conventions from the corpus instead; the set is kept only so
 # `--compare-reference` can reproduce the reference's own partition.
 CONVENTION = {Decimal(0), Decimal(15), Decimal("0.1"), Decimal(1)}

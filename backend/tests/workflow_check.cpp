@@ -17,7 +17,8 @@
  * "which tier declares a price at one interval and not the other". You can
  * query a rule base for exactly that, and the query is one line.
  *
- * The facts are GENERATED from the source (see emit_facts.mjs), never retyped.
+ * The facts are GENERATED from the source (see scripts/emit-workflow-facts.mjs in
+ * nest-egg-loan), never retyped.
  * A rule base maintained by hand beside the code it describes has the identical
  * drift problem it was built to detect.
  */
