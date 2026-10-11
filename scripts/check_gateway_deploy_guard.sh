@@ -150,6 +150,11 @@ installed_epoch=ge_10 digest=abc inputs=def')" "ok"
           "$(verdict d 'error while loading shared libraries: libc++.so.1: cannot open shared object file')" \
           "refused"
     check "empty output is REFUSED" "$(verdict e '')" "refused"
+    # `admin show` prints -1 when it could NOT read the version (`v ? *v : -1`), so a surface
+    # answering "I do not know" must not read as "yes".
+    check "an unreadable version (-1) is REFUSED" \
+          "$(verdict f 'store transport: cleartext (sslmode=disable)
+schema_version=-1 orgs=-1')" "refused"
     # AND redeploy.sh MUST USE IT. A predicate nothing calls is not a gate, which is the lesson
     # this tree records against GroundingCorpusSweepTest.
     if grep -q 'store_version_ok' "$RD" 2>/dev/null; then

@@ -124,7 +124,7 @@ else
   die "this image cannot OPEN the live store, so starting it would replace a serving gateway with one that refuses to boot. Migrate first and then re-run:
       podman run --rm --network host --secret sgw_maint_dsn,type=env,target=SGW_MAINT_DSN \\
         --entrypoint /usr/local/bin/sensen-gateway $IMG admin init env:SGW_MAINT_DSN
-    the store said: $(printf '%s' "$SHOW" | grep -v 'postgresql://' | tail -2 | tr '\\n' ' ')"
+    the store said: $(printf '%s' "$SHOW" | grep -viE 'postgres(ql)?://|password=|dbname=' | tail -2 | tr '\n' ' ')"
 fi
 
 # --- 2. replace the two containers -------------------------------------------

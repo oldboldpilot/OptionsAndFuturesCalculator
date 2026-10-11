@@ -26,7 +26,12 @@ store_version_ok() {
     local text
     text="$(cat)"
     case "$text" in
-        *schema_version=*) return 0;;
+        # A DIGIT, NOT JUST THE KEY. `admin show` prints `schema_version=-1` when it could not
+        # read the version at all -- `v ? *v : -1` -- and a presence match would have taken that
+        # for a pass. It cannot arise while `open()` itself refused, which is the case this
+        # preflight is for, so this is the cheap half of a belt: a surface that answers "I do not
+        # know" must not be read as "yes".
+        *schema_version=[0-9]*) return 0;;
         *) return 1;;
     esac
 }
