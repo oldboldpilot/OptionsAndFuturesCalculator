@@ -118,5 +118,48 @@ else
     no "redeploy.sh is not readable"
 fi
 
+echo "7. the store-version predicate: the success line passes and every refusal fails"
+# WHY THIS IS GATED AND THE REST OF SECTION 1b IS NOT. The preflight itself needs podman, an
+# image and the live store, so it cannot run here -- but its VERDICT is a discriminator, and the
+# first version of that verdict (an inline `case` with a looser pattern) matched one of the
+# refusals it exists to catch. The predicate therefore lives in its own file and is fed the REAL
+# strings: `admin show`'s success line, and three refusals taken verbatim from
+# `GatewayStore::verifyLocked` and the image loader.
+PRED="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/deploy/gateway/store_version_ok.sh"
+if [ -r "$PRED" ]; then
+    # shellcheck source=deploy/gateway/store_version_ok.sh
+    . "$PRED"
+    verdict() { if printf '%s' "$2" | store_version_ok; then echo ok; else echo refused; fi; }
+    check "show's success line is a PASS" \
+          "$(verdict a 'store transport: cleartext (sslmode=disable)
+schema_version=7 orgs=1
+installed_epoch=ge_10 digest=abc inputs=def')" "ok"
+    # The BEHIND refusal, measured against the live store on 2026-10-11. It names neither
+    # "schema_version" nor "schema version", so a rule written to match the refusals would
+    # have missed exactly the state this preflight was written for.
+    check "the BEHIND refusal is REFUSED" \
+          "$(verdict b "sensen-gateway admin: migration 8 ('gateway_hold_principal') has not been applied to this store")" \
+          "refused"
+    # The AHEAD refusal, verbatim from verifyLocked. THIS is the one the first pattern passed:
+    # it contains the words "schema version", so a store NEWER than the image read as a pass
+    # and the deploy would have gone ahead and replaced a serving gateway.
+    check "the AHEAD refusal is REFUSED (the one a looser pattern passed)" \
+          "$(verdict c 'sensen-gateway admin: the store is at schema version 14 but this binary only knows 12')" \
+          "refused"
+    check "a loader failure is REFUSED" \
+          "$(verdict d 'error while loading shared libraries: libc++.so.1: cannot open shared object file')" \
+          "refused"
+    check "empty output is REFUSED" "$(verdict e '')" "refused"
+    # AND redeploy.sh MUST USE IT. A predicate nothing calls is not a gate, which is the lesson
+    # this tree records against GroundingCorpusSweepTest.
+    if grep -q 'store_version_ok' "$RD" 2>/dev/null; then
+        ok "redeploy.sh uses the predicate"
+    else
+        no "redeploy.sh does not use the predicate, so gating it proves nothing"
+    fi
+else
+    no "deploy/gateway/store_version_ok.sh is not readable"
+fi
+
 printf '\n%s: %d passed, %d failed\n' "gateway deploy guard" "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

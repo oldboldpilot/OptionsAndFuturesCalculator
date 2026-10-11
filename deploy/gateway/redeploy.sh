@@ -85,6 +85,48 @@ LOAD="$(podman run --rm --entrypoint /usr/local/bin/sensen-gateway "$IMG" admin 
 case "$LOAD" in *"shared object"*) die "loader failed in image: $LOAD";; esac
 say "image ok sha=${SHA:0:16} uid=$(podman run --rm --entrypoint id "$IMG" -u)"
 
+# --- 1b. THE STORE MUST BE MIGRATED TO WHAT THIS BINARY EXPECTS -------------
+# THE CONTAINER NEVER MIGRATES, deliberately -- `main`'s store selector says so in as many
+# words, because a typo must be a refusal rather than an empty database. So a binary carrying a
+# migration the store has not applied cannot start at all: `GatewayStore::open` calls
+# `verifyLocked` on EVERY open and refuses a version mismatch in either direction with
+# `NotMigrated`. Without this step that refusal arrives at section 2, AFTER `podman rm -f` has
+# already removed the serving containers -- so the gateway would be down until an operator
+# migrated, and the only sign would be a readiness timeout.
+#
+# IT IS MEASURED, NOT ASSUMED: this was a live state. On 2026-10-11 the store was at schema
+# version 7 (migrations 1-7) while the merged binary carried 12, because the serving image was
+# built on 2026-10-06 from a commit that predates migrations 8-11 and nobody had redeployed. A
+# redeploy on that day would have taken the gateway down rather than updating it.
+#
+# THE CHECK IS THE GATEWAY'S OWN `open`, run with the gateway's own credential and scope, so it
+# cannot disagree with what section 2 is about to do. `admin show` is read-only -- it prints the
+# schema version, the org count and the break-glass posture and writes nothing -- and it opens
+# WITHOUT migrating, which is the whole point.
+#
+# IT REFUSES AND NAMES THE STEP rather than migrating. Applying pending migrations to the system
+# of record is an operator's decision with its own evidence, not a side effect of a redeploy: at
+# the time of writing the pending set was four feature migrations and one that rewrites an audit
+# control, which is not something a deploy script should do while nobody is reading.
+SHOW="$(podman run --rm --network host   -e SENSEN_GATEWAY_ORG=sensen   --secret sgw_store_dsn,type=env,target=SENSEN_GATEWAY_STORE   --entrypoint /usr/local/bin/sensen-gateway "$IMG" admin show env:SENSEN_GATEWAY_STORE 2>&1)"
+# THE VERDICT IS A SOURCED PREDICATE, NOT AN INLINE `case`, so that it can be GATED:
+# `store_version_ok.sh` carries the rule and the reason, and
+# `scripts/check_gateway_deploy_guard.sh` feeds it the real success line and three real refusals.
+# The first version of the rule, written inline here, matched one of the refusals it exists to
+# catch -- which is what a predicate with no positive control does.
+# shellcheck source=deploy/gateway/store_version_ok.sh
+. "$OFC/deploy/gateway/store_version_ok.sh"
+if printf '%s' "$SHOW" | store_version_ok; then
+  say "store ok: $(printf '%s' "$SHOW" | grep -oE 'schema_version=[0-9-]+ orgs=[0-9-]+' | head -1)"
+else
+  # The DSN never appears here: `admin show` takes it as `env:NAME` so it is not an argument,
+  # and only the lines that do not carry a scheme are printed.
+  die "this image cannot OPEN the live store, so starting it would replace a serving gateway with one that refuses to boot. Migrate first and then re-run:
+      podman run --rm --network host --secret sgw_maint_dsn,type=env,target=SGW_MAINT_DSN \\
+        --entrypoint /usr/local/bin/sensen-gateway $IMG admin init env:SGW_MAINT_DSN
+    the store said: $(printf '%s' "$SHOW" | grep -v 'postgresql://' | tail -2 | tr '\\n' ' ')"
+fi
+
 # --- 2. replace the two containers -------------------------------------------
 GK="$(cat "$CFG/regress.key" 2>/dev/null)" || true
 [ -n "${GK:-}" ] || die "no regression key at $CFG/regress.key"
