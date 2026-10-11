@@ -162,6 +162,22 @@ schema_version=-1 orgs=-1')" "refused"
     else
         no "redeploy.sh does not use the predicate, so gating it proves nothing"
     fi
+    # AND ITS REMEDY MUST BE ONE THAT CAN SUCCEED. The refusal named `admin init
+    # env:SGW_MAINT_DSN` until 2026-10-11, and that role cannot migrate: measured on the live
+    # store, `gw_maint` had no CREATE on the database (so `migrate()`'s opening `create schema
+    # if not exists` refuses even though the schema exists -- PostgreSQL checks the privilege
+    # before the existence) and does not own the tables the pending migrations ALTER. An
+    # operator following the message got `permission denied for database` and no way forward.
+    if grep -q 'admin init env:SGW_MAINT_DSN' "$RD" 2>/dev/null; then
+        no "the refusal tells the operator to run 'admin init env:SGW_MAINT_DSN', which the maint role cannot do"
+    else
+        ok "the refusal does not name the maint DSN for admin init"
+    fi
+    if grep -q 'SGW_OWNER_DSN' "$RD" 2>/dev/null; then
+        ok "the refusal names an OWNER DSN, which is a role that can migrate"
+    else
+        no "the refusal names no owner DSN, so it does not say which credential migrates"
+    fi
 else
     no "deploy/gateway/store_version_ok.sh is not readable"
 fi
