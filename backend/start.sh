@@ -24,6 +24,30 @@ set -euo pipefail
 
 export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-/app/lib}"
 
+# Envoy's worker threads.
+#
+# Envoy defaults `--concurrency` to the number of hardware threads it can see, and Railway shows
+# this container 48 -- so it started 48 workers (103 threads) to serve an edge that its own local
+# rate limit caps at ten requests per second per replica. Two is ample for that and still gives
+# the second worker a failover when the first is busy with a slow streaming call.
+#
+# MEASURED, so the size of the win is not overstated (one container, the repo's envoy.yaml,
+# h2load at 8 connections x 10 streams with the rate limit lifted): Envoy resident memory
+# idle / after 20,000 requests was 57.1 / 62.6 MB at 48 workers, 54.4 / 59.2 MB at 2, 54.1 / 58.7 MB
+# at 1. About 60 KB per idle worker, ~3 MB per replica -- real, and small. Throughput was not the
+# reason to keep the workers: 20,000 requests took 273 ms at 48 workers and 385 ms at 2, and the
+# rate limit admits 100 of them. Most of what Envoy holds is its own binary (38 MB of clean,
+# file-backed pages) and no worker count changes that.
+#
+# An invalid value stops the container rather than reading as the default: a typo must not
+# silently serve the setting the operator meant to change (the MORTGAGE_WEIGHT_STORE rule).
+ENVOY_CONCURRENCY="${ENVOY_CONCURRENCY:-2}"
+if [[ ! "${ENVOY_CONCURRENCY}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "FATAL: ENVOY_CONCURRENCY='${ENVOY_CONCURRENCY}' is not a positive integer." >&2
+    echo "       Unset it for the default of 2, or set the number of Envoy worker threads." >&2
+    exit 1
+fi
+
 if [[ -z "${ALPACA_API_KEY:-}" || -z "${ALPACA_API_SECRET:-}" ]]; then
     echo "WARNING: ALPACA_API_KEY / ALPACA_API_SECRET are not set." >&2
     echo "         Quote and chain requests will fail with NotConfigured." >&2
@@ -157,18 +181,33 @@ fi
 # had been there all along. A log you cannot trust for absence is worse than no
 # log, because it invites exactly the wrong conclusion.
 #
+# THE ENGINE'S ALLOCATOR. It links jemalloc, whose default frees nothing back to the kernel until
+# some later allocation happens to purge it -- and a quiet service allocates nothing for long
+# stretches. So after a burst the resident set stays at its peak: measured on the engine with both
+# encoders loaded, 57 MB idle -> 82-92 MB after ~22,000 requests -> unchanged 25 seconds later. `background_thread` purges on a thread of its own, so no work lands on the request path;
+# `dirty_decay_ms:3000` bounds how long a freed page stays resident; `narenas:2` stops 128-192
+# per-CPU arenas from each retaining their own slack. Same load afterwards: 60-61 MB, an idle
+# floor of 51.5 MB, and no latency change on the four RPC shapes measured (ComputePayment 52-55 vs
+# 57-60 us, ParseOperation 578-590 vs 582-649 us, Monte Carlo 45-47 vs 42-49 ms, PriceOptionTree 5.05-5.16
+# vs 4.96-5.29 ms; three interleaved rounds each). `dirty_decay_ms:0` was rejected: it purges
+# inline on every free and made PriceOptionTree 30% slower (5.0 -> 6.6 ms).
+#
+# The variable is scoped to the engine's own command line, not exported: Envoy links tcmalloc and
+# a jemalloc option string means nothing to it. An operator-set MALLOC_CONF wins outright.
+ENGINE_MALLOC_CONF="${MALLOC_CONF:-narenas:2,background_thread:true,dirty_decay_ms:3000}"
+
 # `stdbuf` is coreutils and is already in the image. If it were ever missing,
 # fall through to the unbuffered-but-present binary rather than not starting.
 if command -v stdbuf >/dev/null 2>&1; then
-    stdbuf -oL -eL /app/calculator_engine &
+    MALLOC_CONF="${ENGINE_MALLOC_CONF}" stdbuf -oL -eL /app/calculator_engine &
 else
     echo "start.sh: stdbuf not found -- engine logs will be block-buffered and may appear truncated."
-    /app/calculator_engine &
+    MALLOC_CONF="${ENGINE_MALLOC_CONF}" /app/calculator_engine &
 fi
 BACKEND_PID=$!
 
-echo "Starting Envoy on :8080..."
-envoy -c "${ENVOY_CONFIG}" --log-level "${ENVOY_LOG_LEVEL:-info}" &
+echo "Starting Envoy on :8080 with ${ENVOY_CONCURRENCY} worker thread(s)..."
+envoy -c "${ENVOY_CONFIG}" --concurrency "${ENVOY_CONCURRENCY}" --log-level "${ENVOY_LOG_LEVEL:-info}" &
 ENVOY_PID=$!
 
 terminate() {

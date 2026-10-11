@@ -87,5 +87,17 @@ if [ -z "${SENSEN_GATEWAY_PORT:-}" ] && [ -n "${PORT:-}" ]; then
     export SENSEN_GATEWAY_PORT="$PORT"
 fi
 
+# THE ALLOCATOR. The gateway links jemalloc, whose default frees nothing back to the kernel until
+# some later allocation happens to purge it -- and a gateway that is not being asked anything
+# allocates nothing. So a burst leaves the resident set at its peak: measured here with a
+# 200-connection TLS burst of 20,000 requests, 17.8 MB idle -> 52.0 MB, still 51.5 MB eight
+# seconds later. A background purge thread with a 3 s decay and 4 arenas settles the same burst at
+# 24.2 MB ten seconds after it (34.7 MB at jemalloc's default arena count), idle unchanged at
+# 17.7 MB; the price is a higher instantaneous peak while the burst is in flight (69 MB against
+# 52 MB), which costs nothing in a metered average that is dominated by the quiet minutes.
+# Four arenas rather than the engine's two because this process runs 88 worker threads.
+# An operator-set MALLOC_CONF wins outright.
+export MALLOC_CONF="${MALLOC_CONF:-narenas:4,background_thread:true,dirty_decay_ms:3000}"
+
 echo "sensen-gateway entrypoint: TLS + ticket material written to $RUN_DIR, port ${SENSEN_GATEWAY_PORT:-unset}"
 exec /usr/local/bin/sensen-gateway "$@"

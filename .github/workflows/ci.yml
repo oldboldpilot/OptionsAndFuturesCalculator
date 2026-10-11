@@ -99,3 +99,11 @@ jobs:
       # contract drift can be caught automatically, so it must not be skipped.
       - name: Vendored proto identity
         run: ./scripts/check_vendored_protos.sh
+
+      # backend/start.sh's memory knobs (Envoy worker threads, the engine's
+      # allocator). The backend suite is not run in CI, and start.sh is the one
+      # file nothing else executes before Railway does. The script runs the REAL
+      # start.sh in a throwaway container with stand-in binaries; exit 77 means
+      # podman is unavailable on the runner, which is a skip and not a pass.
+      - name: Start-script memory knobs
+        run: ./scripts/check_start_memory_knobs.sh || [ $? -eq 77 ]
