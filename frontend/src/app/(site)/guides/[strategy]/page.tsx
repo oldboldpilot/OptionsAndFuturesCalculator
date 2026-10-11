@@ -80,7 +80,7 @@ export default async function StrategyGuidePage({ params }: Props) {
       <div style={{ maxWidth: '46rem', margin: '0 auto', padding: '3rem 1.5rem' }}>
         <p style={{ color: 'var(--color-ink-200)' }}>
           No written guide for this strategy yet.{' '}
-          <Link href={`/calculator/${slug}`} style={{ color: 'var(--color-accent)' }}>
+          <Link href={`/calculator/${slug}`} style={{ color: 'var(--color-accent-text)' }}>
             Open it in the calculator
           </Link>
           .

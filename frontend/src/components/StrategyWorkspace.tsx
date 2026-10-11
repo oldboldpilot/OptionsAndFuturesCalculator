@@ -1,30 +1,72 @@
 'use client';
 
-import { useEffect } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import TopBar from './TopBar';
 import ProbabilityCurve from './ProbabilityCurve';
-import PayoffLadder from './PayoffLadder';
+import ResultsStrip from './ResultsStrip';
+import SymbolSwitchNotice from './SymbolSwitchNotice';
 import PositionLegs from './PositionLegs';
 import StrategyMetrics from './StrategyMetrics';
 import OptionChain from './OptionChain';
 import PnLMatrix from './PnLMatrix';
 import OptionTicket from './OptionTicket';
+import FuturesTicket from './FuturesTicket';
 import ExerciseStylePanel from './ExerciseStylePanel';
 import PnLSurface from './PnLSurface';
 import TermStructure from './TermStructure';
 import { StrategySelector } from './StrategySelector';
 import AssistantPanel from './AssistantPanel';
+import { ProPanel } from './ProPanel';
 import { SavedScenarios } from './SavedScenarios';
 import { useCalculatorStore } from '../store/useCalculatorStore';
+import { FUTURES_SLUGS, PICKER_STRATEGY_FOR_SLUG, type StrategySlug } from '../config/strategies';
+
+type Area = 'build' | 'chain' | 'results';
+
+/**
+ * Whether a media query matches, kept current. False on the server, so the
+ * prerendered HTML never claims a layout it cannot know.
+ *
+ * Used for two small things only -- which tab to SAY is selected, and when to
+ * switch tab by itself. The layout itself is never chosen here: that is CSS,
+ * because a static page that picked its layout in JavaScript would paint the
+ * desktop grid on a phone before correcting it.
+ */
+function useMediaQuery(query: string): boolean {
+  return useSyncExternalStore(
+    (notify) => {
+      const mq = window.matchMedia(query);
+      mq.addEventListener('change', notify);
+      return () => mq.removeEventListener('change', notify);
+    },
+    () => window.matchMedia(query).matches,
+    () => false,
+  );
+}
+
+const AREAS: { id: Area; label: string }[] = [
+  { id: 'build', label: 'Build' },
+  { id: 'chain', label: 'Chain' },
+  { id: 'results', label: 'Results' },
+];
 
 /**
  * The calculator workspace.
  *
- * Three columns, ordered the way the work actually flows: pick the structure
- * and legs on the left, read the outcome in the centre, assess risk on the
- * right. The probability curve is the centre of gravity — it is where the
- * payoff and the odds of reaching it are visible at once — so it gets the
- * largest region rather than being demoted to a panel in a split view.
+ * Five areas, ordered the way the work flows: choose a structure and compose
+ * legs on the left, read the outcome in the centre, look things up on the right.
+ * The probability curve is the centre of gravity, so it gets the widest region.
+ *
+ * HOW IT LAYS OUT is decided entirely in `globals.css` (see "Workspace layout"
+ * there), by viewport width, with no JavaScript in the choice -- this is a
+ * static export, and picking the layout after hydration would paint the desktop
+ * grid on a phone first. This component only says WHICH AREA IS ACTIVE for the
+ * widths where areas are tabs, and marks each region with the class the CSS
+ * addresses.
+ *
+ *   a  assistant + strategy picker      d  option chain (+ term structure)
+ *   b  ticket, position, exercise       e  outcome detail
+ *   c  probability, matrix, surface
  *
  * Both the home route and every /calculator/[strategy] landing page render
  * this, so there is one calculator to maintain rather than two that drift.
@@ -32,16 +74,42 @@ import { useCalculatorStore } from '../store/useCalculatorStore';
 export function StrategyWorkspace({
   heading,
   guideHref,
+  guideLabel = 'Learn how this strategy works →',
+  strategySlug,
 }: {
   heading?: string;
-  /** Anchor to the written guide below, when the page has one. */
+  /** The page this is rendered for, so the picker opens on its strategy. */
+  strategySlug?: StrategySlug;
+  /** Link to the written guide, when the page has one. */
   guideHref?: string;
+  guideLabel?: string;
 }) {
-  const { calculateStrategy, legs, setSymbol, symbol } = useCalculatorStore();
+  const { calculateStrategy, legs, setSymbol, symbol, assetClass } = useCalculatorStore();
+  const [area, setArea] = useState<Area>('build');
+  const isMid = useMediaQuery('(min-width: 900px) and (max-width: 1279.98px)');
+  // On a laptop the Build column is always visible, so "Build" is not a tab
+  // there: it shows the chain until a position exists, and the tab bar should
+  // say so rather than highlight nothing.
+  const shownArea: Area = isMid && area === 'build' ? 'chain' : area;
 
-  // Fetch the opening quote and chain once on mount.
+  // The first leg ends the "pick a price" phase: show the answer. Adjusted
+  // during render against the last count seen, which is what this rule
+  // (react-hooks/set-state-in-effect) asks for in place of an effect. Only when
+  // it is the FIRST leg -- later ones leave the visitor where they are.
+  const [seenLegs, setSeenLegs] = useState(legs.length);
+  if (legs.length !== seenLegs) {
+    setSeenLegs(legs.length);
+    if (seenLegs === 0 && legs.length > 0 && isMid && area !== 'results') setArea('results');
+  }
+  const tabRefs = useRef<Record<Area, HTMLButtonElement | null>>({ build: null, chain: null, results: null });
+
+  // Fetch the opening quote and chain once on mount. A futures page opens on a
+  // futures symbol: its structure cannot be built on an equity chain, and the
+  // picker would otherwise open on a button reading "Select a futures symbol
+  // first".
   useEffect(() => {
-    setSymbol(symbol);
+    if (strategySlug && FUTURES_SLUGS.has(strategySlug)) setSymbol('ES', undefined, 'FUTURES');
+    else setSymbol(symbol);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -51,242 +119,139 @@ export function StrategyWorkspace({
     if (legs.length > 0) calculateStrategy();
   }, [legs, calculateStrategy]);
 
-  const column: React.CSSProperties = {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '0.5rem',
-    minHeight: 0,
-  };
+  // Arrow keys move between tabs, as the tab pattern promises.
+  function onTabKey(e: React.KeyboardEvent, i: number) {
+    const step = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
+    if (step === 0) return;
+    e.preventDefault();
+    const next = AREAS[(i + step + AREAS.length) % AREAS.length].id;
+    setArea(next);
+    tabRefs.current[next]?.focus();
+  }
 
   return (
-    /*
-     * `overflowX: 'auto'`, `overflowY: 'hidden'` -- deliberately not the
-     * `overflow: 'hidden'` this shell carried.
-     *
-     * The vertical half stays hidden on purpose: the shell is pinned to the
-     * viewport height and every panel scrolls inside itself, so a page-level
-     * vertical scroll would sit alongside a dozen panel scrollbars scrolling
-     * different things. The HORIZONTAL half was the bug. Measured in Chrome at
-     * a 768px viewport, this div's clientWidth was 768 against a scrollWidth of
-     * 1238, so 470px of the workspace -- the whole right-hand column -- was cut
-     * off. And because it CLIPPED rather than overflowed,
-     * `document.documentElement.scrollWidth` also read 768: the page reported
-     * that everything fitted while 2049 elements had a bounding right edge past
-     * the viewport, and nothing on the page could be scrolled to reach them.
-     *
-     * Re-measured after the change: at 768 the shell scrolls 768 -> 1238 and
-     * the rightmost column's right edge lands inside the viewport once scrolled
-     * fully right; at 1280 and 1440 scrollWidth still equals clientWidth, so no
-     * horizontal scrollbar appears at desktop widths. That last part is the
-     * point -- `auto` produces a scrollbar only where one is needed, and a fix
-     * that made every desktop width scroll sideways would be a regression.
-     *
-     * A sweep for clipping ancestors whose scrollWidth exceeds their clientWidth
-     * returns this element plus four `.panel`s. The panels are not the same
-     * thing: `.panel` clips by design and its `.panel-body` scrolls internally,
-     * so their content is reachable. This div was the only one that clipped
-     * with nothing behind it to scroll.
-     */
-    <div
-      style={{
-        display: 'flex',
-        flexDirection: 'column',
-        // Minus the site tab bar above, which is outside this component. At a
-        // flat 100vh the workspace would be exactly --nav-h too tall and the
-        // bottom panel of every column would be clipped by that much — on a
-        // shell that hides its own vertical overflow, silently.
-        height: 'calc(100vh - var(--nav-h))',
-        overflowX: 'auto',
-        overflowY: 'hidden',
-      }}
-    >
+    <div className="ws" data-tab={area}>
+      {/* The page's own skip link goes to <main>; this one goes past the symbol
+          bar and the strategy picker to the order ticket, which is where a
+          keyboard user's work starts. */}
+      <a className="skip-link" href="#ws-ticket" onClick={() => setArea('build')}>
+        Skip to the order ticket
+      </a>
       <TopBar />
 
-      {heading && (
-        <div
-          className="animate-fade"
-          style={{
-            display: 'flex',
-            alignItems: 'baseline',
-            justifyContent: 'space-between',
-            gap: '0.75rem',
-            padding: '0.4375rem 0.75rem 0',
-            flex: 'none',
-          }}
-        >
-          <h1
-            style={{
-              fontSize: 'var(--text-base)',
-              fontWeight: 600,
-              color: 'var(--color-ink-200)',
-            }}
-          >
-            {heading}
-          </h1>
-          {/*
-            The route from the tool to the writing. It used to be a `#guide`
-            anchor into the same document; the article now has its own page, so
-            this is a real link and the arrow points sideways rather than down.
-            It is also the only crawlable path from a calculator page to its
-            guide, which is what keeps the two intents connected now that they
-            are separate URLs.
-          */}
-          {guideHref && (
-            <a
-              href={guideHref}
-              style={{
-                fontSize: 'var(--text-2xs)',
-                color: 'var(--color-accent)',
-                textDecoration: 'none',
-                whiteSpace: 'nowrap',
-              }}
-            >
-              How this strategy works →
-            </a>
-          )}
-        </div>
-      )}
-
-      <main
-        style={{
-          flex: 1,
-          display: 'grid',
-          // Four columns, and the chain gets a full-height one of its own.
-          // It was sharing a column and resolving to 256px — nine of 116 rows —
-          // which is what made the ladder unusable regardless of how it was
-          // sorted or scrolled. Reference data needs height more than anything
-          // else on this page.
-          gridTemplateColumns:
-            'minmax(240px, 280px) minmax(280px, 320px) minmax(0, 1fr) minmax(300px, 380px)',
-          gap: '0.5rem',
-          padding: '0.5rem',
-          minHeight: 0,
-        }}
-      >
-        {/* Choose a structure. The assistant sits ABOVE the picker because
-            that is the order the work happens in when it is used at all: a
-            parse selects an entry in the picker below it, and the picker's own
-            Apply is still what builds the legs. Putting it below would have
-            the output of one control appear above the control itself. */}
-        <div className="stagger" style={{ ...column, overflowY: 'auto' }}>
-          <AssistantPanel />
-          <StrategySelector />
-        </div>
-
-        {/* Compose the position: ticket first, then what it has built. This
-            column is the only one with natural-height panels and its own
-            scroll -- columns 3/4 wrap panels in fixed flex fractions and
-            `.panel` clips (globals.css:334-345), which already clipped
-            content off-screen once (UpgradePrompt.tsx:66-73). The exercise
-            panel's Bermudan date list has variable height, so it belongs
-            here. */}
-        <div className="stagger" style={{ ...column, overflowY: 'auto' }}>
-          {/*
-            `flexShrink: 0` on all three, which is the whole fix for this
-            column.
-
-            It scrolls (`overflowY: auto`), so its panels should stand at their
-            natural height and let the COLUMN move. They were instead the flex
-            default, `0 1 auto`, so the browser compressed them to fit the
-            viewport and the column never had anything to scroll. Measured at
-            1440x900: the ticket was squeezed to 308px against 327px of content
-            and the exercise panel to 330 against 337 — both quietly clipped —
-            while Position was handed 131px total, a 91px body, for a panel
-            whose whole job is to list legs. Every leg added made it worse,
-            because the compression is proportional.
-
-            Position also gets `flex: 1` and a floor: it is the one panel here
-            that grows without bound, so it should absorb spare height when
-            there is some and never fall under roughly three legs when there is
-            not.
-          */}
-          <div style={{ flexShrink: 0, display: 'flex' }}>
-            <OptionTicket />
+      <div className="ws-bar">
+        {heading && (
+          <div className="ws-summary animate-fade">
+            <h1 className="ws-title">{heading}</h1>
+            {/* The route from the tool to the writing. A real link, because the
+                article has its own page now; it is also the only crawlable path
+                from a calculator page to its guide. */}
+            {guideHref && (
+              <a href={guideHref} className="ws-guide-link">
+                {guideLabel}
+              </a>
+            )}
           </div>
-          <div style={{ flex: 1, flexShrink: 0, minHeight: 260, display: 'flex' }}>
-            <PositionLegs />
+        )}
+        <ResultsStrip />
+      </div>
+
+      <div className="ws-main">
+        <div className="ws-left">
+          {/* Choose a structure. The PICKER comes first and the assistant is a
+              collapsed row beneath it: the assistant is Pro-only, so putting it
+              on top meant the first thing a visitor met was a paid feature and
+              three paragraphs of model caveats, with the picker -- the way
+              almost everyone starts -- pushed below the fold. */}
+          <div className="ws-area ws-a stagger">
+            <StrategySelector initialId={strategySlug ? PICKER_STRATEGY_FOR_SLUG[strategySlug] : undefined} />
+            <AssistantPanel />
+            <div className="panel" style={{ flex: 'none' }}>
+              <ProPanel />
+            </div>
           </div>
-          <div style={{ flexShrink: 0, display: 'flex' }}>
-            <ExerciseStylePanel />
-          </div>
+
           {/*
-            Saved scenarios sit at the BOTTOM of the build column, below the
-            controls that produce a position rather than above them: you name a
-            position after building it. `flexShrink: 0` for the same reason
-            every other panel in this column carries it -- this column sets
-            `overflowY: auto` and the browser would otherwise compress the
-            panel to fit instead of letting the column scroll, silently cutting
-            the list rather than scrolling it.
+            Compose the position: ticket first, then what it has built. Every
+            wrapper is `flex: none` so panels stand at their natural height and
+            let the AREA scroll -- the browser's default compresses them to fit
+            and quietly clips their content (the ticket was squeezed to 308px
+            against 327px of content, Position handed a 91px body).
           */}
-          <div style={{ flexShrink: 0, display: 'flex' }}>
-            <SavedScenarios />
+          <div className="ws-area ws-b stagger">
+            <SymbolSwitchNotice />
+            {/* Each instrument has its own ticket. A future has no strike,
+                premium or implied volatility, and the option ticket asked a
+                futures trader for all three. */}
+            <div className="ws-slot" id="ws-ticket" tabIndex={-1} style={{ flex: 'none' }}>
+              {assetClass === 'FUTURES' ? <FuturesTicket /> : <OptionTicket />}
+            </div>
+            <div className="ws-slot" style={{ flex: '1 0 auto', minHeight: 260 }}>
+              <PositionLegs />
+            </div>
+            {assetClass !== 'FUTURES' && (
+              <div className="ws-slot" style={{ flex: 'none' }}>
+                <ExerciseStylePanel />
+              </div>
+            )}
+            <div className="ws-slot" style={{ flex: 'none' }}>
+              <SavedScenarios />
+            </div>
           </div>
         </div>
 
-        {/* Read the result */}
-        <div className="stagger" style={column}>
-          {/*
-            The curve takes the leftover, and it is now the LARGEST region in
-            this column rather than the smallest.
-
-            This file's own header says the probability curve is the centre of
-            gravity and "gets the largest region rather than being demoted to a
-            panel in a split view". The fractions below contradicted it: with
-            the matrix at 40% and the surface at 30%, the curve got whatever
-            remained, which measured 219px against their 314 and 235 at
-            1440x900. The comment described the intent and the numbers
-            described a split view.
-
-            `minHeight` rather than a fraction, so a short viewport shrinks the
-            two panels below before it starts eating the plot — a distribution
-            under about 240px stops being readable as a shape at all.
-          */}
-          <div style={{ flex: 1, minHeight: 240, display: 'flex' }}>
-            <ProbabilityCurve />
+        <div className="ws-right">
+          {/* Where a laptop or a phone switches between areas. Hidden on a
+              desktop, where there is room for all of them. */}
+          <div className="ws-tabs" role="tablist" aria-label="Workspace area">
+            {AREAS.map((a, i) => (
+              <button
+                key={a.id}
+                ref={(el) => { tabRefs.current[a.id] = el; }}
+                role="tab"
+                data-area={a.id}
+                aria-selected={shownArea === a.id}
+                tabIndex={shownArea === a.id ? 0 : -1}
+                className="ws-tab"
+                onClick={() => setArea(a.id)}
+                onKeyDown={(e) => onTabKey(e, i)}
+              >
+                {a.label}
+              </button>
+            ))}
           </div>
-          {/* The matrix wants width — a dozen date columns plus the price axis —
-              so it lives in the widest column and scrolls internally rather
-              than forcing the page to scroll sideways. It gives up 8 points of
-              height for the curve above; it already scrolls internally, so the
-              cost is rows per screen rather than reachable content. */}
-          <div style={{ flex: '0 0 32%', minHeight: 0, display: 'flex' }}>
-            <PnLMatrix />
-          </div>
-          {/* 26%, down from 30%. This panel is OFF by default and renders a
-              one-line message until someone turns it on, so it was the most
-              expensive idle space on the page. */}
-          <div style={{ flex: '0 0 26%', minHeight: 0, display: 'flex' }}>
-            <PnLSurface />
-          </div>
-        </div>
 
-        {/* Reference: the chain, at full height, opened at the money */}
-        <div className="stagger" style={column}>
-          <TermStructure />
-          {/*
-            The chain takes the leftover height of this column, which is the
-            point of giving it a column at all.
-
-            There was a 300x250 `AdSlot size="rectangle"` below the metrics
-            panel here. It was not an ad: NEXT_PUBLIC_ADSENSE_SLOT_RECTANGLE is
-            unset, so AdSlot fell to its unconfigured branch and painted a
-            dashed placeholder box — no <ins>, no slot id, nothing served and
-            nothing earned. Measured at 1440x900 it held 250px while the chain's
-            own scrollable body had 204px, showing about 7 of 126 strikes
-            against a content height of 3564px. The largest single block in the
-            column was an empty box.
-
-            Removing it costs no revenue. The real unit is the multiplex below
-            the workspace, which fills normally.
-          */}
-          <div style={{ flex: 1, minHeight: 260, display: 'flex' }}>
-            <OptionChain />
+          {/* Read the result. The curve takes the leftover and is the largest
+              region here; `minHeight` rather than a fraction, so a short
+              viewport shrinks the two panels below it before it eats the plot --
+              a distribution under about 300px stops being readable as a shape. */}
+          <div className="ws-area ws-c stagger">
+            <div className="ws-slot ws-slot-prob">
+              <ProbabilityCurve />
+            </div>
+            <div className="ws-slot ws-slot-matrix">
+              <PnLMatrix />
+            </div>
+            <div className="ws-slot ws-slot-surface">
+              <PnLSurface />
+            </div>
           </div>
-          <div style={{ flex: '0 0 30%', minHeight: 0, display: 'flex' }}>
+
+          {/* Reference: the chain, at full height, opened at the money. */}
+          <div className="ws-area ws-d stagger">
+            <div className="ws-slot ws-slot-term">
+              <TermStructure />
+            </div>
+            <div className="ws-slot ws-slot-chain">
+              <OptionChain />
+            </div>
+          </div>
+
+          <div className="ws-area ws-e stagger">
             <StrategyMetrics />
           </div>
         </div>
-      </main>
+      </div>
     </div>
   );
 }

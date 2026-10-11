@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import { pageTitle } from '@/lib/seo-title';
-import StrategyWorkspace from '../components/StrategyWorkspace';
+import StrategyWorkspace from '@/components/StrategyWorkspace';
 
 export const metadata: Metadata = {
   title: pageTitle('Options & Futures Profit Calculator - Free Payoff & Greeks'),
@@ -30,6 +30,7 @@ export default function Home() {
       // characters on the page rather than as an ampersand.
       heading={'Options & Futures Profit Calculator'}
       guideHref="/guides"
+      guideLabel="Learn how strategies work →"
     />
   );
 }

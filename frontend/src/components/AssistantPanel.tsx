@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useCalculatorStore } from '../store/useCalculatorStore';
 import {
   useAssistantStore,
@@ -120,6 +120,13 @@ export function AssistantPanel() {
 
   const { pro } = useProStatus();
 
+  // Collapsed to one row until opened. The assistant is Pro-only, so a visitor
+  // who has never paid used to meet its explanation, a textarea, a recorded
+  // demo and three caveat paragraphs -- 529px of panel -- before the strategy
+  // picker, which is how nearly everyone starts. Anything it has to say back to
+  // an answered parse is shown regardless: see `hasOutput`.
+  const [open, setOpen] = useState(false);
+
   // The expiry snap needs a chain, and the chain arrives after `setSymbol`
   // fires. Re-run whenever either the listed expirations or the chain's status
   // moves; `resolvePendingExpiry` clears the pending days on its way out, so
@@ -131,6 +138,11 @@ export function AssistantPanel() {
   }, [chainExpirations, chainStatus, pendingExpirationDays, resolvePendingExpiry]);
 
   const busy = status === 'parsing';
+  // An answer is never hidden behind the disclosure: a parse the user asked for
+  // must not vanish because the panel was folded, or never opened because the
+  // reply arrived while it was.
+  const hasOutput = Boolean(params || clarification || refusal || gateDenied || modelLimit || error);
+  const expanded = open || hasOutput || busy;
   const demoCount = RECORDED_EXCHANGES.length;
   // Clamped rather than trusted: the index is persisted store state and the
   // array is edited by hand, so a shortened array must not index past its end.
@@ -143,7 +155,7 @@ export function AssistantPanel() {
   return (
     <div className="panel" style={{ flex: 'none' }}>
       <div className="panel-head">
-        <span className="panel-title">Assistant</span>
+        <h2 className="panel-title">Assistant</h2>
         {/* Marked, not disabled -- the same rule the strategy list follows.
             The gate is the engine's and it explains itself in its own words;
             blocking the button here would replace a specific server refusal
@@ -151,9 +163,19 @@ export function AssistantPanel() {
         {!pro && (
           <span className="chip chip-accent" title="Assisted parsing needs Pro">PRO</span>
         )}
+        <button
+          className="btn"
+          style={{ marginLeft: 'auto' }}
+          aria-expanded={expanded}
+          aria-controls="assistant-body"
+          onClick={() => setOpen((v) => !v)}
+        >
+          {expanded ? 'Hide' : 'Describe a trade in words'}
+        </button>
       </div>
 
-      <div className="panel-body" style={{ display: 'flex', flexDirection: 'column', gap: '0.4375rem' }}>
+      {expanded && (
+      <div id="assistant-body" className="panel-body" style={{ display: 'flex', flexDirection: 'column', gap: '0.4375rem' }}>
         <span style={noteStyle}>
           Type a trade in plain English. A fine-tuned model returns the symbol, structure,
           expiry and size — never a strike or a price.
@@ -346,32 +368,30 @@ export function AssistantPanel() {
             <ParsedChips p={demo.params} />
 
             <span style={noteStyle}>
-              Not a live answer. Captured from {demo.capturedFrom} on {demo.capturedAt} and
-              replayed here — the assistant did not run just now. Type your own above and
+              <strong>Not a live answer.</strong> Recorded on {demo.capturedAt} from{' '}
+              {demo.capturedFrom}; the assistant did not run just now. Type your own above and
               press Parse for a real one.
             </span>
           </div>
         )}
 
         {/* ------------------------------------------------------------------
-            Known gaps. Permanently visible, because each is a case where the
-            answer is silence or a refusal, and a user who does not know that
-            reads either as the site being broken. */}
-        <div
-          style={{
-            ...noteStyle,
-            display: 'flex',
-            flexDirection: 'column',
-            gap: '0.125rem',
-            borderTop: '1px solid var(--color-line-soft)',
-            paddingTop: '0.375rem',
-          }}
-        >
-          <span>Trained on ES and NQ futures only — commodity roots are refused, not guessed.</span>
-          <span>A bare futures directive (“Long NQ, 45 days”) often returns no parameters.</span>
-          <span>Exercise style and averaging come from a keyword scan of your words.</span>
-        </div>
+            Known gaps. Each is a case where the answer is silence or a refusal,
+            and a user who does not know that reads either as the site being
+            broken. They were three always-open paragraphs under every parse;
+            they are one disclosure now, in a panel that is itself folded away
+            until asked for, and an actual refusal still says its own reason
+            in full above. */}
+        <details style={{ ...noteStyle, borderTop: '1px solid var(--color-line-soft)', paddingTop: '0.375rem' }}>
+          <summary style={{ cursor: 'pointer' }}>Known limits</summary>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.125rem', marginTop: '0.25rem' }}>
+            <span>Trained on ES and NQ futures only — commodity roots are refused, not guessed.</span>
+            <span>A bare futures directive (“Long NQ, 45 days”) often returns no parameters.</span>
+            <span>Exercise style and averaging come from a keyword scan of your words.</span>
+          </div>
+        </details>
       </div>
+      )}
     </div>
   );
 }

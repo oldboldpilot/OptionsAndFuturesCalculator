@@ -2488,7 +2488,9 @@ proto.calculator.StrategyResponse.toObject = function(includeInstance, msg) {
     probabilityOfTargetProfit: jspb.Message.getFloatingPointFieldWithDefault(msg, 14, 0.0),
     curveDaysToExpiration: jspb.Message.getFloatingPointFieldWithDefault(msg, 15, 0.0),
     legRiskList: jspb.Message.toObjectList(msg.getLegRiskList(),
-    proto.calculator.LegRisk.toObject, includeInstance)
+    proto.calculator.LegRisk.toObject, includeInstance),
+    maxProfitUnbounded: jspb.Message.getBooleanFieldWithDefault(msg, 17, false),
+    maxLossUnbounded: jspb.Message.getBooleanFieldWithDefault(msg, 18, false)
   };
 
   if (includeInstance) {
@@ -2595,6 +2597,14 @@ proto.calculator.StrategyResponse.deserializeBinaryFromReader = function(msg, re
       var value = new proto.calculator.LegRisk;
       reader.readMessage(value,proto.calculator.LegRisk.deserializeBinaryFromReader);
       msg.addLegRisk(value);
+      break;
+    case 17:
+      var value = /** @type {boolean} */ (reader.readBool());
+      msg.setMaxProfitUnbounded(value);
+      break;
+    case 18:
+      var value = /** @type {boolean} */ (reader.readBool());
+      msg.setMaxLossUnbounded(value);
       break;
     default:
       reader.skipField();
@@ -2740,6 +2750,20 @@ proto.calculator.StrategyResponse.serializeBinaryToWriter = function(message, wr
       16,
       f,
       proto.calculator.LegRisk.serializeBinaryToWriter
+    );
+  }
+  f = message.getMaxProfitUnbounded();
+  if (f) {
+    writer.writeBool(
+      17,
+      f
+    );
+  }
+  f = message.getMaxLossUnbounded();
+  if (f) {
+    writer.writeBool(
+      18,
+      f
     );
   }
 };
@@ -3147,6 +3171,42 @@ proto.calculator.StrategyResponse.prototype.addLegRisk = function(opt_value, opt
  */
 proto.calculator.StrategyResponse.prototype.clearLegRiskList = function() {
   return this.setLegRiskList([]);
+};
+
+
+/**
+ * optional bool max_profit_unbounded = 17;
+ * @return {boolean}
+ */
+proto.calculator.StrategyResponse.prototype.getMaxProfitUnbounded = function() {
+  return /** @type {boolean} */ (jspb.Message.getBooleanFieldWithDefault(this, 17, false));
+};
+
+
+/**
+ * @param {boolean} value
+ * @return {!proto.calculator.StrategyResponse} returns this
+ */
+proto.calculator.StrategyResponse.prototype.setMaxProfitUnbounded = function(value) {
+  return jspb.Message.setProto3BooleanField(this, 17, value);
+};
+
+
+/**
+ * optional bool max_loss_unbounded = 18;
+ * @return {boolean}
+ */
+proto.calculator.StrategyResponse.prototype.getMaxLossUnbounded = function() {
+  return /** @type {boolean} */ (jspb.Message.getBooleanFieldWithDefault(this, 18, false));
+};
+
+
+/**
+ * @param {boolean} value
+ * @return {!proto.calculator.StrategyResponse} returns this
+ */
+proto.calculator.StrategyResponse.prototype.setMaxLossUnbounded = function(value) {
+  return jspb.Message.setProto3BooleanField(this, 18, value);
 };
 
 

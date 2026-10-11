@@ -16,25 +16,52 @@ import { STRATEGY_SLUGS } from '../src/config/strategies';
  * 4. Site navigation tab states, embed isolation (/widget), and 404 page handling across all routes.
  */
 
+/** A panel by its title; `:has-text` is a case-insensitive substring match over everything inside. */
+const panel = (page: Page, title: string) =>
+  page.locator('.panel', { has: page.locator('.panel-title', { hasText: new RegExp(`^${title}`) }) }).first();
+
+/**
+ * Where each column of the chain is, read from its own header rather than
+ * counted. The ladder's columns have moved twice (open interest and volume are
+ * now behind a toggle, and STRIKE is pinned), and an index written for one
+ * layout silently reads the wrong cell in the next -- this finds IV, Bid and
+ * Ask by what they are called. The calls' columns come first in the DOM, so the
+ * first occurrence of each name is the call side.
+ */
+async function chainColumns(page: Page) {
+  const heads = (await panel(page, 'Option Chain')
+    .locator('thead tr')
+    .nth(1)
+    .locator('th')
+    .allInnerTexts()).map((t) => t.trim());
+  return {
+    iv: heads.indexOf('IV'),
+    bid: heads.indexOf('Bid'),
+    ask: heads.indexOf('Ask'),
+    // The second header row has one blank cell: the one over STRIKE.
+    strike: heads.indexOf(''),
+  };
+}
+
 /**
  * Finds the first CALL strike row in the Option Chain table that carries both
  * a published implied volatility and an executable ask price (> 0).
  */
 async function findActiveCallStrikeRow(page: Page) {
-  const rows = page.locator('.panel:has-text("Option Chain") table.grid-table tbody tr');
+  const rows = panel(page, 'Option Chain').locator('table.grid-table tbody tr');
   await rows.first().waitFor({ state: 'visible', timeout: 15000 });
+  const col = await chainColumns(page);
   const count = await rows.count();
 
   for (let i = 0; i < count; i++) {
     const tr = rows.nth(i);
     const tds = tr.locator('td');
-    const tdCount = await tds.count();
-    if (tdCount >= 8) {
-      const iv = (await tds.nth(2).innerText()).trim();
-      const ask = (await tds.nth(5).innerText()).trim();
-      if (iv !== '—' && ask !== '—' && parseFloat(ask) > 0) {
-        const strike = (await tds.nth(7).innerText()).trim();
-        return { row: tr, index: i, strike: parseFloat(strike), ask: parseFloat(ask) };
+    if ((await tds.count()) > col.strike) {
+      const iv = (await tds.nth(col.iv).innerText()).trim();
+      const ask = (await tds.nth(col.ask).innerText()).trim();
+      if (iv !== '—' && ask !== '—' && parseFloat(ask.replace(/,/g, '')) > 0) {
+        const strike = (await tds.nth(col.strike).innerText()).trim();
+        return { row: tr, index: i, strike: parseFloat(strike.replace(/,/g, '')), ask: parseFloat(ask.replace(/,/g, '')) };
       }
     }
   }
@@ -46,19 +73,19 @@ async function findActiveCallStrikeRow(page: Page) {
  * a published implied volatility and an executable bid price (> 0) to sell.
  */
 async function findHigherCallStrikeRow(page: Page, fromIndex: number) {
-  const rows = page.locator('.panel:has-text("Option Chain") table.grid-table tbody tr');
+  const rows = panel(page, 'Option Chain').locator('table.grid-table tbody tr');
+  const col = await chainColumns(page);
   const count = await rows.count();
 
   for (let i = fromIndex + 1; i < count; i++) {
     const tr = rows.nth(i);
     const tds = tr.locator('td');
-    const tdCount = await tds.count();
-    if (tdCount >= 8) {
-      const iv = (await tds.nth(2).innerText()).trim();
-      const bid = (await tds.nth(4).innerText()).trim();
-      if (iv !== '—' && bid !== '—' && parseFloat(bid) > 0) {
-        const strike = (await tds.nth(7).innerText()).trim();
-        return { row: tr, index: i, strike: parseFloat(strike), bid: parseFloat(bid) };
+    if ((await tds.count()) > col.strike) {
+      const iv = (await tds.nth(col.iv).innerText()).trim();
+      const bid = (await tds.nth(col.bid).innerText()).trim();
+      if (iv !== '—' && bid !== '—' && parseFloat(bid.replace(/,/g, '')) > 0) {
+        const strike = (await tds.nth(col.strike).innerText()).trim();
+        return { row: tr, index: i, strike: parseFloat(strike.replace(/,/g, '')), bid: parseFloat(bid.replace(/,/g, '')) };
       }
     }
   }
@@ -86,7 +113,7 @@ test.describe('Options & Futures Calculator - Regression Suite', () => {
     await page.goto('/calculator/call-spread');
 
     // Verify initial Position panel state is empty (0 legs)
-    const positionTitle = page.locator('.panel-title:has-text("Position")');
+    const positionTitle = panel(page, 'Position').locator('.panel-title');
     await expect(positionTitle).toContainText('0 legs');
 
     // Wait for Option Chain table to render
@@ -100,7 +127,7 @@ test.describe('Options & Futures Calculator - Regression Suite', () => {
     await expect(positionTitle).toContainText('0 legs');
 
     // Verify Ticket panel offers the "Add long call" button
-    const ticketPanel = page.locator('.panel:has-text("Ticket")');
+    const ticketPanel = panel(page, 'Ticket');
     const addLegButton = ticketPanel.locator('button.btn-primary');
     await expect(addLegButton).toBeEnabled();
     await expect(addLegButton).toHaveText(/Add long call/i);
@@ -112,10 +139,11 @@ test.describe('Options & Futures Calculator - Regression Suite', () => {
     await expect(positionTitle).toContainText('1 leg');
 
     // Assert the Position row correctly displays side, type, and strike
-    const positionRow = page.locator('.panel:has-text("Position") table tbody tr').first();
-    await expect(positionRow.locator('td').nth(0)).toHaveText('BUY');
-    await expect(positionRow.locator('td').nth(1)).toContainText('CALL');
-    await expect(positionRow.locator('td').nth(2)).toHaveText(activeCall.strike.toFixed(2));
+    const positionRow = panel(page, 'Position').locator('[data-testid="leg-row"]').first();
+    await expect(positionRow.locator('[data-field="side"]')).toHaveText('BUY');
+    await expect(positionRow.locator('[data-field="type"]')).toContainText('CALL');
+    const shownStrike = (await positionRow.locator('[data-field="strike"]').innerText()).replace(/,/g, '');
+    expect(parseFloat(shownStrike)).toBeCloseTo(activeCall.strike, 2);
   });
 
   /**
@@ -139,14 +167,14 @@ test.describe('Options & Futures Calculator - Regression Suite', () => {
     const activeCall = await findActiveCallStrikeRow(page);
     await activeCall.row.locator('button[title="Buy CALL"]').click();
 
-    const addLegButton = page.locator('.panel:has-text("Ticket") button.btn-primary');
+    const addLegButton = panel(page, 'Ticket').locator('button.btn-primary');
     await expect(addLegButton).toBeEnabled();
     await addLegButton.click();
 
     // Read Strike K and Premium P directly from the committed Position row
-    const positionRow = page.locator('.panel:has-text("Position") table tbody tr').first();
-    const strikeText = (await positionRow.locator('td').nth(2).innerText()).trim();
-    const premiumInput = await positionRow.locator('td').nth(4).locator('input').inputValue();
+    const positionRow = panel(page, 'Position').locator('[data-testid="leg-row"]').first();
+    const strikeText = (await positionRow.locator('[data-field="strike"]').innerText()).replace(/,/g, '');
+    const premiumInput = (await positionRow.locator('input[aria-label="Leg price"]').inputValue()).replace(/,/g, '');
 
     const K = parseFloat(strikeText);
     const P = parseFloat(premiumInput);
@@ -156,8 +184,10 @@ test.describe('Options & Futures Calculator - Regression Suite', () => {
     expect(P).toBeGreaterThan(0);
 
     // Wait for Outcome panel to display computed engine result
-    const outcomePanel = page.locator('.panel:has-text("Outcome")');
-    await expect(outcomePanel.locator('.chip:has-text("engine")')).toBeVisible({ timeout: 15000 });
+    // (It used to wait for an "engine" chip in the panel header, which was jargon
+    // nobody reads and is gone; a rendered figure is the thing that matters.)
+    const outcomePanel = panel(page, 'Outcome');
+    await expect(outcomePanel.locator('.stat:has-text("Max loss") .stat-value')).toBeVisible({ timeout: 15000 });
 
     // Read rendered Max Loss and Break-even from the Outcome stat values
     const maxLossStat = outcomePanel.locator('.stat:has-text("Max loss") .stat-value');
@@ -203,12 +233,12 @@ test.describe('Options & Futures Calculator - Regression Suite', () => {
     // 1. Add first leg: Buy CALL
     const firstCall = await findActiveCallStrikeRow(page);
     await firstCall.row.locator('button[title="Buy CALL"]').click();
-    const ticketAddBtn = page.locator('.panel:has-text("Ticket") button.btn-primary');
+    const ticketAddBtn = panel(page, 'Ticket').locator('button.btn-primary');
     await expect(ticketAddBtn).toBeEnabled();
     await ticketAddBtn.click();
 
     // Verify 1 leg added
-    const positionTitle = page.locator('.panel-title:has-text("Position")');
+    const positionTitle = panel(page, 'Position').locator('.panel-title');
     await expect(positionTitle).toContainText('1 leg');
 
     // 2. Add second leg: Sell higher CALL
@@ -221,22 +251,24 @@ test.describe('Options & Futures Calculator - Regression Suite', () => {
     // Verify 2 legs committed
     await expect(positionTitle).toContainText('2 legs');
 
-    // 3. Outcome panel assertions
-    const outcomePanel = page.locator('.panel:has-text("Outcome")');
-
-    // Must show upgrade prompt heading "Needs Pro"
-    const needsProHeading = outcomePanel.locator('.empty-state-title:has-text("Needs Pro")');
-    await expect(needsProHeading).toBeVisible({ timeout: 15000 });
+    // 3. The entitlement notice. It is shown ONCE, in the results strip above
+    // the panels, with the offer and the way out; the Outcome, probability and
+    // matrix panels below it each say "Needs Pro" in a line and point up, where
+    // they used to repeat the entire pitch three times on one screen.
+    const strip = page.locator('[data-testid="results-strip"]');
+    await expect(strip.getByText('Needs Pro')).toBeVisible({ timeout: 15000 });
 
     // Must show trial call to action button "Start free trial"
-    const trialCta = outcomePanel.getByRole('button', { name: 'Start free trial' });
-    await expect(trialCta).toBeVisible();
+    await expect(strip.getByRole('button', { name: 'Start free trial' })).toBeVisible();
+    // ...and a way back that does not cost both legs.
+    await expect(strip.getByRole('button', { name: /remove last leg/i })).toBeVisible();
 
-    // Must NOT show the error branch ("Unavailable") - assert both directions
-    const unavailableTitle = outcomePanel.locator('.empty-state-title:has-text("Unavailable")');
-    await expect(unavailableTitle).toHaveCount(0);
-    const unavailableText = outcomePanel.getByText('Unavailable');
-    await expect(unavailableText).toHaveCount(0);
+    const outcomePanel = panel(page, 'Outcome');
+    await expect(outcomePanel.locator('.empty-state-title:has-text("Needs Pro")')).toBeVisible();
+
+    // Must NOT show the error branch ("Unavailable") anywhere - assert both directions
+    await expect(page.locator('.empty-state-title:has-text("Unavailable")')).toHaveCount(0);
+    await expect(strip.getByText('Unavailable')).toHaveCount(0);
   });
 
   /**

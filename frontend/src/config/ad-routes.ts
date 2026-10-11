@@ -38,7 +38,7 @@ export const AD_ROUTE_PREFIX = '/guides/';
  * True only for an individual strategy guide.
  *
  * This is defence in depth, NOT the mechanism. The AdSense loader is emitted by
- * `app/guides/[strategy]/layout.tsx` and nowhere else, so a page outside that
+ * `app/(site)/guides/[strategy]/layout.tsx` and nowhere else, so a page outside that
  * subtree carries no Google ad code at all — there is nothing to suppress at
  * runtime because nothing was shipped. Compare the old design, where every page
  * on the site loaded the loader and a runtime pathname test decided whether it

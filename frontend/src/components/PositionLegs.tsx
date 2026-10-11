@@ -1,25 +1,45 @@
 'use client';
 
-import { useCalculatorStore } from '../store/useCalculatorStore';
+import { useCalculatorStore, type Leg } from '../store/useCalculatorStore';
 import { formatAmount, useCurrency } from '../lib/currency';
 import { MoneyInput } from './MoneyInput';
 
-/** Editable leg list. Strike, quantity and premium are all live-editable,
- *  matching optionsprofitcalculator.com's behaviour of letting the trader
- *  override any fill price. */
+/** The leg's own expiry, stated -- not inferred from the ticket above it. */
+function expiryText(leg: Leg): string {
+  const days = leg.expiration_days;
+  if (leg.expiry_label && days !== undefined) return `${leg.expiry_label} · ${days}d`;
+  if (leg.expiry_label) return leg.expiry_label;
+  if (days !== undefined) return `${days}d`;
+  return '';
+}
+
+/**
+ * Editable leg list.
+ *
+ * Strike, quantity and premium are all live-editable, matching
+ * optionsprofitcalculator.com's behaviour of letting the trader override any
+ * fill price.
+ *
+ * One CARD per leg rather than one table row. The table this replaced listed
+ * side, type, strike, quantity, premium, delta, theta, open and a remove
+ * button -- about 440px of columns in a panel with 258px of body -- so the
+ * quantity box was squeezed to 6px of content (the digit hidden under the
+ * browser's spinner), and the remove button sat 118px outside the panel behind
+ * a sideways scroll nobody had a reason to attempt. A leg is a small record:
+ * what it is on the first line, what you can change on the second.
+ */
 export function PositionLegs() {
-  // Regroup the strike column when the display locale changes. The per-leg
-  // quantity and premium inputs stay plain number fields on purpose: they sit
-  // in 52-68px cells, a premium is a per-share figure well under a thousand,
-  // and a currency symbol would not fit. Grouping buys nothing there.
+  // Regroup the strike column when the display locale changes.
   useCurrency();
-  const { legs, updateLeg, removeLeg, clearLegs, calculateStrategy, result } =
+  const { legs, symbol, updateLeg, removeLeg, clearLegs, calculateStrategy, result } =
     useCalculatorStore();
 
   return (
     <div className="panel">
       <div className="panel-head">
-        <span className="panel-title">Position · {legs.length} leg{legs.length === 1 ? '' : 's'}</span>
+        <h2 className="panel-title">
+          Position · {symbol} · {legs.length} leg{legs.length === 1 ? '' : 's'}
+        </h2>
         {legs.length > 0 && (
           <button className="btn" onClick={clearLegs}>
             Clear
@@ -34,53 +54,40 @@ export function PositionLegs() {
             <span>Select strikes from the option chain to build a position.</span>
           </div>
         ) : (
-          <table className="grid-table">
-            <thead>
-              <tr>
-                <th style={{ textAlign: 'left' }}>Side</th>
-                <th style={{ textAlign: 'left' }}>Type</th>
-                <th>Strike</th>
-                <th>Qty</th>
-                <th>Premium</th>
-                {/* Per-leg risk. The aggregate cannot say which leg carries the
-                    position: a condor nets to a small delta while each wing
-                    holds a much larger one, and closing the wrong side is how a
-                    hedged book stops being hedged. */}
-                <th title="This leg's delta, in share-equivalents">Δ</th>
-                <th title="This leg's decay, in dollars per calendar day">Θ/day</th>
-                <th title="Model value against what this leg cost">Open</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              {legs.map((leg, i) => {
-                const risk = result?.legRisk.find((r) => r.legIndex === i) ?? null;
-                return (
-                <tr key={leg.id}>
-                  <td style={{ textAlign: 'left' }}>
+          <ul className="legs">
+            {legs.map((leg, i) => {
+              const risk = result?.legRisk.find((r) => r.legIndex === i) ?? null;
+              const isOption = leg.option_type === 'CALL' || leg.option_type === 'PUT';
+              const side = leg.action === 'BUY' ? 'Buy' : 'Sell';
+              return (
+                <li key={leg.id} className="leg" data-testid="leg-row">
+                  <div className="leg-head">
+                    {/* This is a toggle and it now says so. It looked like a
+                        status label and flipped the whole leg when pressed. */}
                     <button
                       className={leg.action === 'BUY' ? 'btn btn-buy' : 'btn btn-sell'}
-                      style={{ padding: '0.0625rem 0.375rem' }}
+                      style={{ padding: '0.0625rem 0.5rem' }}
+                      data-field="side"
+                      aria-label={`${side} leg. Press to switch to ${leg.action === 'BUY' ? 'sell' : 'buy'}.`}
+                      title="Switch between buy and sell"
                       onClick={() => {
-                        updateLeg(leg.id, {
-                          action: leg.action === 'BUY' ? 'SELL' : 'BUY',
-                        });
+                        updateLeg(leg.id, { action: leg.action === 'BUY' ? 'SELL' : 'BUY' });
                         calculateStrategy();
                       }}
                     >
                       {leg.action}
                     </button>
-                  </td>
-                  <td
-                    style={{
-                      textAlign: 'left',
-                      color:
-                        leg.option_type === 'CALL'
-                          ? 'var(--color-profit)'
-                          : 'var(--color-loss)',
-                    }}
-                  >
-                    {leg.option_type}
+                    <span
+                      className="leg-name"
+                      style={{
+                        color: leg.option_type === 'CALL' ? 'var(--color-profit-text)'
+                          : leg.option_type === 'PUT' ? 'var(--color-loss)'
+                          : 'var(--color-ink-100)',
+                      }}
+                    >
+                      <span data-field="type">{leg.option_type}</span>{' '}
+                      <span data-field="strike">{formatAmount(leg.strike_price, 2)}</span>
+                    </span>
                     {/* An Asian leg is badged, not merely stored.
                         `option_type` says CALL for both a vanilla and an
                         average-price contract, and those are two different
@@ -92,7 +99,6 @@ export function PositionLegs() {
                     {leg.asian_type && leg.asian_type !== 'NOT_ASIAN' && (
                       <span
                         className="chip chip-accent"
-                        style={{ marginLeft: '0.3125rem' }}
                         title={
                           leg.asian_type === 'AVERAGE_PRICE'
                             ? 'Asian, average price: pays max(A − K, 0) on the realised average A, not on the price at expiry.'
@@ -102,71 +108,81 @@ export function PositionLegs() {
                         {leg.asian_type === 'AVERAGE_PRICE' ? 'ASIAN·AVG PX' : 'ASIAN·AVG K'}
                       </span>
                     )}
-                  </td>
-                  <td>{formatAmount(leg.strike_price, 2)}</td>
-                  <td style={{ width: '52px' }}>
-                    <input
-                      className="input"
-                      style={{ textAlign: 'right' }}
-                      type="number"
-                      min={1}
-                      value={leg.quantity}
-                      onChange={(e) => {
-                        updateLeg(leg.id, {
-                          quantity: Math.max(1, Number(e.target.value) || 1),
-                        });
-                        calculateStrategy();
-                      }}
-                    />
-                  </td>
-                  <td style={{ width: '68px' }}>
-                    {/*
-                      Grouped, and WITHOUT a symbol: this cell is 68px and the
-                      column is already headed as a price. A premium is usually
-                      a two-figure per-share number, but it is multiplied by
-                      quantity x 100 downstream, so a slipped digit is a
-                      position priced an order of magnitude wrong.
-                    */}
-                    <MoneyInput
-                      value={leg.premium}
-                      onChange={(v) => {
-                        updateLeg(leg.id, { premium: Number.isNaN(v) ? 0 : v });
-                        calculateStrategy();
-                      }}
-                      decimals={2}
-                      showSymbol={false}
-                      ariaLabel="Leg premium"
-                      className="input"
-                    />
-                  </td>
-                  {/* Em dash until the engine has answered, never zero: a leg
-                      with no computed risk and a leg with none are different
-                      states and must not look alike. */}
-                  <td>{risk ? risk.delta.toFixed(2) : '—'}</td>
-                  <td className={risk && risk.theta < 0 ? 'loss' : risk ? 'profit' : undefined}>
-                    {risk ? risk.theta.toFixed(2) : '—'}
-                  </td>
-                  <td className={risk ? (risk.openPnl >= 0 ? 'profit' : 'loss') : undefined}>
-                    {risk ? `${risk.openPnl >= 0 ? '+' : ''}${formatAmount(risk.openPnl, 0)}` : '—'}
-                  </td>
-                  <td style={{ width: '24px' }}>
+                    <span className="leg-expiry" data-field="expiry">{expiryText(leg)}</span>
                     <button
-                      className="btn"
-                      style={{ padding: '0.0625rem 0.3125rem' }}
+                      className="btn leg-remove"
                       onClick={() => {
                         removeLeg(leg.id);
                         calculateStrategy();
                       }}
-                      aria-label="Remove leg"
+                      aria-label={`Remove ${side.toLowerCase()} ${leg.option_type.toLowerCase()} ${formatAmount(leg.strike_price, 2)}`}
                     >
                       ×
                     </button>
-                  </td>
-                </tr>
-                );
-              })}
-            </tbody>
-          </table>
+                  </div>
+
+                  <div className="leg-fields">
+                    <label className="leg-field leg-field--qty">
+                      <span className="stat-label">{isOption ? 'Contracts' : 'Quantity'}</span>
+                      <input
+                        className="input"
+                        style={{ textAlign: 'right' }}
+                        type="number"
+                        min={1}
+                        value={leg.quantity}
+                        aria-label="Quantity (contracts)"
+                        onChange={(e) => {
+                          updateLeg(leg.id, { quantity: Math.max(1, Number(e.target.value) || 1) });
+                          calculateStrategy();
+                        }}
+                      />
+                    </label>
+                    <label className="leg-field leg-field--price">
+                      <span className="stat-label">Price</span>
+                      {/*
+                        Grouped, and WITHOUT a symbol. A premium is usually a
+                        two-figure per-share number, but it is multiplied by
+                        quantity x 100 downstream, so a slipped digit is a
+                        position priced an order of magnitude wrong.
+                      */}
+                      <MoneyInput
+                        value={leg.premium}
+                        onChange={(v) => {
+                          updateLeg(leg.id, { premium: Number.isNaN(v) ? 0 : v });
+                          calculateStrategy();
+                        }}
+                        decimals={2}
+                        showSymbol={false}
+                        ariaLabel="Leg price"
+                        className="input"
+                      />
+                    </label>
+                    {/* Per-leg risk. The aggregate cannot say which leg carries
+                        the position: a condor nets to a small delta while each
+                        wing holds a much larger one. An em dash until the
+                        engine has answered, never zero -- a leg with no
+                        computed risk and a leg with none are different states. */}
+                    <span className="leg-risk" aria-label="Leg risk">
+                      <span title="This leg's delta, in share-equivalents">Δ {risk ? risk.delta.toFixed(2) : '—'}</span>
+                      <span title="This leg's decay, in dollars per calendar day">
+                        Θ{' '}
+                        <span className={risk && risk.theta < 0 ? 'loss' : risk ? 'profit' : undefined}>
+                          {risk ? risk.theta.toFixed(2) : '—'}
+                        </span>
+                        /day
+                      </span>
+                      <span title="Model value against what this leg cost">
+                        Open{' '}
+                        <span className={risk ? (risk.openPnl >= 0 ? 'profit' : 'loss') : undefined}>
+                          {risk ? `${risk.openPnl >= 0 ? '+' : ''}${formatAmount(risk.openPnl, 0)}` : '—'}
+                        </span>
+                      </span>
+                    </span>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
         )}
       </div>
     </div>

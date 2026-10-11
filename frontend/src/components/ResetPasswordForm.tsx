@@ -1,7 +1,9 @@
 'use client';
 
 import React, { useCallback, useEffect, useState } from 'react';
+import Link from 'next/link';
 import { createClient } from '../lib/supabase/client';
+import { recoveryLinkShape } from '../lib/recoveryLink';
 
 /**
  * Set a new password from a recovery link.
@@ -68,7 +70,9 @@ export const ResetPasswordForm: React.FC = () => {
     const establish = async () => {
       // An already-hydrated session is the implicit-fragment case, and the one
       // that happens in practice.
-      const { data } = await supabase.auth.getSession();
+      // A failed lookup (an unreachable auth host, a refresh token the server
+      // rejects) is "no session", which is the branch below that explains it.
+      const { data } = await supabase.auth.getSession().catch(() => ({ data: { session: null } }));
       if (cancelled) return;
       if (data.session) {
         setReady(true);
@@ -142,13 +146,16 @@ export const ResetPasswordForm: React.FC = () => {
       }
 
       // Nothing established a session. Say which thing is wrong, because "it
-      // did not work" is what sent this report in the first place.
+      // did not work" is what sent this report in the first place -- and tell
+      // a visitor who ARRIVED with a link that failed apart from one who just
+      // navigated here. The second has no link to be "no longer valid".
       setChecking(false);
+      if (recoveryLinkShape(window.location.hash, window.location.search) === 'none') return;
       setMessage({
         kind: 'error',
         text:
           'This reset link is no longer valid. Recovery links expire, and each one can ' +
-          'only be used once. Request a new one from the sign-in form.',
+          'only be used once. Request a new one below.',
       });
     };
 
@@ -232,9 +239,9 @@ export const ResetPasswordForm: React.FC = () => {
     return (
       <div className="flex flex-col gap-3" role="status">
         <p className="text-sm">Your password has been changed and you are signed in.</p>
-        <a href="/" className="btn w-fit">
+        <Link href="/" className="btn w-fit">
           Back to the calculator
-        </a>
+        </Link>
       </div>
     );
   }
@@ -248,6 +255,11 @@ export const ResetPasswordForm: React.FC = () => {
     // unreachable in the first place. So the request lives here too.
     return (
       <form onSubmit={requestLink} className="flex flex-col gap-3">
+        {!message && (
+          <p className="text-sm text-[var(--color-ink-300)]">
+            Enter your email and we will send you a link to choose a new password.
+          </p>
+        )}
         {message && (
           <p
             className="text-sm"
@@ -264,7 +276,7 @@ export const ResetPasswordForm: React.FC = () => {
           <input
             type="email"
             autoComplete="email"
-            className="p-2 rounded bg-transparent border border-white/20 text-sm"
+            className="input"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             required
@@ -273,9 +285,9 @@ export const ResetPasswordForm: React.FC = () => {
         <button type="submit" className="btn w-fit" disabled={sending}>
           {sending ? 'Sending…' : 'Email me a reset link'}
         </button>
-        <a href="/" className="text-xs underline text-[var(--color-ink-400)]">
+        <Link href="/" className="text-xs underline text-[var(--color-ink-300)]">
           Back to the calculator
-        </a>
+        </Link>
       </form>
     );
   }
@@ -287,7 +299,7 @@ export const ResetPasswordForm: React.FC = () => {
         <input
           type="password"
           autoComplete="new-password"
-          className="p-2 rounded bg-transparent border border-white/20 text-sm"
+          className="input"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
           required
@@ -299,7 +311,7 @@ export const ResetPasswordForm: React.FC = () => {
         <input
           type="password"
           autoComplete="new-password"
-          className="p-2 rounded bg-transparent border border-white/20 text-sm"
+          className="input"
           value={confirm}
           onChange={(e) => setConfirm(e.target.value)}
           required

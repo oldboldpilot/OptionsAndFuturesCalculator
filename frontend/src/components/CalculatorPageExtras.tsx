@@ -196,7 +196,7 @@ export function CalculatorPageExtras({ slug }: { slug: string }) {
                     <td style={td}>
                       <a
                         href={`/calculator/${relSlug}`}
-                        style={{ color: 'var(--color-accent)', textDecoration: 'none' }}
+                        style={{ color: 'var(--color-accent-text)', textDecoration: 'none' }}
                       >
                         {relGuide.name}
                       </a>

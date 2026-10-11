@@ -1,9 +1,27 @@
 'use client';
 
-import { useMemo, useRef, useState } from 'react';
-import { Canvas, useFrame } from '@react-three/fiber';
-import * as THREE from 'three';
+import { useMemo, useState } from 'react';
+import dynamic from 'next/dynamic';
 import { useCalculatorStore } from '../store/useCalculatorStore';
+import { GateNote } from './GateNote';
+
+/**
+ * The 3D canvas is fetched only when the surface is switched ON.
+ *
+ * three.js and react-three-fiber are most of this page's JavaScript, and the
+ * surface is OFF by default, so every visitor was downloading, parsing and
+ * compiling a WebGL library to draw a panel that said "Surface off". On a phone
+ * under CPU throttling that parse was a large part of the 500ms of blocking time
+ * and the 5s largest-contentful-paint. `ssr: false` because WebGL has no server.
+ */
+const SurfaceCanvas = dynamic(() => import('./PnLSurfaceCanvas'), {
+  ssr: false,
+  loading: () => (
+    <div className="empty-state">
+      <span className="empty-state-title">Loading 3D…</span>
+    </div>
+  ),
+});
 
 /**
  * The P&L surface: price × date × profit, as a solid.
@@ -22,51 +40,6 @@ import { useCalculatorStore } from '../store/useCalculatorStore';
  * relearning what a colour means. Height is normalised per position rather than
  * absolute, because the shape is the information; the numbers are next door.
  */
-
-function Surface({ rows, cols, heights, maxAbs }: {
-  rows: number; cols: number; heights: Float32Array; maxAbs: number;
-}) {
-  const mesh = useRef<THREE.Mesh>(null);
-
-  const geometry = useMemo(() => {
-    // A plane subdivided to the grid, then displaced. PlaneGeometry's vertex
-    // order runs row-major from the top-left, which matches the way the cells
-    // are laid out below.
-    const g = new THREE.PlaneGeometry(4, 3, cols - 1, rows - 1);
-    const pos = g.attributes.position as THREE.BufferAttribute;
-    const colour = new Float32Array(pos.count * 3);
-    const profit = new THREE.Color('#13aa52');
-    const loss = new THREE.Color('#c0392b');
-    const flat = new THREE.Color('#f2f2f2');
-
-    for (let i = 0; i < pos.count; i++) {
-      const h = heights[i] ?? 0;
-      pos.setZ(i, (h / maxAbs) * 0.9);
-      const t = Math.min(Math.abs(h) / maxAbs, 1);
-      const c = flat.clone().lerp(h >= 0 ? profit : loss, 0.15 + t * 0.85);
-      colour[i * 3] = c.r;
-      colour[i * 3 + 1] = c.g;
-      colour[i * 3 + 2] = c.b;
-    }
-    g.setAttribute('color', new THREE.BufferAttribute(colour, 3));
-    g.computeVertexNormals();
-    return g;
-  }, [rows, cols, heights, maxAbs]);
-
-  // A slow drift, not a spin. Enough parallax to read the relief; not so much
-  // that reading a value becomes a moving target.
-  useFrame(({ clock }) => {
-    if (mesh.current) {
-      mesh.current.rotation.z = -0.9 + Math.sin(clock.elapsedTime * 0.12) * 0.13;
-    }
-  });
-
-  return (
-    <mesh ref={mesh} geometry={geometry} rotation={[-1.05, 0, -0.9]}>
-      <meshStandardMaterial vertexColors flatShading roughness={0.85} metalness={0.05} side={THREE.DoubleSide} />
-    </mesh>
-  );
-}
 
 export function PnLSurface() {
   const { result, isLoading, error, modelLimit, gateDenied, notReady } = useCalculatorStore();
@@ -97,7 +70,7 @@ export function PnLSurface() {
     <div className="panel" style={{ flex: 1, minHeight: 0 }}>
       <div className="panel-head">
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.4375rem' }}>
-          <span className="panel-title">P&amp;L surface</span>
+          <h2 className="panel-title">P&amp;L surface</h2>
           <span className="chip" title="Same figures as the P&L matrix, read as a height field">
             price × date × profit
           </span>
@@ -136,17 +109,9 @@ export function PnLSurface() {
         ) : isLoading ? (
           <div className="empty-state"><span className="empty-state-title">Computing…</span></div>
         ) : field ? (
-          <Canvas camera={{ position: [0, 0, 5.4], fov: 42 }} dpr={[1, 1.75]} style={{ background: 'transparent' }}>
-            <ambientLight intensity={0.85} />
-            <directionalLight position={[3, 5, 4]} intensity={1.1} />
-            <directionalLight position={[-4, -2, 2]} intensity={0.35} />
-            <Surface {...field} />
-          </Canvas>
+          <SurfaceCanvas {...field} />
         ) : gateDenied ? (
-          <div className="empty-state">
-            <span className="empty-state-title">Needs Pro</span>
-            <span>{gateDenied}</span>
-          </div>
+          <GateNote />
         ) : notReady ? (
           /* Replaces the empty state when set, sitting below the panel's
              rendered-output branch so it cannot replace a drawn chart. */

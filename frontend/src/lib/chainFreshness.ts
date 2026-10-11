@@ -29,7 +29,19 @@
  *    frozen at render. A chain fetched fresh renders LIVE and, with nothing
  *    else changing on the page, would stay LIVE for the full fifteen minutes.
  *    That is why the caller ticks `nowMs`; this function stays pure.
+ *
+ * And a third, found on the live site at 01:12 ET:
+ *
+ * 3. **Fresh is not the same as live.** Age measures how recently WE asked the
+ *    provider. With every US exchange closed, a print one second old is the
+ *    last trade of a session that ended hours ago, and the chip said LIVE over
+ *    it. LIVE now also requires the regular session to be open
+ *    (`usEquitySession`); otherwise the state is `closed` and the chip says so
+ *    and gives the time of the last quote. The label is still derived from
+ *    `fetched_at` -- it was never allowed to come from request status -- it
+ *    simply asks one more question of it.
  */
+import { easternClockLabel, usEquitySession } from './marketSession';
 
 /** Age below which a print may be called LIVE. */
 export const LIVE_MAX_AGE_SECONDS = 60;
@@ -41,26 +53,39 @@ export const LIVE_MAX_AGE_SECONDS = 60;
  */
 export const CLOCK_SKEW_TOLERANCE_SECONDS = 5;
 
+/**
+ * What the chip says.
+ *
+ *   live     fresh AND the session is open
+ *   closed   the session is not open, whatever the age: "MARKET CLOSED"
+ *   delayed  the session is open but the print is old (or its age is unknowable)
+ *   unknown  no readable timestamp at all: nothing is claimed
+ */
+export type ChainState = 'live' | 'closed' | 'delayed' | 'unknown';
+
 export interface ChainFreshness {
   /** Seconds since the backend obtained the print; null when unknowable. */
   ageSeconds: number | null;
-  /** True only when the age is known AND within the live window. */
+  /** True only when the age is known, within the live window, AND the market is open. */
   isLive: boolean;
+  state: ChainState;
   /** Local-time "as of" for the DELAYED chip; '' when unknowable. */
   asOfTime: string;
+  /** Exchange-clock time of the print ("3:59 PM ET"), for the closed chip; '' when unknowable. */
+  lastQuoteLabel: string;
 }
 
+const UNKNOWN: ChainFreshness = {
+  ageSeconds: null, isLive: false, state: 'unknown', asOfTime: '', lastQuoteLabel: '',
+};
+
 export function chainFreshness(fetchedAt: string | null | undefined, nowMs: number): ChainFreshness {
-  if (!fetchedAt) {
-    return { ageSeconds: null, isLive: false, asOfTime: '' };
-  }
+  if (!fetchedAt) return UNKNOWN;
 
   const fetchedMs = Date.parse(fetchedAt);
-  if (Number.isNaN(fetchedMs)) {
-    // An unparseable timestamp is a backend or wire problem. Failing to
-    // DELAYED states less than the truth; failing to LIVE would state more.
-    return { ageSeconds: null, isLive: false, asOfTime: '' };
-  }
+  // An unparseable timestamp is a backend or wire problem. Failing to
+  // DELAYED states less than the truth; failing to LIVE would state more.
+  if (Number.isNaN(fetchedMs)) return UNKNOWN;
 
   const asOfTime = new Date(fetchedMs).toLocaleTimeString([], {
     hour: '2-digit',
@@ -68,14 +93,24 @@ export function chainFreshness(fetchedAt: string | null | undefined, nowMs: numb
     second: '2-digit',
   });
 
+  const lastQuoteLabel = easternClockLabel(fetchedMs);
+  const sessionOpen = usEquitySession(nowMs).open;
   const ageSeconds = (nowMs - fetchedMs) / 1000;
 
   if (ageSeconds < -CLOCK_SKEW_TOLERANCE_SECONDS) {
     // The print is stamped in this viewer's future by more than skew explains,
     // so this clock cannot measure its age at all. Keep the timestamp — it is
     // still what the server said — and drop the claim.
-    return { ageSeconds: null, isLive: false, asOfTime };
+    return {
+      ageSeconds: null,
+      isLive: false,
+      state: sessionOpen ? 'delayed' : 'closed',
+      asOfTime,
+      lastQuoteLabel,
+    };
   }
 
-  return { ageSeconds, isLive: ageSeconds < LIVE_MAX_AGE_SECONDS, asOfTime };
+  const fresh = ageSeconds < LIVE_MAX_AGE_SECONDS;
+  const state: ChainState = !sessionOpen ? 'closed' : fresh ? 'live' : 'delayed';
+  return { ageSeconds, isLive: state === 'live', state, asOfTime, lastQuoteLabel };
 }

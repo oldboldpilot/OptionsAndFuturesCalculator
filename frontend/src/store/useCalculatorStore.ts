@@ -18,6 +18,9 @@ import { StrategyRequest, Leg as ProtoLeg, QuoteRequest, ChainRequest, RiskFreeR
  */
 import type { AsianStyle } from './useTreePricerStore';
 
+/** What kind of thing the symbol names. Part of an instrument's identity. */
+export type AssetClass = 'EQUITY' | 'FUTURES' | 'CRYPTO';
+
 export interface Leg {
   id: string;
   instrument_type: string;
@@ -28,6 +31,31 @@ export interface Leg {
   quantity: number;
   expiration_days?: number;
   implied_volatility?: number;
+  /**
+   * The instrument this leg was built on, stamped by `addLeg`.
+   *
+   * A position has exactly one underlying -- the engine prices every leg off a
+   * single spot -- so a leg that carries its own symbol is what lets the store
+   * notice, rather than assume, that the legs on screen belong to the header
+   * above them. Optional because legs loaded from a saved scenario predate the
+   * field; an absent symbol means "the current one", which is what they always
+   * meant.
+   */
+  symbol?: string;
+  asset_class?: AssetClass;
+  /**
+   * Dollars per point for one contract: 50 for an ES future. Absent means the
+   * wire default -- 100 for an option, 1 for anything else -- which is right for
+   * listed equity options and WRONG for a future, whose profit and loss was
+   * therefore reported in index points rather than dollars.
+   */
+  contract_multiplier?: number;
+  /**
+   * Human label for when this leg expires -- the chain date for an option, the
+   * contract code for a future. Display only: the engine prices from
+   * `expiration_days`, and a label must never be parsed back into one.
+   */
+  expiry_label?: string;
   /**
    * Averaging style. Absent means NOT_ASIAN -- the same meaning the proto's
    * zero value carries, so a leg built before this field existed (the strategy
@@ -115,7 +143,18 @@ export interface CalculationResult {
   legRisk: LegRisk[];
   max_profit: number;
   max_loss: number;
+  /**
+   * The engine found no finite maximum profit (or loss) over the underlying's
+   * whole range -- a long call, a short call, a long future. `max_profit` /
+   * `max_loss` then hold only the value at the edge of the grid the engine
+   * swept, and are NOT the position's maximum: the UI shows "Unlimited" and
+   * must not print the number or a ratio derived from it.
+   */
+  max_profit_unbounded: boolean;
+  max_loss_unbounded: boolean;
   break_even: number;
+  /** Every price at which the payoff changes sign, ascending. `break_even` is the first. */
+  breakeven_prices: number[];
   expected_value: number;
   /** Probability of profit — sensen integrates a lognormal over profitable regions. */
   pop: number;
@@ -246,8 +285,16 @@ export interface TicketDraft {
 
 interface CalculatorState {
   symbol: string;
-  assetClass: 'EQUITY' | 'FUTURES' | 'CRYPTO';
+  assetClass: AssetClass;
   legs: Leg[];
+  /**
+   * The position that was on screen when the instrument last changed, kept for
+   * exactly one Undo. Null whenever there is nothing to restore.
+   *
+   * Cleared the moment the user builds anything new (`addLeg`), so an Undo can
+   * never resurrect a position over the top of work done since.
+   */
+  retiredPosition: { symbol: string; assetClass: AssetClass; legs: Leg[] } | null;
   spotPrice: number;
   riskFreeRate: number | null;
   rateSource: RateSource;
@@ -323,7 +370,19 @@ interface CalculatorState {
 
   ticket: TicketDraft;
 
-  setSymbol: (symbol: string, spotPrice?: number, assetClass?: 'EQUITY' | 'FUTURES' | 'CRYPTO') => void;
+  /**
+   * `restoreLegs` is for Undo only: the legs to put on screen WITH the new
+   * instrument in the same write, so they are never visible under a header
+   * that is not theirs and the quote handler finds them already there.
+   */
+  setSymbol: (
+    symbol: string,
+    spotPrice?: number,
+    assetClass?: AssetClass,
+    restoreLegs?: Leg[],
+  ) => void;
+  /** Bring back the position cleared by the last change of instrument. */
+  undoSymbolSwitch: () => void;
   addLeg: (leg: Omit<Leg, 'id'>) => void;
   removeLeg: (id: string) => void;
   clearLegs: () => void;
@@ -336,6 +395,11 @@ interface CalculatorState {
   loadChain: (expiration?: string) => void;
   setSelectedExpiration: (date: string) => void;
   setTicket: (patch: Partial<TicketDraft>) => void;
+  /**
+   * Open the ticket on the at-the-money contract if no strike is chosen yet.
+   * A seed, never an overwrite: a strike the trader picked is left alone.
+   */
+  seedTicketFromAtm: () => void;
   commitTicket: () => void;
 
   calculateStrategy: () => Promise<void>;
@@ -353,7 +417,12 @@ interface CalculatorState {
 const FUTURES_SYMBOLS = ['ES', 'NQ', 'RTY', 'YM', 'CL', 'NG', 'GC', 'SI', 'ZB', 'ZN'];
 const CRYPTO_SYMBOLS = ['BTC', 'ETH', 'SOL'];
 
-function classify(symbol: string): 'EQUITY' | 'FUTURES' | 'CRYPTO' {
+/** Shown in place of a chain for a crypto symbol. Names instruments that do have one. */
+export const CRYPTO_UNSUPPORTED =
+  'No listed options for crypto, and no crypto price feed, so nothing is shown rather than the ' +
+  'price of a different instrument that shares the ticker. Try SPY, QQQ, NVDA, AAPL or TSLA.';
+
+function classify(symbol: string): AssetClass {
   if (FUTURES_SYMBOLS.includes(symbol)) return 'FUTURES';
   if (CRYPTO_SYMBOLS.includes(symbol)) return 'CRYPTO';
   return 'EQUITY';
@@ -541,7 +610,7 @@ export function buildStrategyRequest(input: StrategyRequestInput): StrategyReque
       // every leg reached the engine priced at zero with no volatility.
       pLeg.setPremium(l.premium);
       pLeg.setImpliedVolatility(l.implied_volatility ?? 0);
-      pLeg.setContractMultiplier(isOption ? 100 : 1);
+      pLeg.setContractMultiplier(l.contract_multiplier ?? (isOption ? 100 : 1));
       // Sent for EVERY leg, not only option legs. A futures or stock leg
       // has no averaging window, so nothing in this client ever marks one
       // Asian -- but suppressing the field here on a leg that did carry a
@@ -563,6 +632,7 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
   symbol: 'SPY',
   assetClass: 'EQUITY',
   legs: [],
+  retiredPosition: null,
   // Unknown until the quote service answers. Never seeded with a stand-in price.
   spotPrice: 0,
   // Unknown until the rate service answers, exactly like spotPrice above. The
@@ -603,8 +673,26 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
     asianType: 'NOT_ASIAN',
   },
 
-  setSymbol: (symbolInput, customPrice, customAssetClass) => {
+  setSymbol: (symbolInput, customPrice, customAssetClass, restoreLegs) => {
     const sym = symbolInput.trim().toUpperCase();
+    const nextClass = customAssetClass || classify(sym);
+    const before = get();
+
+    // An instrument is a symbol AND what kind of thing it is: ES the E-mini
+    // future and ES the utility are different instruments that share a ticker.
+    const changed = sym !== before.symbol || nextClass !== before.assetClass;
+
+    // A position belongs to ONE instrument. The engine prices every leg off a
+    // single spot and a single implied volatility, so legs carried across a
+    // change of symbol are not a position on the new instrument -- they are the
+    // old one's strikes and volatility priced against the new one's spot, which
+    // is a confident number answering a question nobody asked. They are cleared
+    // and kept for one Undo instead, because a click on a symbol pill is far too
+    // cheap a gesture to destroy four legs of work.
+    const retire = changed && before.legs.length > 0 && restoreLegs === undefined;
+    const retired = retire
+      ? { symbol: before.symbol, assetClass: before.assetClass, legs: before.legs }
+      : null;
 
     // A user-supplied simulation price is an explicit override and is honoured.
     // Otherwise the price is unknown until the quote service answers — it is
@@ -612,9 +700,13 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
     set({
       symbol: sym,
       spotPrice: customPrice !== undefined ? customPrice : 0,
-      assetClass: customAssetClass || classify(sym),
+      assetClass: nextClass,
       error: null,
       notReady: null,
+      ...(retire
+        ? { legs: [], retiredPosition: retired, gateDenied: null, modelLimit: null }
+        : {}),
+      ...(restoreLegs !== undefined ? { legs: restoreLegs, retiredPosition: null } : {}),
       // The old chain belongs to the old symbol. Showing it against the new one
       // would be the most convincing kind of wrong data.
       chainStrikes: [],
@@ -630,6 +722,17 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
       chainFetchedAt: null,
       result: null,
     });
+
+    // No price and no chain for a class this engine can neither quote nor list
+    // options on. The quote service has no crypto source, so a request falls
+    // through to the EQUITY lookup and answers with the price of a US-listed
+    // fund that happens to share the ticker -- 37.84 under BTC, labelled QUOTE.
+    // A wrong number with a quote chip on it is worse than none, and the chain
+    // can only refuse, so neither is asked.
+    if (nextClass === 'CRYPTO') {
+      set({ spotPrice: 0, chainStatus: 'error', chainError: CRYPTO_UNSUPPORTED });
+      return;
+    }
 
     get().loadChain();
 
@@ -675,11 +778,36 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
         return;
       }
       set({ spotPrice: res.getPrice(), error: null });
+      // A position that was waiting on this price (an Undo restores legs before
+      // the quote has landed) has nothing else that would ever price it:
+      // StrategyWorkspace recalculates on a change of legs, not of spot.
+      if (get().legs.length > 0) void get().calculateStrategy();
     });
   },
 
+  undoSymbolSwitch: () => {
+    const kept = get().retiredPosition;
+    if (!kept) return;
+    // Instrument and legs go back in ONE write (see `restoreLegs`). Nothing is
+    // retired in exchange: an Undo is only offered while the position is empty.
+    get().setSymbol(kept.symbol, undefined, kept.assetClass, kept.legs);
+  },
+
   addLeg: (leg) => set((state) => ({
-    legs: [...state.legs, { ...leg, id: `leg-${(legSeq += 1).toString(36)}` }]
+    legs: [
+      ...state.legs,
+      {
+        ...leg,
+        // Stamped here, once, rather than at each of the call sites that build
+        // legs: a call site that forgot would produce exactly the unmarked leg
+        // this field exists to make impossible.
+        symbol: leg.symbol ?? state.symbol,
+        asset_class: leg.asset_class ?? state.assetClass,
+        id: `leg-${(legSeq += 1).toString(36)}`,
+      },
+    ],
+    // Building something new ends the Undo window.
+    retiredPosition: null,
   })),
 
   // Emptying the leg set clears the denial and the model limit with it.
@@ -812,6 +940,27 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
 
   setTicket: (patch) => set((st) => ({ ticket: { ...st.ticket, ...patch } })),
 
+  seedTicketFromAtm: () => {
+    const { ticket, chainStrikes } = get();
+    if (ticket.strike !== null) return;
+    const atm = chainStrikes.find((r) => r.isAtm);
+    if (!atm) return;
+    const q = ticket.optionType === 'CALL' ? atm.call : atm.put;
+    // The executable side, exactly as a chain click picks it: buying lifts the
+    // ask, selling hits the bid. A side with no quote leaves the price EMPTY --
+    // a premium of zero is an option that costs nothing, and the leg guard below
+    // refuses a null where it would have accepted that.
+    const px = ticket.action === 'BUY' ? q.ask : q.bid;
+    set({
+      ticket: {
+        ...ticket,
+        strike: atm.strike,
+        premium: px > 0 ? px : null,
+        impliedVolatility: q.iv > 0 ? q.iv : null,
+      },
+    });
+  },
+
   /**
    * Move the ticket into the position.
    *
@@ -856,6 +1005,11 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
       premium: t.premium,
       quantity: t.quantity > 0 ? t.quantity : 1,
       expiration_days: dte,
+      // The date the leg was priced against, kept so the position can show it:
+      // a leg's expiry used to be visible nowhere once it left the ticket, and
+      // changing the ticket's expiry afterwards left the existing leg on the
+      // old date with no sign of either.
+      expiry_label: match.date,
       implied_volatility: t.impliedVolatility ?? undefined,
       // Carried, not defaulted. The engine refuses an Asian leg today, and
       // that refusal is the honest answer -- dropping the style here instead
@@ -988,6 +1142,29 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
       return;
     }
 
+    // Every leg must belong to the instrument in the header. Changing symbol
+    // clears the position, so this is the SECOND line of defence rather than
+    // the design: it catches a foreign leg that arrives some other way -- a
+    // loaded scenario, a future code path -- before it is priced against a spot
+    // it has nothing to do with. A leg with no recorded instrument predates the
+    // stamp and always meant the current one.
+    const { assetClass } = get();
+    const foreign = legs.find(
+      (l) => (l.symbol !== undefined && l.symbol !== symbol) ||
+             (l.asset_class !== undefined && l.asset_class !== assetClass),
+    );
+    if (foreign) {
+      set({
+        result: null,
+        notReady:
+          `This position holds ${foreign.symbol ?? symbol} legs, but the symbol is ${symbol}. ` +
+          `Switch back to ${foreign.symbol ?? symbol} or clear the position.`,
+        error: null,
+        isLoading: false,
+      });
+      return;
+    }
+
     // Refuse to compute on inputs we do not actually have. Each of these was
     // previously hardcoded into the request ('SPY', 0.20, 30 days), so the
     // engine returned a real answer to a fabricated question.
@@ -1001,7 +1178,14 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
       return;
     }
     const iv = positionIv(legs);
-    if (iv === null) {
+    // A volatility is a precondition for pricing an OPTION. A future has none in
+    // its payoff -- profit is (price - entry) x multiplier x quantity -- so a
+    // position of futures and stock needs none, and the engine leaves the
+    // probability fields at zero rather than refusing. The guard used to apply
+    // to every leg, which refused a December ES future "for a missing IV" with
+    // advice (choose a later expiration) that could never be followed.
+    const needsVolatility = legs.some((l) => l.option_type === 'CALL' || l.option_type === 'PUT');
+    if (iv === null && needsVolatility) {
       // Same distinction the expiry guard below draws. Telling someone to "add
       // legs from the option chain" is only useful advice when they have not;
       // a position that already holds legs got here because the CONTRACTS
@@ -1020,6 +1204,9 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
       });
       return;
     }
+    // Zero, not a stand-in: the engine reads 0 as "no volatility" and omits the
+    // probability figures; a plausible 0.20 here would produce them.
+    const sigma = iv ?? 0;
     const days = horizonDays(legs);
     if (days <= 0) {
       // Two different causes reach this branch and they need different words.
@@ -1082,7 +1269,7 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
       const req = buildStrategyRequest({
         symbol,
         spotPrice,
-        impliedVolatility: iv,
+        impliedVolatility: sigma,
         riskFreeRate: rate,
         dividendYield: get().dividendYield,
         legs,
@@ -1152,10 +1339,20 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
           legRisk,
           max_profit: res.getMaxProfit(),
           max_loss: maxLoss,
+          max_profit_unbounded: res.getMaxProfitUnbounded(),
+          max_loss_unbounded: res.getMaxLossUnbounded(),
           break_even: res.getBreakEven(),
+          breakeven_prices: res.getBreakevenPricesList(),
           expected_value: res.getExpectedValue(),
           pop: res.getPop(),
-          risk_reward_ratio: maxLoss !== 0 ? Math.abs(res.getMaxProfit() / maxLoss) : 0,
+          // ONLY when both ends are real numbers. With an unbounded end the
+          // engine's max is the edge of its sweep, so a ratio built from it is
+          // a statistic about the grid and not about the trade -- the long
+          // call that read 42.40 : 1 was the profit at spot x 1.25.
+          risk_reward_ratio:
+            maxLoss !== 0 && !res.getMaxProfitUnbounded() && !res.getMaxLossUnbounded()
+              ? Math.abs(res.getMaxProfit() / maxLoss)
+              : 0,
           aggregate_greeks: {
             delta: g?.getDelta() ?? 0,
             gamma: g?.getGamma() ?? 0,
@@ -1173,7 +1370,7 @@ export const useCalculatorStore = create<CalculatorState>((set, get) => ({
           // inputs rather than a snapshot taken before the rate resolved.
           inputs: {
             spot: spotPrice,
-            impliedVolatility: iv,
+            impliedVolatility: sigma,
             days,
             // Falls back to the horizon when the field is absent: proto3 gives
             // an unset double as 0, which is indistinguishable from a backend

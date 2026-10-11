@@ -28,6 +28,16 @@ auto check(bool condition, const std::string& what) -> void {
 
 auto section(const char* title) -> void { std::printf("\n=== %s ===\n", title); }
 
+/** "2035-08-14" -> sys_days, for a test that reads better with the date spelled out. */
+auto sys_days_of(std::string_view iso) -> std::chrono::sys_days {
+    int y{}, m{}, d{};
+    std::from_chars(iso.data() + 0, iso.data() + 4, y);
+    std::from_chars(iso.data() + 5, iso.data() + 7, m);
+    std::from_chars(iso.data() + 8, iso.data() + 10, d);
+    return std::chrono::sys_days{std::chrono::year{y} / std::chrono::month{static_cast<unsigned>(m)} /
+                                 std::chrono::day{static_cast<unsigned>(d)}};
+}
+
 /**
  * A fake MarketDataProvider that counts provider chain, quote, and expirations calls,
  * returns distinct payloads per call count, and can be forced to fail on command.
@@ -52,9 +62,7 @@ public:
         -> std::expected<std::vector<Expiration>, std::error_code> override {
         if (should_fail_) return std::unexpected(make_error_code(MarketDataError::NetworkError));
         ++expirations_calls_;
-        return std::vector<Expiration>{
-            Expiration{.date = "2026-08-21", .days = 10, .label = "Aug 21, 2026 (10d)"}
-        };
+        return std::vector<Expiration>{Expiration{.date = "2026-08-21"}};
     }
 
     [[nodiscard]] auto chain(const std::string& symbol, const std::string& expiration, double spot) const
@@ -66,7 +74,7 @@ public:
         c.symbol = symbol;
         c.spot = spot;
         c.selected_expiration = expiration;
-        c.expirations = { Expiration{.date = expiration, .days = 10, .label = "Aug 21, 2026 (10d)"} };
+        c.expirations = { Expiration{.date = expiration} };
         c.strikes.push_back(StrikeRow{
             .strike = 150.0,
             .call = OptionQuote{.bid = 2.0 + static_cast<double>(n), .ask = 2.2 + static_cast<double>(n), .delta = 0.5, .iv = 0.2, .volume = 100, .open_interest = 500},
@@ -96,11 +104,50 @@ private:
     mutable std::atomic<std::size_t> call_count_{0};
 };
 
+/** Two weekly expirations, so a default-expiry choice has something to choose between. */
+class TwoExpiryProvider final : public IMarketDataProvider {
+public:
+    [[nodiscard]] auto name() const noexcept -> std::string_view override { return "two_expiry"; }
+
+    [[nodiscard]] auto quote(const std::string& symbol) const
+        -> std::expected<Quote, std::error_code> override {
+        return Quote{.symbol = symbol, .price = 150.0, .previous_close = 149.9,
+                     .timestamp = "2035-08-07T14:00:00Z"};
+    }
+
+    [[nodiscard]] auto expirations(const std::string&, double) const
+        -> std::expected<std::vector<Expiration>, std::error_code> override {
+        ++expirations_calls_;
+        return std::vector<Expiration>{Expiration{.date = "2035-08-14"}, Expiration{.date = "2035-08-21"}};
+    }
+
+    [[nodiscard]] auto chain(const std::string& symbol, const std::string& expiration, double spot) const
+        -> std::expected<Chain, std::error_code> override {
+        Chain c;
+        c.symbol = symbol;
+        c.spot = spot;
+        c.selected_expiration = expiration;
+        return c;
+    }
+
+    [[nodiscard]] auto expirations_calls() const noexcept -> int { return expirations_calls_.load(); }
+
+private:
+    mutable std::atomic<int> expirations_calls_{0};
+};
+
 // Fake clock for test time manipulation
 std::chrono::steady_clock::time_point g_test_now = std::chrono::steady_clock::now();
 
 auto get_test_now() -> std::chrono::steady_clock::time_point {
     return g_test_now;
+}
+
+// Fake calendar: the date the service counts from, crossed by assignment.
+std::chrono::sys_days g_test_today{};
+
+auto get_test_today() -> std::chrono::sys_days {
+    return g_test_today;
 }
 
 } // namespace
@@ -214,6 +261,68 @@ auto main() -> int {
         auto cold_fail = fetch_chain("GOOGL", "2026-08-21");
         check(!cold_fail.has_value(), "Cold miss with failing provider returns error");
         fake->set_should_fail(false);
+    }
+
+    section("6. A cached expiration is a DATE; its day count is the reader's, against today");
+    {
+        // The expiration list lives 12 hours, the chain embedding it 15 minutes,
+        // the last good chain an hour. Each outlives a UTC midnight, so a count
+        // taken at fill time is wrong the morning after.
+        // 2035: far from any day this can run on, so a reader that fell back to
+        // the real clock would disagree with the injected one.
+        const auto day_one = std::chrono::sys_days{std::chrono::year{2035} / std::chrono::October / 5};
+        const auto day_two = day_one + std::chrono::days{1};
+
+        check(days_until("2035-10-12", day_one) == 7 && days_until("2035-10-12", day_two) == 6,
+              "days_until counts against the day it is handed: 7 on the 5th, 6 on the 6th");
+        check(days_until("2035-10-12", sys_days_of("2035-10-12")) == 0 &&
+                  days_until("2035-10-12", day_one + std::chrono::days{10}) == -3,
+              "an expiry reads 0 on its own day and negative after it");
+        check(expiry_label("2035-10-12", 7) == "Oct 12, 2035 (7d)" &&
+                  expiry_label("2035-10-12", 6) == "Oct 12, 2035 (6d)",
+              "the label prints the count it is given");
+        check(expiry_label("2028-10-13", 400) == "Oct 13, 2028 (400d LEAP)",
+              "past a year the label says LEAP");
+        check(days_until("garbage", day_one) == 0 && days_until("2035-13-45", day_one) == 0,
+              "an unparseable date counts as 0 rather than as a number of days from nowhere");
+
+        // The same entry, filled once, read on both days.
+        set_calendar_provider(get_test_today);
+        expiration_cache().clear();
+        g_test_today = day_one;
+        expiration_cache().put("SPY", std::vector<Expiration>{Expiration{.date = "2035-10-12"}});
+
+        g_test_today = day_two;
+        const auto hit = expiration_cache().get("SPY");
+        check(hit.has_value() && hit->size() == 1, "the entry is still cached after midnight");
+        check(hit.has_value() && !hit->empty() &&
+                  days_until((*hit)[0].date, today()) == 6,
+              "...and read through today() it is 6 days away, not the 7 it was when filled");
+
+        // The default-expiry policy counts at READ time too: it picks the first
+        // expiration at least 7 days out. The expiration list is cached once and
+        // read on two consecutive days; the choice must follow the day.
+        auto two = std::make_shared<TwoExpiryProvider>();
+        set_provider(two);
+        quote_cache().clear();
+        chain_cache().clear();
+        clear_last_good_chain();
+        expiration_cache().clear();
+
+        g_test_today = sys_days_of("2035-08-07");   // the 14th is 7 days out, the 21st 14
+        auto on_the_7th = fetch_chain("AAPL", "");
+        check(on_the_7th.has_value() && on_the_7th->selected_expiration == "2035-08-14",
+              "default expiry: a date exactly 7 days out qualifies");
+
+        g_test_today = sys_days_of("2035-08-08");   // the SAME cached list: the 14th is now 6 out
+        chain_cache().clear();
+        auto on_the_8th = fetch_chain("AAPL", "");
+        check(on_the_8th.has_value() && on_the_8th->selected_expiration == "2035-08-21",
+              "default expiry: the next day the cached 14th is 6 days out and is skipped");
+        check(two->expirations_calls() == 1,
+              "...from the one cached expiration list (the provider was asked for it once)");
+        set_provider(fake);
+        set_calendar_provider(nullptr);
     }
 
     // Reset clock provider back to default

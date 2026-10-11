@@ -19,10 +19,21 @@ export const AuthUI: React.FC = () => {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setUser(session?.user ?? null);
-      setLoading(false);
-    });
+    // A stored session whose refresh token the server no longer accepts makes
+    // this call fail (a 400 from /auth/v1/token on the first load of a stale
+    // browser profile). That means "signed out", not "broken": settle on no user
+    // and stop showing the loading state, instead of leaving an unhandled
+    // rejection and a form that never appears.
+    supabase.auth
+      .getSession()
+      .then(({ data: { session } }) => {
+        setUser(session?.user ?? null);
+        setLoading(false);
+      })
+      .catch(() => {
+        setUser(null);
+        setLoading(false);
+      });
 
     const {
       data: { subscription },
@@ -116,46 +127,65 @@ export const AuthUI: React.FC = () => {
   };
 
   if (loading) {
-    return <div className="text-sm">Loading...</div>;
+    return <div className="text-sm text-[var(--color-ink-300)]">Loading...</div>;
   }
 
   return (
-    <div className="flex items-center gap-4">
+    <div className="auth">
       {user ? (
-        <div className="flex items-center gap-4">
+        <div className="auth-row">
           <span className="text-sm font-medium">{user.email}</span>
           <button className="btn" onClick={handleLogout}>
             Sign Out
           </button>
         </div>
       ) : (
-        <div className="flex items-center gap-4">
-          <form onSubmit={handleAuth} className="flex flex-col gap-2">
-            <div className="flex gap-2">
+        <div className="auth-row">
+          {/*
+            Theme tokens, real labels, one column.
+
+            This form was dark-theme Tailwind -- `border-white/20`,
+            `text-white/70`, `bg-white/10` -- on a site whose DEFAULT theme is
+            light: white at 20% alpha on cream is invisible, so the inputs had no
+            border, "Create account" and "Forgot password?" were white at 70% on
+            cream (about 1.03:1) and the intro told people to choose a control
+            they could not see. Inputs were placeholder-only, so the label
+            vanished the moment someone typed. It also laid email, password and
+            the button out in one ROW, which overflowed the 260px strategy column
+            it is rendered in and clipped the button.
+          */}
+          <form onSubmit={handleAuth} className="auth-form">
+            <label className="auth-field">
+              <span className="stat-label">Email</span>
               <input
                 type="email"
-                placeholder="Email"
-                className="p-1 rounded bg-transparent border border-white/20 text-sm"
+                name="email"
+                autoComplete="email"
+                className="input"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 required
               />
+            </label>
+            <label className="auth-field">
+              <span className="stat-label">Password</span>
               <input
                 type="password"
-                placeholder="Password"
-                className="p-1 rounded bg-transparent border border-white/20 text-sm"
+                name="password"
+                autoComplete={isSignUp ? 'new-password' : 'current-password'}
+                className="input"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 required
               />
-              <button type="submit" className="btn" disabled={busy}>
-                {busy ? '…' : isSignUp ? 'Sign Up' : 'Sign In'}
-              </button>
-            </div>
-            <div className="flex items-center gap-3">
+            </label>
+            <button type="submit" className="btn btn-primary" disabled={busy}>
+              {busy ? '…' : isSignUp ? 'Sign Up' : 'Sign In'}
+            </button>
+            <div className="auth-links">
               <button
                 type="button"
-                className="text-xs text-white/70 hover:text-white"
+                className="auth-link"
                 onClick={() => {
                   setIsSignUp(!isSignUp);
                   setMessage(null);
@@ -169,7 +199,7 @@ export const AuthUI: React.FC = () => {
               {!isSignUp && (
                 <button
                   type="button"
-                  className="text-xs text-white/70 hover:text-white"
+                  className="auth-link"
                   onClick={handleForgot}
                   disabled={busy}
                 >
@@ -196,15 +226,15 @@ export const AuthUI: React.FC = () => {
               (docs/technical/MORTGAGEFV_RAILWAY_MIGRATION.md); this removes
               what that decision left behind. Sign-up is email, by decision. */}
           {process.env.NEXT_PUBLIC_OAUTH_ENABLED === '1' && (
-          <div className="flex flex-col gap-2 border-l border-white/20 pl-4">
-            <button
-              type="button"
-              className="text-xs bg-white/10 hover:bg-white/20 p-1.5 rounded flex items-center justify-center gap-2 transition-colors"
-              onClick={() => handleOAuthSignIn('google')}
-            >
-              Sign in with Google
-            </button>
-          </div>
+            <div className="auth-oauth">
+              <button
+                type="button"
+                className="btn"
+                onClick={() => handleOAuthSignIn('google')}
+              >
+                Sign in with Google
+              </button>
+            </div>
           )}
         </div>
       )}

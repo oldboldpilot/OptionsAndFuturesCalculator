@@ -10,7 +10,7 @@
  * collapsed Advanced row, and the comparison table -- most traders never
  * open the rest of this panel.
  */
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { formatAmount, useCurrency } from '../lib/currency';
 import { useCalculatorStore } from '../store/useCalculatorStore';
 import {
@@ -75,14 +75,20 @@ export function ExerciseStylePanel() {
     chainExpirations.find((e) => e.date === (ticket.expiration || selectedExpiration))?.dte ?? 0;
   const yearsToExpiry = dte > 0 ? dte / 365 : 0;
   const isAsian = asianType !== 'NOT_ASIAN';
+  // Folded away until asked for. American, Bermudan and average-price pricing
+  // is advanced, and a visitor's first long call met this whole panel (and a
+  // network call to a tree pricer on every ticket edit) before they had a
+  // position. Open it and it behaves exactly as before.
+  const [open, setOpen] = useState(false);
 
   // Re-price whenever an input this panel draws from changes. `priceTree`
   // itself debounces and discards stale responses, so this is safe to fire
   // on every dependency change including rapid ticket edits.
   useEffect(() => {
-    priceTree();
+    if (open) priceTree();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
+    open,
     ticket.strike,
     ticket.impliedVolatility,
     ticket.expiration,
@@ -95,11 +101,28 @@ export function ExerciseStylePanel() {
   return (
     <div className="panel">
       <div className="panel-head">
-        <span className="panel-title">Exercise &amp; Averaging</span>
-        {loading && <span className="chip chip-live">pricing&hellip;</span>}
+        <h2 className="panel-title">Exercise &amp; Averaging</h2>
+        {open && loading && <span className="chip chip-live">pricing&hellip;</span>}
+        <button
+          className="btn"
+          style={{ marginLeft: 'auto' }}
+          aria-expanded={open}
+          aria-controls="exercise-body"
+          onClick={() => setOpen((v) => !v)}
+        >
+          {open ? 'Hide' : 'Advanced'}
+        </button>
       </div>
 
-      <div className="panel-body" style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+      {!open && (
+        <div className="panel-body" style={{ fontSize: 'var(--text-2xs)', color: 'var(--color-ink-300)' }}>
+          American and Bermudan exercise, and average-price (Asian) contracts, priced for the
+          contract in the ticket.
+        </div>
+      )}
+
+      {open && (
+      <div id="exercise-body" className="panel-body" style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
         {/* Exercise style -- a 3-way segment, the Buy/Sell idiom from
             OptionTicket.tsx widened to three states. */}
         <span className="stat-label">Exercise</span>
@@ -302,6 +325,7 @@ export function ExerciseStylePanel() {
           </div>
         )}
       </div>
+      )}
     </div>
   );
 }

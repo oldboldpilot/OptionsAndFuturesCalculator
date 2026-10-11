@@ -5,7 +5,7 @@ import { formatAmount, useCurrency } from '../lib/currency';
 import { useCalculatorStore, type ChainStrike } from '../store/useCalculatorStore';
 import { useAssistantStore } from '../store/useAssistantStore';
 import { useProStatus } from '../lib/useProStatus';
-import { ProPanel } from './ProPanel';
+import { futuresMultiplier } from '../config/futures';
 
 type Category = 'Bullish' | 'Bearish' | 'Neutral' | 'Volatility' | 'Income & Hedge' | 'Futures';
 
@@ -272,17 +272,24 @@ function nearestStrike(strikes: ChainStrike[], target: number): ChainStrike | nu
   );
 }
 
-export const StrategySelector: React.FC = () => {
+export const StrategySelector: React.FC<{
+  /** Open with this strategy already selected and previewed (never applied). */
+  initialId?: string;
+}> = ({ initialId }) => {
   // Regroup the strike hints when the display locale changes.
   useCurrency();
-  const [category, setCategory] = useState<Category>('Bullish');
+  // A calculator page named for a structure opens on it: the strategy selected
+  // and its legs previewed, in the category that owns it. Nothing is APPLIED --
+  // building the position still takes the Apply press, on live chain prices.
+  const initial = STRATEGIES.find((st) => st.id === initialId && !st.gated);
+  const [category, setCategory] = useState<Category>(initial?.category ?? 'Bullish');
   const [query, setQuery] = useState('');
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(initial?.id ?? null);
 
   const {
     addLeg, clearLegs, spotPrice,
     chainStrikes, chainExpirations, selectedExpiration, chainStatus,
-    futuresCurve, assetClass,
+    futuresCurve, assetClass, symbol,
   } = useCalculatorStore();
 
   // Only the flag is needed here -- the panel below owns the rest of the
@@ -412,6 +419,10 @@ export const StrategySelector: React.FC = () => {
           premium: price,
           quantity: t.quantity ?? 1,
           expiration_days: contract ? contract.daysToExpiry : dte,
+          expiry_label: contract ? contract.code : undefined,
+          // Dollars per point. Without it a future was sent with multiplier 1
+          // and its profit and loss came out in index points, not dollars.
+          contract_multiplier: isFuture ? futuresMultiplier(symbol) : undefined,
         });
         continue;
       }
@@ -428,6 +439,7 @@ export const StrategySelector: React.FC = () => {
         premium: t.action === 'BUY' ? q.ask : q.bid,
         quantity: t.quantity ?? 1,
         expiration_days: dte,
+        expiry_label: selectedExpiration,
         implied_volatility: q.iv,
       });
     }
@@ -445,9 +457,9 @@ export const StrategySelector: React.FC = () => {
   }
 
   return (
-    <div className="panel" style={{ flex: 'none', maxHeight: '58vh' }}>
+    <div className="panel" style={{ flex: 'none' }}>
       <div className="panel-head">
-        <span className="panel-title">Strategy</span>
+        <h2 className="panel-title">Strategy</h2>
         {/* Counts what the user can actually pick, not what the array holds --
             a gated entry that still incremented this would advertise a
             structure the picker refuses to show. */}
@@ -489,7 +501,13 @@ export const StrategySelector: React.FC = () => {
         )}
       </div>
 
-      <div className="panel-body panel-body--flush" style={{ marginTop: '0.4375rem' }}>
+      {/* A floor on the list. It is the primary way to start, and sat in a
+          2-3 row scroller (80-153px of a 522px panel) because the Pro sales
+          block and the sign-in form were rendered under it. */}
+      <div
+        className="panel-body panel-body--flush"
+        style={{ marginTop: '0.4375rem', flex: 'none', minHeight: '13rem', maxHeight: 'min(46vh, 22rem)' }}
+      >
         {visible.length === 0 ? (
           <div className="empty-state">
             <span>No strategy matches “{query}”.</span>
@@ -501,6 +519,7 @@ export const StrategySelector: React.FC = () => {
               <button
                 key={s.id}
                 onClick={() => setSelected(s.id)}
+                aria-pressed={isSel}
                 className="animate-fade"
                 style={{
                   display: 'block',
@@ -546,7 +565,7 @@ export const StrategySelector: React.FC = () => {
                         fontWeight: 700,
                         letterSpacing: '0.06em',
                         padding: '0 0.1875rem',
-                        color: 'var(--color-accent)',
+                        color: 'var(--color-accent-text)',
                         border: '1px solid var(--color-accent)',
                       }}
                     >
@@ -599,6 +618,17 @@ export const StrategySelector: React.FC = () => {
             */}
           </div>
 
+          {/* Said BEFORE Apply, in words. The only pre-warning was a hover-only
+              PRO chip, so a free visitor built a spread and learned of the gate
+              from a refusal where the answer should have been. Apply stays
+              enabled: the structure still builds, and it is the engine that
+              decides what it will price. */}
+          {def.legs.length > 1 && !pro && (
+            <div style={{ fontSize: 'var(--text-2xs)', color: 'var(--color-ink-300)', marginBottom: '0.375rem' }}>
+              This is a multi-leg strategy, which needs Pro to calculate. You can still build it
+              and look at its legs.
+            </div>
+          )}
           <button
             className="btn btn-primary"
             style={{ width: '100%' }}
@@ -619,13 +649,6 @@ export const StrategySelector: React.FC = () => {
         </div>
       )}
 
-      {/*
-        Last in the column, below the strategy detail. Subscription state is
-        something you check occasionally, not something you act on while
-        building a position, so it sits where it can be found rather than where
-        it interrupts.
-      */}
-      <ProPanel />
     </div>
   );
 };

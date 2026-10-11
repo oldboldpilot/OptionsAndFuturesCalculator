@@ -33,12 +33,12 @@ export const metadata: Metadata = {
  */
 export default function ResetPasswordPage() {
   return (
-    <main className="mx-auto flex min-h-[60vh] w-full max-w-md flex-col justify-center gap-4 px-4 py-12">
+    <div className="mx-auto flex min-h-[60vh] w-full max-w-md flex-col justify-center gap-4 px-4 py-12">
       <h1 className="text-xl font-semibold">Set a new password</h1>
       <p className="text-sm text-[var(--color-ink-300)]">
         You opened a password reset link for {branding.appName}. Choose a new password below.
       </p>
       <ResetPasswordForm />
-    </main>
+    </div>
   );
 }

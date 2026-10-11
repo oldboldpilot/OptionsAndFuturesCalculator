@@ -49,7 +49,7 @@ export function TermStructure() {
     <div className="panel" style={{ flex: 1, minHeight: 0 }}>
       <div className="panel-head">
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.4375rem' }}>
-          <span className="panel-title">Term structure</span>
+          <h2 className="panel-title">Term structure</h2>
           {/* The same marker the engine sets. A derived curve must never be
               mistaken for a quoted one. */}
           <span
@@ -80,12 +80,12 @@ export function TermStructure() {
           <table className="grid-table">
             <thead>
               <tr>
-                <th style={{ textAlign: 'left' }}>Contract</th>
-                <th style={{ textAlign: 'left' }}>Delivery</th>
-                <th>Days</th>
-                <th>Forward</th>
-                <th title="Forward minus spot">Basis</th>
-                <th title="Annualised cost of carry — the measured risk-free rate">Carry</th>
+                <th scope="col" style={{ textAlign: 'left' }}>Contract</th>
+                <th scope="col" style={{ textAlign: 'left' }}>Delivery</th>
+                <th scope="col">Days</th>
+                <th scope="col">Forward</th>
+                <th scope="col" title="Forward minus spot">Basis</th>
+                <th scope="col" title="Annualised cost of carry — the measured risk-free rate">Carry</th>
               </tr>
             </thead>
             <tbody>

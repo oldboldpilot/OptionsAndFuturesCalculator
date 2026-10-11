@@ -163,6 +163,16 @@ message RiskMetrics {
 }
 
 message StrategyResponse {
+  // The position's greatest gain and greatest loss over every underlying price
+  // in (0, infinity) at the curve date -- NOT over the price grid the curve is
+  // drawn on, which is a +/-25% window around spot unless the caller widened it.
+  //
+  // Each is a maximum only while its flag (max_profit_unbounded for max_profit,
+  // max_loss_unbounded for max_loss) is false. A true flag means the position
+  // has no finite supremum (or infimum) in that direction, and the field then
+  // holds only the value at the EDGE of the computed grid: a figure the position
+  // reaches, and not a maximum. Never present it as one. proto3 has no absent,
+  // so a client discriminates by reading the flag; the number alone cannot say.
   double max_profit = 1;
   double max_loss = 2;
   double break_even = 3;
@@ -172,12 +182,18 @@ message StrategyResponse {
   RiskMetrics risk_metrics = 7;
   repeated PnLPoint pnl_matrix = 8;     // At-expiry curve
 
+  // |max_profit / max_loss|. Left at zero unless BOTH extremes are finite:
+  // max_loss < 0, and neither max_profit_unbounded nor max_loss_unbounded. A
+  // ratio built from a grid-edge figure is a precise-looking number about
+  // nothing.
   double risk_reward_ratio = 9;
   repeated double breakeven_prices = 10; // All sign changes, not just the first
   repeated MatrixCell matrix = 11;       // Price × date grid
   uint64 calculation_time_microseconds = 12;
   double probability_of_touch = 13;
-  double probability_of_target_profit = 14; // P(reaching 50% of max profit)
+  // P(reaching 50% of max profit). Left at zero when max_profit_unbounded: half
+  // of "no maximum" is not a target.
+  double probability_of_target_profit = 14;
 
   // Days from now at which `pnl_matrix` — and every figure derived from it
   // (max_profit, max_loss, breakevens, pop, EV, VaR/CVaR) — is evaluated.
@@ -199,6 +215,20 @@ message StrategyResponse {
   // larger position; closing the wrong side is how a hedged book becomes an
   // unhedged one. Index refers to StrategyRequest.legs, in request order.
   repeated LegRisk leg_risk = 16;
+
+  // True when the position gains without limit as the underlying rises, so
+  // max_profit is not a maximum (see above). Decided from the legs and not from
+  // the grid: as the price goes to infinity a call, future or stock leg adds
+  // direction * quantity * contract_multiplier of P&L per $1 and a put adds
+  // none, whatever its expiry or implied volatility. A positive net is
+  // unbounded profit, a negative net unbounded loss, and zero is bounded on
+  // the upside -- a vertical, a condor, a covered call, a calendar. Only the
+  // upside can be unbounded: the underlying cannot fall below zero, so what a
+  // falling price does to the position is always finite.
+  bool max_profit_unbounded = 17;
+  // True when the position loses without limit as the underlying rises, so
+  // max_loss is not a minimum. The mirror of max_profit_unbounded.
+  bool max_loss_unbounded = 18;
 }
 
 // One leg's contribution to the position, already scaled by direction,

@@ -171,9 +171,9 @@ export const SavedScenarios: React.FC = () => {
   return (
     <div className="panel">
       <div className="panel-head">
-        <span className="panel-title">
+        <h2 className="panel-title">
           Saved{scenarios.length > 0 ? ` · ${scenarios.length}` : ''}
-        </span>
+        </h2>
         {status === 'loading' && (
           <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--color-ink-300)' }}>…</span>
         )}

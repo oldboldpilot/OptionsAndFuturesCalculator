@@ -85,6 +85,25 @@ static constexpr std::array<FuturesProxy, 2> kFuturesProxies{{
                       "rather than a price at the wrong level.");
 }
 
+/**
+ * The refusal for a CRYPTO quote.
+ *
+ * The same collision as the futures roots, and refused the same way. This feed
+ * carries listed US securities and no crypto at all, so a request for "BTC" as
+ * CRYPTO that fell through to the equity path was answered with the price of the
+ * US-listed ticker that happens to be named BTC: a real quote for a different
+ * instrument, rendered in the header as the quote of the thing the user typed.
+ * The option-chain RPC already refuses this asset class; the quote RPC has to say
+ * the same thing for the same reason.
+ */
+[[nodiscard]] auto no_crypto_source(const std::string& symbol) -> Status {
+    return Status(grpc::StatusCode::UNIMPLEMENTED,
+                  "No crypto quote source for " + symbol +
+                      ". The ticker resolves to a listed equity of the same name, "
+                      "which is a different instrument, so nothing is returned "
+                      "rather than a price for the wrong thing.");
+}
+
 // --------------------------------------------------------------------------
 // Pricing helpers
 // --------------------------------------------------------------------------
@@ -178,6 +197,28 @@ static constexpr std::array<FuturesProxy, 2> kFuturesProxies{{
 }
 
 /**
+ * Black-Scholes-Merton value of a live option leg, per share, with the lower
+ * edge of the price domain handled explicitly.
+ *
+ * The expiry curve is asked for its extremes over every price in (0, infinity),
+ * and the lower end of that range is S = 0, where log(S/K) is undefined.
+ * price_black_scholes happens to land on the right limit through IEEE infinity
+ * arithmetic, which is an accident of that implementation and not a contract,
+ * so the limit is stated here: a call is worthless, and a put is worth its
+ * strike discounted over the time left. The dividend factor multiplies S, which
+ * is zero, and drops out.
+ */
+[[nodiscard]] auto model_value_of(const calculator::Leg& leg, double price, double r, double q,
+                                  double sigma, double years) noexcept -> double {
+    if (price <= 0.0) {
+        return (leg.type() == calculator::Leg::CALL) ? 0.0 : leg.strike() * std::exp(-r * years);
+    }
+    const auto type = (leg.type() == calculator::Leg::CALL) ? sensen::OptionType::Call
+                                                            : sensen::OptionType::Put;
+    return price_with_dividend(price, leg.strike(), r, q, sigma, years, type).value;
+}
+
+/**
  * Position P&L at `days_elapsed` from now, for a given underlying price.
  *
  * Every leg is on its OWN clock. A leg with time left is re-priced by
@@ -238,12 +279,94 @@ static constexpr std::array<FuturesProxy, 2> kFuturesProxies{{
             continue;
         }
 
-        const auto type = (leg.type() == calculator::Leg::CALL) ? sensen::OptionType::Call
-                                                                : sensen::OptionType::Put;
-        const auto bs = price_with_dividend(price, leg.strike(), r, q, iv, remaining / 365.0, type);
-        total += (bs.value - leg.premium()) * dir * mult * qty;
+        const double value = model_value_of(leg, price, r, q, iv, remaining / 365.0);
+        total += (value - leg.premium()) * dir * mult * qty;
     }
     return total;
+}
+
+/**
+ * Which way the position's payoff heads as the underlying rises without limit.
+ *
+ * This is what decides whether max_profit and max_loss are numbers or only the
+ * edge of the grid. It is read off the LEGS and deliberately not off the curve:
+ * the curve is a +/-25% window, and the slope at its edge says what happens at
+ * the edge. As the price goes to infinity a call, a future or a stock leg
+ * contributes direction * quantity * contract_multiplier of P&L per $1 -- the
+ * option's value tends to S minus a constant -- and a put contributes nothing,
+ * because its value tends to zero. That is true whatever the leg's expiry or
+ * implied volatility, so a calendar or diagonal built from equal long and short
+ * calls nets to zero, which is what a calendar's bounded risk is.
+ *
+ * It is a statement about the CONTRACT, which is why it is not computed from
+ * the pricing model's own asymptote. With a dividend yield Merton prices a live
+ * call at S*exp(-qT) - K*exp(-rT), a slope of exp(-qT) rather than 1, so the
+ * model itself would call a calendar spread unbounded because a European call
+ * cannot be exercised early. The American-style holder can, and the position
+ * is bounded.
+ *
+ * Only the upside can be unbounded. The price cannot go below zero, so what a
+ * falling underlying does to any position is finite.
+ */
+enum class UpsideTail { Flat, Gains, Loses };
+
+[[nodiscard]] auto upside_tail(const calculator::StrategyRequest& req) noexcept -> UpsideTail {
+    double net = 0.0;
+    double gross = 0.0;
+    for (const auto& leg : req.legs()) {
+        if (leg.type() == calculator::Leg::PUT) continue;
+        const double slope = direction_of(leg) * multiplier_of(leg) * quantity_of(leg);
+        net += slope;
+        gross += std::abs(slope);
+    }
+    // Compared against the gross exposure rather than against zero: the
+    // multipliers are whatever the caller sent, and offsetting legs sum exactly
+    // only when they happen to be representable.
+    if (std::abs(net) <= 1e-9 * gross) return UpsideTail::Flat;
+    return net > 0.0 ? UpsideTail::Gains : UpsideTail::Loses;
+}
+
+/** How far past the largest of spot and every strike the tail is sampled. */
+inline constexpr double kTailReach = 10.0;
+
+/**
+ * The prices, beyond the grid's own, where the expiry curve can still turn.
+ *
+ * max_profit and max_loss are extremes over the whole price domain, but only
+ * the grid is drawn, and the grid is a window. A position whose structure lies
+ * outside it -- a spread struck beyond +25% of spot, a put's payoff at zero --
+ * reaches its extreme somewhere the window never samples, and reporting the
+ * window's best point calls an arbitrary edge a maximum.
+ *
+ * At the curve date a settled leg is piecewise linear with a kink at its
+ * strike, so a strike is where a kink-bound extreme sits and the two ends of
+ * the domain bound the rest. A leg still carrying time value at the curve date
+ * (the far leg of a calendar) is smooth, and a strike is then a close
+ * approximation of its extreme rather than the exact point.
+ *
+ *   - Zero: the lower end of the domain, and where a put's payoff peaks.
+ *   - Every strike: the kinks.
+ *   - One far point, for the smooth tail of a leg that is still live at the
+ *     curve date. It is offered only without a dividend yield: with one, the
+ *     model's own tail keeps sloping (see upside_tail) and a far sample would
+ *     report an extreme manufactured by the model's European exercise at a price
+ *     nobody will see.
+ *
+ * These feed max_profit and max_loss only. The curve, the matrix, the
+ * breakevens and the probability distribution stay on the grid.
+ */
+[[nodiscard]] auto extreme_candidates(const calculator::StrategyRequest& req, double spot, double q)
+    -> std::vector<double> {
+    std::vector<double> prices{0.0};
+    double reach = spot;
+    for (const auto& leg : req.legs()) {
+        if (leg.type() != calculator::Leg::CALL && leg.type() != calculator::Leg::PUT) continue;
+        if (leg.strike() <= 0.0) continue;
+        prices.push_back(leg.strike());
+        reach = std::max(reach, leg.strike());
+    }
+    if (q == 0.0) prices.push_back(kTailReach * reach);
+    return prices;
 }
 
 /** Longest-dated leg, in days. The horizon the structure is measured to. */
@@ -353,16 +476,19 @@ struct RiskFigures {
  * to the quantile, and average the tail beyond it for the conditional figure.
  */
 [[nodiscard]] auto risk_figures(const Distribution& dist, const std::vector<double>& pnl,
-                                double max_profit) -> RiskFigures {
+                                std::optional<double> max_profit) -> RiskFigures {
     RiskFigures out;
     if (dist.density.empty() || pnl.size() != dist.density.size()) return out;
 
-    const double target = max_profit * 0.5;
+    // Half of a maximum that does not exist is not a target, so a position with
+    // no finite max_profit passes none and probability_of_target stays zero.
+    const bool has_target = max_profit.has_value() && *max_profit > 0.0;
+    const double target = has_target ? *max_profit * 0.5 : 0.0;
     for (std::size_t i = 0; i < pnl.size(); ++i) {
         const double w = dist.density[i];
         out.expected_value += pnl[i] * w;
         if (pnl[i] > 0.0) out.pop += w;
-        if (max_profit > 0.0 && pnl[i] >= target) out.probability_of_target += w;
+        if (has_target && pnl[i] >= target) out.probability_of_target += w;
     }
 
     std::vector<std::size_t> order(pnl.size());
@@ -523,6 +649,11 @@ struct ComputeContext {
     double sigma{0.0};
     double horizon{0.0};    // Latest leg expiry: the date axis of the matrix.
     double curve{0.0};      // Earliest leg expiry: the date the payoff curve is drawn at.
+    // The calendar date every date in this response counts from, read ONCE from
+    // market_data's date source. The matrix columns and the expiry dates the
+    // chain serves must come from the same today, or the last column lands a day
+    // off the expiry the caller chose.
+    std::chrono::sys_days today{};
     std::uint32_t date_steps{0};
     std::uint32_t price_steps{0};
     std::vector<double> price_grid;
@@ -577,6 +708,7 @@ inline constexpr std::array<std::string_view, 5> kAllActionNames{
     ctx->sigma = position_iv(ctx->request);
     ctx->horizon = horizon_days(ctx->request);
     ctx->curve = curve_days(ctx->request);
+    ctx->today = md::today();
 
     // Refuse rather than answer a question we were not asked. Each of these
     // was previously defaulted server-side, so the engine always produced a
@@ -744,10 +876,31 @@ inline constexpr std::array<std::string_view, 5> kAllActionNames{
         point.set_pnl(pnl);
     }
 
-    ctx->response.set_max_profit(max_profit);
-    ctx->response.set_max_loss(max_loss);
-    if (max_loss < 0.0) {
-        ctx->response.set_risk_reward_ratio(std::abs(max_profit / max_loss));
+    // The grid is a window, and the position's extremes are over every price.
+    // Fold in the prices beyond it where the curve can still turn, and keep the
+    // grid's own extremes: they are what an UNBOUNDED direction reports, being
+    // the value at the edge of what was computed and not a maximum.
+    const double grid_max = max_profit;
+    const double grid_min = max_loss;
+    for (const double price : extreme_candidates(ctx->request, ctx->spot, ctx->q)) {
+        const double pnl =
+            value_at_elapsed(ctx->request, price, ctx->curve, ctx->r, ctx->q, ctx->sigma, ctx->horizon);
+        max_profit = std::max(max_profit, pnl);
+        max_loss = std::min(max_loss, pnl);
+    }
+
+    const auto tail = upside_tail(ctx->request);
+    const bool profit_unbounded = tail == UpsideTail::Gains;
+    const bool loss_unbounded = tail == UpsideTail::Loses;
+    ctx->response.set_max_profit_unbounded(profit_unbounded);
+    ctx->response.set_max_loss_unbounded(loss_unbounded);
+    ctx->response.set_max_profit(profit_unbounded ? grid_max : max_profit);
+    ctx->response.set_max_loss(loss_unbounded ? grid_min : max_loss);
+
+    // A ratio of two figures is only as real as its weaker term.
+    if (ctx->response.max_loss() < 0.0 && !profit_unbounded && !loss_unbounded) {
+        ctx->response.set_risk_reward_ratio(
+            std::abs(ctx->response.max_profit() / ctx->response.max_loss()));
     }
 
     // Every sign change is a break-even. A condor has two; the single
@@ -774,7 +927,6 @@ inline constexpr std::array<std::string_view, 5> kAllActionNames{
 [[nodiscard]] auto action_matrix(Ctx& ctx) -> ExecutionResult<> {
     if (!ctx->status.ok()) return {};
 
-    const auto now = std::chrono::system_clock::now();
     const double risk = std::abs(ctx->response.max_loss());
 
     for (std::uint32_t d = 0; d < ctx->date_steps; ++d) {
@@ -791,8 +943,7 @@ inline constexpr std::array<std::string_view, 5> kAllActionNames{
         // labelled "today's DTE" and dated at the expiry, the last was
         // labelled "0 DTE" and dated today. Every date in the grid named the
         // wrong day except the midpoint.
-        const auto day = std::chrono::floor<std::chrono::days>(now) +
-                         std::chrono::days{static_cast<int>(std::llround(elapsed))};
+        const auto day = ctx->today + std::chrono::days{static_cast<int>(std::llround(elapsed))};
         const std::chrono::year_month_day ymd{day};
 
         // std::format, not a stream, and deliberately so. A default-constructed
@@ -950,7 +1101,10 @@ inline constexpr std::array<std::string_view, 5> kAllActionNames{
     // right P&Ls by the wrong probabilities.
     const auto dist =
         lognormal_over(ctx->price_grid, ctx->spot, ctx->sigma, ctx->curve / 365.0, ctx->r, ctx->q);
-    const auto figures = risk_figures(dist, ctx->expiry_pnl, ctx->response.max_profit());
+    const auto figures = risk_figures(
+        dist, ctx->expiry_pnl,
+        ctx->response.max_profit_unbounded() ? std::nullopt
+                                             : std::optional{ctx->response.max_profit()});
 
     ctx->response.set_pop(figures.pop);
     ctx->response.set_expected_value(figures.expected_value);
@@ -1348,6 +1502,10 @@ public:
             return s;
         }
 
+        // Refused before the feed is asked, not after: the lookup itself is
+        // the wrong-instrument answer, so there is nothing to inspect afterwards.
+        if (req.asset_class() == "CRYPTO") return no_crypto_source(symbol);
+
         // What to actually ask the feed for, and what to scale its answer by.
         std::string quote_symbol = symbol;
         double multiple = 1.0;
@@ -1513,7 +1671,7 @@ public:
         static constexpr std::array<std::pair<unsigned, char>, 4> kCycle{
             {{3, 'H'}, {6, 'M'}, {9, 'U'}, {12, 'Z'}}};
 
-        const auto today = std::chrono::floor<std::chrono::days>(std::chrono::system_clock::now());
+        const auto today = md::today();
         const std::chrono::year_month_day now_ymd{today};
         int year = static_cast<int>(now_ymd.year());
         const auto month_now = static_cast<unsigned>(now_ymd.month());
@@ -1619,11 +1777,17 @@ public:
         res.set_provider("alpaca");
         res.set_fetched_at(chain->fetched_at);
 
+        // The cache holds dates and nothing derived from them: how far away a
+        // date is, and the label that says so, change at every midnight, and
+        // the chain and expiration caches outlive one. Counted here, from the
+        // same today the matrix columns are dated from.
+        const auto today = md::today();
         for (const auto& e : chain->expirations) {
+            const int dte = md::days_until(e.date, today);
             auto& exp = *res.add_available_expirations();
             exp.set_date_str(e.date);
-            exp.set_days_to_expiry(e.days);
-            exp.set_label(e.label);
+            exp.set_days_to_expiry(dte);
+            exp.set_label(md::expiry_label(e.date, dte));
         }
 
         // The at-the-money row is the listed strike closest to spot, not a

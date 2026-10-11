@@ -41,6 +41,22 @@
 //      file only asserts the fixed (passing) behaviour, which is what a
 //      permanent regression gate should do.
 //
+//   8. THE POSITION'S EXTREMES, NOT THE GRID'S: max_profit and max_loss are
+//      the supremum and infimum over every price in (0, infinity), and a
+//      direction with no finite extreme says so in max_profit_unbounded /
+//      max_loss_unbounded instead of reporting the edge of the +/-25% grid as a
+//      maximum. Every expected figure is the closed form of a payoff written
+//      out by hand beside it, not a number the engine produced.
+//   9. FUTURES NEED NO VOLATILITY: a position of linear legs prices, flags and
+//      draws its curve with no implied volatility anywhere, and the probability
+//      fields stay at zero without an error or a NaN.
+//  10. ONE TODAY: the dates the chain serves and the dates the matrix is drawn
+//      on come from the same calendar, so a cache that outlives a midnight
+//      cannot put the last matrix column a day past the chosen expiry.
+//  11. NO QUOTE FOR THE WRONG INSTRUMENT: a CRYPTO quote is refused rather than
+//      answered with the price of the listed equity of the same name, and the
+//      EQUITY and FUTURES quotes are unchanged.
+//
 // Deliberately scoped to calculator_service.cpp's request handling and
 // response marshalling around SGEE, exactly as the two finance-service test
 // files are scoped to finance_service.cpp around sensen's pricers/solvers.
@@ -59,6 +75,7 @@
 
 import std;
 import calculator_service;
+import market_data;
 import strategy_store;
 
 namespace {
@@ -185,6 +202,153 @@ auto call_strategy(OptionsCalculator::Stub& stub, const StrategyRequest& req)
     StrategyResponse resp;
     const auto ctx = make_context();
     const auto status = stub.CalculateStrategy(ctx.get(), req, &resp);
+    return {status, resp};
+}
+
+/** A request with nothing in it but the underlying and the grid, for sections 8-10. */
+auto make_request(double spot, double price_range_percent = 0.25, std::uint32_t date_steps = 12)
+    -> StrategyRequest {
+    StrategyRequest req;
+    req.set_underlying_symbol("SPY");
+    req.set_current_price(spot);
+    req.set_risk_free_rate(0.04);
+    req.set_price_range_percent(price_range_percent);
+    req.set_price_steps(81);
+    req.set_date_steps(date_steps);
+    return req;
+}
+
+/** A future or stock leg: no strike, no volatility, the entry carried in `premium`. */
+auto add_linear_leg(StrategyRequest& req, Leg::Action action, Leg::Type type, double entry,
+                    double expiration_days, double multiplier, int qty = 1) -> void {
+    auto* leg = req.add_legs();
+    leg->set_action(action);
+    leg->set_type(type);
+    leg->set_expiration_days(expiration_days);
+    leg->set_quantity(qty);
+    leg->set_premium(entry);
+    leg->set_contract_multiplier(multiplier);
+}
+
+/** Every number a response carries, finite: a NaN rendered as a price is the failure to rule out. */
+auto all_finite(const StrategyResponse& r) -> bool {
+    bool ok = std::isfinite(r.max_profit()) && std::isfinite(r.max_loss()) &&
+              std::isfinite(r.break_even()) && std::isfinite(r.expected_value()) &&
+              std::isfinite(r.pop()) && std::isfinite(r.risk_reward_ratio()) &&
+              std::isfinite(r.probability_of_touch()) &&
+              std::isfinite(r.probability_of_target_profit());
+    for (const auto& p : r.pnl_matrix()) ok = ok && std::isfinite(p.pnl());
+    for (const auto& c : r.matrix()) ok = ok && std::isfinite(c.pnl_dollars());
+    const auto& g = r.net_greeks();
+    ok = ok && std::isfinite(g.delta()) && std::isfinite(g.gamma()) && std::isfinite(g.theta()) &&
+         std::isfinite(g.vega()) && std::isfinite(g.rho());
+    const auto& m = r.risk_metrics();
+    return ok && std::isfinite(m.var_parametric_95()) && std::isfinite(m.var_parametric_99()) &&
+           std::isfinite(m.cvar_parametric_95()) && std::isfinite(m.cvar_parametric_99());
+}
+
+/** The extremes of the CURVE a response carries: what the grid alone would have reported. */
+auto curve_extremes(const StrategyResponse& r) -> std::pair<double, double> {
+    double lo = std::numeric_limits<double>::infinity();
+    double hi = -std::numeric_limits<double>::infinity();
+    for (const auto& p : r.pnl_matrix()) {
+        lo = std::min(lo, p.pnl());
+        hi = std::max(hi, p.pnl());
+    }
+    return {lo, hi};
+}
+
+auto near(double a, double b, double eps = 1e-6) -> bool { return std::abs(a - b) < eps; }
+
+// ---------------------------------------------------------------------------
+// Section 10: a market-data provider and a calendar the test controls.
+// ---------------------------------------------------------------------------
+
+namespace md = options_calculator::market_data;
+using calculator::ChainRequest;
+using calculator::ChainResponse;
+
+/** One symbol at 779, two listed expirations, and a count of how often it was asked. */
+class FakeChainProvider final : public md::IMarketDataProvider {
+public:
+    [[nodiscard]] auto name() const -> std::string_view override { return "fake_calendar"; }
+
+    [[nodiscard]] auto quote(const std::string& symbol) const
+        -> std::expected<md::Quote, std::error_code> override {
+        ++quote_calls_;
+        return md::Quote{.symbol = symbol,
+                         .price = 779.0,
+                         .previous_close = 778.0,
+                         .timestamp = "2035-10-05T14:00:00Z"};
+    }
+
+    [[nodiscard]] auto expirations(const std::string&, double) const
+        -> std::expected<std::vector<md::Expiration>, std::error_code> override {
+        ++expirations_calls_;
+        return std::vector<md::Expiration>{md::Expiration{.date = "2035-10-12"},
+                                           md::Expiration{.date = "2035-10-19"}};
+    }
+
+    [[nodiscard]] auto chain(const std::string& symbol, const std::string& expiration,
+                             double spot) const -> std::expected<md::Chain, std::error_code> override {
+        ++chain_calls_;
+        md::Chain c;
+        c.symbol = symbol;
+        c.spot = spot;
+        c.selected_expiration = expiration;
+        c.strikes.push_back(md::StrikeRow{.strike = 779.0});
+        return c;
+    }
+
+    [[nodiscard]] auto quote_calls() const noexcept -> int { return quote_calls_.load(); }
+    [[nodiscard]] auto chain_calls() const noexcept -> int { return chain_calls_.load(); }
+    [[nodiscard]] auto expirations_calls() const noexcept -> int { return expirations_calls_.load(); }
+
+private:
+    mutable std::atomic<int> quote_calls_{0};
+    mutable std::atomic<int> chain_calls_{0};
+    mutable std::atomic<int> expirations_calls_{0};
+};
+
+/** A flat 4% curve, so the futures term structure has the one measured input it refuses to guess. */
+class FakeRateProvider final : public md::IRateProvider {
+public:
+    [[nodiscard]] auto name() const -> std::string_view override { return "fake_rate"; }
+    [[nodiscard]] auto risk_free_rate() const
+        -> std::expected<md::RiskFreeRate, std::error_code> override {
+        return md::RiskFreeRate{.rate = 0.04,
+                                .rate_published = 0.0392,
+                                .tenor = "3M",
+                                .as_of_date = "2026-10-05",
+                                .source = "fake",
+                                .fetched_at = "2026-10-06T00:00:00Z"};
+    }
+};
+
+std::chrono::sys_days g_fake_today{};
+auto fake_today() -> std::chrono::sys_days { return g_fake_today; }
+
+auto get_quote(OptionsCalculator::Stub& stub, const std::string& symbol,
+               const std::string& asset_class) -> std::pair<grpc::Status, calculator::QuoteResponse> {
+    calculator::QuoteRequest req;
+    req.set_symbol(symbol);
+    req.set_asset_class(asset_class);
+    calculator::QuoteResponse resp;
+    const auto ctx = make_context();
+    const auto status = stub.GetMarketQuote(ctx.get(), req, &resp);
+    return {status, resp};
+}
+
+auto get_chain(OptionsCalculator::Stub& stub, const std::string& symbol,
+               const std::string& asset_class, const std::string& expiration_date)
+    -> std::pair<grpc::Status, ChainResponse> {
+    ChainRequest req;
+    req.set_symbol(symbol);
+    req.set_asset_class(asset_class);
+    req.set_expiration_date(expiration_date);
+    ChainResponse resp;
+    const auto ctx = make_context();
+    const auto status = stub.GetMarketChain(ctx.get(), req, &resp);
     return {status, resp};
 }
 
@@ -1051,6 +1215,495 @@ auto main() -> int {
                   "a NaN bound is REFUSED -- unchecked it renders as a grid of blanks, "
                   "which reads as 'no data' rather than as a bad argument");
         }
+    }
+
+    // =======================================================================
+    section("8. THE POSITION'S EXTREMES, NOT THE GRID'S");
+    // =======================================================================
+    // max_profit and max_loss are the supremum and infimum of the expiry payoff
+    // over every price in (0, infinity). The curve is drawn on a +/-25% window,
+    // and before this section existed the extremes were read off that window:
+    // a SPY 779 call bought at 4.49 reported $19,037.25 (the grid's top edge)
+    // as its max profit and a risk/reward of 42:1, where the truth is
+    // "unlimited"; a long 779 put reported $19,114 where the truth is
+    // (779 - 3.54) * 100 = $77,546 at a price of zero.
+    //
+    // Every expected value below is the closed form of a payoff written out
+    // beside it, not a figure the engine handed itself. Every request is
+    // single-expiry, so the curve date IS each leg's expiry and every leg is
+    // settled: the payoff is piecewise linear with kinks at the strikes.
+    {
+        constexpr double kSpot = 779.0;
+
+        {   // -- long call: unbounded profit, loss is the premium ----------------
+            auto req = make_request(kSpot);
+            add_leg(req, Leg::BUY, Leg::CALL, 779.0, 30.0, 4.49, 0.20);
+            auto [status, resp] = call_strategy(stub, req);
+            check(status.ok(), "long call: RPC succeeds");
+            check(resp.max_profit_unbounded() && !resp.max_loss_unbounded(),
+                  "long call: profit is UNBOUNDED, loss is bounded");
+            check(near(resp.max_loss(), -449.0),
+                  "long call: max_loss == -(4.49 * 100) (got " + std::to_string(resp.max_loss()) + ")");
+            // What max_profit now means when the flag is set: the edge of the
+            // grid, a value the position reaches and not a maximum. Pinned so a
+            // client reading the number without the flag is a known quantity.
+            check(near(resp.max_profit(), (779.0 * 1.25 - 779.0 - 4.49) * 100.0),
+                  "long call: max_profit is the grid's top edge, (973.75 - 779 - 4.49) * 100 (got " +
+                      std::to_string(resp.max_profit()) + ")");
+            check(resp.risk_reward_ratio() == 0.0,
+                  "long call: no risk/reward ratio is built from a grid-edge profit (got " +
+                      std::to_string(resp.risk_reward_ratio()) + ")");
+            check(resp.pop() > 0.0 && resp.probability_of_target_profit() == 0.0,
+                  "long call: probabilities were computed (pop > 0) and 50%-of-max has no "
+                  "target, so it is left at zero");
+        }
+
+        {   // -- long put: bounded, and the maximum is at a price of ZERO --------
+            auto req = make_request(kSpot);
+            add_leg(req, Leg::BUY, Leg::PUT, 779.0, 30.0, 3.54, 0.20);
+            auto [status, resp] = call_strategy(stub, req);
+            check(status.ok(), "long put: RPC succeeds");
+            check(!resp.max_profit_unbounded() && !resp.max_loss_unbounded(),
+                  "long put: bounded in both directions");
+            check(near(resp.max_profit(), (779.0 - 3.54) * 100.0),
+                  "long put: max_profit == (779 - 3.54) * 100 = 77,546.00, the payoff at S = 0 (got " +
+                      std::to_string(resp.max_profit()) + ")");
+            check(near(resp.max_loss(), -354.0),
+                  "long put: max_loss == -(3.54 * 100) (got " + std::to_string(resp.max_loss()) + ")");
+            check(near(resp.risk_reward_ratio(), 77546.0 / 354.0, 1e-6),
+                  "long put: risk/reward is the real ratio, 77546 / 354 (got " +
+                      std::to_string(resp.risk_reward_ratio()) + ")");
+            // The extremes are folded in from beyond the grid and the CURVE is
+            // not: it is still exactly the 81-point window.
+            check(resp.pnl_matrix_size() == 81,
+                  "long put: the curve is still the requested 81 grid points");
+            check(curve_extremes(resp).second < resp.max_profit() - 1.0,
+                  "long put: no point of the drawn curve reaches max_profit -- it is not on the grid");
+        }
+
+        {   // -- short call: unbounded loss, profit is the credit -----------------
+            auto req = make_request(kSpot);
+            add_leg(req, Leg::SELL, Leg::CALL, 779.0, 30.0, 4.49, 0.20);
+            auto [status, resp] = call_strategy(stub, req);
+            check(status.ok(), "short call: RPC succeeds");
+            check(resp.max_loss_unbounded() && !resp.max_profit_unbounded(),
+                  "short call: loss is UNBOUNDED, profit is bounded");
+            check(near(resp.max_profit(), 449.0),
+                  "short call: max_profit == the 4.49 credit * 100 (got " +
+                      std::to_string(resp.max_profit()) + ")");
+            check(near(resp.max_loss(), curve_extremes(resp).first),
+                  "short call: max_loss is the grid's edge, the lowest point of the drawn curve");
+            check(resp.risk_reward_ratio() == 0.0, "short call: no risk/reward ratio");
+        }
+
+        {   // -- bull call spread INSIDE the grid: nothing moves ------------------
+            auto req = make_request(590.0);
+            add_leg(req, Leg::BUY, Leg::CALL, 580.0, 30.0, 12.00, 0.20);
+            add_leg(req, Leg::SELL, Leg::CALL, 600.0, 30.0, 4.75, 0.20);
+            auto [status, resp] = call_strategy(stub, req);
+            check(status.ok() && near(resp.max_profit(), 1275.0) && near(resp.max_loss(), -725.0),
+                  "bull call spread inside the grid: 1275 / -725, exactly as before");
+            check(!resp.max_profit_unbounded() && !resp.max_loss_unbounded(),
+                  "bull call spread: the flags default to false on a bounded position");
+            check(near(resp.risk_reward_ratio(), 1275.0 / 725.0, 1e-4),
+                  "bull call spread: risk/reward is unchanged");
+            check(resp.probability_of_target_profit() > 0.0,
+                  "bull call spread: a bounded max_profit still defines a 50% target");
+        }
+
+        // -- a spread struck BEYOND the grid: the plateau it has not reached ----
+        // Spot 500 with a +/-10% window is 450..550. The 560/600 vertical sits
+        // wholly above it, so every point the grid samples is flat at the debit
+        // and the old figure was -500 for BOTH extremes.
+        auto spread_beyond_grid = [] {
+            auto req = make_request(500.0, 0.10);
+            add_leg(req, Leg::BUY, Leg::CALL, 560.0, 30.0, 6.00, 0.20);
+            add_leg(req, Leg::SELL, Leg::CALL, 600.0, 30.0, 1.00, 0.20);
+            return req;
+        };
+        StrategyResponse beyond;
+        {
+            auto [status, resp] = call_strategy(stub, spread_beyond_grid());
+            beyond = resp;
+            check(status.ok(), "bull call spread beyond the grid: RPC succeeds");
+            check(near(resp.max_profit(), (600.0 - 560.0 - 5.0) * 100.0),
+                  "bull call spread beyond the grid: max_profit is the PLATEAU, "
+                  "(40 - 5) * 100 = 3500 (got " + std::to_string(resp.max_profit()) + ")");
+            check(near(resp.max_loss(), -500.0), "bull call spread beyond the grid: max_loss == -500");
+            check(!resp.max_profit_unbounded() && !resp.max_loss_unbounded(),
+                  "bull call spread beyond the grid: bounded both ways -- a capped spread is "
+                  "not 'unlimited' just because its cap is off screen");
+            check(near(curve_extremes(resp).second, -500.0),
+                  "bull call spread beyond the grid: the drawn curve is still flat at -500 -- "
+                  "the plateau is not painted into it");
+        }
+
+        {   // -- the downside twin: a put spread struck below the grid ------------
+            auto req = make_request(500.0, 0.10);
+            add_leg(req, Leg::BUY, Leg::PUT, 440.0, 30.0, 4.00, 0.20);
+            add_leg(req, Leg::SELL, Leg::PUT, 400.0, 30.0, 1.00, 0.20);
+            auto [status, resp] = call_strategy(stub, req);
+            check(status.ok(), "bear put spread below the grid: RPC succeeds");
+            check(near(resp.max_profit(), (440.0 - 400.0 - 3.0) * 100.0),
+                  "bear put spread below the grid: max_profit == (40 - 3) * 100 = 3700 (got " +
+                      std::to_string(resp.max_profit()) + ")");
+            check(near(resp.max_loss(), -300.0), "bear put spread below the grid: max_loss == -300");
+            check(!resp.max_profit_unbounded() && !resp.max_loss_unbounded(),
+                  "bear put spread below the grid: bounded both ways");
+        }
+
+        {   // -- iron condor: bounded, extremes are the closed form ---------------
+            auto req = make_request(590.0);
+            add_leg(req, Leg::BUY, Leg::PUT, 560.0, 30.0, 1.50, 0.20);
+            add_leg(req, Leg::SELL, Leg::PUT, 570.0, 30.0, 3.00, 0.20);
+            add_leg(req, Leg::SELL, Leg::CALL, 610.0, 30.0, 3.00, 0.20);
+            add_leg(req, Leg::BUY, Leg::CALL, 620.0, 30.0, 1.50, 0.20);
+            auto [status, resp] = call_strategy(stub, req);
+            check(status.ok() && near(resp.max_profit(), 300.0) && near(resp.max_loss(), -700.0),
+                  "iron condor: max_profit == the 3.00 net credit * 100, max_loss == -(10 - 3) * 100");
+            check(!resp.max_profit_unbounded() && !resp.max_loss_unbounded(),
+                  "iron condor: its long and short calls net to no upside slope, so bounded");
+        }
+
+        {   // -- covered call: a STOCK leg is a linear leg too --------------------
+            auto req = make_request(kSpot);
+            add_linear_leg(req, Leg::BUY, Leg::STOCK, 779.0, 30.0, 100.0);
+            add_leg(req, Leg::SELL, Leg::CALL, 800.0, 30.0, 5.00, 0.20);
+            auto [status, resp] = call_strategy(stub, req);
+            check(status.ok(), "covered call: RPC succeeds");
+            check(!resp.max_profit_unbounded() && !resp.max_loss_unbounded(),
+                  "covered call: +100 shares against a short call nets to no upside slope");
+            check(near(resp.max_profit(), (800.0 - 779.0 + 5.0) * 100.0),
+                  "covered call: max_profit == (800 - 779 + 5) * 100 = 2600 (got " +
+                      std::to_string(resp.max_profit()) + ")");
+            check(near(resp.max_loss(), (-779.0 + 5.0) * 100.0),
+                  "covered call: max_loss == the shares going to zero less the credit, -77,400 (got " +
+                      std::to_string(resp.max_loss()) + ")");
+        }
+
+        {   // -- a diagonal whose worst case is the TAIL: only the far point sees it
+            // Long a 90-day 600 call (8.00), short a 30-day 500 call (52.00), on
+            // a 550 underlying. The curve is drawn at the near expiry, where the
+            // short call is settled and the long one still has 60 days of life.
+            // Above 500 the position is C_far(S) - (S - 500) + 44, which falls
+            // monotonically toward its asymptote
+            //     500 - 600 * exp(-r * 60/365) + 44   per share,
+            // because the long call's value tends to S - K * exp(-rT). That
+            // asymptote is the worst the position can do, and the +25% grid
+            // (up to 687.5) stops short of it by about $77 per contract. Its
+            // calls net to zero slope, so the loss is bounded and must be the
+            // asymptote, not the grid's edge.
+            auto req = make_request(550.0);
+            add_leg(req, Leg::BUY, Leg::CALL, 600.0, 90.0, 8.00, 0.20);
+            add_leg(req, Leg::SELL, Leg::CALL, 500.0, 30.0, 52.00, 0.20);
+            auto [status, resp] = call_strategy(stub, req);
+            check(status.ok(), "call diagonal: RPC succeeds");
+            check(!resp.max_profit_unbounded() && !resp.max_loss_unbounded(),
+                  "call diagonal: a long and a short call net to no upside slope, so bounded");
+            const double tail = (500.0 - 600.0 * std::exp(-0.04 * 60.0 / 365.0) + 44.0) * 100.0;
+            check(near(resp.max_loss(), tail, 1e-3),
+                  "call diagonal: max_loss is the S -> infinity asymptote " + std::to_string(tail) +
+                      ", not the grid's edge (got " + std::to_string(resp.max_loss()) + ")");
+            check(curve_extremes(resp).first > resp.max_loss() + 10.0,
+                  "call diagonal: the drawn curve never reaches that loss -- it lies beyond the grid");
+            check(resp.max_profit() > 44.0 * 100.0,
+                  "call diagonal: max_profit exceeds the credit kept at S = 0, the peak being at 500");
+        }
+
+        {   // -- a call ratio backspread: net long calls, unbounded profit --------
+            // Sell 1 call at 500 for 12, buy 2 calls at 520 for 4. Per share the
+            // payoff is 4 up to 500, then 4 - (S - 500) to 520 where it bottoms
+            // at -16, then S - 536 climbing without limit. The +/-2% grid is
+            // 490..510, so the 520 kink where the loss is worst is OFF the grid.
+            auto req = make_request(500.0, 0.02);
+            add_leg(req, Leg::SELL, Leg::CALL, 500.0, 30.0, 12.00, 0.20, 1);
+            add_leg(req, Leg::BUY, Leg::CALL, 520.0, 30.0, 4.00, 0.20, 2);
+            auto [status, resp] = call_strategy(stub, req);
+            check(status.ok(), "call backspread: RPC succeeds");
+            check(resp.max_profit_unbounded() && !resp.max_loss_unbounded(),
+                  "call backspread: net long calls (2 against 1) are UNBOUNDED profit");
+            check(near(resp.max_loss(), -1600.0),
+                  "call backspread: max_loss == -16 * 100, at the 520 kink beyond the grid (got " +
+                      std::to_string(resp.max_loss()) + ")");
+            check(resp.risk_reward_ratio() == 0.0, "call backspread: no risk/reward ratio");
+        }
+
+        {   // -- the matrix window is a window on the matrix, not on the answer ---
+            auto pinned = spread_beyond_grid();
+            // A window across both strikes, where the payoff runs from -500 to
+            // 3500: a matrix grid leaking into the headline numbers would add a
+            // breakeven the +/-10% curve does not have.
+            pinned.set_matrix_price_min(560.0);
+            pinned.set_matrix_price_max(640.0);
+            auto [status, resp] = call_strategy(stub, pinned);
+            check(status.ok(), "pinned matrix window: RPC succeeds");
+            check(resp.max_profit() == beyond.max_profit() && resp.max_loss() == beyond.max_loss() &&
+                      resp.max_profit_unbounded() == beyond.max_profit_unbounded() &&
+                      resp.max_loss_unbounded() == beyond.max_loss_unbounded() &&
+                      resp.break_even() == beyond.break_even(),
+                  "pinning the matrix to 560..640 leaves max_profit, max_loss, break_even and BOTH "
+                  "flags identical -- the extremes never read the matrix grid");
+            double lo = std::numeric_limits<double>::infinity();
+            for (const auto& c : resp.matrix()) lo = std::min(lo, c.price());
+            check(near(lo, 560.0, 1e-9), "...while the matrix really is on the pinned window");
+            check(resp.breakeven_prices_size() == beyond.breakeven_prices_size(),
+                  "...and the breakevens, read off the curve, are the unpinned curve's");
+        }
+    }
+
+    // =======================================================================
+    section("9. FUTURES NEED NO VOLATILITY");
+    // =======================================================================
+    // A future's P&L is (price - entry) * multiplier * quantity. It has no
+    // implied volatility, and a request made only of futures legs has none
+    // anywhere. The engine must price it, flag it, and leave the probability
+    // fields at zero -- without an error and without a NaN -- because the
+    // client is about to stop demanding an IV for a position that has no use
+    // for one.
+    {
+        constexpr double kEs = 7855.19;
+        constexpr double kMult = 50.0;
+        const auto es_request = [&] {
+            auto req = make_request(kEs);
+            req.set_underlying_symbol("ES");
+            return req;
+        };
+
+        {   // -- long ES, December, 72 days, NO implied volatility anywhere --------
+            auto req = es_request();
+            add_linear_leg(req, Leg::BUY, Leg::FUTURE, kEs, 72.0, kMult);
+            auto [status, resp] = call_strategy(stub, req);
+            check(status.ok(), "long future, no IV: RPC succeeds (got " + status.error_message() + ")");
+            check(resp.max_profit_unbounded() && !resp.max_loss_unbounded(),
+                  "long future: profit unbounded, loss bounded");
+            check(near(resp.max_loss(), -kEs * kMult),
+                  "long future: max_loss == -(7855.19 * 50), the contract going to zero (got " +
+                      std::to_string(resp.max_loss()) + ")");
+            check(near(resp.max_profit(), kEs * 0.25 * kMult),
+                  "long future: max_profit is the grid's edge, 0.25 * 7855.19 * 50 (got " +
+                      std::to_string(resp.max_profit()) + ")");
+            check(near(resp.net_greeks().delta(), kMult), "long future: net delta == +50");
+            check(resp.leg_risk_size() == 1 && near(resp.leg_risk(0).open_pnl(), 0.0) &&
+                      near(resp.leg_risk(0).greeks().delta(), kMult),
+                  "long future: one leg_risk, open P&L 0 at entry, delta 50");
+            check(near(resp.curve_days_to_expiration(), 72.0),
+                  "long future: the curve is drawn at the 72-day expiry");
+            check(resp.pnl_matrix_size() == 81 && resp.matrix_size() == 81 * 12,
+                  "long future: curve and matrix have the requested dimensions");
+            check(resp.pop() == 0.0 && resp.expected_value() == 0.0 &&
+                      resp.probability_of_touch() == 0.0 &&
+                      resp.probability_of_target_profit() == 0.0 &&
+                      resp.risk_metrics().var_parametric_95() == 0.0 &&
+                      resp.risk_metrics().cvar_parametric_99() == 0.0,
+                  "long future: every probability field is left at zero");
+            check(all_finite(resp), "long future: no NaN or infinity anywhere in the response");
+            check(resp.breakeven_prices_size() == 1 && near(resp.break_even(), kEs, 1e-3),
+                  "long future: one breakeven, at the entry price");
+        }
+
+        {   // -- short ES: the mirror -------------------------------------------
+            auto req = es_request();
+            add_linear_leg(req, Leg::SELL, Leg::FUTURE, kEs, 72.0, kMult);
+            auto [status, resp] = call_strategy(stub, req);
+            check(status.ok(), "short future, no IV: RPC succeeds");
+            check(resp.max_loss_unbounded() && !resp.max_profit_unbounded(),
+                  "short future: loss unbounded, profit bounded");
+            check(near(resp.max_profit(), kEs * kMult),
+                  "short future: max_profit == entry * 50 * 1, at a price of zero (got " +
+                      std::to_string(resp.max_profit()) + ")");
+            check(near(resp.net_greeks().delta(), -kMult), "short future: net delta == -50");
+            check(resp.risk_reward_ratio() == 0.0 && all_finite(resp),
+                  "short future: no ratio, nothing non-finite");
+        }
+
+        {   // -- a future AND an option with an IV: protective put ---------------
+            auto req = es_request();
+            add_linear_leg(req, Leg::BUY, Leg::FUTURE, kEs, 72.0, kMult);
+            add_leg(req, Leg::BUY, Leg::PUT, 7800.0, 72.0, 120.50, 0.18, 1, kMult);
+            auto [status, resp] = call_strategy(stub, req);
+            check(status.ok(), "future + put: RPC succeeds (got " + status.error_message() + ")");
+            check(resp.max_profit_unbounded() && !resp.max_loss_unbounded(),
+                  "future + put: the put adds no upside slope, so profit is still unbounded");
+            check(near(resp.max_loss(), (7800.0 - kEs - 120.50) * kMult),
+                  "future + put: max_loss == (7800 - 7855.19 - 120.50) * 50 = -8,784.50 (got " +
+                      std::to_string(resp.max_loss()) + ")");
+            check(resp.pop() > 0.0 && resp.pop() < 1.0 && all_finite(resp),
+                  "future + put: the option's IV drives the probabilities, which are finite");
+            check(resp.leg_risk_size() == 2, "future + put: one leg_risk per leg");
+        }
+    }
+
+    // =======================================================================
+    section("10. ONE TODAY: the chain's dates and the matrix's dates agree");
+    // =======================================================================
+    // OFC-018. The expiration list is cached for 12 hours and each entry used to
+    // carry `days` and a "(7d)" label computed WHEN IT WAS FILLED. Read after a
+    // UTC midnight the count was a day high; a client built its leg from it,
+    // and the matrix -- counting from today -- dated its last column a day past
+    // the expiry the user chose. Observed live: expiry 2026-10-13, last matrix
+    // column 2026-10-14 reading "0 days to expiry", the real expiry column
+    // reading "1 days".
+    //
+    // The calendar is injected, so midnight is crossed by assignment and not by
+    // sleeping. The fake provider counts its own calls, which is what proves the
+    // second read was SERVED FROM THE CACHE: without it, a re-fetch would
+    // recompute the count and this section would pass on a build with the bug.
+    {
+        auto fake = std::make_shared<FakeChainProvider>();
+        md::set_provider(fake);
+        md::set_rate_provider(std::make_shared<FakeRateProvider>());
+        md::set_calendar_provider(fake_today);
+        md::quote_cache().clear();
+        md::expiration_cache().clear();
+        md::chain_cache().clear();
+        md::rate_cache().clear();
+        md::clear_last_good_chain();
+
+        // Dates in 2035, far from any day this test can run on: a mutant that
+        // reads the REAL clock instead of the injected one must disagree with
+        // the injected dates, which it would not on the day they coincided.
+        constexpr std::string_view kExpiry = "2035-10-12";
+        const auto day_one = std::chrono::sys_days{std::chrono::year{2035} / std::chrono::October / 5};
+        const auto expiry_days = std::chrono::sys_days{std::chrono::year{2035} / std::chrono::October / 12};
+
+        const auto served = [&](const ChainResponse& chain) {
+            for (const auto& e : chain.available_expirations()) {
+                if (e.date_str() == kExpiry) return std::pair{e.days_to_expiry(), e.label()};
+            }
+            return std::pair{-999, std::string{"<expiry not listed>"}};
+        };
+
+        g_fake_today = day_one;
+        auto [st1, chain1] = get_chain(stub, "SPY", "EQUITY", std::string{kExpiry});
+        const auto [days1, label1] = served(chain1);
+        check(st1.ok() && days1 == 7 && label1 == "Oct 12, 2035 (7d)",
+              "day one: 2035-10-12 is 7 days away and labelled so (got " + std::to_string(days1) +
+                  ", '" + label1 + "')");
+        check(fake->chain_calls() == 1 && fake->expirations_calls() == 1,
+              "day one: the provider was asked once for each");
+
+        // Midnight passes. Nothing is evicted: the chain cache holds 15 minutes
+        // and the expiration cache 12 hours, so every entry below is served warm.
+        g_fake_today = day_one + std::chrono::days{1};
+        auto [st2, chain2] = get_chain(stub, "SPY", "EQUITY", std::string{kExpiry});
+        const auto [days2, label2] = served(chain2);
+        check(fake->chain_calls() == 1 && fake->expirations_calls() == 1,
+              "day two: served from the cache -- the provider was NOT asked again");
+        check(st2.ok() && days2 == 6 && label2 == "Oct 12, 2035 (6d)",
+              "day two: the SAME cached entry now reads 6 days and '(6d)' (got " +
+                  std::to_string(days2) + ", '" + label2 + "')");
+
+        // The leg the client builds from what it was served, priced by the
+        // engine on the same day. Every cell must be dated exactly as many days
+        // before the expiry as it says it is.
+        auto req = make_request(779.0, 0.25, 7);
+        add_leg(req, Leg::BUY, Leg::CALL, 779.0, static_cast<double>(days2), 4.49, 0.20);
+        auto [st3, resp] = call_strategy(stub, req);
+        check(st3.ok() && resp.matrix_size() == 81 * 7, "the matrix is 7 columns of 81 prices");
+
+        bool every_cell_consistent = true;
+        std::string first_date;
+        std::string last_date;
+        std::uint32_t first_dte = 0;
+        std::uint32_t last_dte = 99;
+        for (const auto& cell : resp.matrix()) {
+            const auto implied = expiry_days - std::chrono::days{cell.days_to_expiration()};
+            every_cell_consistent =
+                every_cell_consistent && cell.date_str() == std::format("{:%Y-%m-%d}", implied);
+        }
+        if (resp.matrix_size() > 0) {
+            first_date = resp.matrix(0).date_str();
+            first_dte = resp.matrix(0).days_to_expiration();
+            last_date = resp.matrix(resp.matrix_size() - 1).date_str();
+            last_dte = resp.matrix(resp.matrix_size() - 1).days_to_expiration();
+        }
+        check(every_cell_consistent,
+              "every matrix cell is dated (expiry - days_to_expiration): no column is off by a day");
+        check(last_date == kExpiry && last_dte == 0,
+              "the LAST column is the chosen expiry, 2035-10-12, reading 0 days (got " + last_date +
+                  ", " + std::to_string(last_dte) + ")");
+        check(first_date == "2035-10-06" && first_dte == 6,
+              "the FIRST column is today on the injected calendar, 2035-10-06, reading 6 days (got " +
+                  first_date + ", " + std::to_string(first_dte) + ")");
+
+        // The third place that reads a date: the futures term structure.
+        // ESZ35 settles on the third Friday of December 2035.
+        auto [st4, futures] = get_chain(stub, "ES", "FUTURES", "");
+        check(st4.ok() && futures.futures_contracts_size() > 0 &&
+                  futures.futures_contracts(0).code() == "ESZ35",
+              "the term structure's first contract is ESZ35");
+        const auto settle =
+            std::chrono::sys_days{std::chrono::year{2035} / std::chrono::December / std::chrono::Friday[3]};
+        if (futures.futures_contracts_size() > 0) {
+            check(futures.futures_contracts(0).days_to_expiry() == (settle - g_fake_today).count(),
+                  "the term structure counts from the same injected today (day two: " +
+                      std::to_string(futures.futures_contracts(0).days_to_expiry()) + ")");
+        }
+
+        md::set_calendar_provider(nullptr);
+        const auto before = std::chrono::floor<std::chrono::days>(std::chrono::system_clock::now());
+        const auto restored = md::today();
+        const auto after = std::chrono::floor<std::chrono::days>(std::chrono::system_clock::now());
+        check(restored >= before && restored <= after,
+              "clearing the provider restores the real UTC date");
+    }
+
+    // =======================================================================
+    section("11. NO QUOTE FOR THE WRONG INSTRUMENT");
+    // =======================================================================
+    // OFC-015. Typing BTC resolves to the CRYPTO asset class. GetMarketChain
+    // already answers UNIMPLEMENTED for it, but GetMarketQuote fell through to
+    // the equity path and returned 37.84 -- the price of the US-listed ticker
+    // that happens to be named BTC -- which the header then showed as
+    // "BTC | CRYPTO | 37.84 | QUOTE". The provider here answers 779 for ANY
+    // symbol, and counts how often it was asked: a refusal that came after the
+    // lookup would still have spent the wrong-instrument answer, and a count of
+    // zero is what says it never did.
+    {
+        auto fake = std::make_shared<FakeChainProvider>();
+        md::set_provider(fake);
+        md::set_rate_provider(std::make_shared<FakeRateProvider>());
+        md::quote_cache().clear();
+        md::rate_cache().clear();
+
+        auto [crypto_status, crypto] = get_quote(stub, "BTC", "CRYPTO");
+        check(crypto_status.error_code() == grpc::StatusCode::UNIMPLEMENTED,
+              "a CRYPTO quote is UNIMPLEMENTED (got code " +
+                  std::to_string(static_cast<int>(crypto_status.error_code())) + ")");
+        check(crypto_status.error_message().find("BTC") != std::string::npos &&
+                  crypto_status.error_message().find("different instrument") != std::string::npos,
+              "...and says it is a different instrument (got '" + crypto_status.error_message() + "')");
+        check(crypto.price() == 0.0 && crypto.provider().empty(),
+              "...with no price and no provider attributed");
+        check(fake->quote_calls() == 0,
+              "...and the feed was never asked: the refusal precedes the lookup");
+
+        // Unchanged: the equity path, stated and unstated.
+        auto [eq_status, eq] = get_quote(stub, "SPY", "EQUITY");
+        check(eq_status.ok() && near(eq.price(), 779.0) && eq.asset_class() == "EQUITY" &&
+                  eq.provider() == "alpaca",
+              "EQUITY is unchanged: 779, asset_class EQUITY, provider alpaca");
+        auto [bare_status, bare] = get_quote(stub, "SPY", "");
+        check(bare_status.ok() && near(bare.price(), 779.0) && bare.asset_class() == "EQUITY",
+              "an unstated asset class is still an equity");
+        check(fake->quote_calls() >= 1, "...and those two did reach the feed");
+
+        // Unchanged: a futures root with a proxy is priced through it, and one
+        // without is refused with the futures wording rather than the crypto one.
+        md::quote_cache().clear();
+        auto [fut_status, fut] = get_quote(stub, "ES", "FUTURES");
+        check(fut_status.ok() && near(fut.price(), 7790.0) && fut.asset_class() == "FUTURES" &&
+                  fut.provider().find("SPY") != std::string::npos,
+              "FUTURES is unchanged: ES is priced as SPY x 10 = 7790 through the index proxy");
+        auto [cl_status, cl] = get_quote(stub, "CL", "FUTURES");
+        check(cl_status.error_code() == grpc::StatusCode::UNIMPLEMENTED &&
+                  cl_status.error_message().find("futures quote source") != std::string::npos,
+              "a futures root with no proxy is still refused, in the futures wording");
+
+        // The chain refusal this one is parallel to is unchanged.
+        auto [chain_status, chain_unused] = get_chain(stub, "BTC", "CRYPTO", "");
+        check(chain_status.error_code() == grpc::StatusCode::UNIMPLEMENTED,
+              "the CRYPTO option chain is still UNIMPLEMENTED");
     }
 
     // -----------------------------------------------------------------

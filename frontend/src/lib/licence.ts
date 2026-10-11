@@ -14,7 +14,6 @@
  * one and gets refused.
  */
 
-import { createClient } from './supabase/client';
 
 const STORAGE_KEY = 'ofc.licence';
 const LICENCE_PREFIX = 'lk_live_';
@@ -45,27 +44,33 @@ let authSubscribed = false;
 function ensureAuthSubscription(): void {
   if (typeof window === 'undefined' || authSubscribed) return;
   authSubscribed = true;
-  try {
-    const supabase = createClient();
-    supabase.auth.onAuthStateChange((_event, session) => {
-      cachedAccessToken = session?.access_token ?? null;
-    });
-    // onAuthStateChange fires INITIAL_SESSION asynchronously on its own;
-    // priming with getSession() as well closes the brief window on first
-    // load where a call could otherwise see "signed out" when a session
-    // actually exists.
-    supabase.auth
-      .getSession()
-      .then(({ data }) => {
-        cachedAccessToken = data.session?.access_token ?? null;
-      })
-      .catch(() => {
-        cachedAccessToken = null;
+  // The Supabase client is a ~250KB chunk. It is imported HERE, when the first
+  // request needs to know whether someone is signed in, rather than at module
+  // load: this file is on the path of every page that makes an RPC, and a
+  // visitor who never signs in used to download and parse the whole auth stack
+  // before the calculator could paint. `authMetadata()` is synchronous and reads
+  // the cached token, so nothing waits on this -- the token simply arrives a
+  // moment after the chunk does, exactly as it already arrived after the
+  // (async) session lookup.
+  void import('./supabase/client')
+    .then(({ createClient }) => {
+      const supabase = createClient();
+      supabase.auth.onAuthStateChange((_event, session) => {
+        cachedAccessToken = session?.access_token ?? null;
       });
-  } catch {
-    // No Supabase configuration, or the client threw constructing itself.
-    cachedAccessToken = null;
-  }
+      // onAuthStateChange fires INITIAL_SESSION asynchronously on its own;
+      // priming with getSession() as well closes the brief window on first
+      // load where a call could otherwise see "signed out" when a session
+      // actually exists.
+      return supabase.auth.getSession().then(({ data }) => {
+        cachedAccessToken = data.session?.access_token ?? null;
+      });
+    })
+    .catch(() => {
+      // No Supabase configuration, an unreachable auth host, or a client that
+      // threw constructing itself: "no token", and the free tier carries on.
+      cachedAccessToken = null;
+    });
 }
 
 export interface LicenceInfo {

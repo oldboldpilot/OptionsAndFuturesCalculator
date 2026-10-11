@@ -39,8 +39,8 @@ import AdSlot from '@/components/AdSlot';
  * Placing the code here inverts it. A page outside this subtree has no ad code
  * at all: nothing to suppress, no guard that has to work, no pathname to match.
  *
- * NOTE the segment this sits in. `app/guides/[strategy]/layout.tsx` wraps the
- * twenty-six ARTICLES only. Putting it one level up, at `app/guides/layout.tsx`,
+ * NOTE the segment this sits in. `app/(site)/guides/[strategy]/layout.tsx` wraps the
+ * twenty-six ARTICLES only. Putting it one level up, at `app/(site)/guides/layout.tsx`,
  * would also cover the `/guides` index — a directory of twenty-six links, which
  * is a navigation screen and the third condition the same policy names. That
  * one level is load-bearing.
