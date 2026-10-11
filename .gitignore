@@ -57,6 +57,24 @@ model-archive/
 # from out/ for a run that never read it.
 agent/dataset/out/
 
+# Scratch output of agent/train/train_encoder.py -- one directory per run holding
+# encoder_fp32.pt (~4 MB each), tokenizer.json, schema.json, metrics.json and
+# failures.jsonl. Four runs were sitting here neither tracked nor ignored, 16 MB
+# of it checkpoints.
+#
+# THE CHECKPOINT REGENERATES AND THE MEASUREMENT DOES NOT, which is the whole
+# reason this is a gitignore line and not a commit. Every run records its seed and
+# its full argument set inside metrics.json, so the weights and the derived
+# tokenizer/schema can be rebuilt; what no later run can reproduce is what THIS
+# run measured. So the metrics and the failure rows are promoted to
+# docs/evidence/encoder-retrain-20261005/ -- beside the eight other encoder-*
+# evidence directories -- and the run directory itself is scratch.
+#
+# Its absence is what let `9e9c2b5` ship with no evidence directory at all while
+# every sibling encoder commit carried one: the runs were on disk, so nobody
+# noticed they were in neither place.
+agent/train/runs/
+
 # Cloudflare Worker local secrets (wrangler dev). Never committable.
 .dev.vars
 **/.dev.vars
