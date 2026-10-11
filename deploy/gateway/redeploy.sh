@@ -121,9 +121,25 @@ if printf '%s' "$SHOW" | store_version_ok; then
 else
   # The DSN never appears here: `admin show` takes it as `env:NAME` so it is not an argument,
   # and only the lines that do not carry a scheme are printed.
-  die "this image cannot OPEN the live store, so starting it would replace a serving gateway with one that refuses to boot. Migrate first and then re-run:
-      podman run --rm --network host --secret sgw_maint_dsn,type=env,target=SGW_MAINT_DSN \\
-        --entrypoint /usr/local/bin/sensen-gateway $IMG admin init env:SGW_MAINT_DSN
+  # MIGRATING NEEDS A ROLE THAT OWNS THE SCHEMA'S OBJECTS, NOT THE MAINT ROLE, and this
+  # message named the maint DSN until 2026-10-11 -- an instruction that cannot succeed.
+  # Measured against the live store that day, with the maint role `gw_maint`:
+  #   * `admin init` opens `migrate()` with `create schema if not exists <schema>`, and
+  #     PostgreSQL checks CREATE on the DATABASE *before* `if not exists` checks the schema.
+  #     So the statement refuses for a role without that privilege EVEN THOUGH the schema is
+  #     already there -- `permission denied for database`, which reads as a missing grant on
+  #     the store rather than as a no-op demanding a privilege it does not need.
+  #   * past that, the pending migrations `alter table` existing tables, and ALTER requires
+  #     OWNING them.
+  #   `gw_maint` had USAGE on the schema, no CREATE on the database or the schema, and was a
+  #   member of `gateway_maintainer` and not of the objects' owner -- so it failed at the
+  #   first statement and would have failed at the next. Least privilege is correct for
+  #   SERVING; applying a migration is an owner action and the instruction has to say so.
+  die "this image cannot OPEN the live store, so starting it would replace a serving gateway with one that refuses to boot. Migrate first -- with a DSN whose role OWNS the schema's objects, because \`admin init\` needs CREATE on the database and ALTER on existing tables and the maint role has neither -- and then re-run this script:
+      podman secret create sgw_owner_dsn -   # paste the owner DSN; never pass it as an argument
+      podman run --rm --network host --secret sgw_owner_dsn,type=env,target=SGW_OWNER_DSN \\
+        --entrypoint /usr/local/bin/sensen-gateway $IMG admin init env:SGW_OWNER_DSN
+      podman secret rm sgw_owner_dsn
     the store said: $(printf '%s' "$SHOW" | grep -viE 'postgres(ql)?://|password=|dbname=' | tail -2 | tr '\n' ' ')"
 fi
 
