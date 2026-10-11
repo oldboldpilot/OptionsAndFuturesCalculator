@@ -52,7 +52,15 @@ say(){ printf '%s\n' "$*"; }
 ready(){ curl -sk -m3 "$BASE/readyz" 2>/dev/null | grep -q '"ready":true'; }
 wait_ready(){ for _ in $(seq 1 "$1"); do ready && return 0; sleep 1; done; return 1; }
 
-# --- 0. preflight: the binary is the committed code, and it is not stale ------
+# --- 0. preflight: the code was merged, and the binary is it, not stale ------
+# The code being deployed must be code that was merged. `SRC` defaults to a
+# worktree, so without this a default deploy ships whatever lane somebody last
+# checked out there and prints its SHA as though it had been released. The guard
+# lives in its own script because it is the one preflight step that can be
+# exercised on throwaway trees, and so has a gate of its own
+# (`scripts/check_gateway_deploy_guard.sh`); its header states what a cached
+# remote-tracking ref can and cannot tell you.
+"$OFC/deploy/gateway/require_merged.sh" "$SRC" || exit 1
 [ -x "$BIN" ] || die "no binary at $BIN -- build it first (ninja -C $SRC/build-gateway sensen-gateway)"
 git -C "$SRC" diff --quiet HEAD -- agent/ || die "$SRC agent/ has uncommitted changes"
 # General staleness, not one representative file: ANY agent/ source newer than

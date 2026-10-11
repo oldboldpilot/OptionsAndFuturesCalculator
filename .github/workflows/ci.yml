@@ -107,3 +107,12 @@ jobs:
       # podman is unavailable on the runner, which is a skip and not a pass.
       - name: Start-script memory knobs
         run: ./scripts/check_start_memory_knobs.sh || [ $? -eq 77 ]
+
+      # `deploy/gateway/redeploy.sh` takes its source tree from `SRC`, whose
+      # default is a WORKTREE -- whatever branch somebody last checked out
+      # there. Without the guard a default deploy ships an unreviewed lane to
+      # production and prints its SHA as though it had been released. The gate
+      # runs the real guard against throwaway repositories, so it needs no
+      # network, no podman and no state of this checkout's own.
+      - name: Gateway deploy guard
+        run: ./scripts/check_gateway_deploy_guard.sh
