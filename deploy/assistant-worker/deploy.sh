@@ -16,12 +16,12 @@ SERVICE_NAME="assistant-worker"
 
 # Variables this service needs, and the two that are easy to miss:
 #
-#   MODEL_URL / MODEL_SHA256 / MORTGAGE_MODEL_URL / MORTGAGE_MODEL_SHA256
+#   MODEL_URL / MODEL_SHA256 / STRATEGY_ENCODER_URL / STRATEGY_ENCODER_SHA256
 #   INFERENCE_QUEUE (+ SGEE_PEERS and the three SGEE_TLS_*_B64, or DATABASE_URL)
-#   MORTGAGE_GRAMMAR, SENSEN_QKV_FUSION
+#   SENSEN_QKV_FUSION
 #   BUCKET_ACCESS_KEY_ID / BUCKET_SECRET_ACCESS_KEY   <-- see below
 #
-# The bucket credentials are not optional. backend/Dockerfile fetches both
+# The bucket credentials are not optional. backend/Dockerfile fetches the
 # GGUFs from the private Railway bucket with SigV4 and, when they are empty,
 # silently falls through to a plain wget the bucket rejects -- the build then
 # fails MINUTES later inside a 60-line shell step whose error is about the
@@ -127,5 +127,5 @@ echo
 echo "Gate on the deployment list, never on log text:"
 echo "    railway deployment list --service ${SERVICE_NAME}"
 echo
-echo "Then confirm this replica HOLDS the weights (two lines, one per assistant):"
+echo "Then confirm this replica HOLDS the weights (one line per replica):"
 echo "    railway logs --service ${SERVICE_NAME} --deployment <id> | grep 'model is LOADED'"

@@ -1,0 +1,6 @@
+# tokenizer parity, both routes, v5e vocabulary (fixture sha256 3f0acab37ba6a6c1e0814a7ae3b69ae149be4c8d00dda4975c8d872c2eb8be1e)
+## route: vocab.txt
+PARITY: sensen's tokenizer matches the trainer's on 2472/2472 utterances (ids and spans)
+## route: mortgage-encoder-v5e.gguf
+PARITY: sensen's tokenizer matches the trainer's on 2472/2472 utterances (ids and spans)
+route A vs route B: BYTE-IDENTICAL

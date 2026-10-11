@@ -26,7 +26,7 @@
 
 import std;
 import fastjson;
-import encoder_assistant;
+import sensen.encoder_assistant;
 
 namespace {
 
@@ -53,7 +53,7 @@ namespace {
 
 /// The canonical one-line form the reconstruct comparator already reads: keys sorted, no
 /// insignificant whitespace, the operation carried under the schema's own op key name.
-[[nodiscard]] auto render(int row, const encoder_assistant::Parsed& p) -> std::string {
+[[nodiscard]] auto render(int row, const sensen::encoder_assistant::Parsed& p) -> std::string {
     std::map<std::string, std::string> all = p.params;
     all["operation"] = p.operation;
     std::string out = std::format("{{\"row\":{},\"params\":{{", row);
@@ -90,7 +90,7 @@ auto main(int argc, char** argv) -> int {
         return 1;
     }
 
-    auto assistant = encoder_assistant::EncoderAssistant::fromGguf(args[1]);
+    auto assistant = sensen::encoder_assistant::EncoderAssistant::fromGguf(args[1]);
     if (!assistant) {
         std::fprintf(stderr, "load failed: %s\n", assistant.error().c_str());
         return 1;

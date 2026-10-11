@@ -1,0 +1,600 @@
+FAIL pay-01     sparse  [spurious_field] fields the visitor never stated: future_value=0, timing=END_OF_PERIOD
+       What's my monthly payment on a $400,000 loan at 6.5% for 30 years?
+FAIL pay-02     full    [spurious_field] fields the visitor never stated: future_value=0, timing=END_OF_PERIOD
+       I'm borrowing $350,000 at 7% over 15 years. What is the monthly payment?
+FAIL pay-03     should  [wrong_outcome:refused] refused ("values" = 5.875 appears in the request, but not as a value this field can take), wanted params
+       Is it worth taking a $275,000 mortgage at 5.875% over 20 years? What would I pay each month?
+FAIL pay-04     suffix  [left_out_refusal] The assistant left out "present_value", which ComputePayment needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       payment on 1.2 million at 6.25% for 30 years
+FAIL pay-05     suffix  [spurious_field] fields the visitor never stated: future_value=0, timing=END_OF_PERIOD
+       monthly payment 425k at 7.1% 30-year
+FAIL pay-06     sparse  [left_out_refusal] The assistant left out "periods", which ComputePayment needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       mortgage payment for $310,000 at 6.25% for 360 months
+FAIL pay-07     sparse  [spurious_field] fields the visitor never stated: future_value=0, timing=END_OF_PERIOD
+       I'm buying a $500,000 house with 20% down at 6.5% over 30 years. What's the payment?
+FAIL pay-08     sparse  [spurious_field] fields the visitor never stated: future_value=0, timing=END_OF_PERIOD
+       $100,000 down on a $500,000 home, 6.25% for 30 years, what will the payment be?
+FAIL pay-09     typo    [spurious_field] fields the visitor never stated: future_value=0, timing=END_OF_PERIOD
+       what is the payment on a $450,000 mortage at 6.5 percent for 30 yeras
+FAIL pay-10     range   [wrong_question] asked 'The assistant did not identify a calculation for this request.', wanted a question about ['rate', 'annual_rate']
+       what would the payment be on $400,000 at somewhere between 6% and 7% for 30 years?
+FAIL pay-11     twoturn [spurious_field] turn 2: fields the visitor never stated: future_value=0, timing=END_OF_PERIOD
+       What's the payment on a $420,000 loan at 6.5%?
+FAIL pay-12     twoturn [left_out_refusal] turn 2: The assistant left out "present_value", which ComputePayment needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       What's the monthly payment at 6.5% for 30 years?
+FAIL pay-13     twoturn [left_out_refusal] turn 1: The assistant left out "present_value", which ComputePayment needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       How much is the payment on a 30 year loan of $380,000?
+FAIL pv-01      sparse  [spurious_field] fields the visitor never stated: future_value=0, timing=END_OF_PERIOD
+       How much can I borrow if I can afford $2,500 a month at 6.5% over 30 years?
+FAIL pv-02      full    [spurious_field] fields the visitor never stated: future_value=0, timing=END_OF_PERIOD
+       At 7% for 25 years, what loan amount does a $3,100 monthly payment support?
+FAIL pv-03      should  [spurious_field] fields the visitor never stated: future_value=0, timing=END_OF_PERIOD
+       Should I go for a 15-year loan at 6% if I can pay $3,000 a month? How big a loan is that?
+FAIL pv-04      suffix  [spurious_field] fields the visitor never stated: future_value=0, timing=END_OF_PERIOD
+       what loan can a 2.2k monthly payment buy at 6.75% for 30 years
+FAIL fv-01      sparse  [spurious_field] fields the visitor never stated: timing=END_OF_PERIOD
+       If I pay $2,413.77 a month at 6.54% on a $380,300 loan for 30 years, what balance is left at the end?
+FAIL fv-02      sparse  [wrong_operation] named ComputePayment, wanted ComputeFutureValue
+       What will $10,000 grow to at 5% compounded monthly over 10 years?
+FAIL fv-03      should  [left_out_refusal] The assistant left out "present_value", which ComputePayment needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       Is it worth leaving $25,000 in an account at 4.5% for 8 years? What will it be worth?
+FAIL fv-04      suffix  [wrong_operation] named ComputePayment, wanted ComputeFutureValue
+       future value of 50k at 6% for 20 years
+FAIL fvd-01     full    [spurious_field] fields the visitor never stated: annual_inflation_rate=0, compound_frequency=12
+       I have $172,300 saved and add $12,000 a year at 3.85% over 37 years. What will it be worth?
+FAIL fvd-02     sparse  [left_out_refusal] The assistant left out "annual_contribution", which ComputeFutureValueDetailed needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       If I invest $6,000 a year at 7% for 25 years, how much will I have?
+FAIL fvd-03     full    [spurious_field] fields the visitor never stated: annual_inflation_rate=0
+       Starting with $64,200 and contributing $18,000 a year at 4.6% compounded monthly, what's the future value after 33 years?
+FAIL fvd-04     should  [wrong_operation] named ComputePaybackPeriod, wanted ComputeFutureValueDetailed
+       Is it worth putting away $5,000 a year at 6% for 30 years? How much would that be, adjusted for 3% inflation?
+FAIL fvd-05     suffix  [left_out_refusal] The assistant left out "present_value", which ComputePayment needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       I've got 80k and add 10k per year at 5.5% for 20 years -- future value?
+FAIL fvd-06     twoturn [wrong_question] turn 1: asked 'The assistant did not identify a calculation for this request.', wanted a question about ['current_principal', 'annual_contribution', 'present_value', 'payment']
+       What will my savings grow to at 6% over 20 years?
+FAIL ip-01      full    [spurious_field] fields the visitor never stated: future_value=0, timing=END_OF_PERIOD
+       On a $488,600, 30-year loan at 4.58%, how much interest is in payment number 296?
+FAIL ip-02      sparse  [wrong_outcome:asked] asked (The assistant did not identify a calculation for this request.), wanted params
+       how much of payment 60 is interest on a $300,000 loan at 6.5% over 30 years
+FAIL ip-03      should  [wrong_outcome:asked] asked (The assistant did not identify a calculation for this request.), wanted params
+       Is the first payment mostly interest? $350,000 at 7% over 30 years -- how much interest is in payment 1?
+FAIL ip-04      suffix  [wrong_operation] named ComputePayment, wanted ComputeInterestPayment
+       interest part of payment #120 on 400k at 6% for 15 years
+FAIL pp-01      full    [spurious_field] fields the visitor never stated: future_value=0, timing=END_OF_PERIOD
+       On a $352,900, 30-year loan at 5.44%, how much principal is in payment number 165?
+FAIL pp-02      sparse  [spurious_field] fields the visitor never stated: future_value=0, timing=END_OF_PERIOD
+       principal portion of payment 24 on a $250,000 mortgage at 6.25% over 30 years
+FAIL pp-03      should  [left_out_refusal] The assistant left out "period", which ComputePrincipalPayment needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       Should I worry that payment 12 on $500,000 at 7% for 30 years barely touches principal? How much principal is in it?
+FAIL pp-04      suffix  [left_out_refusal] The assistant left out "period", which ComputePrincipalPayment needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       how much principal in payment 200 of a 600k loan at 6.5% over 30 years
+FAIL rate-01    full    [spurious_field] fields the visitor never stated: future_value=0, timing=END_OF_PERIOD
+       $1,011,000 loan, $7,899.07/month, 20-year -- back out the interest rate.
+FAIL rate-02    sparse  [spurious_field] fields the visitor never stated: future_value=0, timing=END_OF_PERIOD
+       What rate am I paying if my payment is $2,400 a month on a $380,000 loan over 30 years?
+FAIL rate-03    should  [wrong_outcome:asked] asked (The assistant did not identify a calculation for this request.), wanted params
+       Is 6.9% what I'm really paying? My loan is $300,000, 30 years, $2,150 a month. What's the rate?
+FAIL rate-04    suffix  [wrong_outcome:asked] asked (The assistant did not identify a calculation for this request.), wanted params
+       implied rate on a 250k loan with a 1.7k payment over 30 years
+FAIL per-01     full    [spurious_field] fields the visitor never stated: future_value=0, timing=END_OF_PERIOD
+       At 6.93% and $6,154.88/month, how long until a $931,700 loan is paid off?
+FAIL per-02     sparse  [spurious_field] fields the visitor never stated: future_value=0, timing=END_OF_PERIOD
+       how many months to pay off $200,000 at 6% paying $2,000 a month
+FAIL per-03     should  [wrong_outcome:asked] asked (The assistant did not identify a calculation for this request.), wanted params
+       Is $1,800 a month enough to clear a $250,000 loan at 7%? How long will it take?
+FAIL per-04     suffix  [wrong_outcome:asked] asked (Over how many years?), wanted params
+       time to repay 300k at 5.5% with a 2.2k monthly payment
+FAIL am-01      sparse  [spurious_field] fields the visitor never stated: annual_cost_growth=0, annual_insurance=0, annual_repairs=0, monthly_hoa=0, monthly_overpayment=0, original_home_value=350000, pmi_annual_rate=0
+       amortization schedule for $350,000 at 6% over 30 years
+FAIL am-02      full    [spurious_field] fields the visitor never stated: annual_cost_growth=0, annual_insurance=0, annual_repairs=0, monthly_hoa=0, original_home_value=500000, pmi_annual_rate=0
+       Show me the amortization for a $500,000 loan at 6.5% over 25 years with an extra $300 a month.
+FAIL am-03      full    [spurious_field] fields the visitor never stated: annual_cost_growth=0, annual_insurance=0, annual_repairs=0, monthly_hoa=0, monthly_overpayment=0
+       amortize 480000 at 6.5% for 30 years, the house is worth 600000, PMI is 0.8%
+FAIL am-04      should  [spurious_field] fields the visitor never stated: annual_cost_growth=0, annual_insurance=0, annual_repairs=0, monthly_hoa=0, monthly_overpayment=0
+       Should I amortize a $600,000 house with 20% down at 6.5% over 30 years with 0.8% PMI? Show me the schedule.
+FAIL am-05      suffix  [spurious_field] fields the visitor never stated: annual_cost_growth=0, annual_insurance=0, annual_repairs=0, monthly_hoa=0, monthly_overpayment=0, original_home_value=425000, pmi_annual_rate=0
+       full payment schedule on 425k, 7.1%, 30-year
+FAIL am-06      sparse  [spurious_field] fields the visitor never stated: annual_cost_growth=0, annual_insurance=0, annual_repairs=0, monthly_overpayment=0, original_home_value=350000, pmi_annual_rate=0
+       amortization schedule for $350,000 at 6% over 30 years with $275 a month HOA dues
+FAIL am-07      sparse  [spurious_field] fields the visitor never stated: annual_cost_growth=0, annual_insurance=0.00, monthly_hoa=0, monthly_overpayment=0, original_home_value=300000, pmi_annual_rate=0
+       amortize $300,000 at 6.25% for 20 years, budget $3,600 a year for repairs
+FAIL am-08      typo    [left_out_refusal] The assistant left out "end_period", which ComputeCumulative needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       amortise 275000 at 6.75 percent over 30 yeras with 150 extar each month
+FAIL am-09      twoturn [spurious_field] turn 2: fields the visitor never stated: annual_cost_growth=0, annual_insurance=0, annual_repairs=0, monthly_hoa=0, monthly_overpayment=0, original_home_value=467500, pmi_annual_rate=0
+       Amortize $467,500 over 15 years.
+FAIL am-10      twoturn [left_out_refusal] turn 1: The assistant left out "original_home_value", which ComputeAmortization needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       Show me the amortization schedule at 6.5% for 30 years
+FAIL da-01      full    [spurious_field] fields the visitor never stated: annual_cost_growth=0, annual_insurance=0, annual_repairs=0, monthly_hoa=0, monthly_overpayment=0, original_home_value=400000, pmi_annual_rate=0
+       Amortization with the interest deduction at my 24% tax bracket: $400,000 at 6.5% for 30 years
+FAIL da-02      sparse  [wrong_outcome:asked] asked (The assistant did not identify a calculation for this request.), wanted params
+       I'm in the 32% bracket -- show deductible interest on a $650k mortgage at 6.875% over 30 years
+FAIL da-03      should  [wrong_outcome:refused] refused (I don't give financial, tax or legal advice -- describe a specific calculation (e.g. "what would a $420,000 loan at 6.25% over 30 years cost), wanted params
+       Is the mortgage interest deduction worth it on $500,000 at 6% over 30 years at a 22% tax rate? Show the schedule with the deduction.
+FAIL da-04      full    [wrong_outcome:asked] asked (The assistant did not identify a calculation for this request.), wanted params
+       Break out the deductible interest on $300,000 at 6.25% for 30 years, 24% bracket, $3,600 a year for repairs
+FAIL da-05      twoturn [wrong_question] turn 1: asked 'The assistant did not identify a calculation for this request.', wanted a question about ['annual_tax_rate']
+       What's my tax deduction on a $500,000 mortgage at 6% over 30 years?
+FAIL amb-01     full    [spurious_field] fields the visitor never stated: extra_payments=[0,0], home_values=[362100,256100], pmi_rates=[0,0]
+       Compare these loan offers: $362,100 at 5.56% over 15 years; $256,100 at 7.1% over 30 years
+FAIL amb-02     should  [wrong_operation] named ComputePayment, wanted ComputeAmortizationBatch
+       Which is cheaper, 300k at 6% for 15 years or 300k at 6.5% for 30 years?
+FAIL amb-03     sparse  [wrong_operation] named ComputePayment, wanted ComputeAmortizationBatch
+       compare $400,000 at 6.5% for 30 years against $400,000 at 5.75% for 15 years
+FAIL po-01      full    [spurious_field] fields the visitor never stated: payments_per_year=12
+       $155,500 balance, 4.54%, $1,381.05/month payment -- how many months do I save by paying $100 more a month?
+FAIL po-02      sparse  [wrong_operation] named ComputePeriods, wanted ComputePayoffTiming
+       I owe $250,000 at 6.5% and pay $1,900 a month. How fast would I pay it off adding $400 a month?
+FAIL po-03      should  [left_out_refusal] The assistant left out "current_monthly_payment", which ComputePayoffTiming needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       Is it worth paying an extra $200 a month on a $300,000 balance at 6% with a $2,000 payment? How much sooner is it paid off?
+FAIL po-04      suffix  [left_out_refusal] The assistant left out "periods", which ComputeFutureValue needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       balance 310k, 5.9%, payment 2.4k a month, what if I add 500 more each month -- how soon am I done?
+FAIL po-05      twoturn [wrong_question] turn 1: asked 'Over how many years?', wanted a question about ['current_monthly_payment']
+       I owe $310,000 at 5.9%. How many months would I save paying $500 more a month?
+FAIL rc-01      full    [spurious_field] fields the visitor never stated: payments_per_year=12
+       I owe $428,300 at 5.37%, paying $5,408.17/month, 98 months left. If I put $29,100 toward the balance and recast, what's my new payment?
+FAIL rc-02      sparse  [left_out_refusal] The assistant left out "current_loan_balance", which ComputeMortgageRecast needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       Recast my $380,000 mortgage after a $50,000 lump sum at 6.5% with 27 years left. Current payment is $2,455.
+FAIL rc-03      should  [wrong_operation] named ComputePayment, wanted ComputeMortgageRecast
+       Should I recast? $300,000 balance at 6%, $1,900 payment, 20 years left, and I have $40,000 to put in.
+FAIL rc-04      suffix  [left_out_refusal] The assistant left out "current_monthly_payment", which ComputeMortgageRecast needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       recast: 420k balance, 6.25%, 2.9k payment, 300 months left, 60k lump sum
+FAIL rf-01      should  [wrong_outcome:refused] refused (I don't give financial, tax or legal advice -- describe a specific calculation (e.g. "what would a $420,000 loan at 6.25% over 30 years cost), wanted params
+       Should I refinance my $300,000 loan at 7.5% to 6.25%?
+FAIL rf-02      full    [left_out_refusal] The assistant left out "current_monthly_payment", which ComputeRefinance needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       I owe $365,000 at 7.25% with 27 years left. Refinance to 5.99% over 30 years with $6,400 in closing costs?
+FAIL rf-03      should  [wrong_outcome:refused] refused (I don't give financial, tax or legal advice -- describe a specific calculation (e.g. "what would a $420,000 loan at 6.25% over 30 years cost), wanted params
+       Is it worth refinancing from 7.25% to 5.99% on a $365,000 balance? Closing costs would be $6,400.
+FAIL rf-04      suffix  [wrong_outcome:asked] asked (The assistant did not identify a calculation for this request.), wanted params
+       refi break-even: 450k balance at 7% to 6%, closing costs 7k, home worth 600k
+FAIL rf-05      full    [spurious_field] fields the visitor never stated: cash_out_amount=0, current_pmi_monthly=0, new_pmi_monthly=0, payments_per_year=12, pmi_drop_off_ltv=0.8
+       I owe $512,400 at 6.97% with 179 months left, paying $4,611.59/month. Home is worth $768,500. Refinance to 5.15% over 15 years with $8,000 in closing 
+FAIL hl-01      full    [spurious_field] fields the visitor never stated: payments_per_year=12
+       Home value $1,213,100, mortgage balance $666,800, 85% LTV limit. HELOC draw of $258,200 at 7.29%, 15-year repayment.
+FAIL hl-02      sparse  [wrong_outcome:asked] asked (Over how many years?), wanted params
+       How much HELOC could I get on a $500,000 home with a $300,000 mortgage?
+FAIL hl-03      should  [wrong_outcome:refused] refused (I don't give financial, tax or legal advice -- describe a specific calculation (e.g. "what would a $420,000 loan at 6.25% over 30 years cost), wanted params
+       Is a HELOC worth it? My home is worth $700,000, I owe $400,000, and I'd draw $50,000 at 8.5% over 10 years.
+FAIL hl-04      suffix  [left_out_refusal] The assistant left out "drawn_amount", which ComputeHeloc needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       heloc on a 650k house, 380k mortgage left, draw 75k at 9% for 10 years, 80% max ltv
+FAIL hl-05      twoturn [wrong_question] turn 1: asked 'Over how many years?', wanted a question about ['home_value', 'property_value', 'property_price']
+       How much can I borrow on a HELOC against my house?
+FAIL hf-01      full    [spurious_field] fields the visitor never stated: payments_per_year=12
+       $385,300 home, 4.74% appreciation, $269,600 mortgage balance at 6.71%, $1,826.38/month -- project my equity 7 years out.
+FAIL hf-02      sparse  [left_out_refusal] The assistant left out "periods", which ComputeFutureValue needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       What will my $500,000 home be worth in 10 years if it appreciates 4% a year?
+FAIL hf-03      should  [left_out_refusal] The assistant left out "current_property_value", which ComputeHomeFutureValue needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       Is my equity growing fast enough? Home worth $450,000, appreciating 3.5%, I owe $300,000 at 6.25% paying $2,100 a month. Where will I be in 5 years?
+FAIL hf-04      suffix  [left_out_refusal] The assistant left out "annual_appreciation_rate", which ComputeHomeFutureValue needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       project the equity on my 600k house, 3% appreciation, 400k owed at 6.5%, paying 2.6k, 8 years
+FAIL rb-01      sparse  [left_out_refusal] The assistant left out "property_price", which ComputeRentVsBuy needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       rent vs buy: 600k home, 20% down, 6.5% for 30 years, rent 3000 a month
+FAIL rb-02      should  [wrong_outcome:refused] refused (I don't give financial, tax or legal advice -- describe a specific calculation (e.g. "what would a $420,000 loan at 6.25% over 30 years cost), wanted params
+       should I rent or buy a $450,000 house? rent is $2,500 a month
+FAIL rb-03      full    [left_out_refusal] The assistant left out "current_monthly_rent", which ComputeRentVsBuy needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       Evaluate rent vs. buy for a 9-year horizon. Renting costs $3,400 a month. Buying a $971,500 home with no money down at 6.57% for 20 years.
+FAIL rb-04      suffix  [left_out_refusal] The assistant left out "current_monthly_rent", which ComputeRentVsBuy needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       is it better to buy a 750k house (150k down, 6.75% 30 year) or keep renting at 3.2k? I'd stay 7 years
+FAIL rb-05      sparse  [left_out_refusal] The assistant left out "annual_investment_return", which ComputeRentVsBuy needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       Buy or rent? House is $390,000, I'd put 20% down at 6.5% for 30 years, and rent is $2,300 a month. Home values rise 3% a year.
+FAIL rb-06      twoturn [wrong_outcome:refused] turn 1: refused (I don't give financial, tax or legal advice -- describe a specific calculation (e.g. "what would a $420,000 loan at 6.25% over 30 years cost), wanted clarification
+       should I rent or buy a $450,000 house?
+FAIL hn-01      full    [left_out_refusal] The assistant left out "annual_home_appreciation", which ComputeRentVsBuy needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       NPV of buying a $450,000 house with $90,000 down at 7% for 30 years. Rent saved is $2,400 a month rising 3%, discount rate 5%, appreciation 3.5%.
+FAIL hn-02      sparse  [wrong_outcome:refused] refused (I don't give financial, tax or legal advice -- describe a specific calculation (e.g. "what would a $420,000 loan at 6.25% over 30 years cost), wanted params
+       Is buying a $450,000 house worth it at 7%? Comparable rent is $2,400 a month.
+FAIL hn-03      should  [wrong_outcome:refused] refused (I don't give financial, tax or legal advice -- describe a specific calculation (e.g. "what would a $420,000 loan at 6.25% over 30 years cost), wanted params
+       Should I buy this property as an investment? Price $751,500, $183,700 down, 4.64% over 20 years, saves $3,100 a month in rent, 9 year horizon.
+FAIL hn-04      suffix  [left_out_refusal] The assistant left out "current_monthly_rent", which ComputeRentVsBuy needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       NPV of buying: 500k home, 100k down, 6.5%, 30 years, rent saved 2.6k, discount rate 5%, hold 10 years
+FAIL rr-01      full    [spurious_field] fields the visitor never stated: periods_per_year=12
+       Rental property worth $383,500, I put in $51,400 cash. Rent is $3,500/month, expenses $900/month, mortgage payment $2,300/month. What's my ROI?
+FAIL rr-02      sparse  [wrong_outcome:asked] asked (The assistant did not identify a calculation for this request.), wanted params
+       What's the cap rate on a $285,000 rental that brings in $2,400 a month and costs $490 a month to run, with $71,250 cash in?
+FAIL rr-03      should  [wrong_outcome:refused] refused (I don't give financial, tax or legal advice -- describe a specific calculation (e.g. "what would a $420,000 loan at 6.25% over 30 years cost), wanted params
+       Is this rental worth buying? $400,000 property, $80,000 down, rents for $3,000 a month, $800 a month in expenses. What's the return?
+FAIL rr-04      suffix  [left_out_refusal] The assistant left out "periodic_mortgage_payment", which ComputeRentalRoi needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       cash-on-cash on a 320k rental, 64k invested, rent 2.5k per month, 600 a month expenses
+FAIL rr-05      twoturn [wrong_question] turn 1: asked "What's the interest rate?", wanted a question about ['periodic_operating_expenses']
+       What's the return on a $350,000 rental I put $70,000 into? It rents for $2,800 a month.
+FAIL rcf-01     sparse  [left_out_refusal] The assistant left out "closing_costs", which ComputeRentalCashFlow needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       Rental cash flow: $285,000 property, $71,250 down, 7.25% for 30 years, rents for $2,400 a month
+FAIL rcf-02     full    [left_out_refusal] The assistant left out "annual_capex_reserve", which ComputeRentalCashFlow needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       Is this rental worth buying? $658,000 price, $197,400 down, $11,300 closing costs, 7.99% over 30 years. Rent $5,800/month, assume 100% occupancy. Prop
+FAIL rcf-03     should  [left_out_refusal] The assistant left out "current_monthly_rent", which ComputeRentVsBuy needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       Should I buy a $285,000 rental with $71,250 down at 7.25% for 30 years? It rents for $2,400 a month with 6% vacancy and an 8% management fee.
+FAIL rcf-04     suffix  [left_out_refusal] The assistant left out "closing_costs", which ComputeRentalCashFlow needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       cash flow on a 320k buy-to-let, 96k down, 6.5% for 30 years, rent 2.3k a month, 10% vacancy
+FAIL cc-01      sparse  [wrong_outcome:asked] asked (Over how many years?), wanted params
+       What are my closing costs on a $500,000 house with 20% down?
+FAIL cc-02      full    [wrong_outcome:asked] asked (Over how many years?), wanted params
+       closing costs on a $750k home, 10% down, 6.75% rate
+FAIL cc-03      sparse  [wrong_outcome:asked] asked (Over how many years?), wanted params
+       How much cash do I need to close on a $425,000 purchase?
+FAIL cc-04      full    [left_out_refusal] The assistant left out "title_settlement_percent", which ComputeClosingCosts needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       Estimate closing costs on a $450,000 home with 5% down at 6.5%. The appraisal is $650 and the inspection is $400.
+FAIL cc-05      should  [wrong_outcome:asked] asked (The assistant did not identify a calculation for this request.), wanted params
+       Should I expect big closing costs on a 300k condo with 20% down?
+FAIL cc-06      twoturn [wrong_question] turn 1: asked 'Over how many years?', wanted a question about ['home_price', 'property_price']
+       How much are closing costs on a house?
+FAIL cu-01      full    [spurious_field] fields the visitor never stated: timing=END_OF_PERIOD
+       $641,900, 6.56%, 15-year -- total interest paid from month 150 through month 173?
+FAIL cu-02      sparse  [left_out_refusal] The assistant left out "end_period", which ComputeCumulative needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       principal paid between payment 25 and payment 48 on $350,000 at 7% for 30 years
+FAIL cu-03      should  [wrong_outcome:asked] asked (The assistant did not identify a calculation for this request.), wanted params
+       Is most of my first year just interest? $300,000 at 6.5% over 30 years -- total interest from month 1 to month 12?
+FAIL cu-04      suffix  [wrong_outcome:asked] asked (The assistant did not identify a calculation for this request.), wanted params
+       interest paid in months 13 to 24 on a 450k loan at 6.25%, 30 years
+FAIL dp-03      should  [spurious_field] fields the visitor never stated: factor=2
+       Is double declining balance better for my $80,000 machine? 5 year life, $8,000 salvage -- what's year 3's depreciation?
+FAIL dp-04      sparse  [left_out_refusal] The assistant left out "cost", which ComputeDepreciation needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       MACRS 5-year property, $120,000 cost, year 2 depreciation
+FAIL dp-05      suffix  [wrong_outcome:asked] asked (What's the interest rate?), wanted params
+       how much does a 30k delivery van depreciate per year over 8 years?
+FAIL npv-02     sparse  [wrong_outcome:asked] asked (The assistant did not identify a calculation for this request.), wanted params
+       NPV at 8%: pay $50,000 now, get $20,000 in year 1, $25,000 in year 2 and $30,000 in year 3
+FAIL npv-03     should  [wrong_outcome:refused] refused (I don't give financial, tax or legal advice -- describe a specific calculation (e.g. "what would a $420,000 loan at 6.25% over 30 years cost), wanted params
+       Is this worth it? I put in $30,000 and get back $12,000 a year for 3 years. What's the NPV at a 6% discount rate?
+FAIL irr-02     sparse  [wrong_outcome:asked] asked (Over how many years?), wanted params
+       IRR: pay $100,000, then receive $30,000, $40,000 and $50,000 over three years
+FAIL irr-03     should  [wrong_outcome:refused] refused (I don't give financial, tax or legal advice -- describe a specific calculation (e.g. "what would a $420,000 loan at 6.25% over 30 years cost), wanted params
+       Is a 3 year deal worth it if I put in $20,000 and get back $8,000, $9,000 and $10,000? What's the IRR?
+FAIL xnpv-02    sparse  [wrong_outcome:refused] refused ("values" = 6 appears in the request, but not as a value this field can take), wanted params
+       NPV at 6%: invest $10,000 today, get $4,000 after 180 days and $8,000 after 400 days
+FAIL xirr-02    sparse  [wrong_outcome:refused] refused ("values" = 90 appears in the request, but not as a value this field can take), wanted params
+       annualized return: put in $5,000 now, get back $2,000 after 90 days and $4,000 after 300 days
+FAIL pb-03      suffix  [wrong_outcome:refused] refused ("values" = -12000 does not correspond to anything in the request (the nearest figure you gave is 12)), wanted params
+       payback on a 12k water heater that saves 900 a year
+FAIL sc1-01     sparse  [spurious_field] fields the visitor never stated: annual_cost_growth=0, annual_insurance=0, annual_repairs=0, monthly_hoa=0, monthly_overpayment=0
+       I'm buying a $420,000 home with 5% down at 6.75% for 30 years and PMI is 0.55%. Show me the amortization schedule.
+FAIL sc1-02     sparse  [wrong_outcome:refused] refused ("values" = -5 does not correspond to anything in the request (the nearest figure you gave is 5)), wanted params
+       5% down on a $420k house at 6.75% fixed for 30 years: how much cash do I need at closing?
+FAIL sc1-03     should  [wrong_outcome:refused] refused (I don't give financial, tax or legal advice -- describe a specific calculation (e.g. "what would a $420,000 loan at 6.25% over 30 years cost), wanted params
+       Should I buy a $420,000 home now with 5% down at 6.75% for 30 years, or keep renting at $2,450 a month?
+FAIL sc2-01     sparse  [left_out_refusal] The assistant left out "payment", which ComputeFutureValue needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       I owe $310,000 at 5.9% with 24 years left. What if I add $500 a month?
+FAIL sc2-02     should  [wrong_outcome:refused] refused ("values" = 7 appears in the request, but not as a value this field can take), wanted params
+       Should I invest $500 a month at 7% for 24 years instead of paying down my mortgage? What would it grow to?
+FAIL sc2-03     full    [spurious_field] fields the visitor never stated: payments_per_year=12
+       Balance $310,000, 5.9%, $2,455 a month. How many months do I save paying $500 extra?
+FAIL sc3-01     should  [wrong_outcome:refused] refused (I don't give financial, tax or legal advice -- describe a specific calculation (e.g. "what would a $420,000 loan at 6.25% over 30 years cost), wanted params
+       Should I refinance my $365,000 balance from 7.25% to 5.99%? Closing costs would be $6,400.
+FAIL sc3-02     full    [wrong_outcome:asked] asked (The assistant did not identify a calculation for this request.), wanted params
+       Refi break-even: $365,000 at 7.25% with 27 years left going to 5.99% on a new 30 year loan, $6,400 closing costs
+FAIL sc4-01     sparse  [left_out_refusal] The assistant left out "closing_costs", which ComputeRentalCashFlow needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       Rental cash flow: $285,000 property, $71,250 down, 7.25% for 30 years, it rents for $2,400 a month
+FAIL sc4-02     full    [left_out_refusal] The assistant left out "closing_costs", which ComputeRentalCashFlow needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       Rental: $285,000 price, $71,250 down, 7.25% over 30 years, $2,400 a month rent, 6% vacancy, 8% management fee, $5,900 a year for property tax and insu
+FAIL sc4-03     sparse  [left_out_refusal] The assistant left out "total_cash_invested", which ComputeRentalRoi needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       What's the cap rate on a $285,000 rental renting at $2,400 a month with $71,250 invested and $490 a month in expenses?
+FAIL sc5-01     should  [wrong_outcome:refused] refused (I don't give financial, tax or legal advice -- describe a specific calculation (e.g. "what would a $420,000 loan at 6.25% over 30 years cost), wanted params
+       Is buying a $390,000 house worth it if I move in 3 years? 20% down, 6.5% for 30 years, rent is $2,300 a month.
+FAIL sc5-02     full    [left_out_refusal] The assistant left out "monthly_maintenance", which ComputeHomeNpv needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       Buy or rent for 3 years? $390,000 home, $78,000 down, 6.5% for 30 years, 7% selling costs, rent $2,300 a month rising 3%, appreciation 3% a year.
+FAIL sc6-01     sparse  [wrong_operation] named ComputePayment, wanted ComputeAmortizationBatch
+       Compare a $350,000 loan at 6.75% for 30 years against 6% for 15 years
+FAIL sc6-02     sparse  [spurious_field] fields the visitor never stated: future_value=0, timing=END_OF_PERIOD
+       What's the monthly payment on $350,000 at 6% for 15 years?
+FAIL sc7-01     sparse  [wrong_operation] named ComputePayment, wanted ComputeAmortizationBatch
+       What's the payment difference between $450,000 at 6.75% over 30 years and $450,000 at 6% over 15 years?
+FAIL sc7-02     sparse  [spurious_field] fields the visitor never stated: future_value=0, timing=END_OF_PERIOD
+       monthly payment on $450,000 at 6.75% for 30 years
+FAIL sc8-01     full    [left_out_refusal] The assistant left out "annual_home_appreciation", which ComputeRentVsBuy needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       NPV of buying a $450,000 house, $90,000 down, 7% for 30 years, rent saved $2,400 a month rising 3%, discount rate 5%, 3.5% appreciation
+FAIL sc8-02     should  [wrong_outcome:refused] refused (I don't give financial, tax or legal advice -- describe a specific calculation (e.g. "what would a $420,000 loan at 6.25% over 30 years cost), wanted params
+       Is buying worth it at a 7% mortgage rate? $450,000 house, 20% down, rent is $2,400.
+FAIL sc9-01     sparse  [left_out_refusal] The assistant left out "current_loan_balance", which ComputeMortgageRecast needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       Recast my $380,000 mortgage after a $50,000 lump sum: 6.5%, 27 years left, current payment about $2,455
+FAIL sc9-02     should  [wrong_outcome:asked] asked (Over how many years?), wanted params
+       Should I recast or pay extra principal? $380,000 balance at 6.5%, $2,455 payment, 324 months left, $50,000 lump sum.
+FAIL pg-cc-01   sparse  [wrong_outcome:asked] asked (Over how many years?), wanted params
+       closing costs for a $350,000 home with 10% down
+FAIL pg-cc-02   full    [left_out_refusal] The assistant left out "remaining_months", which ComputeMortgageRecast needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       what would closing costs be on a $620,000 house, 15% down, at 6.375%, with $1,200 in lender fees and 0.5% title?
+FAIL pg-hl-01   sparse  [wrong_outcome:asked] asked (The assistant did not identify a calculation for this request.), wanted params
+       I have a $550,000 home and owe $320,000. What can I borrow with a HELOC?
+FAIL pg-hl-02   full    [spurious_field] fields the visitor never stated: payments_per_year=12
+       HELOC payment: home worth $800,000, mortgage balance $450,000, 85% max ltv, draw $100,000 at 9.25% repaid over 15 years
+FAIL pg-rr-01   sparse  [left_out_refusal] The assistant left out "periodic_mortgage_payment", which ComputeRentalRoi needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       rental yield: property $260,000, I put in $60,000, rent $2,000 a month, expenses $450 a month
+FAIL pg-rpi-01  sparse  [internal_text_leak] the visitor would be shown '"periodic_gross_rent"' in: "periodic_gross_rent" = 7 appears in the request, but not as a value this field can take
+       does a $330,000 rental pay its way? $66,000 down, 7% for 30 years, rent $2,500 a month
+FAIL pg-rb-01   sparse  [left_out_refusal] The assistant left out "property_price", which ComputeRentVsBuy needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       rent vs buy on a $500,000 house, 20% down, 6.75% for 30 years, rent is $2,800
+FAIL pg-rb-02   should  [wrong_outcome:refused] refused (I don't give financial, tax or legal advice -- describe a specific calculation (e.g. "what would a $420,000 loan at 6.25% over 30 years cost), wanted params
+       should I rent or buy? the house is $380,000 and I pay $2,200 rent
+FAIL pg-trb-01  sparse  [left_out_refusal] The assistant left out "property_price", which ComputeRentVsBuy needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       texas: buy a $310,000 house with 10% down at 6.6% for 30 years or rent for $2,000 a month?
+FAIL pg-bw-01   sparse  [wrong_question] asked 'The assistant did not identify a calculation for this request.', wanted a question about ['payments_per_year']
+       bi-weekly payment on a $350,000 loan at 6.25% over 30 years
+FAIL pg-bw-02   should  [left_out_refusal] The assistant left out "payment", which ComputePeriods needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       should I switch to biweekly payments on my $300,000 loan at 6.5%? how much sooner would I pay it off?
+FAIL pg-ex-01   sparse  [left_out_refusal] The assistant left out "extra_monthly_payment", which ComputePayoffTiming needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       how much interest do I save paying $250 extra a month on $360,000 at 6.5% over 30 years?
+FAIL pg-ov-01   sparse  [wrong_outcome:refused] refused (present_value = -279600 is negative), wanted params
+       overpay $400 a month on a $280,000 mortgage at 5.75% for 25 years -- what changes?
+FAIL pg-ep-01   sparse  [wrong_outcome:asked] asked (Over how many years?), wanted params
+       I owe $220,000 at 6% and pay $1,500 a month. When will I be done if I add $300?
+FAIL pg-fha-01  sparse  [spurious_field] fields the visitor never stated: future_value=0, timing=END_OF_PERIOD
+       fha loan payment on a $300,000 house with 3.5% down at 6.5% for 30 years
+FAIL pg-va-01   sparse  [left_out_refusal] The assistant left out "present_value", which ComputePayment needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       va loan, no money down on a $400,000 house at 6.25% for 30 years -- what's the payment?
+FAIL pg-us-01   sparse  [spurious_field] fields the visitor never stated: future_value=0, timing=END_OF_PERIOD
+       usda loan for $250,000 at 6.5% over 30 years, monthly payment?
+FAIL pg-pmi-01  sparse  [spurious_field] fields the visitor never stated: annual_cost_growth=0, annual_insurance=0, annual_repairs=0, monthly_hoa=0, monthly_overpayment=0
+       amortize a $380,000 loan at 6.5% for 30 years on a $400,000 home with 0.6% PMI
+FAIL pg-1530-01 should  [wrong_outcome:asked] asked (The assistant did not identify a calculation for this request.), wanted params
+       should I take a 15 year at 6% or a 30 year at 6.75% on $400,000? compare the payments
+FAIL pg-rc-01   sparse  [left_out_refusal] The assistant left out "property_price", which ComputeRentVsBuy needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       compare 6.25% for 30 years with 5.5% for 15 years on a $500,000 loan
+FAIL pg-fv-01   sparse  [left_out_refusal] The assistant left out "present_value", which ComputePayment needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       what will $200 a month grow to at 7% over 30 years?
+FAIL pg-am-01   sparse  [spurious_field] fields the visitor never stated: annual_cost_growth=0, annual_insurance=0, annual_repairs=0, monthly_hoa=0, monthly_overpayment=0, original_home_value=275000, pmi_annual_rate=0
+       amortization for 275k at 6.125% over 30 years
+FAIL pg-rf-01   should  [wrong_outcome:refused] refused (I don't give financial, tax or legal advice -- describe a specific calculation (e.g. "what would a $420,000 loan at 6.25% over 30 years cost), wanted params
+       is it worth refinancing a $280,000 balance from 7% to 6.25%? closing costs are $5,000
+FAIL pg-rec-01  sparse  [left_out_refusal] The assistant left out "current_monthly_payment", which ComputeMortgageRecast needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       recast my $300,000 balance at 6.25% with a $40,000 lump sum, payment is $1,950 and 22 years remain
+FAIL pg-npv-01  sparse  [left_out_refusal] The assistant left out "monthly_maintenance", which ComputeHomeNpv needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       npv of buying: $400,000 house, $80,000 down, 6.5% for 30 years, rent saved $2,300
+FAIL pay-14     suffix  [left_out_refusal] The assistant left out "present_value", which ComputePayment needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       mortgage payment on 1.5m at 6.75% for 30 years
+FAIL pay-15     sparse  [wrong_outcome:asked] asked (The assistant did not identify a calculation for this request.), wanted params
+       what would I pay monthly on a 30 year fixed at 6.375% for $520,000?
+FAIL pay-16     should  [left_out_refusal] The assistant left out "payment", which ComputeFutureValue needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       is a $350,000 loan at 7.25% over 30 years going to be too much each month? what's the payment
+FAIL pay-17     typo    [spurious_field] fields the visitor never stated: future_value=0, timing=END_OF_PERIOD
+       monthly paymnet on 300k at 6 percent for 15 years
+FAIL pay-18     sparse  [spurious_field] fields the visitor never stated: future_value=0, timing=END_OF_PERIOD
+       payment on a $240,000 loan at 5.5%, 20 year term
+FAIL pay-19     full    [spurious_field] fields the visitor never stated: future_value=0, timing=END_OF_PERIOD
+       I'm taking a loan of $615,000 at 6.99% over 30 years and want the monthly P&I payment
+FAIL pay-20     twoturn [spurious_field] turn 2: fields the visitor never stated: future_value=0, timing=END_OF_PERIOD
+       what's the payment on a $275,000 mortgage?
+FAIL pv-05      sparse  [spurious_field] fields the visitor never stated: future_value=0, timing=END_OF_PERIOD
+       what's the most I can borrow at 6.25% for 30 years if I can pay $2,800 a month
+FAIL pv-06      should  [wrong_outcome:refused] refused (I don't give financial, tax or legal advice -- describe a specific calculation (e.g. "what would a $420,000 loan at 6.25% over 30 years cost), wanted params
+       can I afford to borrow more? payment budget is $3,400 a month at 6.5% over 30 years -- what loan size is that
+FAIL fv-05      sparse  [left_out_refusal] The assistant left out "present_value", which ComputeFutureValue needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       if I put $15,000 away at 4% for 12 years how much will it be?
+FAIL fvd-07     sparse  [wrong_outcome:asked] asked (The assistant did not identify a calculation for this request.), wanted params
+       saving $500 a month for 20 years at 6%, what will I have?
+FAIL fvd-08     full    [spurious_field] fields the visitor never stated: compound_frequency=12
+       I have $50,000 now and add $3,000 a year for 25 years at 7%. What will it be worth, with 2.5% inflation?
+FAIL ip-05      sparse  [spurious_field] fields the visitor never stated: future_value=0, timing=END_OF_PERIOD
+       interest portion of the 36th payment on $320,000 at 6.5% for 30 years
+FAIL pp-05      sparse  [spurious_field] fields the visitor never stated: future_value=0, timing=END_OF_PERIOD
+       how much principal is in the 100th payment of a $410,000 loan at 6.25% over 30 years?
+FAIL rate-05    sparse  [wrong_outcome:asked] asked (What's the interest rate?), wanted params
+       my loan is $275,000 over 30 years and I pay $1,900 a month, what's my interest rate?
+FAIL per-05     sparse  [wrong_outcome:asked] asked (The assistant did not identify a calculation for this request.), wanted params
+       how long will it take to pay off $180,000 at 5% if I pay $1,500 a month?
+FAIL am-11      sparse  [spurious_field] fields the visitor never stated: annual_cost_growth=0, annual_insurance=0, annual_repairs=0, monthly_hoa=0, original_home_value=425000, pmi_annual_rate=0
+       amortization schedule: $425,000, 6.5%, 30 years, extra $200 a month
+FAIL am-12      suffix  [left_out_refusal] The assistant left out "original_home_value", which ComputeAmortization needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       show me the amortization on a 1.1m loan at 6.875% for 30 years
+FAIL am-13      full    [spurious_field] fields the visitor never stated: annual_cost_growth=0, monthly_hoa=0, monthly_overpayment=0, original_home_value=500000, pmi_annual_rate=0
+       amortize $500,000 at 6.25% over 30 years with $4,800 a year for insurance and $3,600 a year for repairs
+FAIL am-14      should  [wrong_outcome:asked] asked (The assistant did not identify a calculation for this request.), wanted params
+       should I get a 15 year or 30 year? amortize $300,000 at 6.5% over 15 years first
+FAIL am-15      range   [wrong_outcome:answered] answered (ComputeAmortization), wanted clarification
+       amortize 300k at 6.5% for 25 to 30 years
+FAIL da-06      suffix  [spurious_field] fields the visitor never stated: annual_cost_growth=0, annual_insurance=0, annual_repairs=0, monthly_hoa=0, monthly_overpayment=0, original_home_value=720000, pmi_annual_rate=0
+       with the mortgage interest deduction at 28%: amortize 720k at 6.75% over 30 years
+FAIL amb-04     suffix  [wrong_operation] named ComputeRentVsBuy, wanted ComputeAmortizationBatch
+       compare 500k at 6.25% for 30 years vs 500k at 5.5% for 15 years vs 500k at 6% for 20 years
+FAIL po-06      typo    [left_out_refusal] The assistant left out "annual_rate", which ComputePayoffTiming needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       baance 280k, 6.25%, 1.9k a month, how many months do i save paying 300 more
+FAIL rc-05      sparse  [wrong_operation] named ComputeRate, wanted ComputeMortgageRecast
+       I owe $350,000 at 6%, payment $2,100, 25 years left. Lump sum of $30,000 -- what does a recast do?
+FAIL rf-06      should  [wrong_outcome:asked] asked (The assistant did not identify a calculation for this request.), wanted params
+       worth refinancing a 400k balance from 7.1% to 6.2%?
+FAIL rf-07      range   [left_out_refusal] The assistant left out "property_price", which ComputeHomeNpv needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       refinance my $300,000 loan from 7% to somewhere between 5.5% and 6%
+FAIL rf-08      twoturn [wrong_outcome:refused] turn 1: refused (I don't give financial, tax or legal advice -- describe a specific calculation (e.g. "what would a $420,000 loan at 6.25% over 30 years cost), wanted clarification
+       should I refinance my $300,000 loan at 7.5%?
+FAIL hl-06      should  [wrong_outcome:asked] asked (What's the maximum loan-to-value?), wanted params
+       should I take a HELOC? home is worth $900,000, I owe $500,000 and want to draw $80,000 at 8.75% for 15 years
+FAIL hl-07      sparse  [left_out_refusal] The assistant left out "current_property_value", which ComputeHomeFutureValue needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       available equity on a $750,000 house with a $410,000 balance at an 80% limit
+FAIL hf-05      typo    [left_out_refusal] The assistant left out "periods", which ComputePayment needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       wat will my 350k home be worth in 12 yrs at 3% apprecation
+FAIL rb-07      should  [wrong_outcome:refused] refused (I don't give financial, tax or legal advice -- describe a specific calculation (e.g. "what would a $420,000 loan at 6.25% over 30 years cost), wanted params
+       should I buy a $520,000 home with 10% down at 6.75% for 30 years or rent for $2,900 a month?
+FAIL rb-08      suffix  [left_out_refusal] The assistant left out "current_monthly_rent", which ComputeRentVsBuy needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       rent vs buy: 800k house, 200k down, 6.5%, rent 3.5k, 5 years
+FAIL rb-09      full    [left_out_refusal] The assistant left out "current_monthly_rent", which ComputeRentVsBuy needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       Rent vs buy for 10 years. I'd pay $350,000 for the house, putting $70,000 down at 6.25% over 30 years, versus renting at $2,100 a month rising 3% a ye
+FAIL hn-05      should  [left_out_refusal] The assistant left out "current_monthly_payment", which ComputeHomeFutureValue needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       is buying a $600,000 house a good investment? 20% down at 6.5% for 30 years, I'd save $3,200 a month in rent
+FAIL rr-06      typo    [left_out_refusal] The assistant left out "periodic_mortgage_payment", which ComputeRentalRoi needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       wats the cap rate on a 300k rental, 60k invested, 2.6k rent a month, 700 a month expenses
+FAIL rr-07      full    [left_out_refusal] The assistant left out "periodic_mortgage_payment", which ComputeRentalRoi needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       Rental ROI: property $410,000, cash invested $92,000, rent $3,100/month, expenses $950/month, mortgage payment $2,050/month
+FAIL rcf-05     should  [left_out_refusal] The assistant left out "property_price", which ComputeRentVsBuy needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       should I buy a $450,000 rental with 25% down at 7% for 30 years, rent $3,300 a month, property tax $5,400 a year?
+FAIL rcf-06     full    [left_out_refusal] The assistant left out "annual_property_tax", which ComputeRentalCashFlow needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       Cash flow on a $400,000 rental: $80,000 down, $6,000 closing, 7.25% for 30 years, rent $3,000 a month, 5% vacancy, $4,800 a year property tax, $1,500 
+FAIL cc-07      suffix  [wrong_outcome:asked] asked (Over how many years?), wanted params
+       closing costs on a 1.1m house, 25% down
+FAIL cc-08      typo    [wrong_outcome:asked] asked (The assistant did not identify a calculation for this request.), wanted params
+       wat r the closin costs on a 275k condo with 5% down
+FAIL cc-09      full    [left_out_refusal] The assistant left out "title_settlement_percent", which ComputeClosingCosts needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       closing costs for a $650,000 home, 20% down, 6.5% rate, $1,800 in other lender fees, 0.5% title, $900 appraisal, $500 inspection, $300 recording
+FAIL cu-05      sparse  [wrong_outcome:asked] asked (The assistant did not identify a calculation for this request.), wanted params
+       total interest paid in months 1 to 60 on a $500,000 loan at 6% over 30 years
+FAIL dp-06      full    [spurious_field] fields the visitor never stated: factor=2
+       double declining balance depreciation for year 2 on $90,000 of equipment, 6 year life, $9,000 salvage
+FAIL dp-07      should  [left_out_refusal] The assistant left out "cost", which ComputeDepreciation needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       should I use sum of the years digits for a $40,000 truck over 5 years with $4,000 salvage? what's the year 1 deduction
+FAIL npv-04     suffix  [wrong_outcome:refused] refused ("-1e+05" in field "values" is not a bare decimal this contract accepts), wanted params
+       npv at 7%: -100k now then 30k, 40k, 50k, 60k over four years
+FAIL irr-04     suffix  [left_out_refusal] The assistant left out "present_value", which ComputeFutureValue needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       irr if I put in 75k and get back 20k, 30k, 40k and 25k in years 1 to 4
+FAIL xnpv-03    should  [wrong_outcome:refused] refused (I don't give financial, tax or legal advice -- describe a specific calculation (e.g. "what would a $420,000 loan at 6.25% over 30 years cost), wanted params
+       is it worth it at a 7% discount rate: pay $20,000 today, get $9,000 after 200 days and $15,000 after 500 days?
+FAIL xirr-03    should  [wrong_outcome:refused] refused (I don't give financial, tax or legal advice -- describe a specific calculation (e.g. "what would a $420,000 loan at 6.25% over 30 years cost), wanted params
+       is it worth it: invest $30,000 now, get back $10,000 after 150 days and $28,000 after 600 days -- what's the IRR?
+FAIL pb-04      sparse  [wrong_outcome:asked] asked (What's the interest rate?), wanted params
+       I'm spending $9,500 on insulation that saves $1,100 a year, how long to pay back?
+FAIL pg-am-02   should  [wrong_outcome:refused] refused (I don't give financial, tax or legal advice -- describe a specific calculation (e.g. "what would a $420,000 loan at 6.25% over 30 years cost), wanted params
+       I'm thinking of a $390,000 mortgage at 6.9% for 30 years with $200 extra a month. is that worth it? show me the schedule
+FAIL pg-am-03   sparse  [left_out_refusal] The assistant left out "title_settlement_percent", which ComputeClosingCosts needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       mortgage calculator: $520,000 home, 20% down, 6.5%, 30 years, 0.5% PMI
+FAIL pg-ct-01   sparse  [spurious_field] fields the visitor never stated: future_value=0, timing=END_OF_PERIOD
+       houston: what's the monthly payment on a $340,000 house with 10% down at 6.5% for 30 years?
+FAIL pg-hl-03   sparse  [left_out_refusal] The assistant left out "monthly_maintenance", which ComputeHomeNpv needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       my house is worth 620k and i owe 300k, how big a heloc at 85%
+FAIL pg-rf-02   sparse  [left_out_refusal] The assistant left out "home_price", which ComputeClosingCosts needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       refinance break even: $350,000 left at 7.25%, new rate 6.25%, closing costs $4,500
+FAIL pg-rec-02  should  [left_out_refusal] The assistant left out "current_loan_balance", which ComputeMortgageRecast needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       should I recast my $420,000 mortgage? lump sum of $60,000, rate 6.25%, payment $2,900, 300 months left
+FAIL pg-ep-02   sparse  [left_out_refusal] The assistant left out "current_monthly_payment", which ComputePayoffTiming needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       balance $190,000 at 5.5%, paying $1,300 a month, add $250 -- how much sooner?
+FAIL pg-rb-03   should  [left_out_refusal] The assistant left out "current_monthly_rent", which ComputeRentVsBuy needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       buy or rent: $700,000 house, $140,000 down, 6.5% for 30 years, rent is $3,600, I'll stay 6 years
+FAIL pg-rr-02   should  [wrong_outcome:refused] refused (I don't give financial, tax or legal advice -- describe a specific calculation (e.g. "what would a $420,000 loan at 6.25% over 30 years cost), wanted params
+       is a $250,000 rental with $50,000 invested worth it? it rents for $2,000 a month and costs $400 a month
+FAIL pg-fv-02   sparse  [wrong_operation] named ComputeAmortization, wanted ComputeFutureValueDetailed
+       future value of $20,000 plus $3,000 a year at 6% over 15 years
+FAIL pg-cc-03   should  [wrong_outcome:asked] asked (Over how many years?), wanted params
+       how much should I budget for closing on a $480,000 home with 10% down?
+FAIL pg-npv-02  full    [left_out_refusal] The assistant left out "current_monthly_rent", which ComputeRentVsBuy needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       npv of buying a $500,000 house, $100,000 down, 6.5% for 30 years, rent saved $2,800 a month, hold for 10 years, 4% discount rate
+FAIL sc1-04     should  [left_out_refusal] The assistant left out "present_value", which ComputePayment needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       Is 5% down on a $420,000 home a mistake at 6.75%? what's the monthly payment over 30 years
+FAIL sc3-03     sparse  [wrong_outcome:asked] asked (The assistant did not identify a calculation for this request.), wanted params
+       Refi from 7.25% to 5.99% on $365,000? New loan is 30 years, closing costs $6,400
+FAIL sc4-04     should  [wrong_outcome:refused] refused (I don't give financial, tax or legal advice -- describe a specific calculation (e.g. "what would a $420,000 loan at 6.25% over 30 years cost), wanted params
+       Should I buy a $285,000 rental? $71,250 down, 7.25% for 30 years, rent $2,400 a month
+FAIL sc5-03     sparse  [wrong_outcome:asked] asked (Over how many years?), wanted params
+       closing costs on a $390,000 house with 20% down at 6.5%
+FAIL sc9-03     sparse  [wrong_outcome:asked] asked (The assistant did not identify a calculation for this request.), wanted params
+       what's the payment after recasting? $380,000 balance, 6.5%, 27 years left, $50,000 lump sum, current payment $2,455
+FAIL site-01    sparse  [internal_text_leak] the visitor would be shown '"monthly_overpayment"' in: "monthly_overpayment" = 200 is a figure you gave, but your wording makes it an HOA or association fee, which is a carrying cost rather than 
+       550k home, 10% down, 6.75% 30-year, 1.2% taxes, $200 HOA
+FAIL site-02    sparse  [left_out_refusal] The assistant left out "property_value", which ComputeRentalRoi needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       $550k house, 10% down, 6.75% for 30 years, taxes 1.2%, $200 HOA
+FAIL site-03    full    [left_out_refusal] The assistant left out "current_monthly_payment", which ComputeHomeFutureValue needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       $550k house, 10% down, 6.75% for 30 years, taxes 1.2%, insurance $1,800, $200 HOA, paying $300 extra a month
+FAIL live-01    sparse  [wrong_outcome:asked] asked (What's the interest rate?), wanted params
+       Closing costs on 450k
+FAIL live-02    sparse  [wrong_outcome:asked] asked (Over how many years?), wanted params
+       Closing costs on 450k with 10% down
+FAIL live-03    sparse  [wrong_outcome:asked] asked (Over how many years?), wanted params
+       closing costs on a 450k house at 6.5%
+FAIL live-04    sparse  [wrong_outcome:asked] asked (Over how many years?), wanted params
+       Refinance 320000 at 7% to 6%
+FAIL live-05    sparse  [left_out_refusal] The assistant left out "periods", which ComputePayment needs. Filling it in with a default would compute an exact answer to a question nobody asked.
+       Refinance 320000 from 7.25% to 6.125%, closing costs 5000
+FAIL live-08    sparse  [spurious_field] fields the visitor never stated: future_value=0, timing=END_OF_PERIOD
+       payment on a 400000 loan at 6.5% for 30 years
+FAIL live-09    sparse  [spurious_field] fields the visitor never stated: future_value=0, timing=END_OF_PERIOD
+       payment on a $455,000 house with $55,000 down at 6.5% for 30 years
+FAIL oos-01     oos     [wrong_outcome:asked] asked (The assistant did not identify a calculation for this request.), wanted refusal
+       which bank has the best mortgage rates?
+FAIL oos-02     oos     [wrong_outcome:asked] asked (The assistant did not identify a calculation for this request.), wanted refusal
+       what will interest rates do next year?
+FAIL oos-07     oos     [wrong_outcome:asked] asked (Over how many years?), wanted refusal
+       tell me a joke
+FAIL oos-08     oos     [wrong_outcome:asked] asked (The assistant did not identify a calculation for this request.), wanted refusal
+       what's the weather in Austin?
+FAIL oos-10     oos     [wrong_outcome:asked] asked (The assistant did not identify a calculation for this request.), wanted refusal
+       what credit score do I need for a mortgage?
+FAIL oos-11     oos     [wrong_outcome:asked] asked (The assistant did not identify a calculation for this request.), wanted refusal
+       will my home value go up?
+FAIL oos-12     oos     [wrong_outcome:asked] asked (The assistant did not identify a calculation for this request.), wanted refusal
+       write me a poem about houses
+
+TOTAL 19/272 passed
+
+BY EXPECTED OUTCOME
+  clarification                                  0/3  
+  clarification/params                           0/1  
+  clarification/refusal                          0/2  
+  params                                         8/248
+  refusal                                       11/18 
+
+BY OPERATION / GROUP
+  live:usability-audit                           2/9  
+  oos                                            7/14 
+  op:ComputeAmortization                         0/15 
+  op:ComputeAmortizationBatch                    0/4  
+  op:ComputeClosingCosts                         0/9  
+  op:ComputeCumulative                           0/5  
+  op:ComputeDepreciation                         2/7  
+  op:ComputeDetailedAmortization                 0/6  
+  op:ComputeFutureValue                          0/5  
+  op:ComputeFutureValueDetailed                  0/8  
+  op:ComputeHeloc                                0/7  
+  op:ComputeHomeFutureValue                      0/5  
+  op:ComputeHomeNpv                              0/5  
+  op:ComputeInterestPayment                      0/5  
+  op:ComputeIrr                                  1/4  
+  op:ComputeMortgageRecast                       0/5  
+  op:ComputeNpv                                  1/4  
+  op:ComputePaybackPeriod                        2/4  
+  op:ComputePayment                              0/20 
+  op:ComputePayoffTiming                         0/6  
+  op:ComputePeriods                              0/5  
+  op:ComputePresentValue                         0/6  
+  op:ComputePrincipalPayment                     0/5  
+  op:ComputeRate                                 0/5  
+  op:ComputeRefinance                            0/8  
+  op:ComputeRentVsBuy                            0/9  
+  op:ComputeRentalCashFlow                       0/6  
+  op:ComputeRentalRoi                            0/7  
+  op:ComputeXirr                                 1/3  
+  op:ComputeXnpv                                 1/3  
+  page:15-vs-30-year-mortgage-calculator         0/1  
+  page:biweekly-mortgage                         0/2  
+  page:early-mortgage-payoff-calculator          0/2  
+  page:fha-mortgage-calculator                   0/1  
+  page:future-value                              0/2  
+  page:heloc-calculator                          0/3  
+  page:mortgage                                  0/3  
+  page:mortgage-affordability-calculator         2/2  
+  page:mortgage-calculator-with-extra-payments   0/1  
+  page:mortgage-calculator.state.city            0/1  
+  page:mortgage-closing-costs-calculator         0/3  
+  page:mortgage-overpayment-calculator           0/1  
+  page:mortgage-rates-comparison                 0/1  
+  page:mortgage-recast-calculator                0/2  
+  page:npv-of-buying-a-house                     0/2  
+  page:pmi-calculator                            0/1  
+  page:refinance-break-even-calculator           0/2  
+  page:rent-vs-buy                               0/3  
+  page:rental-property-investment-calculator     0/1  
+  page:rental-roi                                0/2  
+  page:tools.rent-vs-buy                         0/1  
+  page:usda-loan-calculator                      0/1  
+  page:va-loan-calculator                        0/1  
+  scenario:15-vs-30-year-with-5-percent-inflation   0/2  
+  scenario:15-year-versus-30-year-with-investing   0/2  
+  scenario:buying-a-rental-property              0/4  
+  scenario:first-time-buyer-5-percent-down       0/4  
+  scenario:is-buying-worth-it-at-7-percent-npv   0/2  
+  scenario:mortgage-recast-vs-extra-principal    0/3  
+  scenario:pay-off-early-or-invest               0/3  
+  scenario:refinance-when-rates-drop             0/3  
+  scenario:relocating-in-three-years             0/3  
+  site:assistant-panel                           0/3  
+
+BY ROW KIND
+  full                                           5/48 
+  oos                                            9/16 
+  range                                          0/3  
+  should                                         3/57 
+  sparse                                         2/97 
+  suffix                                         0/30 
+  twoturn                                        0/14 
+  typo                                           0/7  
+
+FAILURE CLASSES
+  left_out_refusal             81
+  spurious_field               63
+  wrong_outcome:asked          52
+  wrong_outcome:refused        33
+  wrong_operation              13
+  wrong_question               8
+  internal_text_leak           2
+  wrong_outcome:answered       1

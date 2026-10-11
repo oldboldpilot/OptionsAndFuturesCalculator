@@ -1,0 +1,21 @@
+holdout : /home/muyiwa/.cache/lane-mfva-scratch/val_old_holdout_600.jsonl
+          sha256 062614ce7bb18abd055e28a1e0ef9b62b714437f2583e5575e784e8626b23c06
+schema  : /home/muyiwa/.cache/lane-mfva-scratch/mortgage-encoder.gguf (sensen-encoder.schema_json)
+wire    : one-call rendered join (the trainer control)
+rows with gold params      : 559
+  served and NUMERICALLY equal to gold : 557
+  served and differing                 : 2
+  refused / clarified instead          : 0
+rows whose gold is prose (skipped)     : 41
+
+SERVED-THROUGH-gRPC params exact-match: 557/559 = 99.64%
+(gold adjusted for the TVM sign flip and the per-method inert-field drops -- both
+ documented service behaviour, verified against tvm_payment_needs_sign_flip and
+ kVariantInertFields, not excused on the served side)
+
+disagreements by (operation, shape):
+     2  ComputeAmortization              other
+
+the 'other' disagreements:
+  row 264 (ComputeAmortization): pmi_annual_rate: gold '0.0131' served '0'
+  row 555 (ComputeAmortization): pmi_annual_rate: gold '0.0031' served '0'

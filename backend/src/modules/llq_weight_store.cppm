@@ -30,14 +30,12 @@
  *
  * This module is the SEAM. It is selected explicitly and defaults OFF:
  *
- *     MORTGAGE_WEIGHT_STORE = dense (default) | llq | llq-fused
  *     STRATEGY_WEIGHT_STORE = dense (default) | llq | llq-fused
  *
- * Two variables and no fallback between them, for the reason
- * `MORTGAGE_MODEL_PATH` does not fall back to `MODEL_PATH`: an operator who
- * opted ONE model into a different numeric path must not have the other
- * quietly follow. An unrecognised value is REFUSED, not read as `dense` -- a
- * typo must not silently serve the path the operator meant to leave.
+ * A MORTGAGE_WEIGHT_STORE selector sat beside it while the mortgage decoder was
+ * served from this engine; it left with that assistant and is no longer read.
+ * An unrecognised value is REFUSED, not read as `dense` -- a typo must not
+ * silently serve the path the operator meant to leave.
  *
  * ---------------------------------------------------------------------------
  * HOW IT PLUGS IN, AND WHY THE SENSEN PATCH IS SO SMALL

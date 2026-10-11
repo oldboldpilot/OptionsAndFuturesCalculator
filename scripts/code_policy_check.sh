@@ -137,11 +137,12 @@ strip_string_literals_then_match() {
 # Placement new and NOLINT-annotated lines are permitted.
 #
 # `%` IS A COMMENT TOO, because this tree embeds Prolog. The Horn-clause rule
-# base in mortgage_derivation.cppm is Prolog source carried inside a C++ raw
-# string literal, and Prolog comments start with `%`. Its prose explains, in
-# English, that "redo it for $817,400" means "the NEW price combines with the
-# ORIGINAL down payment" -- and that sentence was reported as a raw heap
-# allocation, failing the whole policy gate on a comment about mortgages. The
+# base in mortgage_explanation.cppm is Prolog source carried inside a C++ raw
+# string literal, and Prolog comments start with `%`. Its prose is English, and
+# English contains the word "new": the same failure was first reported on a rule
+# base since moved out of this repository, where a sentence explaining that a
+# revised price combines with the ORIGINAL down payment was read as a raw heap
+# allocation and failed the whole policy gate on a comment about mortgages. The
 # same cry-wolf failure this block already records for string literals, in a
 # second language nobody thought to list.
 #

@@ -1,0 +1,13 @@
+## R1 role allow-list: "M9 a*p" removed | probe rc 0 | gate rc 1
+    rows: python=2169 cpp=2169
+    rows differing: 8
+   stderr: 
+## R2 role allow-list: repeated identity bounded at 2 (a payback of 20 flows is refused) | probe rc 0 | gate rc 1
+    rows: python=2169 cpp=2169
+    rows differing: 54
+   stderr: 
+## R3 role allow-list: "M3 annual%->quarterly" removed | probe rc 0 | gate rc 1
+    rows: python=2169 cpp=2169
+    rows differing: 2
+   stderr: 
+restored == baseline: True

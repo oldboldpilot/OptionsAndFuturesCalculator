@@ -7,10 +7,10 @@ import sgee_queue_client;
 /**
  * @author Olumuyiwa Oluwasanmi
  *
- * The admission-queue/backpressure layer shared by the strategy assistant
- * (assistant_service.cpp) and the mortgage assistant (mortgage_assistant_
- * service.cpp), extracted out of both files' near-identical anonymous
- * namespaces into one module. `InferenceOutcome`, `PendingJob`,
+ * The admission-queue/backpressure layer of the strategy assistant
+ * (assistant_service.cpp), extracted out of that file's anonymous namespace
+ * into one module. It was shared with a second assistant (mortgage) until that
+ * service moved to the nest-egg-loan repository. `InferenceOutcome`, `PendingJob`,
  * `InferenceBackend` and `QueuedBackend` below are the SAME classes that used
  * to live twice -- once per file -- with the SAME names and the SAME
  * behaviour; only their address changed. `SensenBackend`/`LlamaCppBackend`
@@ -38,7 +38,7 @@ import sgee_queue_client;
  *     `statement_timeout`, rather than hanging or erroring the RPC.
  *
  * WHY THIS MODULE IMPORTS `inference_queue` DIRECTLY (and is therefore only
- * safe to import from assistant_service.cpp / mortgage_assistant_service.cpp,
+ * safe to import from assistant_service.cpp,
  * never from finance_service.cpp or calculator_service.cpp): the Postgres
  * extension's types are expressed directly in terms of
  * `inference_queue::Queue`/`Surface`/`Job` rather than behind a further
@@ -53,7 +53,7 @@ import sgee_queue_client;
 namespace options_calculator::inference_admission {
 
 // ---------------------------------------------------------------------------
-// Device selection (ASSISTANT_DEVICE / MORTGAGE_DEVICE)
+// Device selection (ASSISTANT_DEVICE)
 // ---------------------------------------------------------------------------
 
 /**
@@ -67,7 +67,7 @@ namespace options_calculator::inference_admission {
 export enum class Device : std::uint8_t { Cpu, Cuda };
 
 /** `device`'s wire/log spelling -- "cpu" or "cuda", the same two strings
- *  `ASSISTANT_DEVICE`/`MORTGAGE_DEVICE` accept. Centralised so a ready-line
+ *  `ASSISTANT_DEVICE` accepts. Centralised so a ready-line
  *  log and a `device()` override never drift into spelling it differently. */
 export [[nodiscard]] constexpr auto device_name(Device device) noexcept -> std::string_view {
     return device == Device::Cuda ? "cuda" : "cpu";
@@ -86,8 +86,8 @@ export struct DeviceResolution {
 };
 
 /**
- * Pure decision function behind `ASSISTANT_DEVICE`/`MORTGAGE_DEVICE`, factored
- * out of both Worker constructors so it is unit-testable without an actual
+ * Pure decision function behind `ASSISTANT_DEVICE`, factored
+ * out of the Worker constructor so it is unit-testable without an actual
  * CUDA build or a real device: `cuda_build`/`cuda_device_ready` are the two
  * facts a caller has already established -- both at RUNTIME, via one
  * `sensen::cuda::CudaBackend::query()` call whose failure message tells the
@@ -139,6 +139,62 @@ export [[nodiscard]] constexpr auto resolve_device(std::string_view requested, b
 }
 
 /**
+ * The value of an environment variable, or nothing when it is unset or empty. A COPY, not the
+ * pointer `std::getenv` hands back: that points into storage the next `setenv` may move, so no
+ * caller should hold it. The ONE reader of the environment for the assistant services, the encoder
+ * queue and the runtime. Modules that `inference_admission` itself imports (`sgee_queue_client`), or
+ * that should not depend on the assistant layer (`state_refresh`), keep their own.
+ */
+export [[nodiscard]] inline auto environment_text(std::string_view name) -> std::optional<std::string> {
+    const std::string key{name};  // getenv needs a terminated string
+    const char* const raw = std::getenv(key.c_str());
+    if (raw == nullptr || *raw == '\0') return std::nullopt;
+    return std::string{raw};
+}
+
+/**
+ * A positive integer from an environment variable, or `fallback` on anything unset, empty,
+ * non-numeric, out of range or non-positive -- a malformed override must degrade to the documented
+ * default, never to zero threads or a crash. Both assistant services read their thread, concurrency,
+ * queue-depth and context knobs through this one parser.
+ */
+export [[nodiscard]] inline auto environment_positive_int(std::string_view name, int fallback) -> int {
+    const auto text = environment_text(name);
+    if (!text.has_value()) return fallback;
+    int value = 0;
+    const auto result = std::from_chars(text->data(), text->data() + text->size(), value);
+    if (result.ec != std::errc{} || value <= 0) return fallback;
+    return value;
+}
+
+/**
+ * What a shared-queue task is ROUTED on: the surface it belongs to, and -- for work whose answer
+ * depends on the build that computes it -- a fingerprint of that build.
+ *
+ * WHY THE SURFACE ALONE WAS NOT ENOUGH. The lease filter used to partition by surface and nothing
+ * else, which is exactly right for a decoder (every replica of a surface runs the same weights and
+ * any of them may answer) and wrong for anything whose answer is a function of the code or the
+ * model that produced it. Railway's blue/green deploy stands the new set of containers up and
+ * health-gates them while the old set is still carrying traffic, all against the same queue; with
+ * a surface-only filter about half of the old engines' encoder tasks were executed by the NEW
+ * binary before cutover, and an old binary parses a new renderer's keys through an unknown-key
+ * rejection that turns the row into a refusal. A worker must only lease a task it would answer
+ * identically to the replica that submitted it, so the encoder's tag carries its build.
+ *
+ * `build` EMPTY is the decoder, and the format on the wire is then byte-identical to what it was
+ * before this existed. It converts implicitly from a bare `Surface` for that reason: every decoder
+ * call site, and every test written against the surface-only API, is unchanged.
+ */
+export struct RouteTag {
+    options_calculator::inference_queue::Surface surface{};
+    std::string build;
+
+    // Deliberately implicit: a surface IS a complete tag for work that does not depend on a build.
+    RouteTag(options_calculator::inference_queue::Surface s, std::string b = {})  // NOLINT(google-explicit-constructor)
+        : surface(s), build(std::move(b)) {}
+};
+
+/**
  * What a backend hands back for one generation request.
  *
  * The three timing fields exist because, before they did, nobody could tell
@@ -166,6 +222,15 @@ export struct InferenceOutcome {
     // real number a caller waited, not an isolated-model number).
     double decode_ms = 0.0;
     std::size_t tokens_generated = 0;
+
+    // True iff an ADMISSION object tried the shared queue, could not get an answer from it, and
+    // answered this request itself through its local backend. `ok == true` on such an outcome says
+    // only that SOMEONE answered: the bytes are identical to a queue success, so without this a
+    // caller reporting HOW a request was answered cannot tell the queue working from the queue
+    // being down. Set at the one place each admission class degrades (`degrade_to_local` in
+    // inference_admission.cpp) and false on every other path, so the decoder callers -- which
+    // never read it -- are unchanged.
+    bool degraded = false;
 };
 
 /**
@@ -218,8 +283,8 @@ export class InferenceBackend {
     /**
      * Which device is ACTUALLY serving requests through this backend right
      * now -- "cpu" or "cuda" (see `device_name`), never a partial value.
-     * Distinct from what a deployment REQUESTED via `ASSISTANT_DEVICE`/
-     * `MORTGAGE_DEVICE`: a backend that degraded from a `cuda` request to
+     * Distinct from what a deployment REQUESTED via
+     * `ASSISTANT_DEVICE`: a backend that degraded from a `cuda` request to
      * `cpu` at runtime (see `resolve_device`) reports "cpu" here, so a caller
      * logging this states ground truth, not the abandoned request.
      *
@@ -265,6 +330,25 @@ export class NoLocalBackend final : public InferenceBackend {
 
     [[nodiscard]] auto name() const noexcept -> std::string_view override { return "no-local"; }
 };
+
+/** The idle-poll interval of every shared-queue consumer: `take_jobs()`'s BACKSTOP in postgres/sgee mode, and
+ *  an idle `LeaseRunner` lane. Only ever paid when an immediate lease attempt already came up empty
+ *  (see that function's own doc for the try-first ordering this backs up). Local mode never uses
+ *  this constant at all.
+ *
+ *  50ms, not the 200ms this was originally set to: the try-first fix
+ *  means this value no longer gates the common case (a job already
+ *  waiting), only the genuinely-idle case (nothing to lease at all,
+ *  where a worker thread is going to retry regardless and the only
+ *  question is how soon) -- so a smaller value buys a tighter worst-case
+ *  discovery latency for whatever arrives WHILE this thread happens to
+ *  be mid-wait, at the cost of a cheap indexed no-op lease() query up to
+ *  20x/sec/idle-worker instead of 5x/sec against Postgres. Against a
+ *  same-datacentre Postgres (low single-digit ms per round trip) that
+ *  cost is negligible; the latency this buys back is not, when the
+ *  budget for the whole postgres-mode path is ~10-15% over local mode's
+ *  1.6-2.5s (see this task's own latency breakdown). */
+export inline constexpr std::chrono::milliseconds kLeasePollTick{50};
 
 /**
  * Where a `QueuedBackend`'s owner thread draws SHARED work from, in addition to
@@ -377,7 +461,7 @@ export class QueuedBackend : public InferenceBackend {
         {
             const std::lock_guard lock{mutex_};
             if (shutting_down_) {
-                return InferenceOutcome{.ok = false, .text = {}, .error = shutting_down_message_};
+                return InferenceOutcome{.ok = false, .text = {}, .error = std::string{kShuttingDownMessage}};
             }
             if (queue_.size() >= max_queue_depth_) {
                 return std::nullopt;
@@ -416,7 +500,7 @@ export class QueuedBackend : public InferenceBackend {
      * accumulates rows and serves none of them, indistinguishable from the
      * outside from Postgres itself being broken. This is exactly the failure
      * this ordering contract exists to make impossible: every production
-     * Worker constructor calls `configure_inference_queue()` (which calls
+     * Worker constructor calls `AssistantRuntime::configure_queue()` (which calls
      * `set_lease_source()` when `INFERENCE_QUEUE=postgres`) BEFORE calling
      * `backend_->start()`, so the owner thread's first take_jobs() call
      * always observes the correct, final `lease_source_` -- non-null in
@@ -439,19 +523,7 @@ export class QueuedBackend : public InferenceBackend {
     }
 
   protected:
-    /**
-     * A per-surface human-readable name for the "shutting down" message
-     * `submit()` returns to a caller that arrives after shutdown has begun.
-     * Defaults to the strategy assistant's original wording so
-     * assistant_service.cpp's `SensenBackend`/`LlamaCppBackend` need no
-     * change; mortgage_assistant_service.cpp's `SensenBackend` passes its own
-     * original wording explicitly. This is the one piece of `QueuedBackend`'s
-     * externally-visible behaviour that genuinely differed between the two
-     * pre-extraction copies, so it is parameterized rather than unified.
-     */
-    explicit QueuedBackend(
-        std::string_view shutting_down_message = "assistant backend is shutting down")
-        : shutting_down_message_(shutting_down_message) {}
+    QueuedBackend() = default;
 
     /**
      * Blocks the owner thread until at least one job is queued or a stop is
@@ -546,7 +618,7 @@ export class QueuedBackend : public InferenceBackend {
      * compiled fresh for, and linked into, every target that uses this
      * module -- to emit a genuine, usable definition of `take_jobs`'s
      * compiled body, rather than leaving that to whichever calling TU
-     * (assistant_service.cpp, mortgage_assistant_service.cpp, a test driver,
+     * (assistant_service.cpp, a test driver,
      * ...) happens to need it first.
      *
      * DIAGNOSIS (root cause, not a shrug): `take_jobs`'s `local`-mode branch
@@ -599,9 +671,9 @@ export class QueuedBackend : public InferenceBackend {
      * happens to dodge the bug -- by independently instantiating the same
      * libc++ internals for some unrelated reason of its own, which sidesteps
      * the merge-as-declaration defect entirely rather than depending on it
-     * being fixed -- is NOT reliable: assistant_service.cpp.o and
-     * mortgage_assistant_service.cpp.o happened to emit a real definition
-     * (both construct `std::jthread` workers directly, which independently
+     * being fixed -- is NOT reliable: assistant_service.cpp.o
+     * happened to emit a real definition
+     * (it constructs `std::jthread` workers directly, which independently
      * instantiates this same `__stop_state` machinery); this task's own
      * tests/test_inference_admission.cpp.o and
      * tests/test_inference_admission_pg.cpp.o did not, and failed to link
@@ -637,30 +709,13 @@ export class QueuedBackend : public InferenceBackend {
     [[maybe_unused, gnu::used]] static auto force_take_jobs_symbol_emission() noexcept
         -> std::vector<PendingJob> (QueuedBackend::*)(std::stop_token, std::size_t, bool);
 
-    /** The BACKSTOP idle-poll interval for `take_jobs()`'s postgres mode --
-     *  only ever paid when an immediate lease attempt already came up empty
-     *  (see that function's own doc for the try-first ordering this backs
-     *  up). Local mode never uses this constant at all.
-     *
-     *  50ms, not the 200ms this was originally set to: the try-first fix
-     *  means this value no longer gates the common case (a job already
-     *  waiting), only the genuinely-idle case (nothing to lease at all,
-     *  where a worker thread is going to retry regardless and the only
-     *  question is how soon) -- so a smaller value buys a tighter worst-case
-     *  discovery latency for whatever arrives WHILE this thread happens to
-     *  be mid-wait, at the cost of a cheap indexed no-op lease() query up to
-     *  20x/sec/idle-worker instead of 5x/sec against Postgres. Against a
-     *  same-datacentre Postgres (low single-digit ms per round trip) that
-     *  cost is negligible; the latency this buys back is not, when the
-     *  budget for the whole postgres-mode path is ~10-15% over local mode's
-     *  1.6-2.5s (see this task's own latency breakdown). */
-    static constexpr std::chrono::milliseconds kLeasePollTick{50};
+    /** What `submit()` answers a caller that arrives after shutdown has begun. */
+    static constexpr std::string_view kShuttingDownMessage = "assistant backend is shutting down";
 
     std::mutex mutex_;
     std::condition_variable_any cv_;
     std::deque<PendingJob> queue_;
     bool shutting_down_ = false;
-    std::string shutting_down_message_;
     std::shared_ptr<LeaseSource> lease_source_;
 };
 
@@ -693,8 +748,7 @@ export class QueuedBackend : public InferenceBackend {
 export class PostgresLeaseSource final : public LeaseSource {
   public:
     PostgresLeaseSource(std::shared_ptr<options_calculator::inference_queue::Queue> queue,
-                         options_calculator::inference_queue::Surface surface,
-                         std::string worker_id);
+                         RouteTag tag, std::string worker_id);
     ~PostgresLeaseSource();
 
     PostgresLeaseSource(const PostgresLeaseSource&) = delete;
@@ -718,7 +772,10 @@ export class PostgresLeaseSource final : public LeaseSource {
     auto reap_finished_locked() -> void;
 
     std::shared_ptr<options_calculator::inference_queue::Queue> queue_;
-    options_calculator::inference_queue::Surface surface_;
+    RouteTag tag_;
+    /** The `route` member's value a leased payload must carry, or empty when the surface alone
+     *  decides. Derived once, from the same function that writes it. */
+    std::string route_;
     std::string worker_id_;
 
     std::mutex helpers_mu_;
@@ -811,8 +868,8 @@ inline auto QueuedBackend::force_take_jobs_symbol_emission() noexcept
 export class PostgresAdmission final : public InferenceBackend {
   public:
     PostgresAdmission(std::shared_ptr<options_calculator::inference_queue::Queue> queue,
-                       options_calculator::inference_queue::Surface surface,
-                       InferenceBackend& local, std::chrono::milliseconds remote_deadline);
+                       RouteTag tag, InferenceBackend& local,
+                       std::chrono::milliseconds remote_deadline);
 
     [[nodiscard]] auto submit(std::string prompt) -> std::optional<InferenceOutcome> override;
     [[nodiscard]] auto name() const noexcept -> std::string_view override { return "postgres"; }
@@ -826,7 +883,8 @@ export class PostgresAdmission final : public InferenceBackend {
 
   private:
     std::shared_ptr<options_calculator::inference_queue::Queue> queue_;
-    options_calculator::inference_queue::Surface surface_;
+    RouteTag tag_;
+    std::string route_;
     InferenceBackend& local_;
     std::chrono::milliseconds remote_deadline_;
     std::optional<SgeeQueueClient> sgee_client_;
@@ -857,8 +915,8 @@ export class PostgresAdmission final : public InferenceBackend {
  * format shared by two processes, and the defect it fixes was invisible to
  * every layer above it.
  */
-export [[nodiscard]] auto encode_prompt_for_surface(
-    options_calculator::inference_queue::Surface surface, const std::string& prompt) -> std::string;
+export [[nodiscard]] auto encode_prompt_for_surface(const RouteTag& tag, const std::string& prompt)
+    -> std::string;
 
 /** The raw `surface` string a payload carries, or nullopt when it carries none.
  *  Deliberately returns the NAME rather than a `Surface`: "no tag" and "a tag
@@ -867,9 +925,11 @@ export [[nodiscard]] auto encode_prompt_for_surface(
 export [[nodiscard]] auto decode_surface_name(std::string_view payload_json)
     -> std::optional<std::string>;
 
-/** The bytes a lease source asks the broker to match against a task's payload. */
-export [[nodiscard]] auto surface_lease_filter(
-    options_calculator::inference_queue::Surface surface) -> std::string;
+/** The bytes a lease source asks the broker to match against a task's payload. For a tag with no
+ *  build that is the surface member; for one with a build it is the `route` member alone, whose
+ *  value names the surface AND the build -- a single contiguous member, because the broker
+ *  matches one byte substring and cannot be asked for two. */
+export [[nodiscard]] auto surface_lease_filter(const RouteTag& tag) -> std::string;
 
 /** The prompt half of the same payload, through the SAME decoder the worker path
  *  uses — so a test can prove a surface-tagged payload still yields its prompt. */
@@ -877,12 +937,11 @@ export [[nodiscard]] auto decode_prompt_payload(std::string_view payload_json) -
 
 export class SgeeLeaseSource final : public LeaseSource {
   public:
-    /** @param surface the ONLY surface this source may execute. The broker applies
+    /** @param tag the ONLY surface (and, for an encoder, build) this source may execute. The broker applies
      *         it as a lease-time payload filter, so a task belonging to somebody
      *         else is never chosen for this worker in the first place. */
-    SgeeLeaseSource(SgeeQueueClient client,
-                     options_calculator::inference_queue::Surface surface,
-                     std::uint64_t worker_id, std::uint64_t visibility_ms);
+    SgeeLeaseSource(SgeeQueueClient client, RouteTag tag, std::uint64_t worker_id,
+                     std::uint64_t visibility_ms);
     ~SgeeLeaseSource() override;
 
     [[nodiscard]] auto fill(std::size_t want) -> std::vector<PendingJob> override;
@@ -893,7 +952,7 @@ export class SgeeLeaseSource final : public LeaseSource {
     auto reap_finished_locked() -> void;
 
     SgeeQueueClient client_;
-    options_calculator::inference_queue::Surface surface_;
+    RouteTag tag_;
     /** The bytes sent as the broker's lease-time payload filter. Built once from
      *  the ENCODER's own serialiser so it cannot drift from what is written. */
     std::string lease_filter_;
@@ -901,9 +960,10 @@ export class SgeeLeaseSource final : public LeaseSource {
     std::uint64_t visibility_ms_;
 
     /** Owner-thread only, like every member here except those under `helpers_mu_`:
-     *  fill() is called solely from QueuedBackend::take_jobs on the backend's own
-     *  worker thread. Both exist only for the broker-not-filtering path, which is
-     *  a deployment fault rather than a routine event. */
+     *  fill() is called from ONE thread -- QueuedBackend::take_jobs on the backend's own
+     *  worker thread for a decoder, LeaseRunner::run for an encoder -- never from two. Both
+     *  exist only for the broker-not-filtering path, which is a deployment fault rather than
+     *  a routine event. */
     std::chrono::steady_clock::time_point foreign_backoff_until_{};
     std::uint64_t foreign_leases_{0};
 
@@ -933,11 +993,10 @@ export class SgeeLeaseSource final : public LeaseSource {
  */
 export class SgeeAdmission final : public InferenceBackend {
   public:
-    /** @param surface stamped into every submitted payload, and the value the
+    /** @param tag stamped into every submitted payload, and the value the
      *         leasing worker's filter matches on. */
-    SgeeAdmission(SgeeQueueClient client,
-                   options_calculator::inference_queue::Surface surface,
-                   InferenceBackend& local, std::chrono::milliseconds remote_deadline);
+    SgeeAdmission(SgeeQueueClient client, RouteTag tag, InferenceBackend& local,
+                   std::chrono::milliseconds remote_deadline);
 
     [[nodiscard]] auto submit(std::string prompt) -> std::optional<InferenceOutcome> override;
     [[nodiscard]] auto name() const noexcept -> std::string_view override { return "sgee"; }
@@ -951,9 +1010,67 @@ export class SgeeAdmission final : public InferenceBackend {
 
   private:
     SgeeQueueClient client_;
-    options_calculator::inference_queue::Surface surface_;
+    RouteTag tag_;
     InferenceBackend& local_;
     std::chrono::milliseconds remote_deadline_;
+};
+
+// ---------------------------------------------------------------------------
+// Running leased work on a backend that executes INLINE
+// ---------------------------------------------------------------------------
+
+/**
+ * Drains a `LeaseSource` on its own thread into a backend that answers on the CALLING thread.
+ *
+ * WHY THIS EXISTS. `QueuedBackend`'s owner thread is how a DECODER leases shared work: it has
+ * to be, because a decoder cannot run two sequences from two threads (`generate()` is not
+ * re-entrant) and so one owner thread feeds a fused batch. An ENCODER has no such constraint
+ * -- `EncoderAssistant::parse()` is const and thread-safe, a request costs about a
+ * millisecond -- so it has no owner thread and no batch, and therefore nothing that ever
+ * called `LeaseSource::fill()`. That is the whole reason `INFERENCE_QUEUE=sgee` moved ~120
+ * production assistant calls through the cluster's log by 10 housekeeping entries: the queue
+ * existed, the encoder was in-process, and no path connected them.
+ *
+ * This is that path, and it is deliberately the SMALLEST one: the same `LeaseSource`
+ * (`SgeeLeaseSource` / `PostgresLeaseSource`, surface filter and write-back included), driven
+ * by one loop, executing through the same `InferenceBackend::submit()` a local request uses.
+ * Nothing about the queue, the surface partition or the write-back is reimplemented.
+ *
+ * ONE THREAD, because `LeaseSource::fill()` is documented owner-thread-only
+ * (`SgeeLeaseSource` keeps unsynchronised back-off state). One job per pass, because jobs here
+ * are milliseconds long: leasing several at once would let one replica hoard a burst another
+ * replica could be answering, which is the opposite of what a shared queue is for.
+ *
+ * EVERY leased job's promise is fulfilled, on every path including an executor that throws or
+ * reports capacity -- the write-back helper blocks on that future, and an unfulfilled promise
+ * would surface as a broken-promise exception instead of an honest failure to the cluster.
+ */
+export class LeaseRunner final {
+  public:
+    LeaseRunner(std::shared_ptr<LeaseSource> source, InferenceBackend& executor, std::string label);
+
+    LeaseRunner(const LeaseRunner&) = delete;
+    auto operator=(const LeaseRunner&) -> LeaseRunner& = delete;
+    LeaseRunner(LeaseRunner&&) = delete;
+    auto operator=(LeaseRunner&&) -> LeaseRunner& = delete;
+
+    /** The jthread requests stop and joins; it is declared last so that happens first. */
+    ~LeaseRunner() = default;
+
+  private:
+    auto run(std::stop_token stoken) -> void;
+    /** One lease attempt that cannot throw: an exception from the source is logged and reads as
+     *  "nothing leased", which the loop already answers with a tick's wait. */
+    [[nodiscard]] auto fill_one() -> std::vector<PendingJob>;
+    auto note_fill_failure(std::string_view what) -> void;
+
+    std::shared_ptr<LeaseSource> source_;
+    InferenceBackend& executor_;
+    std::string label_;
+    std::uint64_t executed_{0};       // run()'s thread only; numbers the log line
+    std::uint64_t fill_failures_{0};  // likewise
+    /** Declared last: destroyed first, so the thread is joined before any member it reads goes. */
+    std::jthread thread_;
 };
 
 }  // namespace options_calculator::inference_admission

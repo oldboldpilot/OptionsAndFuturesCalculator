@@ -1,5 +1,5 @@
 /**
- * Gates for `encoder_reconstruct::OperationDecode` -- the per-operation mask both model
+ * Gates for `sensen::encoder_reconstruct::OperationDecode` -- the per-operation mask both model
  * heads are decoded through.
  *
  * @author Olumuyiwa Oluwasanmi
@@ -32,7 +32,7 @@
 #include <cstdio>
 
 import std;
-import encoder_reconstruct;
+import sensen.encoder_reconstruct;
 
 namespace {
 
@@ -52,8 +52,8 @@ auto check(bool condition, const std::string& what) -> void {
 /// op 0 is <NONE>, as in every real schema. `futures_only` admits one asset class;
 /// `equity_or_crypto` admits two of three; `unmasked_field` is FULL for both, so it stands
 /// in for the strategy schema's `expiration_days` where the mask is a genuine no-op.
-[[nodiscard]] auto miniature() -> encoder_reconstruct::Schema {
-    encoder_reconstruct::Schema s;
+[[nodiscard]] auto miniature() -> sensen::encoder_reconstruct::Schema {
+    sensen::encoder_reconstruct::Schema s;
     s.ops = {"<NONE>", "futures_only", "equity_or_crypto"};
     s.conv_fields = {"asset_class", "unmasked_field"};
     s.conv_vocab["asset_class"] = {"\"EQUITY\"", "\"FUTURES\"", "\"CRYPTO\""};
@@ -78,7 +78,7 @@ auto main() -> int {
 
     std::printf("Section 1: the mask overrides a higher inadmissible logit\n");
     {
-        const auto got = encoder_reconstruct::OperationDecode::of(sch).forOperation(1)
+        const auto got = sensen::encoder_reconstruct::OperationDecode::of(sch).forOperation(1)
                              .conventionClasses(logits);
         check(got.has_value(), "futures_only decodes");
         if (got) {
@@ -91,7 +91,7 @@ auto main() -> int {
 
     std::printf("Section 2: a two-of-three mask still picks the best ADMISSIBLE class\n");
     {
-        const auto got = encoder_reconstruct::OperationDecode::of(sch).forOperation(2)
+        const auto got = sensen::encoder_reconstruct::OperationDecode::of(sch).forOperation(2)
                              .conventionClasses(logits);
         check(got.has_value(), "equity_or_crypto decodes");
         // EQUITY (9.0) is admissible here and is the honest winner -- the mask must not
@@ -105,7 +105,7 @@ auto main() -> int {
         // `torch.argmax`, `std::ranges::max_element` and sensen's `argmaxIndex` all return
         // the FIRST maximum, so masked-logits-then-argmax would answer 0.
         const std::vector<float> tied{5.0F, 1.0F, 5.0F, 0.5F, 4.0F};
-        const auto got = encoder_reconstruct::OperationDecode::of(sch).forOperation(2)
+        const auto got = sensen::encoder_reconstruct::OperationDecode::of(sch).forOperation(2)
                              .conventionClasses(tied);
         check(got.has_value() && class_of(*got, "asset_class") == 0,
               "a tie between admissible 0 and 2 resolves to 0");
@@ -113,11 +113,11 @@ auto main() -> int {
 
     std::printf("Section 4: <NONE> decodes no field, and an unknown operation REFUSES\n");
     {
-        const auto none = encoder_reconstruct::OperationDecode::of(sch).forOperation(0)
+        const auto none = sensen::encoder_reconstruct::OperationDecode::of(sch).forOperation(0)
                               .conventionClasses(logits);
         check(none.has_value() && none->empty(), "<NONE> yields no convention field");
         for (const int bad : {-1, 3, 99}) {
-            const auto got = encoder_reconstruct::OperationDecode::of(sch).forOperation(bad)
+            const auto got = sensen::encoder_reconstruct::OperationDecode::of(sch).forOperation(bad)
                                  .conventionClasses(logits);
             check(!got.has_value(),
                   std::format("operation {} is refused, never decoded unmasked", bad));
@@ -131,7 +131,7 @@ auto main() -> int {
         // provably identical to decoding it there -- and strictly more honest.
         auto s = miniature();
         s.conv_op_mask["asset_class"].erase("futures_only");
-        const auto got = encoder_reconstruct::OperationDecode::of(s).forOperation(1)
+        const auto got = sensen::encoder_reconstruct::OperationDecode::of(s).forOperation(1)
                              .conventionClasses(logits);
         check(got.has_value(), "a missing mask entry is not an error");
         if (got) {
@@ -144,7 +144,7 @@ auto main() -> int {
     std::printf("Section 6: the flat layout is DERIVED and self-checked against the buffer\n");
     {
         const auto s = miniature();
-        const auto decode = encoder_reconstruct::OperationDecode::of(s).forOperation(1);
+        const auto decode = sensen::encoder_reconstruct::OperationDecode::of(s).forOperation(1);
         // 3 + 2 = 5 classes. A buffer of any other width means the schema and the model
         // disagree about the flat layout, which would read one field's logits as another's.
         check(!decode.conventionClasses(std::vector<float>{1.0F, 2.0F, 3.0F}).has_value(),
@@ -159,7 +159,7 @@ auto main() -> int {
     {
         auto s = miniature();
         s.conv_op_mask["asset_class"]["futures_only"] = {7};
-        check(!encoder_reconstruct::OperationDecode::of(s).forOperation(1)
+        check(!sensen::encoder_reconstruct::OperationDecode::of(s).forOperation(1)
                    .conventionClasses(logits).has_value(),
               "conv_op_mask admitting class 7 of a 3-class field is refused");
     }
@@ -169,7 +169,7 @@ auto main() -> int {
         auto s = miniature();
         s.pairs = {{"a", "m1"}, {"b", "m2"}, {"c", "m3"}};
         s.op_pairs = {{"futures_only", {0, 2}}, {"equity_or_crypto", {1}}};
-        const auto decode = encoder_reconstruct::OperationDecode::of(s).forOperation(1);
+        const auto decode = sensen::encoder_reconstruct::OperationDecode::of(s).forOperation(1);
         const std::vector<int> selected{0, 1, 2};
         const auto pairs = decode.admissiblePairs(selected);
         check(pairs.has_value() && *pairs == std::vector<int>{0, 2},

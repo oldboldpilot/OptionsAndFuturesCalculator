@@ -12,11 +12,19 @@
 
 ## Scope
 
-This document provides reference documentation for the wire contract of the four canonical protobuf schemas defining the gRPC surface of the application:
+This document provides reference documentation for the wire contract of the three canonical protobuf schemas defining the gRPC surface of the application:
 - `backend/proto/calculator.proto`
 - `backend/proto/finance.proto`
 - `backend/proto/assistant.proto`
-- `backend/proto/mortgage_assistant.proto`
+
+> **Removed 2026-10: `mortgage.assistant.MortgageAssistant` (`ParseOperation`).** The mortgage
+> assistant is no longer served from this engine or from `api.optionsandfuturescalculator.com`;
+> `POST /mortgage.assistant.MortgageAssistant/ParseOperation` there is answered by no service (see the
+> exact responses below). It runs as the
+> separate `mfv-assistant` service built from the `nest-egg-loan` repository (formerly `mortgage-nest-egg`), where
+> `clients/mortgagefv/proto/mortgage_assistant.proto` is now the canonical copy of its contract and the
+> only place to read it. Callers that held an OFC-issued key for `ParseOperation` must move to that
+> service; nothing in this repository answers that call any more.
 
 It documents every service, RPC, and message, including wire types, units, presence rules, invariants, validation bounds, failure codes, HTTP JSON-transcoder routes, and corresponding test targets.
 
@@ -29,7 +37,7 @@ Numeric fields across this surface use two distinct wire types based on the unde
 
 | Wire type | Native engine type | Scope and rationale | Enforcing citation |
 | --- | --- | --- | --- |
-| `string` | `sensen::BigDecimal` (`Int256` scaled by $10^{38}$, 38 decimal places exact as of 2026-09-23; `__int128`/$10^{18}$/18 before) | Used for currency amounts, mortgage balances, interest rates, property values, contributions, and exact TVM/amortization arithmetic. Preserves the full scale across network boundaries and prevents precision loss in browser JavaScript clients where native `number` is an IEEE 754 `float64` (`backend/proto/finance.proto:33-37`). Also used as the value type in `FinanceParams.params` (`backend/proto/mortgage_assistant.proto:198-219`) to carry numeric literals without floating-point conversion. | `backend/proto/finance.proto:25-28`, `backend/proto/mortgage_assistant.proto:200-209` |
+| `string` | `sensen::BigDecimal` (`Int256` scaled by $10^{38}$, 38 decimal places exact as of 2026-09-23; `__int128`/$10^{18}$/18 before) | Used for currency amounts, mortgage balances, interest rates, property values, contributions, and exact TVM/amortization arithmetic. Preserves the full scale across network boundaries and prevents precision loss in browser JavaScript clients where native `number` is an IEEE 754 `float64` (`backend/proto/finance.proto:33-37`). Also used as the value type in `FinanceParams.params` (a `map<string, string>` in `nest-egg-loan`'s `clients/mortgagefv/proto/mortgage_assistant.proto`, which this repository no longer holds) to carry numeric literals without floating-point conversion. | `backend/proto/finance.proto:25-28`, `FinanceParams` in `nest-egg-loan:clients/mortgagefv/proto/mortgage_assistant.proto` |
 | `double` | IEEE 754 binary64 `double` | Used where computation is natively floating-point: option pricing models (Black-Scholes, trinomial trees, Monte Carlo), Greeks, implied volatilities, probabilities, futures cost-of-carry, bond yield/duration/convexity solvers, portfolio optimization, and empirical return statistics (`backend/proto/finance.proto:29-32`). Widening these to string would claim precision the engine never computed. | `backend/proto/finance.proto:29-32`, `backend/proto/calculator.proto:43-56` |
 
 Notable exceptions where monetary or financial fields are deliberately `double`:
@@ -55,26 +63,11 @@ In `DatedCashFlowRequest` (`backend/proto/finance.proto:443-448`) used by `Compu
 - Wire semantics:
   - Absent (unset): Directs the engine to use the default convention of 15 days (half-month prepaid interest) (`backend/proto/finance.proto:1075-1077`, `backend/src/modules/finance_service.cpp:4254-4258`).
   - Explicit `0`: Means zero days of prepaid interest, representing a closing on the final day of the month where no prepaid interest is owed (`backend/proto/finance.proto:1077-1078`, `backend/src/modules/finance_service.cpp:4256-4258`).
-- Text-level parser defect: Standard proto3 fields collapse unset and zero. Because proto3 explicit presence was introduced in protoc 3.15, text-level proto regex parsers that stripped `repeated` but did not capture `optional` (e.g. `agent/dataset/build_mortgage_dataset.py:107-114`, `backend/tests/test_mortgage_grammar.cpp:127-133`) misclassified `optional` as part of the field type or treated it as required. This prevented omitting the field to invoke the 15-day convention, causing schema validators to reject valid convention calls.
+- Text-level parser defect: Standard proto3 fields collapse unset and zero. Because proto3 explicit presence was introduced in protoc 3.15, text-level proto regex parsers that stripped `repeated` but did not capture `optional` (e.g. the mortgage corpus builder and grammar test that were parsing this proto, both since removed with the mortgage assistant) misclassified `optional` as part of the field type or treated it as required. This prevented omitting the field to invoke the 15-day convention, causing schema validators to reject valid convention calls.
 
 ### Mortgage assistant label-space exclusions
-The mortgage assistant service (`backend/proto/mortgage_assistant.proto`) maps natural language utterances to `sensen.finance.Finance` RPCs. Out of 46 RPCs defined in `backend/proto/finance.proto:40-104`, the assistant's label space covers 26 operations in the deployed v2 production model (`backend/proto/mortgage_assistant.proto:183-186`, `docs/CLOSING_COSTS_CLIENT_NOTICE.md:156-158`) and 27 in the verification grammar (`backend/src/modules/mortgage_verification.cppm:384`, `backend/tests/test_mortgage_grammar.cpp:553`).
-
-The excluded RPCs and rationale are:
-1. Out-of-scope functional sections (`agent/dataset/build_mortgage_dataset.py:196-202`):
-   - Fixed income: `AnalyzeBond`, `AnalyzeTreasuryBill`
-   - Futures and hedging: `PriceFutures`, `ValueFutures`, `SimulateMarginAccount`, `ComputeHedge`, `CommoditySpread`
-   - Options: `PriceOptionTree`, `PriceBlackScholes`, `PriceOptionMonteCarlo`, `ComputeProbabilityTree`
-   - Portfolio: `ComputePortfolioStats`, `OptimizePortfolio`, `ComputeRiskContributions`
-2. Rate-theory utilities (`agent/dataset/build_mortgage_dataset.py:206-207`, `backend/tests/test_mortgage_grammar.cpp:248-251`):
-   - `ConvertInterestRate`, `ComputeFisherRate`: Theoretical rate conversion utilities not phrased as consumer mortgage or cash flow requests.
-3. Batch APIs (`agent/dataset/build_mortgage_dataset.py:209-217`, `backend/tests/test_mortgage_grammar.cpp:248-251`):
-   - `ComputeAmortizationBatch`, `ComputeRentVsBuyBatch`: High-throughput bulk APIs accepting repeated arrays (up to 1,000 scenarios) for offline batching; no single conversational utterance can ground parameters for a batch.
-4. Administrative and reference operations (`agent/dataset/build_mortgage_dataset.py:221-225`, `backend/tests/test_mortgage_grammar.cpp:248-251`):
-   - `RefreshStateAssumptions`: Operational maintenance mutation triggering external Census ACS fetches and database writes.
-   - `GetStateAssumptions`: Reference data lookup for state housing parameters.
-5. Deployed model status of `ComputeClosingCosts`:
-   - Included in the 27-operation grammar and C++ verification rules (`backend/src/modules/mortgage_verification.cppm:384`), but excluded from the active deployed v2 model label space (26 operations, 160 fields). The v3 candidate model achieved only 16.7% accuracy on closing cost utterances and regressed existing operations, so v2 remains deployed without natural language closing cost parsing (`docs/CLOSING_COSTS_CLIENT_NOTICE.md:152-160`). Direct calls to `Finance/ComputeClosingCosts` via gRPC or JSON transcoder are fully operational (`docs/CLOSING_COSTS_CLIENT_NOTICE.md:117-145`).
+Moved with the service (2026-10): which `sensen.finance.Finance` RPCs the mortgage assistant can name,
+and why the rest are excluded, is documented where the assistant now lives, in `nest-egg-loan`.
 
 ---
 
@@ -263,7 +256,7 @@ Contains `bool deleted` (false if ID did not exist or belonged to another user; 
 - `CalculateStrategy` matrix price bounds: Non-finite bounds or negative bounds refused with `INVALID_ARGUMENT` (`backend/src/modules/calculator_service.cpp:695-703`); `matrix_price_max <= matrix_price_min` refused with `INVALID_ARGUMENT` (`backend/src/modules/calculator_service.cpp:708-713`).
 - `CalculateStrategy` entitlement: Multi-leg strategies checked against Pro tier when `PRO_GATE_MODE` is active; unentitled calls return `PERMISSION_DENIED` (`backend/src/modules/calculator_service.cpp:1214-1218`).
 - Market data failures: Upstream feed unavailability returns `UNAVAILABLE` (`backend/src/modules/calculator_service.cpp:1378-1380, 1437-1439, 1504-1506`).
-- Saved scenarios authentication & capacity: Unauthenticated calls or missing bearer token return `UNAUTHENTICATED` (`backend/src/modules/calculator_service.cpp:1701, 1845-1850`). Exceeding per-user scenario cap (50) returns `RESOURCE_EXHAUSTED` ("You have reached the limit of 50 saved scenarios...") (`backend/src/modules/calculator_service.cpp:1837-1840`). Missing database connection returns `FAILED_PRECONDITION` ("Saved scenarios are not available on this deployment.") (`backend/src/modules/calculator_service.cpp:1827-1829`).
+- Saved scenarios authentication & capacity: Unauthenticated calls or missing bearer token return `UNAUTHENTICATED` (`backend/src/modules/calculator_service.cpp:1701, 1845-1850`). Exceeding the per-user scenario cap (100) returns `RESOURCE_EXHAUSTED` ("You have reached the limit of 100 saved scenarios...") (`backend/src/modules/calculator_service.cpp:1837-1840`). Missing database connection returns `FAILED_PRECONDITION` ("Saved scenarios are not available on this deployment.") (`backend/src/modules/calculator_service.cpp:1827-1829`).
 
 ### Gotchas
 - Multi-expiry curve horizon: For calendar and diagonal spreads, `StrategyResponse.curve_days_to_expiration` represents the EARLIEST leg expiry, not the latest. At far expiry, near legs are expired and structures collapse to debit lines (`backend/proto/calculator.proto:182-194`).
@@ -280,52 +273,54 @@ Exposes general-purpose financial mathematics: time value of money (TVM), mortga
 
 | RPC name | Request message | Response message | Description |
 | --- | --- | --- | --- |
-| `ComputePayment` | `PaymentRequest` | `DecimalResponse` | Periodic annuity payment (PMT) (`backend/proto/finance.proto:42`). |
-| `ComputePresentValue` | `PresentValueRequest` | `DecimalResponse` | Present value of an annuity (PV) (`backend/proto/finance.proto:43`). |
-| `ComputeFutureValue` | `FutureValueRequest` | `DecimalResponse` | Future value of an annuity (FV) (`backend/proto/finance.proto:44`). |
-| `ComputeFutureValueDetailed` | `FutureValueDetailedRequest` | `FutureValueDetailedResponse` | Investment future value with contributions and inflation adjustments (`backend/proto/finance.proto:45`). |
-| `ComputeInterestPayment` | `PeriodPaymentRequest` | `DecimalResponse` | Interest portion of a specific period's payment (IPMT) (`backend/proto/finance.proto:46`). |
-| `ComputePrincipalPayment` | `PeriodPaymentRequest` | `DecimalResponse` | Principal portion of a specific period's payment (PPMT) (`backend/proto/finance.proto:47`). |
-| `ComputeRate` | `RateRequest` | `DecimalResponse` | Solves for per-period interest rate (RATE) (`backend/proto/finance.proto:48`). |
-| `ComputePeriods` | `PeriodsRequest` | `DecimalResponse` | Solves for number of payment periods (NPER) (`backend/proto/finance.proto:49`). |
-| `ConvertInterestRate` | `RateConversionRequest` | `DoubleResponse` | Nominal to effective or effective to nominal rate conversion (`backend/proto/finance.proto:50`). |
-| `ComputeFisherRate` | `FisherRequest` | `DoubleResponse` | Exact Fisher equation rate conversion (`backend/proto/finance.proto:51`). |
-| `ComputeAmortization` | `AmortizationRequest` | `AmortizationResponse` | Full mortgage amortization schedule and summary (`backend/proto/finance.proto:54`). |
-| `ComputeDetailedAmortization` | `DetailedAmortizationRequest` | `DetailedAmortizationResponse` | Amortization schedule including tax savings breakdown (`backend/proto/finance.proto:55`). |
-| `ComputeAmortizationBatch` | `AmortizationBatchRequest` | `AmortizationBatchResponse` | High-throughput batch amortization summaries (`backend/proto/finance.proto:56`). |
-| `ComputeHeloc` | `HelocRequest` | `HelocResponse` | HELOC available borrowing equity and payments (`backend/proto/finance.proto:57`). |
-| `ComputeRefinance` | `RefinanceRequest` | `RefinanceResponse` | Mortgage refinance comparison and breakeven horizons (`backend/proto/finance.proto:58`). |
-| `ComputePayoffTiming` | `PayoffTimingRequest` | `PayoffTimingResponse` | Accelerated mortgage payoff timeline with extra payments (`backend/proto/finance.proto:59`). |
-| `ComputeMortgageRecast` | `MortgageRecastRequest` | `MortgageRecastResponse` | Loan recast payment reduction following lump-sum principal reduction (`backend/proto/finance.proto:60`). |
-| `ComputeNpv` | `NpvRequest` | `DoubleResponse` | Net present value for periodic cash flows (`backend/proto/finance.proto:63`). |
-| `ComputeIrr` | `IrrRequest` | `DoubleResponse` | Internal rate of return for periodic cash flows (`backend/proto/finance.proto:64`). |
-| `ComputeXnpv` | `DatedCashFlowRequest` | `DoubleResponse` | Net present value for irregularly dated cash flows (`backend/proto/finance.proto:65`). |
-| `ComputeXirr` | `DatedCashFlowRequest` | `DoubleResponse` | Internal rate of return for irregularly dated cash flows (`backend/proto/finance.proto:66`). |
-| `ComputePaybackPeriod` | `PaybackRequest` | `DoubleResponse` | Plain or discounted payback period (`backend/proto/finance.proto:67`). |
-| `ComputeCumulative` | `CumulativeRequest` | `DoubleResponse` | Cumulative principal or interest paid between periods (`backend/proto/finance.proto:68`). |
-| `ComputeDepreciation` | `DepreciationRequest` | `DoubleResponse` | Depreciation charges (SLN, SYD, DDB, MACRS) (`backend/proto/finance.proto:71`). |
-| `AnalyzeBond` | `BondRequest` | `BondResponse` | Bond pricing, yield to maturity, duration, and convexity (`backend/proto/finance.proto:74`). |
-| `AnalyzeTreasuryBill` | `TreasuryBillRequest` | `TreasuryBillResponse` | T-bill pricing and yields (BEY, MMY, BDY) (`backend/proto/finance.proto:75`). |
-| `PriceFutures` | `FuturesPricingRequest` | `DoubleResponse` | Cost-of-carry futures price (`backend/proto/finance.proto:78`). |
-| `ValueFutures` | `FuturesValuationRequest` | `DoubleResponse` | Mark-to-market futures contract valuation (`backend/proto/finance.proto:79`). |
-| `SimulateMarginAccount` | `MarginSimulationRequest` | `MarginSimulationResponse` | Simulates daily margin path and margin call triggers (`backend/proto/finance.proto:80`). |
-| `ComputeHedge` | `HedgeRequest` | `HedgeResponse` | Minimum-variance hedge ratio and contract sizing (`backend/proto/finance.proto:81`). |
-| `ComputeCommoditySpread` | `CommoditySpreadRequest` | `DoubleResponse` | Crack, spark, or crush commodity spread processing margin (`backend/proto/finance.proto:82`). |
-| `ComputeRentalRoi` | `RentalRoiRequest` | `RentalRoiResponse` | Real estate NOI, cash flow, cap rate, and CoC return (`backend/proto/finance.proto:85`). |
-| `ComputeHomeFutureValue` | `HomeFutureValueRequest` | `HomeFutureValueResponse` | Projected property value, remaining balance, and equity (`backend/proto/finance.proto:86`). |
-| `ComputeRentVsBuy` | `RentVsBuyRequest` | `RentVsBuyResponse` | Rent vs buy wealth and cost comparison (`backend/proto/finance.proto:87`). |
-| `ComputeRentVsBuyBatch` | `RentVsBuyBatchRequest` | `RentVsBuyBatchResponse` | Batch rent vs buy scenarios for corpus generation (`backend/proto/finance.proto:88`). |
-| `ComputeHomeNpv` | `HomeNpvRequest` | `HomeNpvResponse` | Lifetime homeownership NPV and IRR (`backend/proto/finance.proto:89`). |
-| `ComputeClosingCosts` | `ClosingCostsRequest` | `ClosingCostsResponse` | Itemized buyer closing costs, prepaids, escrow, and cash to close (`backend/proto/finance.proto:90`). |
-| `RefreshStateAssumptions` | `RefreshStateAssumptionsRequest` | `RefreshStateAssumptionsResponse` | Triggers automated US Census ACS state housing data refresh (`backend/proto/finance.proto:91`). |
-| `GetStateAssumptions` | `GetStateAssumptionsRequest` | `GetStateAssumptionsResponse` | Reads state housing and tax reference assumptions (`backend/proto/finance.proto:92`). |
-| `PriceOptionTree` | `OptionTreeRequest` | `OptionPricingResponse` | Trinomial tree pricer for American, Bermudan, and Asian options (`backend/proto/finance.proto:95`). |
-| `PriceBlackScholes` | `BlackScholesRequest` | `BlackScholesResponse` | Closed-form European option value and complete 1st-3rd order Greeks (`backend/proto/finance.proto:96`). |
-| `PriceOptionMonteCarlo` | `MonteCarloRequest` | `DoubleResponse` | Monte Carlo pricing for European and Asian options (`backend/proto/finance.proto:97`). |
-| `ComputeProbabilityTree` | `ProbabilityTreeRequest` | `ProbabilityTreeResponse` | Trinomial probability distribution tree (`backend/proto/finance.proto:98`). |
-| `ComputePortfolioStats` | `PortfolioStatsRequest` | `PortfolioStatsResponse` | Sharpe, Sortino, Treynor, alpha, beta, and historical/parametric VaR/CVaR (`backend/proto/finance.proto:101`). |
-| `OptimizePortfolio` | `PortfolioOptimizeRequest` | `PortfolioOptimizeResponse` | Mean-variance or maximum Sharpe portfolio optimization (`backend/proto/finance.proto:102`). |
-| `ComputeRiskContributions` | `RiskContributionRequest` | `RiskContributionResponse` | Marginal component risk contributions decomposing portfolio risk (`backend/proto/finance.proto:103`). |
+| `ComputePayment` | `PaymentRequest` | `DecimalResponse` | Periodic annuity payment (PMT) (`backend/proto/finance.proto:45`). |
+| `ComputePresentValue` | `PresentValueRequest` | `DecimalResponse` | Present value of an annuity (PV) (`backend/proto/finance.proto:46`). |
+| `ComputeFutureValue` | `FutureValueRequest` | `DecimalResponse` | Future value of an annuity (FV) (`backend/proto/finance.proto:47`). |
+| `ComputeFutureValueDetailed` | `FutureValueDetailedRequest` | `FutureValueDetailedResponse` | Investment future value with contributions and inflation adjustments (`backend/proto/finance.proto:48`). |
+| `ComputeInterestPayment` | `PeriodPaymentRequest` | `DecimalResponse` | Interest portion of a specific period's payment (IPMT) (`backend/proto/finance.proto:49`). |
+| `ComputePrincipalPayment` | `PeriodPaymentRequest` | `DecimalResponse` | Principal portion of a specific period's payment (PPMT) (`backend/proto/finance.proto:50`). |
+| `ComputeRate` | `RateRequest` | `DecimalResponse` | Solves for per-period interest rate (RATE) (`backend/proto/finance.proto:51`). |
+| `ComputePeriods` | `PeriodsRequest` | `DecimalResponse` | Solves for number of payment periods (NPER) (`backend/proto/finance.proto:52`). |
+| `ConvertInterestRate` | `RateConversionRequest` | `DoubleResponse` | Nominal to effective or effective to nominal rate conversion (`backend/proto/finance.proto:53`). |
+| `ComputeFisherRate` | `FisherRequest` | `DoubleResponse` | Exact Fisher equation rate conversion (`backend/proto/finance.proto:54`). |
+| `ComputeAmortization` | `AmortizationRequest` | `AmortizationResponse` | Full mortgage amortization schedule and summary (`backend/proto/finance.proto:57`). |
+| `ComputeDetailedAmortization` | `DetailedAmortizationRequest` | `DetailedAmortizationResponse` | Amortization schedule including tax savings breakdown (`backend/proto/finance.proto:58`). |
+| `ComputeAmortizationBatch` | `AmortizationBatchRequest` | `AmortizationBatchResponse` | High-throughput batch amortization summaries (`backend/proto/finance.proto:59`). |
+| `ComputeHeloc` | `HelocRequest` | `HelocResponse` | HELOC available borrowing equity and payments (`backend/proto/finance.proto:60`). |
+| `ComputeRefinance` | `RefinanceRequest` | `RefinanceResponse` | Mortgage refinance comparison and breakeven horizons (`backend/proto/finance.proto:61`). |
+| `ComputePayoffTiming` | `PayoffTimingRequest` | `PayoffTimingResponse` | Accelerated mortgage payoff timeline with extra payments (`backend/proto/finance.proto:62`). |
+| `ComputeMortgageRecast` | `MortgageRecastRequest` | `MortgageRecastResponse` | Loan recast payment reduction following lump-sum principal reduction (`backend/proto/finance.proto:63`). |
+| `ComputeNpv` | `NpvRequest` | `DoubleResponse` | Net present value for periodic cash flows (`backend/proto/finance.proto:66`). |
+| `ComputeIrr` | `IrrRequest` | `DoubleResponse` | Internal rate of return for periodic cash flows (`backend/proto/finance.proto:67`). |
+| `ComputeXnpv` | `DatedCashFlowRequest` | `DoubleResponse` | Net present value for irregularly dated cash flows (`backend/proto/finance.proto:68`). |
+| `ComputeXirr` | `DatedCashFlowRequest` | `DoubleResponse` | Internal rate of return for irregularly dated cash flows (`backend/proto/finance.proto:69`). |
+| `ComputePaybackPeriod` | `PaybackRequest` | `DoubleResponse` | Plain or discounted payback period (`backend/proto/finance.proto:70`). |
+| `ComputeCumulative` | `CumulativeRequest` | `DoubleResponse` | Cumulative principal or interest paid between periods (`backend/proto/finance.proto:71`). |
+| `ComputeDepreciation` | `DepreciationRequest` | `DoubleResponse` | Depreciation charges (SLN, SYD, DDB, MACRS) (`backend/proto/finance.proto:74`). |
+| `AnalyzeBond` | `BondRequest` | `BondResponse` | Bond pricing, yield to maturity, duration, and convexity (`backend/proto/finance.proto:77`). |
+| `AnalyzeTreasuryBill` | `TreasuryBillRequest` | `TreasuryBillResponse` | T-bill pricing and yields (BEY, MMY, BDY) (`backend/proto/finance.proto:78`). |
+| `PriceFutures` | `FuturesPricingRequest` | `DoubleResponse` | Cost-of-carry futures price (`backend/proto/finance.proto:81`). |
+| `ValueFutures` | `FuturesValuationRequest` | `DoubleResponse` | Mark-to-market futures contract valuation (`backend/proto/finance.proto:82`). |
+| `SimulateMarginAccount` | `MarginSimulationRequest` | `MarginSimulationResponse` | Simulates daily margin path and margin call triggers (`backend/proto/finance.proto:83`). |
+| `ComputeHedge` | `HedgeRequest` | `HedgeResponse` | Minimum-variance hedge ratio and contract sizing (`backend/proto/finance.proto:84`). |
+| `ComputeCommoditySpread` | `CommoditySpreadRequest` | `DoubleResponse` | Crack, spark, or crush commodity spread processing margin (`backend/proto/finance.proto:85`). |
+| `ComputeRentalRoi` | `RentalRoiRequest` | `RentalRoiResponse` | Real estate NOI, cash flow, cap rate, and CoC return (`backend/proto/finance.proto:88`). |
+| `ComputeRentalCashFlow` | `RentalCashFlowRequest` | `RentalCashFlowResponse` | Multi-year rental cash flow, vacancy, operating expenses, debt service, equity accumulation, and sale proceeds (`backend/proto/finance.proto:89`). |
+| `ComputeHomeFutureValue` | `HomeFutureValueRequest` | `HomeFutureValueResponse` | Projected property value, remaining balance, and equity (`backend/proto/finance.proto:90`). |
+| `ComputeRentVsBuy` | `RentVsBuyRequest` | `RentVsBuyResponse` | Rent vs buy wealth and cost comparison (`backend/proto/finance.proto:91`). |
+| `ComputeRentVsBuyBatch` | `RentVsBuyBatchRequest` | `RentVsBuyBatchResponse` | Batch rent vs buy scenarios for corpus generation (`backend/proto/finance.proto:92`). |
+| `ComputeHomeNpv` | `HomeNpvRequest` | `HomeNpvResponse` | Lifetime homeownership NPV and IRR (`backend/proto/finance.proto:93`). |
+| `ComputeClosingCosts` | `ClosingCostsRequest` | `ClosingCostsResponse` | Itemized buyer closing costs, prepaids, escrow, and cash to close (`backend/proto/finance.proto:94`). |
+| `ExplainMortgage` | `ExplainMortgageRequest` | `ExplainMortgageResponse` | Itemised plain-language points explaining a mortgage scenario: PMI facts, then the scenario's totals (`backend/proto/finance.proto:95`). |
+| `RefreshStateAssumptions` | `RefreshStateAssumptionsRequest` | `RefreshStateAssumptionsResponse` | Triggers automated US Census ACS state housing data refresh (`backend/proto/finance.proto:96`). |
+| `GetStateAssumptions` | `GetStateAssumptionsRequest` | `GetStateAssumptionsResponse` | Reads state housing and tax reference assumptions (`backend/proto/finance.proto:97`). |
+| `PriceOptionTree` | `OptionTreeRequest` | `OptionPricingResponse` | Trinomial tree pricer for American, Bermudan, and Asian options (`backend/proto/finance.proto:100`). |
+| `PriceBlackScholes` | `BlackScholesRequest` | `BlackScholesResponse` | Closed-form European option value and complete 1st-3rd order Greeks (`backend/proto/finance.proto:101`). |
+| `PriceOptionMonteCarlo` | `MonteCarloRequest` | `DoubleResponse` | Monte Carlo pricing for European and Asian options (`backend/proto/finance.proto:102`). |
+| `ComputeProbabilityTree` | `ProbabilityTreeRequest` | `ProbabilityTreeResponse` | Trinomial probability distribution tree (`backend/proto/finance.proto:103`). |
+| `ComputePortfolioStats` | `PortfolioStatsRequest` | `PortfolioStatsResponse` | Sharpe, Sortino, Treynor, alpha, beta, and historical/parametric VaR/CVaR (`backend/proto/finance.proto:106`). |
+| `OptimizePortfolio` | `PortfolioOptimizeRequest` | `PortfolioOptimizeResponse` | Mean-variance or maximum Sharpe portfolio optimization (`backend/proto/finance.proto:107`). |
+| `ComputeRiskContributions` | `RiskContributionRequest` | `RiskContributionResponse` | Marginal component risk contributions decomposing portfolio risk (`backend/proto/finance.proto:108`). |
 
 ### Message and field inventory
 
@@ -362,6 +357,9 @@ Exposes general-purpose financial mathematics: time value of money (TVM), mortga
 - `PayoffTimingResponse`: `original_months_remaining` (`int32`), `new_months_remaining` (`int32`), `months_saved` (`int32`), `total_interest_saved` (`string`).
 - `MortgageRecastRequest`: `current_loan_balance` (`string`), `current_monthly_payment` (`string`), `lump_sum_payment` (`string`), `annual_rate` (`string`), `remaining_months` (`int32`), `payments_per_year` (`int32`, 0 rejected).
 - `MortgageRecastResponse`: `new_monthly_payment` (`string`), `monthly_savings` (`string`).
+- `ExplainMortgageRequest`: `loan_amount` (`string`), `annual_rate` (`string`), `term_months` (`int32`), `monthly_overpayment` (`string`), `pmi_annual_rate` (`string`), `original_home_value` (`string`), `annual_tax_rate` (`string`), `annual_repairs` (`string`), `annual_insurance` (`string`), `annual_cost_growth` (`string`), `heloc_drawn_amount` (`string`), `heloc_annual_rate` (`string`), `heloc_term_years` (`int32`), `pmi_drop_off_ltv` (`string`), `annual_appreciation` (`string`) (`backend/proto/finance.proto:1429-1449`).
+- `ExplanationPoint`: `topic` (`string`, stable dotted identifier, e.g. "pmi.termination"), `text` (`string`, explanation prose), `item` (`int32`, 1-based display ordinal), `field` (`string`, the output line the point is about), `value` (`string`, exact computed figure string) (`backend/proto/finance.proto:1451-1463`).
+- `ExplainMortgageResponse`: `points` (`repeated ExplanationPoint`) (`backend/proto/finance.proto:1465-1467`).
 
 #### Cash Flow & Depreciation Messages (`backend/proto/finance.proto:418-492`)
 - `NpvRequest`: `rate` (`double`), `values` (`repeated double`).
@@ -386,9 +384,12 @@ Exposes general-purpose financial mathematics: time value of money (TVM), mortga
 - `HedgeResponse`: `hedge_ratio` (`double`), `contracts` (`double`, 0 if sizing unstated), `contracts_computed` (`bool`).
 - `CommoditySpreadRequest`: `spread` (`Spread`: `CRACK_321=0`, `SPARK=1`, `CRUSH=2`), `a` (`double`), `b` (`double`), `c` (`double`). For Crack: a=crude, b=gasoline, c=heating oil; for Spark: a=power, b=gas, c=heat rate; for Crush: a=soybean, b=oil, c=meal (`backend/proto/finance.proto:615-620`).
 
-#### Real Estate Messages (`backend/proto/finance.proto:627-856`)
+#### Real Estate Messages
 - `RentalRoiRequest`: `property_value` (`string`), `total_cash_invested` (`string`), `periodic_gross_rent` (`string`), `periodic_operating_expenses` (`string`, non-debt expenses only), `periodic_mortgage_payment` (`string`), `periods_per_year` (`int32`).
 - `RentalRoiResponse`: `net_operating_income` (`string`), `annual_cash_flow` (`string`), `cash_on_cash_return` (`string`), `cap_rate` (`string`), `gross_rent_multiplier` (`string`).
+- `RentalCashFlowRequest`: `property_price` (`string`), `down_payment` (`string`), `closing_costs` (`string`), `loan_annual_rate` (`string`), `loan_term_years` (`int32`), `monthly_gross_rent` (`string`), `annual_rent_increase` (`string`), `occupancy_rate` (`string`, 0 means fully occupied / 100% occupancy), `annual_property_tax` (`string`), `annual_insurance` (`string`), `annual_repairs` (`string`), `annual_capex_reserve` (`string`), `monthly_hoa` (`string`), `management_fee_rate` (`string`, share of collected rent), `annual_other_expenses` (`string`), `annual_expense_increase` (`string`), `annual_appreciation` (`string`), `selling_cost_percent` (`string`), `years` (`int32`), `heloc_drawn_amount` (`string`), `heloc_annual_rate` (`string`), `heloc_term_years` (`int32`) (`backend/proto/finance.proto:871-908`).
+- `RentalCashFlowRow`: `year` (`int32`), `gross_scheduled_rent` (`string`), `vacancy_loss` (`string`), `effective_gross_income` (`string`), `operating_expenses` (`string`), `net_operating_income` (`string`), `mortgage_debt_service` (`string`), `heloc_debt_service` (`string`), `cash_flow` (`string`), `cumulative_cash_flow` (`string`), `loan_balance` (`string`), `property_value` (`string`), `equity` (`string`) (`backend/proto/finance.proto:910-927`).
+- `RentalCashFlowResponse`: `rows` (`repeated RentalCashFlowRow`), `own_cash_invested` (`string`), `total_cash_to_close` (`string`), `year_one_noi` (`string`), `cap_rate` (`string`), `cash_on_cash` (`string`), `cash_on_cash_defined` (`bool`), `debt_service_coverage` (`string`), `debt_service_coverage_defined` (`bool`), `total_cash_flow` (`string`), `sale_price` (`string`), `sale_proceeds` (`string`), `total_profit` (`string`), `any_year_negative` (`bool`) (`backend/proto/finance.proto:929-949`).
 - `HomeFutureValueRequest`: `current_property_value` (`string`), `annual_appreciation_rate` (`string`), `current_loan_balance` (`string`), `annual_mortgage_rate` (`string`), `current_monthly_payment` (`string`), `target_years` (`int32`), `payments_per_year` (`int32`, 0 rejected).
 - `HomeFutureValueResponse`: `future_property_value` (`double`), `future_loan_balance` (`string`), `future_equity` (`string`).
 - `RentVsBuyRequest`: `property_price` (`string`), `down_payment` (`string`), `monthly_piti_and_maintenance` (`string`, legacy aggregate; triggers legacy model if used alone, `backend/proto/finance.proto:670-679`), `annual_home_appreciation` (`string`), `current_monthly_rent` (`string`), `annual_rent_increase` (`string`), `annual_investment_return` (`string`), `years` (`int32`), `loan_annual_rate` (`string`, defaults to 0), `loan_term_years` (`int32`, omitted defaults to 30, `backend/proto/finance.proto:693-696`), `loan_amount` (`string`), `monthly_taxes_ins_maintenance` (`string`), `closing_costs_buy` (`string`), `selling_cost_percent` (`string`, omitted defaults to 0, `backend/proto/finance.proto:711-718`), `annual_inflation_rate` (`string`).
@@ -494,61 +495,29 @@ Contains `reason` (`Reason`: `REASON_UNSPECIFIED=0`, `UNSUPPORTED_STRATEGY=1`, `
 
 ---
 
-## Service: `mortgage.assistant.MortgageAssistant` (`backend/proto/mortgage_assistant.proto`)
+## Service: `mortgage.assistant.MortgageAssistant` -- REMOVED 2026-10
 
-### Purpose
-Parses unstructured natural language mortgage, loan, and financial calculation queries into structured parameters matching `sensen.finance.Finance` RPCs.
+No longer part of this surface. The service, its proto, its Envoy transcoder entry and its descriptor
+entry were deleted from this repository when the assistant moved to `nest-egg-loan`
+(`services/mortgage-assistant`, Railway service `mfv-assistant`); its contract is
+`nest-egg-loan:clients/mortgagefv/proto/mortgage_assistant.proto`. No route or handler for it remains, so
+a request to `/mortgage.assistant.MortgageAssistant/ParseOperation` on this host reaches the engine's catch-all
+and is refused there. Measured on the image built from the deleting tree (`options-backend:m81j`, 2026-10-08):
 
-### RPC inventory
+| Caller | Response |
+| --- | --- |
+| gRPC-Web (`nest-egg-loan`'s default transport) | HTTP 200, `grpc-status: 12` (UNIMPLEMENTED), empty body |
+| native gRPC, straight to the engine | `UNIMPLEMENTED` (12) (not re-measured through the Railway TCP proxy; same engine and listener) |
+| JSON (`POST` with `application/json`) | HTTP 200, `content-type: application/grpc`, `grpc-status: 2` (UNKNOWN), `grpc-message: Missing :te header`, `content-length: 0` -- the same status, message and empty body as `POST /foo.Bar/Baz` |
 
-| RPC name | Request message | Response message | Description |
-| --- | --- | --- | --- |
-| `ParseOperation` | `ParseRequest` | `ParseResponse` | Translates a loan or cash flow query into structured arguments for a specific Finance RPC (`backend/proto/mortgage_assistant.proto:75`). |
-
-### Message and field inventory
-
-#### `ParseRequest` (`backend/proto/mortgage_assistant.proto:78-164`)
-| Field name | Wire type | Units / Convention | Presence / Restriction |
-| --- | --- | --- | --- |
-| `utterance` | `string` | Free text | Required; max 1,000 chars (`backend/src/modules/mortgage_assistant_service.cpp:225, 3096`). |
-| `prior_clarification` | `string` | Prior answer | Optional; max 400 chars (`backend/src/modules/mortgage_assistant_service.cpp:226, 3102`). |
-| `prior_question` | `string` | Question being answered | Optional; retained for backward compatibility (`backend/proto/mortgage_assistant.proto:104-163`). |
-
-#### `ParseResponse` (`backend/proto/mortgage_assistant.proto:166-174`)
-| Field name | Wire type | Units / Convention | Presence / Restriction |
-| --- | --- | --- | --- |
-| `outcome` | `oneof` | Mutual exclusion | Exactly one of `params`, `clarification`, or `refusal` (`backend/proto/mortgage_assistant.proto:169-173`). |
-| `params` | `FinanceParams` | Structured output | Set when the request resolves to an executable Finance RPC (`backend/proto/mortgage_assistant.proto:170`). |
-| `clarification` | `Clarification` | Clarifying question | Set when a required input parameter is missing (`backend/proto/mortgage_assistant.proto:171`). |
-| `refusal` | `Refusal` | Refusal diagnostic | Set when the query is out of scope or invalid (`backend/proto/mortgage_assistant.proto:172`). |
-
-#### `FinanceParams` (`backend/proto/mortgage_assistant.proto:226-270`)
-| Field name | Wire type | Units / Convention | Presence / Restriction |
-| --- | --- | --- | --- |
-| `operation` | `string` | Exact RPC name on `sensen.finance.Finance` | E.g. "ComputeAmortization", "ComputeRefinance" (`backend/proto/mortgage_assistant.proto:228-237`). |
-| `params` | `map<string, string>` | Field name to string literal | Every field declared by the operation's request message is present (`backend/proto/mortgage_assistant.proto:242-269`). |
-
-#### `Clarification` (`backend/proto/mortgage_assistant.proto:277-279`)
-Contains string `question` (capped at 400 chars, `backend/src/modules/mortgage_assistant_service.cpp:211`).
-
-#### `Refusal` (`backend/proto/mortgage_assistant.proto:284-322`)
-Contains `reason` (`Reason`: `REASON_UNSPECIFIED=0`, `UNSUPPORTED_OPERATION=1`, `INVALID_PARAMETERS=2`, `OUT_OF_SCOPE=3`, `MODEL_UNAVAILABLE=4`) and human-readable string `message`.
-
-### Invariants, refusals, and failure modes
-- Complete field mapping: `params` must carry all fields declared by the request message; missing fields are refused with `INVALID_PARAMETERS` to prevent proto3 default zero-injection (`backend/proto/mortgage_assistant.proto:262-268`).
-- String encoding of values: Values in `params` are formatted as: exact decimal string for BigDecimal, decimal digits for int32, shortest decimal text for double, `"true"`/`"false"` for bool, enum constant name for enums, and JSON arrays for repeated values (`backend/proto/mortgage_assistant.proto:245-260`).
-- Text bounds: Utterances $> 1,000$ chars or prior clarifications $> 400$ chars return `INVALID_ARGUMENT` (`backend/src/modules/mortgage_assistant_service.cpp:3096-3108`). Decimal strings in values are capped at 48 chars, array lengths at 512, and absolute magnitudes at $10^{15}$ (`backend/src/modules/mortgage_assistant_service.cpp:240-242`).
-- Five verification gates: Gated through `mortgage_verification.cppm`: G1 (closed operation vocabulary), G2 (declared field set & enum names), G3 (utterance grounding), G4 (presence check), and G5 (plausibility bounds). Only `Proven` outputs are served (`backend/src/modules/mortgage_verification.cppm:48-67`).
-
-### Gotchas
-- Model label-space vs. verification schema: The schema and verification code support 27 operations, but the active production model was trained on 26 operations (`docs/CLOSING_COSTS_CLIENT_NOTICE.md:156-158`). Utterances asking for closing costs yield a refusal in production rather than parameters.
-- Opposite signs in annuity solvers: `ComputeRate` and `ComputePeriods` require cash flows with opposite signs (borrowing vs paying). Natural language queries describing positive loan and payment amounts are signed by the service layer before dispatch (`backend/src/modules/mortgage_verification.cppm:1360-1380`).
+It is never a 404 (Envoy's 404 is for GET/HEAD only, `backend/envoy.yaml`) and never a crash. A client that treats an
+empty 200 as an answer will misread the JSON case; check the `grpc-status` header.
 
 ---
 
 ## HTTP edge mapping (JSON transcoder paths)
 
-All 55 gRPC RPCs across the four services are accessible through Envoy's `grpc_json_transcoder` filter (`backend/envoy.yaml:154-170`) using HTTP `POST` at `https://api.optionsandfuturescalculator.com`.
+All 56 gRPC RPCs across the three services are accessible through Envoy's `grpc_json_transcoder` filter (`backend/envoy.yaml`) using HTTP `POST` at `https://api.optionsandfuturescalculator.com`.
 
 | Package / Service | RPC Method | HTTP Method and Transcoder Path |
 | --- | --- | --- |
@@ -591,11 +560,13 @@ All 55 gRPC RPCs across the four services are accessible through Envoy's `grpc_j
 | `sensen.finance.Finance` | `ComputeHedge` | `POST /sensen.finance.Finance/ComputeHedge` |
 | `sensen.finance.Finance` | `ComputeCommoditySpread` | `POST /sensen.finance.Finance/ComputeCommoditySpread` |
 | `sensen.finance.Finance` | `ComputeRentalRoi` | `POST /sensen.finance.Finance/ComputeRentalRoi` |
+| `sensen.finance.Finance` | `ComputeRentalCashFlow` | `POST /sensen.finance.Finance/ComputeRentalCashFlow` |
 | `sensen.finance.Finance` | `ComputeHomeFutureValue` | `POST /sensen.finance.Finance/ComputeHomeFutureValue` |
 | `sensen.finance.Finance` | `ComputeRentVsBuy` | `POST /sensen.finance.Finance/ComputeRentVsBuy` |
 | `sensen.finance.Finance` | `ComputeRentVsBuyBatch` | `POST /sensen.finance.Finance/ComputeRentVsBuyBatch` |
 | `sensen.finance.Finance` | `ComputeHomeNpv` | `POST /sensen.finance.Finance/ComputeHomeNpv` |
 | `sensen.finance.Finance` | `ComputeClosingCosts` | `POST /sensen.finance.Finance/ComputeClosingCosts` |
+| `sensen.finance.Finance` | `ExplainMortgage` | `POST /sensen.finance.Finance/ExplainMortgage` |
 | `sensen.finance.Finance` | `RefreshStateAssumptions` | `POST /sensen.finance.Finance/RefreshStateAssumptions` |
 | `sensen.finance.Finance` | `GetStateAssumptions` | `POST /sensen.finance.Finance/GetStateAssumptions` |
 | `sensen.finance.Finance` | `PriceOptionTree` | `POST /sensen.finance.Finance/PriceOptionTree` |
@@ -606,7 +577,6 @@ All 55 gRPC RPCs across the four services are accessible through Envoy's `grpc_j
 | `sensen.finance.Finance` | `OptimizePortfolio` | `POST /sensen.finance.Finance/OptimizePortfolio` |
 | `sensen.finance.Finance` | `ComputeRiskContributions` | `POST /sensen.finance.Finance/ComputeRiskContributions` |
 | `calculator.assistant.StrategyAssistant` | `ParseStrategy` | `POST /calculator.assistant.StrategyAssistant/ParseStrategy` |
-| `mortgage.assistant.MortgageAssistant` | `ParseOperation` | `POST /mortgage.assistant.MortgageAssistant/ParseOperation` |
 
 ---
 
@@ -623,10 +593,8 @@ Every service, verification module, and validation rule has corresponding automa
 | `backend/tests/test_state_assumptions_gate.cpp` | Tests write gate on `RefreshStateAssumptions`, proving `PERMISSION_DENIED` for anonymous and Pro callers, and admission for partner credentials. |
 | `backend/tests/test_assistant_service.cpp` | In-process gRPC tests for `calculator.assistant.StrategyAssistant/ParseStrategy` over `StrategyAssistantWorkflow`: admission limits (1,000 char utterance, 400 char clarification), prompt injection rejection, model availability refusal, and did-compute postconditions. |
 | `backend/tests/test_assistant_verification.cpp` | Standalone verification unit tests for `assistant_verification.cppm`: closed-vocabulary strategy validation (48 strategies), ticker validation, quantity and expiration limits, and keyword extraction. |
-| `backend/tests/test_mortgage_assistant_service.cpp` | In-process gRPC tests for `mortgage.assistant.MortgageAssistant/ParseOperation` over `MortgageAssistantWorkflow`: length bounds, injection checks, model availability gating, and verdict routing. |
-| `backend/tests/test_mortgage_grammar.cpp` | Proves grammar label-space matches `finance.proto` (27 operations, 184 fields in declaration order), verifies enum tables, and tests character-level automaton rejection and non-vacuous gold validation. |
-| `backend/tests/test_mortgage_verification.cpp` | Standalone tests for the 5 mortgage verification gates: operation vocabulary, field totality, utterance value grounding, absent-params detection, and plausibility bounds. |
 | `backend/tests/test_vendored_proto_drift.cpp` | Compares vendored client protos in `clients/mortgagefv/proto/` and `frontend/src/grpc/` against canonical backend protos in `backend/proto/`. |
+| `scripts/check_envoy_services.py` (ctest `EnvoyTranscoderServicesTest`) | The services `backend/envoy.yaml` lists under `grpc_json_transcoder` must equal the services in the generated `api_descriptor.pb`. A name Envoy cannot find in the descriptor makes it refuse the configuration at startup, so `/healthz` never answers and the deploy fails its healthcheck while the previous deployment keeps serving; a descriptor service missing from the list has no JSON route. The image build also runs `envoy --mode validate` on the same two files (`backend/Dockerfile`), which turns the first failure into an immediate build failure that prints Envoy's message. |
 
 ---
 

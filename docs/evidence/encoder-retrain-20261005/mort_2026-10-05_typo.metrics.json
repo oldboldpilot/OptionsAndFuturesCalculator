@@ -1,0 +1,1309 @@
+{
+ "meta": {
+  "args": {
+   "train": "agent/dataset/data_mortgage/train.jsonl",
+   "val": "agent/dataset/data_mortgage/val.jsonl",
+   "op_key": "operation",
+   "out_dir": "agent/train/runs/mort_2026-10-05_typo",
+   "epochs": 6,
+   "limit": null,
+   "batch_size": 64,
+   "lr": 0.002,
+   "warmup": 200,
+   "weight_decay": 0.01,
+   "loss_weights": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "no_bf16": false,
+   "pure_bf16": false,
+   "device": "cpu",
+   "cuda_device": 0,
+   "threads": 4,
+   "seed": 0,
+   "threshold": 0.5,
+   "dev_frac": 0.0,
+   "max_minutes": null,
+   "min_coverage": 0.99,
+   "question_mode": "real",
+   "min_class_count": 20,
+   "min_pair_count": 8,
+   "vocab_size": 4096,
+   "digits": "chunk",
+   "extra_val": [],
+   "augment_digits": 0.25,
+   "augment_format": 0.35,
+   "first_turn_examples": 0.0,
+   "print_failures": 0,
+   "probe_unseen": true,
+   "probe_ask": true,
+   "probe_format": true,
+   "d_model": 128,
+   "n_layers": 3,
+   "n_heads": 4,
+   "max_len": 160,
+   "ffn": "geglu",
+   "norm": "layernorm",
+   "no_bias": false,
+   "no_emb_norm": false,
+   "no_segments": false,
+   "no_pooler": false,
+   "no_lit_mlp": false,
+   "heads": "pair",
+   "servable": true,
+   "pos": "learned",
+   "dropout": 0.1,
+   "no_lit_features": false
+  },
+  "n_params": 963096,
+  "train_minutes": 2.529234794775645,
+  "total_minutes": 3.3875253200531006,
+  "process_cpu_seconds": 415.939664621,
+  "load_average_at_end": [
+   19.90087890625,
+   17.96630859375,
+   17.0166015625
+  ],
+  "oracle_row_coverage": {
+   "train": 1.0,
+   "val": 1.0
+  },
+  "train_sha256": "2fad2971ddd22e2dbb97579de09cad5bcac07d2649d2be7726c90ba863b58ff2",
+  "val_sha256": "bf804b2d6b6cd67d1b01f0a3c61bc341be37a0d3639921bf02ef892e5ca5172e",
+  "question_mode": "real",
+  "op_key": "operation"
+ },
+ "history": [
+  {
+   "epoch": 1,
+   "secs": 25.069151878356934,
+   "tok_per_s": 24309.717494916007,
+   "loss": {
+    "op": 2.0817646643968932,
+    "conv": 0.46186844192903137,
+    "pair": 3.0694833900675427
+   },
+   "eval_set": "val",
+   "op_acc": 0.6933333277702332,
+   "row_acc": 0.09166666666666666,
+   "pair_f1": 0.497583607191185
+  },
+  {
+   "epoch": 2,
+   "secs": 25.219489574432373,
+   "tok_per_s": 24128.00616777335,
+   "loss": {
+    "op": 0.4726060561773331,
+    "conv": 0.07655472130717596,
+    "pair": 1.1737296960353019
+   },
+   "eval_set": "val",
+   "op_acc": 0.971666693687439,
+   "row_acc": 0.6766666666666666,
+   "pair_f1": 0.8550046772684751
+  },
+  {
+   "epoch": 3,
+   "secs": 23.30070686340332,
+   "tok_per_s": 26175.68658219306,
+   "loss": {
+    "op": 0.0497221119956155,
+    "conv": 0.004462515814740382,
+    "pair": 0.3424386720370772
+   },
+   "eval_set": "val",
+   "op_acc": 0.996666669845581,
+   "row_acc": 0.9233333333333333,
+   "pair_f1": 0.9744413611800788
+  },
+  {
+   "epoch": 4,
+   "secs": 25.355127096176147,
+   "tok_per_s": 24048.15395667871,
+   "loss": {
+    "op": 0.011986867378554606,
+    "conv": 0.001829319932142288,
+    "pair": 0.09209166809200445
+   },
+   "eval_set": "val",
+   "op_acc": 1.0,
+   "row_acc": 0.9833333333333333,
+   "pair_f1": 0.9968399885090491
+  },
+  {
+   "epoch": 5,
+   "secs": 25.240739107131958,
+   "tok_per_s": 24139.70515735954,
+   "loss": {
+    "op": 0.0012708947919713991,
+    "conv": 0.00019056341515397688,
+    "pair": 0.024237395319164152
+   },
+   "eval_set": "val",
+   "op_acc": 1.0,
+   "row_acc": 0.9966666666666667,
+   "pair_f1": 0.9989955517290859
+  },
+  {
+   "epoch": 6,
+   "secs": 25.218095302581787,
+   "tok_per_s": 24147.73965651782,
+   "loss": {
+    "op": 0.00018176629623286323,
+    "conv": 8.363757382407811e-05,
+    "pair": 0.010811452525319901
+   },
+   "eval_set": "val",
+   "op_acc": 1.0,
+   "row_acc": 0.9966666666666667,
+   "pair_f1": 0.9988518943742825
+  }
+ ],
+ "probe": {
+  "one": {
+   "n": 562,
+   "original": 0.99644128113879,
+   "fresh_digits": 0.994661921708185,
+   "pair_f1_original": 0.9988518943742825,
+   "pair_f1_fresh": 0.9988518943742825,
+   "bad_fields": [
+    [
+     [
+      "ComputeClosingCosts",
+      "appraisal_fee"
+     ],
+     2
+    ],
+    [
+     [
+      "ComputeClosingCosts",
+      "inspection_fee"
+     ],
+     2
+    ],
+    [
+     [
+      "ComputeRentVsBuy",
+      "loan_term_years"
+     ],
+     1
+    ],
+    [
+     [
+      "ComputeRentVsBuy",
+      "years"
+     ],
+     1
+    ]
+   ]
+  },
+  "all": {
+   "n": 562,
+   "original": 0.99644128113879,
+   "fresh_digits": 0.9822064056939501,
+   "pair_f1_original": 0.9988518943742825,
+   "pair_f1_fresh": 0.9974145360528583,
+   "bad_fields": [
+    [
+     [
+      "ComputeRefinance",
+      "new_pmi_monthly"
+     ],
+     2
+    ],
+    [
+     [
+      "ComputeClosingCosts",
+      "appraisal_fee"
+     ],
+     2
+    ],
+    [
+     [
+      "ComputeClosingCosts",
+      "inspection_fee"
+     ],
+     2
+    ],
+    [
+     [
+      "ComputeRentalCashFlow",
+      "occupancy_rate"
+     ],
+     1
+    ],
+    [
+     [
+      "ComputeDetailedAmortization",
+      "monthly_hoa"
+     ],
+     1
+    ],
+    [
+     [
+      "ComputeMortgageRecast",
+      "lump_sum_payment"
+     ],
+     1
+    ],
+    [
+     [
+      "ComputeRentVsBuy",
+      "loan_term_years"
+     ],
+     1
+    ],
+    [
+     [
+      "ComputeRentVsBuy",
+      "years"
+     ],
+     1
+    ]
+   ]
+  },
+  "pool": {
+   "n": 562,
+   "original": 0.99644128113879,
+   "fresh_digits": 0.9928825622775801,
+   "pair_f1_original": 0.9988518943742825,
+   "pair_f1_fresh": 0.9974167623421355,
+   "bad_fields": [
+    [
+     [
+      "ComputeClosingCosts",
+      "appraisal_fee"
+     ],
+     2
+    ],
+    [
+     [
+      "ComputeClosingCosts",
+      "inspection_fee"
+     ],
+     2
+    ],
+    [
+     [
+      "ComputeRentVsBuy",
+      "loan_term_years"
+     ],
+     1
+    ],
+    [
+     [
+      "ComputeRentVsBuy",
+      "years"
+     ],
+     1
+    ],
+    [
+     [
+      "ComputeRefinance",
+      "cash_out_amount"
+     ],
+     1
+    ],
+    [
+     [
+      "ComputeRefinance",
+      "new_pmi_monthly"
+     ],
+     1
+    ]
+   ]
+  }
+ },
+ "extra_val": {},
+ "ask_probe": {
+  "n": 88,
+  "asks_correctly": 1.0,
+  "op_correct": 1.0,
+  "missing_set_exact": 1.0
+ },
+ "format_probe": {
+  "drop the $ sign": {
+   "n": 578,
+   "too_long": 0,
+   "original": 0.9965397923875432,
+   "retyped": 0.9948096885813149,
+   "op_original": 1.0,
+   "op_retyped": 1.0,
+   "bad_fields": [
+    [
+     [
+      "ComputeClosingCosts",
+      "appraisal_fee"
+     ],
+     2
+    ],
+    [
+     [
+      "ComputeClosingCosts",
+      "inspection_fee"
+     ],
+     2
+    ],
+    [
+     [
+      "ComputeNpv",
+      "values"
+     ],
+     1
+    ]
+   ]
+  },
+  "drop thousands commas": {
+   "n": 578,
+   "too_long": 0,
+   "original": 0.9965397923875432,
+   "retyped": 0.9826989619377162,
+   "op_original": 1.0,
+   "op_retyped": 1.0,
+   "bad_fields": [
+    [
+     [
+      "ComputePaybackPeriod",
+      "values"
+     ],
+     2
+    ],
+    [
+     [
+      "ComputeClosingCosts",
+      "appraisal_fee"
+     ],
+     2
+    ],
+    [
+     [
+      "ComputeClosingCosts",
+      "inspection_fee"
+     ],
+     2
+    ],
+    [
+     [
+      "ComputeRentalCashFlow",
+      "annual_property_tax"
+     ],
+     1
+    ],
+    [
+     [
+      "ComputeRentalCashFlow",
+      "closing_costs"
+     ],
+     1
+    ],
+    [
+     [
+      "ComputeAmortization",
+      "annual_insurance"
+     ],
+     1
+    ]
+   ]
+  },
+  "'6.5%' -> '6.5 percent'": {
+   "n": 496,
+   "too_long": 0,
+   "original": 0.9959677419354839,
+   "retyped": 0.9959677419354839,
+   "op_original": 1.0,
+   "op_retyped": 1.0,
+   "bad_fields": [
+    [
+     [
+      "ComputeClosingCosts",
+      "appraisal_fee"
+     ],
+     2
+    ],
+    [
+     [
+      "ComputeClosingCosts",
+      "inspection_fee"
+     ],
+     2
+    ]
+   ]
+  },
+  "'$250,000' -> '$250k'": {
+   "n": 186,
+   "too_long": 0,
+   "original": 0.9946236559139785,
+   "retyped": 0.9946236559139785,
+   "op_original": 1.0,
+   "op_retyped": 1.0,
+   "bad_fields": [
+    [
+     [
+      "ComputeClosingCosts",
+      "appraisal_fee"
+     ],
+     1
+    ],
+    [
+     [
+      "ComputeClosingCosts",
+      "inspection_fee"
+     ],
+     1
+    ]
+   ]
+  },
+  "'6.5%' -> '6.5 pct'": {
+   "n": 496,
+   "too_long": 0,
+   "original": 0.9959677419354839,
+   "retyped": 0.9959677419354839,
+   "op_original": 1.0,
+   "op_retyped": 1.0,
+   "bad_fields": [
+    [
+     [
+      "ComputeClosingCosts",
+      "appraisal_fee"
+     ],
+     2
+    ],
+    [
+     [
+      "ComputeClosingCosts",
+      "inspection_fee"
+     ],
+     2
+    ]
+   ]
+  },
+  "'6.5%' -> '6.5 per cent'": {
+   "n": 496,
+   "too_long": 0,
+   "original": 0.9959677419354839,
+   "retyped": 0.9959677419354839,
+   "op_original": 1.0,
+   "op_retyped": 1.0,
+   "bad_fields": [
+    [
+     [
+      "ComputeClosingCosts",
+      "appraisal_fee"
+     ],
+     2
+    ],
+    [
+     [
+      "ComputeClosingCosts",
+      "inspection_fee"
+     ],
+     2
+    ]
+   ]
+  },
+  "space before % ('6.5 %')": {
+   "n": 496,
+   "too_long": 0,
+   "original": 0.9959677419354839,
+   "retyped": 0.9959677419354839,
+   "op_original": 1.0,
+   "op_retyped": 1.0,
+   "bad_fields": [
+    [
+     [
+      "ComputeClosingCosts",
+      "appraisal_fee"
+     ],
+     2
+    ],
+    [
+     [
+      "ComputeClosingCosts",
+      "inspection_fee"
+     ],
+     2
+    ]
+   ]
+  },
+  "'0.5%' -> '.5%' (leading dot)": {
+   "n": 35,
+   "too_long": 0,
+   "original": 0.9428571428571428,
+   "retyped": 0.9428571428571428,
+   "op_original": 1.0,
+   "op_retyped": 1.0,
+   "bad_fields": [
+    [
+     [
+      "ComputeClosingCosts",
+      "appraisal_fee"
+     ],
+     2
+    ],
+    [
+     [
+      "ComputeClosingCosts",
+      "inspection_fee"
+     ],
+     2
+    ]
+   ]
+  },
+  "space after $ ('$ 495,000')": {
+   "n": 578,
+   "too_long": 0,
+   "original": 0.9965397923875432,
+   "retyped": 0.9965397923875432,
+   "op_original": 1.0,
+   "op_retyped": 1.0,
+   "bad_fields": [
+    [
+     [
+      "ComputeClosingCosts",
+      "appraisal_fee"
+     ],
+     2
+    ],
+    [
+     [
+      "ComputeClosingCosts",
+      "inspection_fee"
+     ],
+     2
+    ]
+   ]
+  },
+  "'$495,000' -> 'USD 495,000'": {
+   "n": 578,
+   "too_long": 0,
+   "original": 0.9965397923875432,
+   "retyped": 0.9965397923875432,
+   "op_original": 1.0,
+   "op_retyped": 1.0,
+   "bad_fields": [
+    [
+     [
+      "ComputeClosingCosts",
+      "appraisal_fee"
+     ],
+     2
+    ],
+    [
+     [
+      "ComputeClosingCosts",
+      "inspection_fee"
+     ],
+     2
+    ]
+   ]
+  },
+  "'$250k' uppercase K": {
+   "n": 186,
+   "too_long": 0,
+   "original": 0.9946236559139785,
+   "retyped": 0.9946236559139785,
+   "op_original": 1.0,
+   "op_retyped": 1.0,
+   "bad_fields": [
+    [
+     [
+      "ComputeClosingCosts",
+      "appraisal_fee"
+     ],
+     1
+    ],
+    [
+     [
+      "ComputeClosingCosts",
+      "inspection_fee"
+     ],
+     1
+    ]
+   ]
+  },
+  "'30 years' -> '30 yrs'": {
+   "n": 438,
+   "too_long": 0,
+   "original": 1.0,
+   "retyped": 1.0,
+   "op_original": 1.0,
+   "op_retyped": 1.0,
+   "bad_fields": []
+  },
+  "'per month' -> '/mo'": {
+   "n": 93,
+   "too_long": 0,
+   "original": 1.0,
+   "retyped": 0.989247311827957,
+   "op_original": 1.0,
+   "op_retyped": 1.0,
+   "bad_fields": [
+    [
+     [
+      "ComputeDetailedAmortization",
+      "monthly_hoa"
+     ],
+     1
+    ]
+   ]
+  },
+  "'per year' -> '/yr'": {
+   "n": 140,
+   "too_long": 0,
+   "original": 0.9857142857142858,
+   "retyped": 0.9857142857142858,
+   "op_original": 1.0,
+   "op_retyped": 1.0,
+   "bad_fields": [
+    [
+     [
+      "ComputeClosingCosts",
+      "appraisal_fee"
+     ],
+     2
+    ],
+    [
+     [
+      "ComputeClosingCosts",
+      "inspection_fee"
+     ],
+     2
+    ]
+   ]
+  },
+  "'months' -> 'mo'": {
+   "n": 59,
+   "too_long": 0,
+   "original": 0.9661016949152542,
+   "retyped": 0.9661016949152542,
+   "op_original": 1.0,
+   "op_retyped": 1.0,
+   "bad_fields": [
+    [
+     [
+      "ComputeClosingCosts",
+      "appraisal_fee"
+     ],
+     2
+    ],
+    [
+     [
+      "ComputeClosingCosts",
+      "inspection_fee"
+     ],
+     2
+    ]
+   ]
+  },
+  "double spaces": {
+   "n": 598,
+   "too_long": 0,
+   "original": 0.9966555183946488,
+   "retyped": 0.9966555183946488,
+   "op_original": 1.0,
+   "op_retyped": 1.0,
+   "bad_fields": [
+    [
+     [
+      "ComputeClosingCosts",
+      "appraisal_fee"
+     ],
+     2
+    ],
+    [
+     [
+      "ComputeClosingCosts",
+      "inspection_fee"
+     ],
+     2
+    ]
+   ]
+  },
+  "UPPERCASE the request": {
+   "n": 600,
+   "too_long": 0,
+   "original": 0.9966666666666667,
+   "retyped": 0.9966666666666667,
+   "op_original": 1.0,
+   "op_retyped": 1.0,
+   "bad_fields": [
+    [
+     [
+      "ComputeClosingCosts",
+      "appraisal_fee"
+     ],
+     2
+    ],
+    [
+     [
+      "ComputeClosingCosts",
+      "inspection_fee"
+     ],
+     2
+    ]
+   ]
+  },
+  "lowercase the request": {
+   "n": 562,
+   "too_long": 0,
+   "original": 0.99644128113879,
+   "retyped": 0.99644128113879,
+   "op_original": 1.0,
+   "op_retyped": 1.0,
+   "bad_fields": [
+    [
+     [
+      "ComputeClosingCosts",
+      "appraisal_fee"
+     ],
+     2
+    ],
+    [
+     [
+      "ComputeClosingCosts",
+      "inspection_fee"
+     ],
+     2
+    ]
+   ]
+  },
+  "no space after a comma": {
+   "n": 308,
+   "too_long": 0,
+   "original": 0.9935064935064936,
+   "retyped": 0.9935064935064936,
+   "op_original": 1.0,
+   "op_retyped": 1.0,
+   "bad_fields": [
+    [
+     [
+      "ComputeClosingCosts",
+      "appraisal_fee"
+     ],
+     2
+    ],
+    [
+     [
+      "ComputeClosingCosts",
+      "inspection_fee"
+     ],
+     2
+    ]
+   ]
+  },
+  "role-word typo (last two letters)": {
+   "n": 256,
+   "too_long": 0,
+   "original": 0.9921875,
+   "retyped": 0.9921875,
+   "op_original": 1.0,
+   "op_retyped": 1.0,
+   "bad_fields": [
+    [
+     [
+      "ComputeClosingCosts",
+      "appraisal_fee"
+     ],
+     2
+    ],
+    [
+     [
+      "ComputeClosingCosts",
+      "inspection_fee"
+     ],
+     2
+    ]
+   ]
+  },
+  "'$495,000' -> '495,000 dollars'": {
+   "n": 578,
+   "too_long": 0,
+   "original": 0.9965397923875432,
+   "retyped": 0.8217993079584776,
+   "op_original": 1.0,
+   "op_retyped": 0.991349458694458,
+   "bad_fields": [
+    [
+     [
+      "ComputeAmortization",
+      "annual_rate"
+     ],
+     22
+    ],
+    [
+     [
+      "ComputeRentalRoi",
+      "periodic_mortgage_payment"
+     ],
+     18
+    ],
+    [
+     [
+      "ComputeDetailedAmortization",
+      "annual_rate"
+     ],
+     14
+    ],
+    [
+     [
+      "ComputePayment",
+      "rate"
+     ],
+     12
+    ],
+    [
+     [
+      "ComputeHeloc",
+      "annual_rate"
+     ],
+     11
+    ],
+    [
+     [
+      "ComputeFutureValueDetailed",
+      "annual_rate"
+     ],
+     8
+    ]
+   ]
+  },
+  "'$495,000' -> '495,000 USD' (suffix)": {
+   "n": 578,
+   "too_long": 0,
+   "original": 0.9965397923875432,
+   "retyped": 0.9965397923875432,
+   "op_original": 1.0,
+   "op_retyped": 1.0,
+   "bad_fields": [
+    [
+     [
+      "ComputeClosingCosts",
+      "appraisal_fee"
+     ],
+     2
+    ],
+    [
+     [
+      "ComputeClosingCosts",
+      "inspection_fee"
+     ],
+     2
+    ]
+   ]
+  },
+  "'$495,000' -> 'US$495,000'": {
+   "n": 578,
+   "too_long": 0,
+   "original": 0.9965397923875432,
+   "retyped": 0.9878892733564014,
+   "op_original": 1.0,
+   "op_retyped": 1.0,
+   "bad_fields": [
+    [
+     [
+      "ComputeNpv",
+      "values"
+     ],
+     5
+    ],
+    [
+     [
+      "ComputeClosingCosts",
+      "appraisal_fee"
+     ],
+     2
+    ],
+    [
+     [
+      "ComputeClosingCosts",
+      "inspection_fee"
+     ],
+     2
+    ]
+   ]
+  },
+  "'$495,000' -> 'USD495,000' (no space)": {
+   "n": 578,
+   "too_long": 0,
+   "original": 0.9965397923875432,
+   "retyped": 0.9757785467128027,
+   "op_original": 1.0,
+   "op_retyped": 1.0,
+   "bad_fields": [
+    [
+     [
+      "ComputeClosingCosts",
+      "appraisal_fee"
+     ],
+     13
+    ],
+    [
+     [
+      "ComputeClosingCosts",
+      "inspection_fee"
+     ],
+     7
+    ],
+    [
+     [
+      "ComputeNpv",
+      "values"
+     ],
+     1
+    ]
+   ]
+  },
+  "'495,000' -> '495,000.00' (explicit cents)": {
+   "n": 571,
+   "too_long": 0,
+   "original": 0.9964973730297724,
+   "retyped": 0.4290718038528897,
+   "op_original": 1.0,
+   "op_retyped": 1.0,
+   "bad_fields": [
+    [
+     [
+      "ComputeRentalCashFlow",
+      "annual_property_tax"
+     ],
+     36
+    ],
+    [
+     [
+      "ComputeRentalCashFlow",
+      "annual_repairs"
+     ],
+     36
+    ],
+    [
+     [
+      "ComputeRentalCashFlow",
+      "down_payment"
+     ],
+     36
+    ],
+    [
+     [
+      "ComputeRentalCashFlow",
+      "property_price"
+     ],
+     36
+    ],
+    [
+     [
+      "ComputeAmortization",
+      "loan_amount"
+     ],
+     34
+    ],
+    [
+     [
+      "ComputeRentalCashFlow",
+      "annual_capex_reserve"
+     ],
+     34
+    ]
+   ]
+  },
+  "'6.5%' -> '6.5percent' (no space)": {
+   "n": 496,
+   "too_long": 0,
+   "original": 0.9959677419354839,
+   "retyped": 0.6854838709677419,
+   "op_original": 1.0,
+   "op_retyped": 1.0,
+   "bad_fields": [
+    [
+     [
+      "ComputeRentalCashFlow",
+      "loan_annual_rate"
+     ],
+     36
+    ],
+    [
+     [
+      "ComputeRentalCashFlow",
+      "occupancy_rate"
+     ],
+     36
+    ],
+    [
+     [
+      "ComputeRefinance",
+      "new_annual_rate"
+     ],
+     29
+    ],
+    [
+     [
+      "ComputeRefinance",
+      "current_annual_rate"
+     ],
+     26
+    ],
+    [
+     [
+      "ComputePayment",
+      "rate"
+     ],
+     10
+    ],
+    [
+     [
+      "ComputeAmortization",
+      "annual_rate"
+     ],
+     9
+    ]
+   ]
+  },
+  "role-word typo (first two letters)": {
+   "n": 256,
+   "too_long": 0,
+   "original": 0.9921875,
+   "retyped": 0.62109375,
+   "op_original": 1.0,
+   "op_retyped": 1.0,
+   "bad_fields": [
+    [
+     [
+      "ComputeRentalCashFlow",
+      "down_payment"
+     ],
+     27
+    ],
+    [
+     [
+      "ComputeClosingCosts",
+      "down_payment_percent"
+     ],
+     18
+    ],
+    [
+     [
+      "ComputeAmortization",
+      "loan_amount"
+     ],
+     14
+    ],
+    [
+     [
+      "ComputePayment",
+      "present_value"
+     ],
+     13
+    ],
+    [
+     [
+      "ComputeClosingCosts",
+      "annual_rate"
+     ],
+     7
+    ],
+    [
+     [
+      "ComputeDetailedAmortization",
+      "original_home_value"
+     ],
+     5
+    ]
+   ]
+  }
+ },
+ "contamination": {
+  "n_val": 600,
+  "n_identical_to_train": 11,
+  "row_acc_on_disjoint_rows": 0.9966044142614601
+ },
+ "final": {
+  "n": 600,
+  "op_acc": 1.0,
+  "op_acc_params_rows": 1.0,
+  "none_rows": 38,
+  "none_rows_correct": 38,
+  "conv_acc": {
+   "closing_cost_type": [
+    1.0,
+    30
+   ],
+   "component": [
+    1.0,
+    12
+   ],
+   "compound_frequency": [
+    1.0,
+    41
+   ],
+   "discounted": [
+    1.0,
+    25
+   ],
+   "method": [
+    1.0,
+    13
+   ]
+  },
+  "pair": {
+   "literals": 3448,
+   "exact_set_acc": 0.9988399071925754,
+   "slot_set_acc": 0.9988399071925754,
+   "map_acc_given_slot": 1.0,
+   "precision": 0.9988518943742825,
+   "recall": 0.9988518943742825,
+   "f1": 0.9988518943742825
+  },
+  "row_acc": 0.9966666666666667,
+  "row_acc_params_rows": 0.99644128113879,
+  "row_acc_given_gold_op": 0.99644128113879,
+  "field_acc": 0.9992885094272501,
+  "by_op": {
+   "ComputeDetailedAmortization": [
+    67,
+    67
+   ],
+   "ComputePaybackPeriod": [
+    25,
+    25
+   ],
+   "ComputePresentValue": [
+    7,
+    7
+   ],
+   "ComputePayment": [
+    57,
+    57
+   ],
+   "ComputePrincipalPayment": [
+    6,
+    6
+   ],
+   "ComputeRentalRoi": [
+    23,
+    23
+   ],
+   "ComputeAmortization": [
+    72,
+    72
+   ],
+   "ComputeRate": [
+    13,
+    13
+   ],
+   "ComputeCumulative": [
+    12,
+    12
+   ],
+   "ComputeDepreciation": [
+    13,
+    13
+   ],
+   "ComputeHomeNpv": [
+    8,
+    8
+   ],
+   "ComputeHeloc": [
+    39,
+    39
+   ],
+   "ComputeRentalCashFlow": [
+    36,
+    36
+   ],
+   "ComputePeriods": [
+    10,
+    10
+   ],
+   "ComputeRentVsBuy": [
+    19,
+    19
+   ],
+   "ComputeClosingCosts": [
+    16,
+    18
+   ],
+   "ComputeRefinance": [
+    30,
+    30
+   ],
+   "ComputeFutureValueDetailed": [
+    41,
+    41
+   ],
+   "ComputeIrr": [
+    1,
+    1
+   ],
+   "ComputeFutureValue": [
+    4,
+    4
+   ],
+   "ComputeXnpv": [
+    3,
+    3
+   ],
+   "ComputePayoffTiming": [
+    10,
+    10
+   ],
+   "ComputeInterestPayment": [
+    12,
+    12
+   ],
+   "ComputeMortgageRecast": [
+    10,
+    10
+   ],
+   "ComputeNpv": [
+    11,
+    11
+   ],
+   "ComputeXirr": [
+    5,
+    5
+   ],
+   "ComputeAmortizationBatch": [
+    7,
+    7
+   ],
+   "ComputeHomeFutureValue": [
+    3,
+    3
+   ]
+  },
+  "by_kind": {
+   "clarify": [
+    88,
+    88
+   ],
+   "single": [
+    404,
+    406
+   ],
+   "revise": [
+    68,
+    68
+   ],
+   "single:none": [
+    38,
+    38
+   ]
+  },
+  "bad_fields": [
+   [
+    [
+     "ComputeClosingCosts",
+     "appraisal_fee"
+    ],
+    2
+   ],
+   [
+    [
+     "ComputeClosingCosts",
+     "inspection_fee"
+    ],
+    2
+   ]
+  ]
+ }
+}

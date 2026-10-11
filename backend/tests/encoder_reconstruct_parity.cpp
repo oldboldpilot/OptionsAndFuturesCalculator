@@ -61,7 +61,7 @@
 #include <new>
 
 import std;
-import encoder_reconstruct;
+import sensen.encoder_reconstruct;
 import fastjson;
 import sensen.bigdecimal;
 
@@ -141,8 +141,8 @@ namespace {
  */
 [[nodiscard]] auto format_field_value(
     std::string_view key,
-    const encoder_reconstruct::FieldValue& fval,
-    const encoder_reconstruct::Schema& sch) -> std::string {
+    const sensen::encoder_reconstruct::FieldValue& fval,
+    const sensen::encoder_reconstruct::Schema& sch) -> std::string {
 
     if (fval.is_missing()) {
         return "null";
@@ -190,8 +190,8 @@ namespace {
  * and zero insignificant whitespace.
  */
 [[nodiscard]] auto format_params(
-    const encoder_reconstruct::Schema& sch,
-    const encoder_reconstruct::ReconstructedParams& rec) -> std::string {
+    const sensen::encoder_reconstruct::Schema& sch,
+    const sensen::encoder_reconstruct::ReconstructedParams& rec) -> std::string {
 
     std::string out = "{";
 
@@ -271,7 +271,7 @@ auto main(int argc, char** argv) -> int {
         return 1;
     }
 
-    auto sch_res = encoder_reconstruct::Schema::from_json(*schema_text);
+    auto sch_res = sensen::encoder_reconstruct::Schema::from_json(*schema_text);
     if (!sch_res) {
         std::fprintf(stderr, "Error parsing schema JSON: %s\n", sch_res.error().c_str());
         return 1;
@@ -324,7 +324,7 @@ auto main(int argc, char** argv) -> int {
             continue;
         }
 
-        auto lits_res = encoder_reconstruct::Literal::from_json_array(elem["lits"]);
+        auto lits_res = sensen::encoder_reconstruct::Literal::from_json_array(elem["lits"]);
         if (!lits_res) {
             std::printf("{\"row\":%d,\"error\":\"Failed to parse literals: %s\"}\n",
                         row_id, escape_json(lits_res.error()).c_str());
@@ -426,7 +426,7 @@ auto main(int argc, char** argv) -> int {
         if (apply_mask) {
             bool masked_ok = true;
             for (auto& plist : lit_pairs) {
-                auto m = encoder_reconstruct::maskPairsToOperation(
+                auto m = sensen::encoder_reconstruct::maskPairsToOperation(
                     sch, op, std::span<const int>(plist));
                 if (!m) {
                     std::printf("{\"row\":%d,\"error\":\"mask: %s\"}\n",
@@ -440,7 +440,7 @@ auto main(int argc, char** argv) -> int {
         }
 
         // Execute reconstruct
-        auto res = encoder_reconstruct::reconstruct(sch, op, *lits_res, lit_pairs, conv);
+        auto res = sensen::encoder_reconstruct::reconstruct(sch, op, *lits_res, lit_pairs, conv);
         if (!res) {
             std::printf("{\"row\":%d,\"error\":\"%s\"}\n",
                         row_id, escape_json(res.error()).c_str());

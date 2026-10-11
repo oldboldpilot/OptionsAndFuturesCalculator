@@ -29,6 +29,13 @@
 # FINE -- calculator.proto and assistant.proto are not part of the mortgage
 # client's surface. A vendored proto with NO backend counterpart is an error:
 # "a dead entry beside a missing one reads exactly like coverage".
+#
+# mortgage_assistant.proto is deliberately NOT in this set any more. The mortgage
+# assistant moved to the nest-egg-loan repository (2026-10), whose copy is now
+# the canonical one, so there is no backend/proto/ file here to compare against. The
+# rule above makes that self-enforcing: a vendored copy re-added under clients/
+# fails as "NOT PRESENT" rather than quietly standing in for a contract this
+# repository no longer owns.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

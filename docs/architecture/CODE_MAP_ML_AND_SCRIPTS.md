@@ -14,9 +14,13 @@
 
 This document provides exhaustive reference documentation for the machine learning data and training pipeline, evaluation harnesses, operational maintenance scripts, backend C++ diagnostic probes, and the end-to-end integration smoke client across the repository:
 
+> The mortgage corpus builder, its gRPC evaluation harness and the mortgage-only probes this map used to
+> cover were DELETED from this repository in 2026-10 with the mortgage assistant (see `CLAUDE.md`, "gRPC
+> Surface"); they were not moved. Where they are preserved and the state of the port are stated once, in the
+> `CLAUDE.md` banner under "Mortgage assistant".
+
 - **ML Dataset Generators**:
   - `agent/dataset/build_dataset.py` (Options & Futures strategy extraction dataset)
-  - `agent/dataset/build_mortgage_dataset.py` (Mortgage & fixed-income operation dataset)
 - **Training and Profiling Pipelines**:
   - `agent/train/train.py` (QLoRA / SFT training harness)
   - `agent/profile/profile.sh` (Nsight timeline & kernel profiler)
@@ -24,9 +28,8 @@ This document provides exhaustive reference documentation for the machine learni
 - **Model Evaluation Harnesses**:
   - `agent/train/evaluate.py` (In-process PyTorch/CUDA evaluation on merged bf16 weights)
   - `agent/train/eval_grpc.py` (Live gRPC evaluation of strategy assistant against running engine)
-  - `agent/train/eval_grpc_mortgage.py` (Live gRPC evaluation of mortgage assistant with GP-ARA stderr capture)
 - **Operational and Utility Scripts (`scripts/`)**:
-  - All 24 operational shell, Python, Node.js, and maintenance scripts.
+  - The operational shell, Python, Node.js, and maintenance scripts.
 - **Backend C++ Diagnostic Probes (`backend/src/*_probe.cpp`)**:
   - All 16 standalone parity, throughput, numerical audit, and KV-cache benchmark binaries.
 - **Backend Smoke Test Client**:
@@ -75,80 +78,6 @@ Defined in `agent/dataset/build_dataset.py:734-766`:
 
 ---
 
-### `agent/dataset/build_mortgage_dataset.py`
-
-#### Purpose
-Generates synthetic multi-turn ShareGPT-formatted datasets (`train.jsonl`, `val.jsonl`, `meta.json`) for fine-tuning a model to map natural-language mortgage and fixed-income queries into structured RPC invocations declared in `backend/proto/finance.proto` (`agent/dataset/build_mortgage_dataset.py:1-40`).
-
-#### Proto AST Parsing and In-Scope Operations
-The script mechanically parses `backend/proto/finance.proto` without depending on external compiler tools (`parse_finance_proto`, `agent/dataset/build_mortgage_dataset.py:144-193`):
-- **In-Scope Sections** (`agent/dataset/build_mortgage_dataset.py:199-202`):
-  - `"Time Value of Money"`
-  - `"Mortgages and HELOC"`
-  - `"Cash-Flow Analysis"`
-  - `"Depreciation"`
-  - `"Real Estate Investment"`
-- **Excluded RPCs** (`agent/dataset/build_mortgage_dataset.py:226-228`):
-  - `ConvertInterestRate`
-  - `ComputeFisherRate`
-- **Operation Excluded Fields (`OP_EXCLUDED_FIELDS`)** (`agent/dataset/build_mortgage_dataset.py:269-283`):
-  - `ComputeXirr`: `{"rate", "guess"}`
-  - `ComputeXnpv`: `{"guess"}`
-  - `ComputeRate`: `{"guess"}`
-  - `ComputeIrr`: `{"guess"}`
-
-#### Operation Generators and Mix Weights
-The generator samples across 22 distinct tasks (`mix` table, `agent/dataset/build_mortgage_dataset.py:2347-2377`):
-
-| Generator Function | Weight | Target RPC / Task | Line |
-| :--- | :---: | :--- | :--- |
-| `gen_payment` | 12 | `ComputePayment` | `agent/dataset/build_mortgage_dataset.py:749-808` |
-| `gen_amortization` | 12 | `ComputeAmortization` | `agent/dataset/build_mortgage_dataset.py:1001-1113` |
-| `gen_closing_costs` | 10 | `ComputeClosingCosts` | `agent/dataset/build_mortgage_dataset.py:1270-1404` |
-| `gen_refinance` | 8 | `ComputeRefinance` | `agent/dataset/build_mortgage_dataset.py:1406-1560` |
-| `gen_recast` | 6 | `ComputeMortgageRecast` | `agent/dataset/build_mortgage_dataset.py:1562-1631` |
-| `gen_heloc` | 6 | `ComputeHeloc` | `agent/dataset/build_mortgage_dataset.py:1633-1720` |
-| `gen_rent_vs_buy` | 6 | `ComputeRentVsBuy` | `agent/dataset/build_mortgage_dataset.py:2209-2282` |
-| `gen_rental_roi` | 5 | `ComputeRentalRoi` | `agent/dataset/build_mortgage_dataset.py:2284-2345` |
-| `gen_present_value` | 4 | `ComputePresentValue` | `agent/dataset/build_mortgage_dataset.py:810-847` |
-| `gen_future_value` | 4 | `ComputeFutureValue` | `agent/dataset/build_mortgage_dataset.py:849-896` |
-| `gen_periods` | 4 | `ComputePeriods` | `agent/dataset/build_mortgage_dataset.py:898-946` |
-| `gen_rate` | 4 | `ComputeRate` | `agent/dataset/build_mortgage_dataset.py:948-999` |
-| `gen_payoff_timing` | 4 | `ComputePayoffTiming` | `agent/dataset/build_mortgage_dataset.py:1722-1794` |
-| `gen_cumulative` | 4 | `ComputeCumulative` | `agent/dataset/build_mortgage_dataset.py:1796-1863` |
-| `gen_depreciation` | 4 | `ComputeDepreciation` | `agent/dataset/build_mortgage_dataset.py:2134-2207` |
-| `gen_npv` | 3 | `ComputeNpv` | `agent/dataset/build_mortgage_dataset.py:1865-1923` |
-| `gen_xnpv` | 3 | `ComputeXnpv` | `agent/dataset/build_mortgage_dataset.py:1925-1974` |
-| `gen_irr` | 3 | `ComputeIrr` | `agent/dataset/build_mortgage_dataset.py:1976-2025` |
-| `gen_xirr` | 3 | `ComputeXirr` | `agent/dataset/build_mortgage_dataset.py:2027-2085` |
-| `gen_payback` | 3 | `ComputePaybackPeriod` | `agent/dataset/build_mortgage_dataset.py:2087-2132` |
-| `gen_clarification` | 12 | Multi-turn missing parameter question | `agent/dataset/build_mortgage_dataset.py:1115-1189` |
-| `gen_modification` | 12 | Multi-turn parameter override | `agent/dataset/build_mortgage_dataset.py:1191-1268` |
-
-*Total mix weight: 132.*
-
-#### CLI Arguments and Defaults
-Defined in `agent/dataset/build_mortgage_dataset.py:2451-2487`:
-- `--proto`: Path to input proto file (default: `"backend/proto/finance.proto"`, line 2453).
-- `--output-dir`: Output folder for JSONL and metadata (default: `"agent/dataset/data_mortgage"`, line 2459).
-- `--train-size`: Number of training examples (default: `5000`, line 2465).
-- `--val-ratio`: Validation holdout split ratio (default: `0.05`, line 2470).
-- `--seed`: RNG seed (default: `42`, line 2475).
-
-#### Load-Bearing Invariants
-1. **Money Phrasing and Cent Drift Prevention (`phrase_money`)** (`agent/dataset/build_mortgage_dataset.py:329-372`):
-   Spoken currency phrases are strictly formatted from the exact decimal string representation produced by `money_str(v)`. This prevents fractional cents truncation and formatting drift (e.g., phrasing `$1,250.50` as "twelve hundred fifty dollars" without cents). If an utterance text drops the cents, the backend's fail-closed grounding gate `G3` rejects the emitted decimal as an `UngroundedValue`.
-2. **Label Derivability Assertion** (`agent/dataset/build_mortgage_dataset.py:426-433`):
-   Every generated `<params>` block undergoes an internal verification pass asserting that every emitted numeric parameter can be derived from the generated prompt via the candidate mappings (M0..M9).
-3. **M9 Candidate Mapping Coverage** (`agent/dataset/build_mortgage_dataset.py:1460-1468`):
-   Down payment amounts generated as percentages must satisfy $\text{down\_payment} = \text{purchase\_price} \times \text{down\_payment\_percent}$ to remain verifiable under backend grounding map M9.
-4. **Prepaid Interest Days Convention** (`agent/dataset/build_mortgage_dataset.py:1322-1349`):
-   Closing cost rows emit either explicit whole-day counts or default to 0 / 15 depending on the presence of specific month-end closing phrasing.
-5. **Metadata Provenance** (`agent/dataset/build_mortgage_dataset.py:2417-2427`):
-   Every run produces a `meta.json` file recording the git commit SHA, generator weights, random seed, and exact row counts.
-
----
-
 ## Training and Profiling Pipelines
 
 ### `agent/train/train.py`
@@ -191,7 +120,7 @@ When `--extend-vocab` is enabled (`agent/train/train.py:162-237`):
 - Weight Merging Hook `_patch_merged_embedding` (`agent/train/train.py:551-570`): Injects newly trained embeddings into base model weights prior to saving merged safetensors.
 
 #### Load-Bearing Formatting Constraints
-1. **System Prompt Byte-Exactness**: The system prompt injected during dataset packing must match byte-for-byte the constant `kSystemPrompt` defined in `backend/src/modules/assistant_service.cpp:119` or `backend/src/modules/mortgage_assistant_service.cpp:169`. Any deviation causes prompt-mismatch regression during inference.
+1. **System Prompt Byte-Exactness**: The system prompt injected during dataset packing must match byte-for-byte the constant `kSystemPrompt` defined in `backend/src/modules/assistant_service.cpp:119`. Any deviation causes prompt-mismatch regression during inference.
 2. **Four-Turn Clarification Shape**: Multi-turn rows follow the strict sequence: `User -> Assistant (question) -> User (clarification) -> Assistant (<params>)`.
 3. **Catalogue Alignment**: Strategy and operation names must match the static string tables generated in `backend/src/modules/strategy_catalogue.cppm`.
 
@@ -283,35 +212,9 @@ Guards against false evaluation scores when the test environment is unconfigured
 
 ---
 
-### `agent/train/eval_grpc_mortgage.py`
-
-#### Purpose
-Evaluates mortgage operation parameter extraction on a running `calculator_engine` via `sensen.finance.MortgageAssistant/ParseOperation` (`agent/train/eval_grpc_mortgage.py:1-40`). It features simultaneous tailing of the engine's `stderr` stream (`RawOutputTail`, lines 110-155) to capture raw model decodes prior to C++ GP-ARA verification.
-
-#### Metrics and Denominators
-Defined in `agent/train/eval_grpc_mortgage.py:444-499`:
-1. **Raw Model Accuracy (Pre-Verification)**:
-   - `params exact-match` (`raw_exact / raw_total`): Gold has params, model emitted identical JSON.
-   - `emitted valid <params>` (`raw_emitted / raw_total`): Model emitted syntactically valid JSON params block.
-   - `<params> but bad JSON` (`raw_block_invalid / raw_total`): Model emitted opening tag but malformed syntax.
-   - `non-params correct` (`raw_nonparam_ok / raw_nonparam_total`): Gold is prose/refusal, model emitted no params.
-   - `asked-when-ambiguous` (`asked_raw_ok / asked_total`): Ambiguous rows where model asked a question on turn 1.
-   - `answered-when-stated` (`answered_raw_ok / answered_total`): Modification rows where model answered turn 1.
-2. **Served Outcome (Post-GP-ARA)**:
-   - `params`, `clarification`, `refusal` ratios over `total_served` (`agent/train/eval_grpc_mortgage.py:482-488`).
-   - `served_exact / raw_total` (`:493`): Params that passed all verification gates and matched gold exactly.
-   - Breakdown of refusal reason codes (`refusal_shapes`, lines 490-492).
-
-#### Holdout Disjointness Assertion
-Enforces dataset hygiene across corpus iterations (`agent/train/eval_grpc_mortgage.py:525-530, 561-584`):
-- `--assert-disjoint-from <train.jsonl>`: Asserts that zero holdout evaluation rows exist within the specified training set.
-- Default Behavior: If any row overlaps, raises `SystemExit` (lines 578-580). This fail-closed check prevents a known defect where training row contamination in holdout sets falsely inflated evaluation benchmarks. Overriding requires passing `--allow-contamination` (line 529).
-
----
-
 ## Operational Scripts (`scripts/`)
 
-### Summary Table of All 24 Scripts
+### Summary Table of Scripts
 
 | Script File | Language / Runtime | Operational Role | Key Flags & Dependencies |
 | :--- | :--- | :--- | :--- |
@@ -323,14 +226,11 @@ Enforces dataset hygiene across corpus iterations (`agent/train/eval_grpc_mortga
 | `eval_assistant_sensen.py` | Python 3 | Evaluates strategy assistant on running engine with raw vs RPC layer scoring. | `<holdout.jsonl> <engine.log> [--layer raw\|rpc]`; requires gRPC stubs |
 | `gen_proto.sh` | Bash | Generates TypeScript gRPC-Web client stubs from backend protobuf files. | Uses `protoc` with `protoc-gen-grpc-web`; outputs to `frontend/src/grpc/` |
 | `generate_strategy_catalogue.py` | Python 3 | Generates `backend/src/modules/strategy_catalogue.cppm` from `strategies.json`. | Reads `strategies.json`; supports `--check` for drift detection |
-| `measure_serving_reproducibility.py`| Python 3 | Measures 2x2 matrix {local, prod} x {sequential, concurrent} on serving holdouts. | Uses `ThreadPoolExecutor`; parses protobuf `outcome` oneof arm |
 | `mint_pro_gate_creds.mjs` | Node.js | Mints valid, expired, bad-signature, and free-tier license tokens for testing. | Imports `workers/billing/src/licence.ts`; requires `LICENCE_SIGNING_KEY` |
 | `probe_finance_service.py` | Python 3 | Validates `sensen.finance.Finance` against independent Python math over gRPC-Web. | Hand-encoded protobuf framing; `decimal.Decimal` 18-place fixed-point checks |
 | `probe_live_assistant.py` | Python 3 | Verifies live deployed strategy assistant over gRPC-Web text transport. | Tests Qwen3-0.6B Q8 KV cache, GP-ARA gate, and `ES` root disambiguation |
 | `probe_live_engine.py` | Python 3 | Post-deploy check verifying calculator engine via calendar spread payoff curve. | Checks `StrategyResponse.curve_days_to_expiration` (field 15) |
 | `probe_live_term_structure.py` | Python 3 | Verifies live futures term structure and quote feeds over gRPC-Web. | Tests `GetMarketChain`/`GetMarketQuote`; checks level floor and unmapped refusals |
-| `probe_local_under_load.py` | Python 3 | Evaluates local engine determinism under concurrent background RPC traffic. | Spawns background worker threads issuing `ParseOperation` requests |
-| `probe_mortgage_adversarial.py` | Python 3 | Exercises mortgage assistant GP-ARA gate against adversarial prompt injections. | Asserts `SAFE` and `GROUNDED` invariants over real gRPC `ParseOperation` |
 | `probe_pro_gate.sh` | Bash | Executes pro-gate authorization test matrix over native gRPC. | Drives `smoke_client ... pro` with credentials minted by Node.js |
 | `probe_pro_gate_web.py` | Python 3 | Executes pro-gate authorization test matrix over live gRPC-Web ingress. | Distinguishes `PERMISSION_DENIED` from network errors; verifies liveness first |
 | `probe_replica_periodicity.py` | Python 3 | Probes production replicas to distinguish cyclic routing from numeric noise. | Calculates auto-correlation lag agreement across repeated requests |
@@ -412,7 +312,7 @@ Multi-phase automated review gate (`scripts/code_review_adversarial.sh:1-60`):
 
 ##### `scripts/gen_proto.sh`
 - **gRPC-Web TypeScript Client Generation** (`scripts/gen_proto.sh:1-40`):
-  Invokes `protoc` with `protoc-gen-grpc-web` to generate TypeScript client stubs in `frontend/src/grpc/` from canonical proto definitions in `backend/proto/` (`calculator.proto`, `finance.proto`, `assistant.proto`, `mortgage_assistant.proto`). Generated stubs are committed to git to support serverless frontend builds on Cloudflare Pages.
+  Invokes `protoc` with `protoc-gen-grpc-web` to generate TypeScript client stubs in `frontend/src/grpc/` from canonical proto definitions in `backend/proto/` (`calculator.proto`, `finance.proto`, `assistant.proto`). Generated stubs are committed to git to support serverless frontend builds on Cloudflare Pages.
 
 ---
 
@@ -448,28 +348,14 @@ Multi-phase automated review gate (`scripts/code_review_adversarial.sh:1-60`):
   3. Order-book discipline (verifies unconfigured market feeds do not fabricate bid/ask/volume).
   4. Refusal on unmapped commodity roots.
 
-##### `scripts/probe_mortgage_adversarial.py`
-- **Adversarial Gate Validation** (`scripts/probe_mortgage_adversarial.py:1-37`):
-  Issues adversarial queries to `ParseOperation` on a running engine to verify GP-ARA fail-closed properties:
-  - `SAFE`: The response must never emit unverified `<params>` on adversarial prompts, injections, or out-of-scope requests (must return refusal or clarification).
-  - `GROUNDED`: If `<params>` are emitted, all numeric fields must be grounded in prompt tokens via admissible candidate maps M1..M9.
-
 ##### `scripts/probe_pro_gate.sh` & `scripts/probe_pro_gate_web.py`
 - **Dual-Transport Pro-Gate Verification**:
   - `probe_pro_gate.sh` (`:1-25`): Runs native gRPC tests using `smoke_client` against local/staging engines.
   - `probe_pro_gate_web.py` (`:1-28`): Runs tests over gRPC-Web against production. Executes an anonymous single-leg liveness control first to verify basic connectivity, and ensures only `grpc-status: 7` (`PERMISSION_DENIED`) is scored as an authorization refusal (distinguishing genuine authorization denials from network drops or 5xx server errors).
 
-##### `scripts/measure_serving_reproducibility.py`
-- **Factorial Serving Analysis** (`scripts/measure_serving_reproducibility.py:1-27`):
-  Measures generation consistency across a 2x2 matrix: {local, production} $\times$ {sequential, concurrent} using a fixed 16-row evaluation holdout (`val2_closingcosts.jsonl`), scoring purely on response structure (`outcome` oneof arm).
-
 ##### `scripts/probe_replica_periodicity.py`
 - **Multi-Replica Stability Probe** (`scripts/probe_replica_periodicity.py:1-15`):
   Evaluates production response variations across requests to determine if instability stems from per-replica state discrepancies (periodic response sequence across 3 replicas) or per-request numerical noise. Calculates auto-correlation lag agreement for lags 1 through 5.
-
-##### `scripts/probe_local_under_load.py`
-- **Batch Sharing and Determinism** (`scripts/probe_local_under_load.py:1-20`):
-  Runs a sequential evaluation battery through the local engine while background threads generate concurrent RPC traffic (`ParseOperation`) to determine if continuous batching introduces numerical jitter.
 
 ##### `scripts/eval_assistant_sensen.py`
 - **Two-Layer Evaluation Harness** (`scripts/eval_assistant_sensen.py:17-29`):
@@ -580,16 +466,11 @@ Lines `backend/src/smoke_client.cpp:800-865`:
 | Test Target / Executable | Test Source Location | Exercised Components | Verified Behaviors |
 | :--- | :--- | :--- | :--- |
 | `smoke_client` | `backend/src/smoke_client.cpp` | `sensen.finance.*`, `calculator.OptionsCalculator`, Pro Gate | Verifies Black-Scholes parity, bond inversion, annuity closed forms, amortization closure, recast linearity, closing-cost base math, and pro-gate authorization over native gRPC. |
-| `test_mortgage_verification` | `backend/tests/test_mortgage_verification.cpp` | `mortgage_verification.cppm` | Re-parses `finance.proto` to verify `kLabelSpace` and `kOperationIds` have zero drift; tests `classify_slot` totality; tests G1..G5 gates, candidate maps M1..M9, down payment M0 suppression, cadence inference, and convention values. |
-| `test_mortgage_grammar` | `backend/tests/test_mortgage_grammar.cpp` | `mortgage_grammar.cppm`, `mortgage_verification.cppm` | Validates DFA state transitions, prefix rejection, enum validity, full JSON object recognition, acceptance of gold parameters from `agent/dataset/data_mortgage/val.jsonl`, and `sensen::IGrammar` interface compliance. |
 | `test_assistant_verification` | `backend/tests/test_assistant_verification.cpp` | `assistant_verification.cppm`, `strategy_catalogue.cppm` | Verifies cross-field constraints across 5 output fields; tests ambiguous root detection and clarification formatting for `"ES"` and `"CL"`; tests strategy alias normalisation, lexical support rules, and bare direction recovery. |
 | `test_assistant_service` | `backend/tests/test_assistant_service.cpp` | `assistant_service.cpp`, `assistant_verification.cppm` | End-to-end integration test of strategy assistant gRPC service layer, continuous batching, and verification gate handoff. |
-| `test_mortgage_assistant_service`| `backend/tests/test_mortgage_assistant_service.cpp`| `mortgage_assistant_service.cpp`, `mortgage_verification.cppm`| Tests mortgage assistant gRPC service layer, constrained grammar decoding, and GP-ARA verification pipeline. |
-| `probe_mortgage_adversarial.py` | `scripts/probe_mortgage_adversarial.py` | Deployed / running `calculator_engine` | Tests mortgage assistant GP-ARA gate under adversarial inputs; enforces `SAFE` (refusal/clarification) and `GROUNDED` invariants over real RPCs. |
 | `probe_pro_gate.sh` | `scripts/probe_pro_gate.sh` | Engine Pro Gate (native gRPC) | Tests pro-gate enforcement matrix (valid, expired, bad-sig, free-tier, forged claims) via `smoke_client`. |
 | `probe_pro_gate_web.py` | `scripts/probe_pro_gate_web.py` | Engine Pro Gate (gRPC-Web) | Tests pro-gate enforcement over public HTTP/gRPC-Web ingress; validates liveness and distinguishes permission denials from transport errors. |
 | `eval_grpc.py` | `agent/train/eval_grpc.py` | Strategy Assistant on `calculator_engine` | Evaluates fine-tuned Q8_0 model with Q8 KV cache on running engine over gRPC; handles multi-turn clarifications; traps infrastructure refusals. |
-| `eval_grpc_mortgage.py` | `agent/train/eval_grpc_mortgage.py` | Mortgage Assistant on `calculator_engine` | Evaluates mortgage assistant over gRPC; tails engine stderr to score raw model output; verifies holdout set disjointness via `--assert-disjoint-from`. |
 | `evaluate.py` | `agent/train/evaluate.py` | Merged bf16 checkpoint on CUDA | In-process evaluation of merged model weights; measures params exact match, field-level accuracy, and non-params correctness. |
 | `code_policy_check.sh` | `scripts/code_policy_check.sh` | First-party C++ source & build files | Audits C++ source code and build configs against Rules 3, 31, 50, and 55 in `config/cpp_details.txt`. |
 | `code_review_adversarial.sh` | `scripts/code_review_adversarial.sh` | Staged / unstaged git diffs | Static checks on git diff combined with multi-agent consensus review and language server diagnostic analysis. |

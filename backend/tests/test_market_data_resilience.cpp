@@ -31,7 +31,7 @@
 // the bug it repairs, so that last property is mandatory, not optional.
 //
 // Plain hand-rolled check()/section() harness, matching
-// tests/test_option_pricing_service.cpp and tests/test_mortgage_verification.cpp
+// tests/test_option_pricing_service.cpp and tests/test_assistant_verification.cpp
 // -- not gtest. The sensen coding policy (backend/sensen/config/cpp_details.txt
 // rule 39) forbids external test frameworks project-wide.
 #include <cstdio>

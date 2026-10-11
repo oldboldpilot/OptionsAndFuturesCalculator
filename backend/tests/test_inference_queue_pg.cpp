@@ -186,6 +186,44 @@ auto main() -> int {
     }
 
     // -----------------------------------------------------------------
+    section("lease(route): a worker takes only the tasks its build submitted");
+    {
+        reset_db(admin);
+        auto pool = make_pool("iq_test_route");
+        Queue queue{pool};
+
+        // Payloads as the admission layer writes them: a route naming surface AND build. Written by
+        // hand here so this section does not depend on inference_admission, and so the stored
+        // jsonb -- which re-renders its input -- is what the filter is proved against.
+        const auto old_build = queue.submit_remote(
+            Surface::Mortgage, R"({"prompt":"old","route":"mortgage/build-OLD"})", kFarFuture());
+        const auto new_build = queue.submit_remote(
+            Surface::Mortgage, R"({"prompt":"new","route":"mortgage/build-NEW"})", kFarFuture());
+        const auto no_route = queue.submit_remote(
+            Surface::Mortgage, R"({"prompt":"decoder"})", kFarFuture());
+        check(old_build.has_value() && new_build.has_value() && no_route.has_value(),
+              "three tasks submitted: another build's, this build's, and a decoder's");
+
+        auto mine = queue.lease(Surface::Mortgage, "new-worker", "mortgage/build-NEW");
+        check(mine.has_value() && mine->has_value() && (*mine)->id == new_build->job_id,
+              "a worker routed to build-NEW leases build-NEW's task although build-OLD's was "
+              "submitted FIRST -- the filter is applied when choosing, not after");
+        auto none_left = queue.lease(Surface::Mortgage, "new-worker", "mortgage/build-NEW");
+        check(none_left.has_value() && !none_left->has_value(),
+              "and finds nothing else: neither the other build's task nor the decoder's matches");
+
+        auto other_surface = queue.lease(Surface::Strategy, "strategy-worker", "mortgage/build-OLD");
+        check(other_surface.has_value() && !other_surface->has_value(),
+              "the surface column still partitions first: a strategy worker cannot take a mortgage "
+              "task even holding its route");
+
+        auto decoder = queue.lease(Surface::Mortgage, "decoder-worker");
+        check(decoder.has_value() && decoder->has_value() && (*decoder)->id == old_build->job_id,
+              "an EMPTY route claims any task of the surface, oldest first -- every decoder is "
+              "unchanged (and shares a surface's queue with an encoder only at its peril)");
+    }
+
+    // -----------------------------------------------------------------
     section("Expired lease -> re-leased -> STALE worker's fenced complete() is discarded");
     {
         reset_db(admin);

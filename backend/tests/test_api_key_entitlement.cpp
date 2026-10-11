@@ -24,8 +24,8 @@
 // a channel, or FINANCE_API_KEYS. KeyRegistry itself (the JSON-backed
 // registry, hashing, origin binding) is out of scope here; this file is
 // scoped to the gate's OWN decision given an Identity, the same way
-// test_mortgage_verification.cpp is scoped to mortgage_verification.cppm's
-// verdicts given a parsed operation, not to the model that produced it.
+// test_assistant_verification.cpp is scoped to assistant_verification.cppm's
+// verdicts given a parsed request, not to the model that produced it.
 //
 // PRO_GATE_MODE is set to "enforce" via setenv() at the top of main(), before
 // any gate call -- pro_gate_mode() re-reads the environment on every call
@@ -105,11 +105,9 @@ auto hmac_sha512_b64_for_test(std::string_view secret, std::string_view message)
         std::string_view{reinterpret_cast<const char*>(mac.data()), 32});
 }
 
-using options_calculator::auth::AssistantSurface;
 using options_calculator::auth::check_assistant_entitlement;
 using options_calculator::auth::check_strategy_entitlement;
 using options_calculator::auth::Identity;
-using options_calculator::auth::kMortgageSurface;
 using options_calculator::auth::kStrategySurface;
 using options_calculator::auth::KeyType;
 using options_calculator::auth::Mode;
@@ -275,7 +273,7 @@ auto main() -> int {
     // =======================================================================
     {
         const auto malformed = identity_with_outcome(Outcome::Malformed);
-        const auto status = check_assistant_entitlement(malformed, kStrategySurface);
+        const auto status = check_assistant_entitlement(malformed);
         check(!status.ok(), "ParseStrategy, malformed key: refused");
         check(static_cast<int>(status.error_code()) == 7, "...status code is 7");
         check(status.error_message() == std::string{kStrategySurface.malformed_message},
@@ -285,7 +283,7 @@ auto main() -> int {
     }
     {
         const auto unknown = identity_with_outcome(Outcome::Unknown);
-        const auto status = check_assistant_entitlement(unknown, kStrategySurface);
+        const auto status = check_assistant_entitlement(unknown);
         check(!status.ok(), "ParseStrategy, unknown key: refused");
         check(static_cast<int>(status.error_code()) == 7, "...status code is 7");
         check(status.error_message() == std::string{kStrategySurface.unknown_message},
@@ -293,7 +291,7 @@ auto main() -> int {
     }
     {
         const auto revoked = identity_with_outcome(Outcome::Revoked);
-        const auto status = check_assistant_entitlement(revoked, kStrategySurface);
+        const auto status = check_assistant_entitlement(revoked);
         check(!status.ok(), "ParseStrategy, revoked key: refused");
         check(static_cast<int>(status.error_code()) == 7, "...status code is 7");
         check(status.error_message() == std::string{kStrategySurface.revoked_message},
@@ -301,7 +299,7 @@ auto main() -> int {
     }
     {
         const auto no_key = identity_with_outcome(Outcome::NoKey);
-        const auto status = check_assistant_entitlement(no_key, kStrategySurface);
+        const auto status = check_assistant_entitlement(no_key);
         check(!status.ok(), "ParseStrategy, no key: refused");
         check(static_cast<int>(status.error_code()) == 7, "...status code is 7");
         check(status.error_message() == std::string{kStrategySurface.message},
@@ -312,7 +310,7 @@ auto main() -> int {
         free_identity.tier = "free";
         free_identity.authenticated = true;
         free_identity.outcome = Outcome::Ok;
-        const auto status = check_assistant_entitlement(free_identity, kStrategySurface);
+        const auto status = check_assistant_entitlement(free_identity);
         check(!status.ok(), "ParseStrategy, authenticated free-tier identity: refused");
         check(static_cast<int>(status.error_code()) == 7, "...status code is 7");
         check(status.error_message() == std::string{kStrategySurface.message},
@@ -320,51 +318,17 @@ auto main() -> int {
     }
 
     // =======================================================================
-    section("4. check_assistant_entitlement (kMortgageSurface): the ACTUAL incident");
-    // =======================================================================
-    // mortgagefvcalculator.com's own surface. Same shape as section 3, but
-    // this is the exact combination that produced 206 misleading refusals in
-    // production: a malformed key on ParseOperation.
-    {
-        const auto malformed = identity_with_outcome(Outcome::Malformed);
-        const auto status = check_assistant_entitlement(malformed, kMortgageSurface);
-        check(!status.ok(), "ParseOperation, malformed key: refused");
-        check(static_cast<int>(status.error_code()) == 7, "...status code is 7");
-        check(status.error_message() == std::string{kMortgageSurface.malformed_message},
-              "...message is EXACTLY kMortgageSurface.malformed_message: \"" +
-                  status.error_message() + "\"");
-        check(status.error_message() != std::string{kMortgageSurface.message},
-              "...and is NOT the 'is a Pro feature' text this incident was misdiagnosed against");
-    }
-    {
-        const auto revoked = identity_with_outcome(Outcome::Revoked);
-        const auto status = check_assistant_entitlement(revoked, kMortgageSurface);
-        check(!status.ok(), "ParseOperation, revoked key: refused");
-        check(static_cast<int>(status.error_code()) == 7, "...status code is 7");
-        check(status.error_message() == std::string{kMortgageSurface.revoked_message},
-              "...message is EXACTLY kMortgageSurface.revoked_message");
-    }
-    {
-        const auto unknown = identity_with_outcome(Outcome::Unknown);
-        const auto status = check_assistant_entitlement(unknown, kMortgageSurface);
-        check(!status.ok(), "ParseOperation, unknown key: refused");
-        check(static_cast<int>(status.error_code()) == 7, "...status code is 7");
-        check(status.error_message() == std::string{kMortgageSurface.unknown_message},
-              "...message is EXACTLY kMortgageSurface.unknown_message");
-    }
-
-    // =======================================================================
     section("5. check_assistant_entitlement: ADMIT path is unchanged");
     // =======================================================================
     {
         const auto pro = pro_identity("pro");
-        const auto status = check_assistant_entitlement(pro, kStrategySurface);
+        const auto status = check_assistant_entitlement(pro);
         check(status.ok(), "pro identity, ParseStrategy: admitted");
     }
     {
         const auto partner = pro_identity("partner");
-        const auto status = check_assistant_entitlement(partner, kMortgageSurface);
-        check(status.ok(), "partner identity, ParseOperation: admitted");
+        const auto status = check_assistant_entitlement(partner);
+        check(status.ok(), "partner identity, ParseStrategy: admitted");
     }
     {
         // A Pro identity that somehow also carries a non-Ok outcome (should
@@ -372,7 +336,7 @@ auto main() -> int {
         // not be fooled by it either way -- is_pro() is checked FIRST).
         auto pro_but_odd = pro_identity("partner");
         pro_but_odd.outcome = Outcome::Malformed;
-        const auto status = check_assistant_entitlement(pro_but_odd, kMortgageSurface);
+        const auto status = check_assistant_entitlement(pro_but_odd);
         check(status.ok(), "pro/partner tier wins regardless of a stray outcome value: admitted");
     }
 
@@ -385,9 +349,9 @@ auto main() -> int {
         const auto strategy_status = check_strategy_entitlement(malformed, 4);
         check(strategy_status.ok(),
               "PRO_GATE_MODE unset: even a malformed-key 4-leg request is admitted (gate Off)");
-        const auto assistant_status = check_assistant_entitlement(malformed, kMortgageSurface);
+        const auto assistant_status = check_assistant_entitlement(malformed);
         check(assistant_status.ok(),
-              "PRO_GATE_MODE unset: even a malformed-key ParseOperation call is admitted");
+              "PRO_GATE_MODE unset: even a malformed-key ParseStrategy call is admitted");
         setenv("PRO_GATE_MODE", "enforce", 1);  // restore for anything run after this binary
     }
 
@@ -429,8 +393,8 @@ auto main() -> int {
             check(ok, "a freshly minted Pro licence verifies");
             check(id.tier == "pro", "...and carries tier=pro");
             check(id.authenticated, "...and is authenticated");
-            check(check_assistant_entitlement(id, kMortgageSurface).ok(),
-                  "...so ParseOperation is ADMITTED -- the direction a refuse-only "
+            check(check_assistant_entitlement(id).ok(),
+                  "...so ParseStrategy is ADMITTED -- the direction a refuse-only "
                   "test can never prove");
         }
 
@@ -443,7 +407,7 @@ auto main() -> int {
             const bool ok = verify_licence(mint(tier, 3600), id);
             check(ok && id.tier == tier,
                   std::string{"a "} + tier + " licence verifies and keeps its tier");
-            check(check_assistant_entitlement(id, kMortgageSurface).ok(),
+            check(check_assistant_entitlement(id).ok(),
                   std::string{"...and "} + tier + " is admitted to the assistant");
         }
 

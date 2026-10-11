@@ -10,7 +10,7 @@
 // validation, defaulting, and marshalling around that pricer.
 //
 // Plain hand-rolled check()/section() harness, matching
-// tests/test_mortgage_verification.cpp -- NOT gtest. The sensen coding
+// tests/test_assistant_verification.cpp -- NOT gtest. The sensen coding
 // policy (config/cpp_details.txt rule 39) forbids external test
 // frameworks, and this repo already has one working, in-tree convention
 // for a standalone gRPC-service test: build the request/response protos,
@@ -127,7 +127,7 @@ import finance_service;
 namespace {
 
 // ---------------------------------------------------------------------------
-// Harness (mirrors tests/test_mortgage_verification.cpp).
+// Harness (mirrors tests/test_assistant_verification.cpp).
 // ---------------------------------------------------------------------------
 
 int g_checks = 0;

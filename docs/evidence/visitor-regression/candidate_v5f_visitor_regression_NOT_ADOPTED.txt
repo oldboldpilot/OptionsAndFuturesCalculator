@@ -1,0 +1,370 @@
+PASS pay-01     sparse  ComputePayment
+PASS pay-02     full    ComputePayment
+PASS pay-03     should  ComputePayment
+PASS pay-04     suffix  ComputePayment
+PASS pay-05     suffix  ComputePayment
+PASS pay-06     sparse  ComputePayment
+PASS pay-07     sparse  ComputePayment
+PASS pay-08     sparse  ComputePayment
+PASS pay-09     typo    ComputePayment
+PASS pay-10     range   clarification
+PASS pay-11     twoturn ComputePayment
+PASS pay-12     twoturn ComputePayment
+PASS pay-13     twoturn ComputePayment
+PASS pv-01      sparse  ComputePresentValue
+PASS pv-02      full    ComputePresentValue
+PASS pv-03      should  ComputePresentValue
+PASS pv-04      suffix  ComputePresentValue
+PASS fv-01      sparse  ComputeFutureValue
+PASS fv-02      sparse  ComputeFutureValue
+FAIL fv-03      should  [wrong_outcome:asked] asked (Over how many years?), wanted params
+       Is it worth leaving $25,000 in an account at 4.5% for 8 years? What will it be worth?
+PASS fv-04      suffix  ComputeFutureValue
+PASS fvd-01     full    ComputeFutureValueDetailed
+PASS fvd-02     sparse  ComputeFutureValueDetailed
+PASS fvd-03     full    ComputeFutureValueDetailed
+PASS fvd-04     should  ComputeFutureValueDetailed
+PASS fvd-05     suffix  ComputeFutureValueDetailed
+PASS fvd-06     twoturn ComputeFutureValue
+PASS ip-01      full    ComputeInterestPayment
+PASS ip-02      sparse  ComputeInterestPayment
+PASS ip-03      should  ComputeInterestPayment
+PASS ip-04      suffix  ComputeInterestPayment
+PASS pp-01      full    ComputePrincipalPayment
+PASS pp-02      sparse  ComputePrincipalPayment
+PASS pp-03      should  ComputePrincipalPayment
+PASS pp-04      suffix  ComputePrincipalPayment
+PASS rate-01    full    ComputeRate
+PASS rate-02    sparse  ComputeRate
+PASS rate-03    should  ComputeRate
+PASS rate-04    suffix  ComputeRate
+PASS per-01     full    ComputePeriods
+PASS per-02     sparse  ComputePeriods
+PASS per-03     should  ComputePeriods
+PASS per-04     suffix  ComputePeriods
+PASS am-01      sparse  ComputeAmortization
+PASS am-02      full    ComputeAmortization
+PASS am-03      full    ComputeAmortization
+PASS am-04      should  ComputeAmortization
+PASS am-05      suffix  ComputeAmortization
+PASS am-06      sparse  ComputeAmortization
+PASS am-07      sparse  ComputeAmortization
+PASS am-08      typo    ComputeAmortization
+PASS am-09      twoturn ComputeAmortization
+PASS am-10      twoturn ComputeAmortization
+PASS da-01      full    ComputeDetailedAmortization
+PASS da-02      sparse  ComputeDetailedAmortization
+FAIL da-03      should  [spurious_field] fields the visitor never stated: original_home_value=500000
+       Is the mortgage interest deduction worth it on $500,000 at 6% over 30 years at a 22% tax rate? Show the schedule with the deduction.
+PASS da-04      full    ComputeDetailedAmortization
+PASS da-05      twoturn ComputeDetailedAmortization
+PASS amb-01     full    ComputeAmortizationBatch
+FAIL amb-02     should  [wrong_outcome:refused] refused (The term I read from your request looks out of range, so I didn't use it. Please check it and try again.), wanted params
+       Which is cheaper, 300k at 6% for 15 years or 300k at 6.5% for 30 years?
+PASS amb-03     sparse  ComputeAmortizationBatch
+PASS po-01      full    ComputePayoffTiming
+PASS po-02      sparse  ComputePayoffTiming
+PASS po-03      should  ComputePayoffTiming
+PASS po-04      suffix  ComputePayoffTiming
+PASS po-05      twoturn ComputePayoffTiming
+PASS rc-01      full    ComputeMortgageRecast
+PASS rc-02      sparse  ComputeMortgageRecast
+PASS rc-03      should  ComputeMortgageRecast
+PASS rc-04      suffix  ComputeMortgageRecast
+PASS rf-01      should  ComputeRefinance
+PASS rf-02      full    ComputeRefinance
+PASS rf-03      should  ComputeRefinance
+PASS rf-04      suffix  ComputeRefinance
+PASS rf-05      full    ComputeRefinance
+PASS hl-01      full    ComputeHeloc
+PASS hl-02      sparse  ComputeHeloc
+PASS hl-03      should  ComputeHeloc
+PASS hl-04      suffix  ComputeHeloc
+PASS hl-05      twoturn ComputeHeloc
+PASS hf-01      full    ComputeHomeFutureValue
+PASS hf-02      sparse  ComputeHomeFutureValue
+PASS hf-03      should  ComputeHomeFutureValue
+PASS hf-04      suffix  ComputeHomeFutureValue
+PASS rb-01      sparse  ComputeRentVsBuy
+PASS rb-02      should  ComputeRentVsBuy
+PASS rb-03      full    ComputeRentVsBuy
+PASS rb-04      suffix  ComputeRentVsBuy
+PASS rb-05      sparse  ComputeRentVsBuy
+PASS rb-06      twoturn ComputeRentVsBuy
+PASS hn-01      full    ComputeHomeNpv
+FAIL hn-02      sparse  [spurious_field] fields the visitor never stated: annual_discount_rate=0.07
+       Is buying a $450,000 house worth it at 7%? Comparable rent is $2,400 a month.
+PASS hn-03      should  ComputeHomeNpv
+PASS hn-04      suffix  ComputeHomeNpv
+PASS rr-01      full    ComputeRentalRoi
+PASS rr-02      sparse  ComputeRentalRoi
+PASS rr-03      should  ComputeRentalRoi
+PASS rr-04      suffix  ComputeRentalRoi
+PASS rr-05      twoturn ComputeRentalRoi
+PASS rcf-01     sparse  ComputeRentalCashFlow
+PASS rcf-02     full    ComputeRentalCashFlow
+PASS rcf-03     should  ComputeRentalCashFlow
+PASS rcf-04     suffix  ComputeRentalCashFlow
+PASS cc-01      sparse  ComputeClosingCosts
+PASS cc-02      full    ComputeClosingCosts
+PASS cc-03      sparse  ComputeClosingCosts
+PASS cc-04      full    ComputeClosingCosts
+PASS cc-05      should  ComputeClosingCosts
+PASS cc-06      twoturn ComputeClosingCosts
+PASS cu-01      full    ComputeCumulative
+PASS cu-02      sparse  ComputeCumulative
+FAIL cu-03      should  [wrong_operation] named ComputeFutureValue, wanted ComputeCumulative
+       Is most of my first year just interest? $300,000 at 6.5% over 30 years -- total interest from month 1 to month 12?
+PASS cu-04      suffix  ComputeCumulative
+PASS dp-01      full    ComputeDepreciation
+PASS dp-02      sparse  ComputeDepreciation
+PASS dp-03      should  ComputeDepreciation
+PASS dp-04      sparse  ComputeDepreciation
+PASS dp-05      suffix  ComputeDepreciation
+PASS npv-01     full    ComputeNpv
+PASS npv-02     sparse  ComputeNpv
+PASS npv-03     should  ComputeNpv
+PASS irr-01     full    ComputeIrr
+PASS irr-02     sparse  ComputeIrr
+PASS irr-03     should  ComputeIrr
+PASS xnpv-01    full    ComputeXnpv
+PASS xnpv-02    sparse  ComputeXnpv
+PASS xirr-01    full    ComputeXirr
+PASS xirr-02    sparse  ComputeXirr
+PASS pb-01      sparse  ComputePaybackPeriod
+PASS pb-02      should  ComputePaybackPeriod
+PASS pb-03      suffix  ComputePaybackPeriod
+PASS sc1-01     sparse  ComputeAmortization
+PASS sc1-02     sparse  ComputeClosingCosts
+PASS sc1-03     should  ComputeRentVsBuy
+FAIL sc2-01     sparse  [wrong_operation] named ComputeFutureValue, wanted ComputeAmortization
+       I owe $310,000 at 5.9% with 24 years left. What if I add $500 a month?
+PASS sc2-02     should  ComputeFutureValue
+PASS sc2-03     full    ComputePayoffTiming
+PASS sc3-01     should  ComputeRefinance
+PASS sc3-02     full    ComputeRefinance
+PASS sc4-01     sparse  ComputeRentalCashFlow
+PASS sc4-02     full    ComputeRentalCashFlow
+PASS sc4-03     sparse  ComputeRentalRoi
+PASS sc5-01     should  ComputeRentVsBuy
+PASS sc5-02     full    ComputeRentVsBuy
+PASS sc6-01     sparse  ComputeAmortizationBatch
+PASS sc6-02     sparse  ComputePayment
+PASS sc7-01     sparse  ComputeAmortizationBatch
+PASS sc7-02     sparse  ComputePayment
+PASS sc8-01     full    ComputeHomeNpv
+PASS sc8-02     should  ComputeRentVsBuy
+PASS sc9-01     sparse  ComputeMortgageRecast
+PASS sc9-02     should  ComputeMortgageRecast
+PASS pg-cc-01   sparse  ComputeClosingCosts
+PASS pg-cc-02   full    ComputeClosingCosts
+PASS pg-hl-01   sparse  ComputeHeloc
+PASS pg-hl-02   full    ComputeHeloc
+PASS pg-rr-01   sparse  ComputeRentalRoi
+PASS pg-rpi-01  sparse  ComputeRentalCashFlow
+PASS pg-rb-01   sparse  ComputeRentVsBuy
+PASS pg-rb-02   should  ComputeRentVsBuy
+PASS pg-trb-01  sparse  ComputeRentVsBuy
+PASS pg-bw-01   sparse  refusal
+PASS pg-bw-02   should  clarification
+PASS pg-ex-01   sparse  ComputeAmortization
+PASS pg-ov-01   sparse  ComputeAmortization
+PASS pg-ep-01   sparse  ComputePayoffTiming
+PASS pg-af-01   should  refusal
+PASS pg-af-02   should  refusal
+PASS pg-fha-01  sparse  ComputePayment
+PASS pg-va-01   sparse  ComputePayment
+PASS pg-us-01   sparse  ComputePayment
+PASS pg-pmi-01  sparse  ComputeAmortization
+PASS pg-1530-01 should  ComputeAmortizationBatch
+PASS pg-rc-01   sparse  ComputeAmortizationBatch
+PASS pg-fv-01   sparse  ComputeFutureValue
+PASS pg-am-01   sparse  ComputeAmortization
+PASS pg-rf-01   should  ComputeRefinance
+PASS pg-rec-01  sparse  ComputeMortgageRecast
+PASS pg-npv-01  sparse  ComputeHomeNpv
+PASS pay-14     suffix  ComputePayment
+PASS pay-15     sparse  ComputePayment
+PASS pay-16     should  ComputePayment
+PASS pay-17     typo    ComputePayment
+PASS pay-18     sparse  ComputePayment
+PASS pay-19     full    ComputePayment
+PASS pay-20     twoturn ComputePayment
+PASS pv-05      sparse  ComputePresentValue
+PASS pv-06      should  ComputePresentValue
+PASS fv-05      sparse  ComputeFutureValue
+PASS fvd-07     sparse  ComputeFutureValue
+PASS fvd-08     full    ComputeFutureValueDetailed
+PASS ip-05      sparse  ComputeInterestPayment
+PASS pp-05      sparse  ComputePrincipalPayment
+PASS rate-05    sparse  ComputeRate
+PASS per-05     sparse  ComputePeriods
+PASS am-11      sparse  ComputeAmortization
+PASS am-12      suffix  ComputeAmortization
+PASS am-13      full    ComputeAmortization
+FAIL am-14      should  [wrong_operation] named ComputeAmortizationBatch, wanted ComputeAmortization
+       should I get a 15 year or 30 year? amortize $300,000 at 6.5% over 15 years first
+PASS am-15      range   clarification
+PASS da-06      suffix  ComputeDetailedAmortization
+PASS amb-04     suffix  ComputeAmortizationBatch
+PASS po-06      typo    ComputePayoffTiming
+PASS rc-05      sparse  ComputeMortgageRecast
+PASS rf-06      should  ComputeRefinance
+PASS rf-07      range   clarification
+PASS rf-08      twoturn ComputeRefinance
+PASS hl-06      should  ComputeHeloc
+PASS hl-07      sparse  ComputeHeloc
+PASS hf-05      typo    ComputeHomeFutureValue
+PASS rb-07      should  ComputeRentVsBuy
+PASS rb-08      suffix  ComputeRentVsBuy
+PASS rb-09      full    ComputeRentVsBuy
+PASS hn-05      should  ComputeHomeNpv
+PASS rr-06      typo    ComputeRentalRoi
+PASS rr-07      full    ComputeRentalRoi
+PASS rcf-05     should  ComputeRentalCashFlow
+PASS rcf-06     full    ComputeRentalCashFlow
+PASS cc-07      suffix  ComputeClosingCosts
+PASS cc-08      typo    ComputeClosingCosts
+PASS cc-09      full    ComputeClosingCosts
+PASS cu-05      sparse  ComputeCumulative
+PASS dp-06      full    ComputeDepreciation
+PASS dp-07      should  ComputeDepreciation
+PASS npv-04     suffix  ComputeNpv
+PASS irr-04     suffix  ComputeIrr
+PASS xnpv-03    should  ComputeXnpv
+PASS xirr-03    should  ComputeXirr
+PASS pb-04      sparse  ComputePaybackPeriod
+PASS pg-am-02   should  ComputeAmortization
+PASS pg-am-03   sparse  ComputeAmortization
+PASS pg-ct-01   sparse  ComputePayment
+PASS pg-hl-03   sparse  ComputeHeloc
+PASS pg-rf-02   sparse  ComputeRefinance
+PASS pg-rec-02  should  ComputeMortgageRecast
+PASS pg-ep-02   sparse  ComputePayoffTiming
+PASS pg-rb-03   should  ComputeRentVsBuy
+PASS pg-rr-02   should  ComputeRentalRoi
+PASS pg-fv-02   sparse  ComputeFutureValueDetailed
+PASS pg-cc-03   should  ComputeClosingCosts
+PASS pg-npv-02  full    ComputeHomeNpv
+PASS sc1-04     should  ComputePayment
+PASS sc3-03     sparse  ComputeRefinance
+PASS sc4-04     should  ComputeRentalCashFlow
+PASS sc5-03     sparse  ComputeClosingCosts
+PASS sc9-03     sparse  ComputeMortgageRecast
+PASS site-01    sparse  ComputeAmortization
+PASS site-02    sparse  ComputeAmortization
+PASS site-03    full    ComputeAmortization
+PASS live-01    sparse  ComputeClosingCosts
+PASS live-02    sparse  ComputeClosingCosts
+PASS live-03    sparse  ComputeClosingCosts
+PASS live-04    sparse  ComputeRefinance
+PASS live-05    sparse  ComputeRefinance
+PASS live-06    oos     refusal
+PASS live-07    oos     refusal
+PASS live-08    sparse  ComputePayment
+PASS live-09    sparse  ComputePayment
+PASS oos-01     oos     refusal
+PASS oos-02     oos     refusal
+PASS oos-03     oos     refusal
+PASS oos-04     oos     refusal
+PASS oos-05     oos     refusal
+PASS oos-06     oos     refusal
+FAIL oos-07     oos     [wrong_outcome:asked] asked (What's the interest rate?), wanted refusal
+       tell me a joke
+PASS oos-08     oos     refusal
+PASS oos-09     oos     refusal
+PASS oos-10     oos     refusal
+PASS oos-11     oos     refusal
+PASS oos-12     oos     refusal
+PASS oos-13     oos     refusal
+PASS oos-14     oos     refusal
+
+TOTAL 264/272 passed
+
+BY EXPECTED OUTCOME
+  clarification                                  3/3  
+  clarification/params                           0/1  
+  clarification/refusal                          2/2  
+  params                                       242/248
+  refusal                                       17/18 
+
+BY OPERATION / GROUP
+  live:usability-audit                           9/9  
+  oos                                           13/14 
+  op:ComputeAmortization                        14/15 
+  op:ComputeAmortizationBatch                    3/4  
+  op:ComputeClosingCosts                         9/9  
+  op:ComputeCumulative                           4/5  
+  op:ComputeDepreciation                         7/7  
+  op:ComputeDetailedAmortization                 5/6  
+  op:ComputeFutureValue                          4/5  
+  op:ComputeFutureValueDetailed                  8/8  
+  op:ComputeHeloc                                7/7  
+  op:ComputeHomeFutureValue                      5/5  
+  op:ComputeHomeNpv                              4/5  
+  op:ComputeInterestPayment                      5/5  
+  op:ComputeIrr                                  4/4  
+  op:ComputeMortgageRecast                       5/5  
+  op:ComputeNpv                                  4/4  
+  op:ComputePaybackPeriod                        4/4  
+  op:ComputePayment                             20/20 
+  op:ComputePayoffTiming                         6/6  
+  op:ComputePeriods                              5/5  
+  op:ComputePresentValue                         6/6  
+  op:ComputePrincipalPayment                     5/5  
+  op:ComputeRate                                 5/5  
+  op:ComputeRefinance                            8/8  
+  op:ComputeRentVsBuy                            9/9  
+  op:ComputeRentalCashFlow                       6/6  
+  op:ComputeRentalRoi                            7/7  
+  op:ComputeXirr                                 3/3  
+  op:ComputeXnpv                                 3/3  
+  page:15-vs-30-year-mortgage-calculator         1/1  
+  page:biweekly-mortgage                         2/2  
+  page:early-mortgage-payoff-calculator          2/2  
+  page:fha-mortgage-calculator                   1/1  
+  page:future-value                              2/2  
+  page:heloc-calculator                          3/3  
+  page:mortgage                                  3/3  
+  page:mortgage-affordability-calculator         2/2  
+  page:mortgage-calculator-with-extra-payments   1/1  
+  page:mortgage-calculator.state.city            1/1  
+  page:mortgage-closing-costs-calculator         3/3  
+  page:mortgage-overpayment-calculator           1/1  
+  page:mortgage-rates-comparison                 1/1  
+  page:mortgage-recast-calculator                2/2  
+  page:npv-of-buying-a-house                     2/2  
+  page:pmi-calculator                            1/1  
+  page:refinance-break-even-calculator           2/2  
+  page:rent-vs-buy                               3/3  
+  page:rental-property-investment-calculator     1/1  
+  page:rental-roi                                2/2  
+  page:tools.rent-vs-buy                         1/1  
+  page:usda-loan-calculator                      1/1  
+  page:va-loan-calculator                        1/1  
+  scenario:15-vs-30-year-with-5-percent-inflation   2/2  
+  scenario:15-year-versus-30-year-with-investing   2/2  
+  scenario:buying-a-rental-property              4/4  
+  scenario:first-time-buyer-5-percent-down       4/4  
+  scenario:is-buying-worth-it-at-7-percent-npv   2/2  
+  scenario:mortgage-recast-vs-extra-principal    3/3  
+  scenario:pay-off-early-or-invest               2/3  
+  scenario:refinance-when-rates-drop             3/3  
+  scenario:relocating-in-three-years             3/3  
+  site:assistant-panel                           3/3  
+
+BY ROW KIND
+  full                                          48/48 
+  oos                                           15/16 
+  range                                          3/3  
+  should                                        52/57 
+  sparse                                        95/97 
+  suffix                                        30/30 
+  twoturn                                       14/14 
+  typo                                           7/7  
+
+FAILURE CLASSES
+  wrong_operation              3
+  wrong_outcome:asked          2
+  spurious_field               2
+  wrong_outcome:refused        1

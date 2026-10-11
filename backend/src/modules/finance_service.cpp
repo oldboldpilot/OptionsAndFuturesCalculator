@@ -407,7 +407,7 @@ template <typename T>
 //   - A JSON caller through `grpc_json_transcoder` OMITS the field, so it
 //     arrives as "".
 //   - The ASSISTANT must emit every field its operation declares --
-//     `mortgage_verification.cppm`'s G2b refuses a missing key outright -- so
+//     the mortgage assistant's verifier (now in nest-egg-loan) refuses a missing key outright -- so
 //     it says "not this shape" with the convention value "0", which
 //     `kConventionValues` exempts from grounding precisely so that it can.
 //
@@ -1208,7 +1208,14 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         if (auto s = check_periods(request->periods()); !s.ok()) return s;
         if (auto s = check_period_count_ceiling(request->periods(), "periods"); !s.ok()) return s;
         REQUIRE_DECIMAL(rate, request->rate(), "rate");
-        REQUIRE_DECIMAL(pmt_v, request->payment(), "payment");
+        // A present value is what a STREAM of payments or a LUMP SUM at the end is worth today, so
+        // the question is defined by AT LEAST ONE of them; the other is zero. Both absent is a
+        // question about nothing and is still refused. (It required `payment` outright, so "what is
+        // $50,000 in 20 years worth today at 6%?" -- a future value and no payment -- was refused.)
+        if (request->payment().empty() && request->future_value().empty()) {
+            return missing_field("payment (or future_value)");
+        }
+        READ_DECIMAL(pmt_v, request->payment(), "payment");
         READ_DECIMAL(fv, request->future_value(), "future_value");
         if (auto s = check_compound_growth_safe_periods(rate.to_double(), request->periods(), "rate");
             !s.ok()) {
@@ -1228,7 +1235,14 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         if (auto s = check_periods(request->periods()); !s.ok()) return s;
         if (auto s = check_period_count_ceiling(request->periods(), "periods"); !s.ok()) return s;
         REQUIRE_DECIMAL(rate, request->rate(), "rate");
-        REQUIRE_DECIMAL(pmt_v, request->payment(), "payment");
+        // A LUMP SUM states no payment and a stream of deposits states no starting amount: the
+        // question is defined by at least one cash flow, and the other is zero. It required
+        // `payment` outright, so "what will $10,000 grow to at 5%?" was refused for a payment nobody
+        // makes. Both absent is a question about nothing and is still refused.
+        if (request->payment().empty() && request->present_value().empty()) {
+            return missing_field("payment (or present_value)");
+        }
+        READ_DECIMAL(pmt_v, request->payment(), "payment");
         READ_DECIMAL(pv_v, request->present_value(), "present_value");
         if (auto s = check_compound_growth_safe_periods(rate.to_double(), request->periods(), "rate");
             !s.ok()) {
@@ -1293,8 +1307,15 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         // Status::OK with total_interest_earned silently wrapped to a
         // fabricated figure rather than refused.
         REQUIRE_DECIMAL_SAFE(rate, request->annual_rate(), "annual_rate");
-        REQUIRE_DECIMAL_SAFE(contrib, request->annual_contribution(), "annual_contribution");
-        REQUIRE_DECIMAL_SAFE(principal, request->current_principal(), "current_principal");
+        // SOMETHING must be saved: a starting balance, a yearly contribution, or both. "$6,000 a year
+        // at 7% for 25 years" has no starting balance and "$172,300 at 3.85% for 37 years" has no
+        // contributions; each used to be refused for the figure it never mentioned. Both absent is a
+        // projection of nothing and is still refused.
+        if (request->annual_contribution().empty() && request->current_principal().empty()) {
+            return missing_field("annual_contribution (or current_principal)");
+        }
+        READ_DECIMAL_SAFE(contrib, request->annual_contribution(), "annual_contribution");
+        READ_DECIMAL_SAFE(principal, request->current_principal(), "current_principal");
         READ_DECIMAL_SAFE(inflation, request->annual_inflation_rate(), "annual_inflation_rate");
         if (auto s = check_compound_growth_safe(rate.to_double(), request->compound_frequency(),
                                                 request->years() * request->compound_frequency(),
@@ -1781,9 +1802,19 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
         };
         if (auto s = same(request->annual_rates_size(), "annual_rates"); !s.ok()) return s;
         if (auto s = same(request->term_months_size(), "term_months"); !s.ok()) return s;
-        if (auto s = same(request->extra_payments_size(), "extra_payments"); !s.ok()) return s;
-        if (auto s = same(request->pmi_rates_size(), "pmi_rates"); !s.ok()) return s;
-        if (auto s = same(request->home_values_size(), "home_values"); !s.ok()) return s;
+        // OMITTED, NOT RAGGED. `extra_payments`, `pmi_rates` and `home_values` are optional inputs:
+        // a comparison of "$350,000 at 6.75% for 30 years against 6% for 15" states a loan, a rate and
+        // a term per offer and nothing else, and the assistant now returns exactly what was stated.
+        // An array with NO entries is the caller saying nothing about it (no extra payment, no PMI,
+        // and a home worth the loan, which is the engine's own no-PMI convention); an array with the
+        // WRONG number of entries is still a ragged batch and still refused, because dropping or
+        // repeating loans would look like a complete answer.
+        const auto same_or_omitted = [&same](int m, const char* which) -> Status {
+            return m == 0 ? Status::OK : same(m, which);
+        };
+        if (auto s = same_or_omitted(request->extra_payments_size(), "extra_payments"); !s.ok()) return s;
+        if (auto s = same_or_omitted(request->pmi_rates_size(), "pmi_rates"); !s.ok()) return s;
+        if (auto s = same_or_omitted(request->home_values_size(), "home_values"); !s.ok()) return s;
 
         for (int i = 0; i < n; ++i) {
             if (auto s = check_term(request->term_months(i)); !s.ok()) return s;
@@ -1826,30 +1857,42 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
                 !s.ok()) {
                 return s;
             }
-            if (auto s = require_finite(request->extra_payments(i), "extra_payments"); !s.ok()) {
-                return s;
+            if (request->extra_payments_size() != 0) {
+                if (auto s = require_finite(request->extra_payments(i), "extra_payments"); !s.ok()) {
+                    return s;
+                }
+                if (auto s = check_double_magnitude(request->extra_payments(i), "extra_payments");
+                    !s.ok()) {
+                    return s;
+                }
             }
-            if (auto s = check_double_magnitude(request->extra_payments(i), "extra_payments");
-                !s.ok()) {
-                return s;
+            if (request->pmi_rates_size() != 0) {
+                if (auto s = require_finite(request->pmi_rates(i), "pmi_rates"); !s.ok()) return s;
+                if (auto s = check_double_magnitude(request->pmi_rates(i), "pmi_rates"); !s.ok()) {
+                    return s;
+                }
             }
-            if (auto s = require_finite(request->pmi_rates(i), "pmi_rates"); !s.ok()) return s;
-            if (auto s = check_double_magnitude(request->pmi_rates(i), "pmi_rates"); !s.ok()) {
-                return s;
-            }
-            if (auto s = require_finite(request->home_values(i), "home_values"); !s.ok()) return s;
-            if (auto s = check_double_magnitude(request->home_values(i), "home_values");
-                !s.ok()) {
-                return s;
+            if (request->home_values_size() != 0) {
+                if (auto s = require_finite(request->home_values(i), "home_values"); !s.ok()) return s;
+                if (auto s = check_double_magnitude(request->home_values(i), "home_values");
+                    !s.ok()) {
+                    return s;
+                }
             }
         }
 
         const std::vector<double> loans(request->loan_amounts().begin(), request->loan_amounts().end());
         const std::vector<double> rates(request->annual_rates().begin(), request->annual_rates().end());
         const std::vector<int> terms(request->term_months().begin(), request->term_months().end());
-        const std::vector<double> extras(request->extra_payments().begin(), request->extra_payments().end());
-        const std::vector<double> pmis(request->pmi_rates().begin(), request->pmi_rates().end());
-        const std::vector<double> homes(request->home_values().begin(), request->home_values().end());
+        const std::vector<double> extras = request->extra_payments_size() == 0
+            ? std::vector<double>(static_cast<std::size_t>(n), 0.0)
+            : std::vector<double>(request->extra_payments().begin(), request->extra_payments().end());
+        const std::vector<double> pmis = request->pmi_rates_size() == 0
+            ? std::vector<double>(static_cast<std::size_t>(n), 0.0)
+            : std::vector<double>(request->pmi_rates().begin(), request->pmi_rates().end());
+        const std::vector<double> homes = request->home_values_size() == 0
+            ? loans
+            : std::vector<double>(request->home_values().begin(), request->home_values().end());
 
         const auto summaries =
             sensen::calculate_mortgage_batch_cpu(loans, rates, terms, extras, pmis, homes);
@@ -5131,7 +5174,7 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
      *
      * Three of the four artifacts that describe this field speak days.
      * `finance.proto` documents `dates` as "day offsets from an arbitrary
-     * common epoch"; `mortgage_verification.cppm` classifies it
+     * common epoch"; the mortgage assistant's verifier (now in nest-egg-loan) classifies it
      * `SlotKind::DayOffsets` and bounds it at 36,525 -- a hundred years IN
      * DAYS; and the training corpus labels "$23,099.61 after 372 days" as
      * 372.0, because the sentence the assistant reads is itself in days.
@@ -5157,7 +5200,7 @@ class FinanceServiceImpl final : public sensen::finance::Finance::Service {
     static constexpr double kSecondsPerDay = 86'400.0;
     /**
      * A hundred years in days -- the same ceiling
-     * `mortgage_verification.cppm`'s `kMaxDayUnits` puts on this field, stated
+     * the mortgage assistant verifier's `kMaxDayUnits` (now in nest-egg-loan) puts on this field, stated
      * in the same unit so the two cannot drift apart unnoticed.
      */
     static constexpr double kMaxCashFlowDaySpan = 36'525.0;

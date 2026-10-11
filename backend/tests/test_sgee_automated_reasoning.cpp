@@ -4,7 +4,6 @@
 //   1. OptionsWorkflow (calculator_service.cpp)
 //   2. FinanceRequestLifecycle (finance_service.cpp)
 //   3. StrategyAssistantWorkflow (assistant_service.cpp)
-//   4. MortgageAssistantWorkflow (mortgage_assistant_service.cpp)
 //
 // Powered by sensen's Z3-backed General-Purpose Automated Reasoning Agent (GP-ARA Z3Reasoner,
 // backend/sensen/src/gp_ara_interfaces.cppm).
@@ -14,7 +13,7 @@
 //   P2. Node Reachability: Every node in a graph is reachable from the workflow entry node.
 //   P3. Path Termination: Every execution path terminates at a node marked terminal (no dead ends, no infinite loops).
 //   P4. Error Route Completeness: Every action that can fail has an OnError (fallback) route reaching a terminal node.
-//   P5. Mortgage Safety Invariant: response.mutable_params() is populated ONLY when the GP-ARA verification verdict is Proven.
+//   P5. Assistant Safety Invariant: response.mutable_params() is populated ONLY when the GP-ARA verification verdict is Proven.
 //       Unsafe and Indeterminate verdicts provably reach the Refused terminal node.
 
 
@@ -107,24 +106,6 @@ inline auto build_strategy_assistant_workflow() -> WorkflowGraph {
     };
 
     return WorkflowGraph{"StrategyAssistantWorkflow", result.value(), bound};
-}
-
-// 4. MortgageAssistantWorkflow (mortgage_assistant_service.cpp ~:2598)
-inline auto build_mortgage_assistant_workflow() -> WorkflowGraph {
-    auto result = sgee::Builder<void*>("MortgageAssistantWorkflow")
-        .Node("Admission").Execute("Admission").Next("CheckModel").OnError("Refused")
-        .Node("CheckModel").Execute("CheckModel").Next("Generate").OnError("Refused")
-        .Node("Generate").Execute("Generate").Next("ParseAndVerify").OnError("Refused")
-        .Node("ParseAndVerify").Execute("ParseAndVerify").Next("Done").OnError("Refused")
-        .Node("Done").IsTerminal()
-        .Node("Refused").IsTerminal()
-        .Build();
-
-    std::vector<std::string> bound = {
-        "Admission", "CheckModel", "Generate", "ParseAndVerify"
-    };
-
-    return WorkflowGraph{"MortgageAssistantWorkflow", result.value(), bound};
 }
 
 // ---------------------------------------------------------------------------
@@ -389,14 +370,14 @@ class GraphProver {
     }
 
     // -----------------------------------------------------------------------
-    // P5: Mortgage Safety Property (Verdict Isolation)
+    // P5: Assistant Safety Property (Verdict Isolation)
     // -----------------------------------------------------------------------
     // Formal proof that response.mutable_params() is populated ONLY when the
     // GP-ARA verification verdict is Proven (0). Unsafe (1) and Indeterminate (2)
     // MUST provably reach the Refused (1) terminal node without populating params.
-    auto prove_mortgage_safety(const WorkflowGraph& wg, bool inject_violation = false) -> ProofResult {
+    auto prove_verdict_isolation(const WorkflowGraph& wg, bool inject_violation = false) -> ProofResult {
         ProofResult res;
-        res.property_name = "P5: Mortgage Safety Property (Verdict Isolation)";
+        res.property_name = "P5: Assistant Safety Property (Verdict Isolation)";
 
         std::string smt;
         smt += "(declare-const query_verdict Int)\n"; // 0=Proven, 1=Unsafe, 2=Indeterminate
@@ -413,7 +394,7 @@ class GraphProver {
             smt += "(assert (= query_verdict 1))\n"; // Focus audit query on Unsafe verdict
             res.offending_node = "ParseAndVerify";
         } else {
-            // Nominal state machine matching mortgage_assistant_service.cpp:
+            // Nominal state machine matching assistant_service.cpp:
             // Proven (0) -> params_populated = true, final_node = Done (0)
             // Unsafe (1) / Indeterminate (2) -> params_populated = false, final_node = Refused (1)
             smt += "(assert (=> (= query_verdict 0) (and (= params_populated true) (= final_node 0))))\n";
@@ -430,10 +411,10 @@ class GraphProver {
         if (proof.has_value()) {
             if (*proof) {
                 res.proved = true;
-                res.details = std::format("Mortgage safety invariant holds in '{}': params populated ONLY on Proven verdict", wg.name);
+                res.details = std::format("Assistant safety invariant holds in '{}': params populated ONLY on Proven verdict", wg.name);
             } else {
                 res.proved = false;
-                res.details = std::format("Mortgage safety invariant VIOLATED at node '{}': params populated on Unsafe/Indeterminate verdict", wg.name, res.offending_node.empty() ? "ParseAndVerify" : res.offending_node);
+                res.details = std::format("Assistant safety invariant VIOLATED at node '{}': params populated on Unsafe/Indeterminate verdict", wg.name, res.offending_node.empty() ? "ParseAndVerify" : res.offending_node);
             }
         } else {
             res.proved = false;
@@ -536,8 +517,7 @@ auto main(int argc, char* argv[]) -> int {
     std::vector<sgee_reasoning::WorkflowGraph> workflows = {
         sgee_reasoning::build_options_workflow(),
         sgee_reasoning::build_finance_workflow(),
-        sgee_reasoning::build_strategy_assistant_workflow(),
-        sgee_reasoning::build_mortgage_assistant_workflow()
+        sgee_reasoning::build_strategy_assistant_workflow()
     };
 
     std::cout << "--- 1. FORMAL PROOFS FOR CORE BACKEND WORKFLOW GRAPHS ---\n";
@@ -556,8 +536,8 @@ auto main(int argc, char* argv[]) -> int {
         auto r4 = prover.prove_error_handling(wg);
         check(r4.proved, std::format("{}: {}", r4.property_name, r4.details));
 
-        if (wg.name == "MortgageAssistantWorkflow") {
-            auto r5 = prover.prove_mortgage_safety(wg);
+        if (wg.name == "StrategyAssistantWorkflow") {
+            auto r5 = prover.prove_verdict_isolation(wg);
             check(r5.proved, std::format("{}: {}", r5.property_name, r5.details));
         }
     }
@@ -577,15 +557,15 @@ auto main(int argc, char* argv[]) -> int {
     }
 
     {
-        std::cout << "\n[Discrimination Probe 5: Unsafe Parameter Population in MortgageAssistantWorkflow]\n";
-        auto mortgage_wf = sgee_reasoning::build_mortgage_assistant_workflow();
-        auto probe5 = prover.prove_mortgage_safety(mortgage_wf, true /* inject Unsafe population flaw */);
-        check(!probe5.proved, "Checker correctly REJECTED mortgage graph that populates params on Unsafe verdict");
+        std::cout << "\n[Discrimination Probe 5: Unsafe Parameter Population in StrategyAssistantWorkflow]\n";
+        auto strategy_wf = sgee_reasoning::build_strategy_assistant_workflow();
+        auto probe5 = prover.prove_verdict_isolation(strategy_wf, true /* inject Unsafe population flaw */);
+        check(!probe5.proved, "Checker correctly REJECTED assistant graph that populates params on Unsafe verdict");
         check(probe5.offending_node == "ParseAndVerify",
               std::format("Offending node correctly identified as '{}'", probe5.offending_node));
 
-        auto restored5 = prover.prove_mortgage_safety(mortgage_wf, false /* nominal safe */);
-        check(restored5.proved, "Restored MortgageAssistantWorkflow formally PROVED clean");
+        auto restored5 = prover.prove_verdict_isolation(strategy_wf, false /* nominal safe */);
+        check(restored5.proved, "Restored StrategyAssistantWorkflow formally PROVED clean");
     }
 
     {

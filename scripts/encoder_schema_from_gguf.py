@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Read `sensen-encoder.schema_json` out of the GGUF that is actually being served.
 
-WHY THIS EXISTS. `scripts/score_encoder_served_rpc.py` read its schema from
+WHY THIS EXISTS. `scripts/score_encoder_served_rpc.py` (removed with the mortgage assistant, 2026-10) read its schema from
 `/tmp/parity_regen/schema.json`, a fixture written out of a training checkpoint. That is a
 SECOND copy of the label space, in /tmp, with nothing binding it to the weights the engine
 loaded -- and this project's scars are almost all of that shape: the four label-space

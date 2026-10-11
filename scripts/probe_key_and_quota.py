@@ -86,7 +86,7 @@ def payment_request(pv: str = "495000", rate: str = "0.005625", periods: int = 3
 # --- the probe ---------------------------------------------------------------
 
 FINANCE = "/sensen.finance.Finance/ComputePayment"
-MORTGAGE = "/mortgage.assistant.MortgageAssistant/ParseOperation"
+ASSISTANT = "/calculator.assistant.StrategyAssistant/ParseStrategy"
 
 PASS, FAIL = "PASS", "FAIL"
 results: list[tuple[str, str, str]] = []
@@ -181,17 +181,17 @@ def main() -> int:
         record("NO key is SERVED (finance surface is ungated by design)", code == "OK", f"{code} {detail}")
 
     print("\n=== PRO GATE on the assistant surface ===")
-    utterance = f_str(1, "what is the payment on a $420,000 loan at 6.5%?")
-    code, detail = call(ch, MORTGAGE, utterance, [])
+    utterance = f_str(1, "buy a 580/600 SPY bull call spread, 30 days")
+    code, detail = call(ch, ASSISTANT, utterance, [])
     # THE TWO GATES ARE ORDERED AND THE ORDER IS VISIBLE HERE. Under Observe the
     # key gate serves an unkeyed caller, so the Pro gate is what refuses and the
-    # caller is told to call the free Finance RPC directly. Under Enforce the key
+    # caller is told the calculator itself is free. Under Enforce the key
     # gate refuses FIRST, so the same request comes back UNAUTHENTICATED and that
     # helpful redirection is never reached. Both are correct; asserting only the
     # PERMISSION_DENIED shape would have reported the enforce engine as broken.
     if args.expect_key_mode == "enforce":
         record(
-            "anonymous ParseOperation is refused by the KEY gate first",
+            "anonymous ParseStrategy is refused by the KEY gate first",
             code == "UNAUTHENTICATED",
             f"{code} {detail}",
         )
@@ -202,7 +202,7 @@ def main() -> int:
         # reaches the model and stalls or answers MODEL_UNAVAILABLE. Anything
         # except PERMISSION_DENIED/UNAUTHENTICATED means both gates admitted it,
         # and that — not a specific success payload — is what is being proven.
-        code, detail = call(ch, MORTGAGE, utterance, [("x-api-key", key)], timeout=8)
+        code, detail = call(ch, ASSISTANT, utterance, [("x-api-key", key)], timeout=8)
         record(
             "partner key (scope 'assistant') is ADMITTED past both gates",
             code not in ("PERMISSION_DENIED", "UNAUTHENTICATED"),
@@ -210,7 +210,7 @@ def main() -> int:
         )
     else:
         record(
-            "anonymous ParseOperation is refused by the PRO gate",
+            "anonymous ParseStrategy is refused by the PRO gate",
             code == "PERMISSION_DENIED",
             f"{code} {detail}",
         )

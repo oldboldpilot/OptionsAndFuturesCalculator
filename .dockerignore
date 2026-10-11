@@ -40,9 +40,9 @@ backend/sensen/docs
 **/perf.data*
 **/core.*
 
-# Both assistants' fine-tuned Qwen3-0.6B GGUFs (Q8_0, ~639 MB each) are fetched
-# during the build from MODEL_URL / MORTGAGE_MODEL_URL and verified against
-# MODEL_SHA256 / MORTGAGE_MODEL_SHA256 in backend/Dockerfile's `model` stage.
+# The strategy assistant's fine-tuned Qwen3-0.6B GGUF (Q8_0, ~639 MB) is fetched
+# during the build from MODEL_URL and verified against MODEL_SHA256 in
+# backend/Dockerfile's `model` stage.
 # They must never arrive through the build context instead: `COPY backend/
 # /src/backend/` in the builder stage has no verification step of its own and
 # would carry whatever it found, unchecked, into the image -- which is exactly
@@ -56,10 +56,10 @@ backend/sensen/docs
 # exist) falling back to <context>/.dockerignore -- this file. backend/
 # .dockerignore is only consulted by a build whose context is backend/, which
 # this build is not. This entry is what actually keeps a .gguf out of the
-# context, and it matters now rather than in the abstract:
-# backend/models/mortgagefv-assistant-q8_0.gguf is 639 MB and is sitting in the
-# tree today. .railwayignore excludes it from the `railway up` payload for the
-# same reason (with its own note on the ~30 s upload deadline).
+# context, and it matters now rather than in the abstract: a 639 MB decoder GGUF
+# in backend/models/ would be copied into every local build. .railwayignore
+# excludes .gguf files from the `railway up` payload for the same reason (with its
+# own note on the ~30 s upload deadline).
 **/*.gguf
 
 # EXCEPTION, added deliberately: the staged assistant models SHIP IN THE BUILD
@@ -79,19 +79,22 @@ backend/sensen/docs
 # measured, the only member under backend/models/ is .gitkeep, on both of
 # railway_deploy.sh's tar arms. The exception below has therefore been INERT for
 # every Railway build, and the staged branches in backend/Dockerfile have never
-# fired there: on Railway both encoders arrive from *_ENCODER_URL.
+# fired there: on Railway the encoder arrives from STRATEGY_ENCODER_URL.
 #
 # It is still worth narrowing, for the build whose context IS this working tree.
-# Nothing in the image uses those four files -- the decoder it would use arrives
-# from MORTGAGE_MODEL_URL, and with both assistants on ENCODERS no decoder is
-# loaded at all, because each worker constructor returns BEFORE touching one when
-# its backend is `encoder`.
+# Nothing in the image uses those four files -- the mortgage assistant they served
+# now lives in the nest-egg-loan repository, and a strategy assistant on its
+# ENCODER loads no decoder at all, because the worker constructor returns BEFORE
+# touching one when its backend is `encoder`.
 #
 # The files are NOT deleted: they are the only copies of those GGUFs on this host
 # (model-archive/ holds the bf16 safetensors, not the quantised files), so they
 # stay on disk and stop being copied into a local build context. Widen this back
 # to `*.gguf` the day a DECODER is staged deliberately, and say which one.
-!backend/models/*-encoder*.gguf
+#
+# `mortgage-encoder.gguf` is excluded by name for the same reason: the mortgage assistant it served
+# is gone from this image, and the pattern that admitted every `*-encoder*.gguf` would have copied it.
+!backend/models/strategy-encoder.gguf
 
 # model-archive/ holds MERGED BF16 CHECKPOINTS -- the safetensors a training run
 # produces, ~1.2-1.8 GB each, which are the INPUT to a GGUF conversion and reach

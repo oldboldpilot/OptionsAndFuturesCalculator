@@ -1,0 +1,29 @@
+# reconstruct parity, v5e checkpoint, 2169-row v5 val (gold pairs)
+rows: python=2169 cpp=2169
+rows differing: 0
+decimal values compared: 17067  (16779 EXACT, 288 equal within one BigDecimal ulp of 1e-38)
+
+PARITY: C++ encoder_reconstruct matches Python reconstruct on 2169/2169 rows
+
+# roles exercised by the fixture (count of literal-pair selections)
+  6276 M1 identity
+  2187 M2 percent/100
+   865 M5 years->months
+   430 M3 annual%->monthly
+   192 M8 negate
+    71 M9 a*(1-p)#A
+    71 M9 a*(1-p)#B
+    48 M9 a-b#A
+    48 M9 a-b#B
+    39 M1 identity#rep20
+    33 M10 complement%
+    15 M1 identity#rep2
+     8 M9 a*p#A
+     8 M9 a*p#B
+     7 M1 identity#rep3
+     3 M1 identity#rep4
+     2 M3 annual%->quarterly
+     2 M5 years->quarters
+     2 M1 identity#rep10
+     2 M1 identity#rep6
+     1 M1 identity#rep7

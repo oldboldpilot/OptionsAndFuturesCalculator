@@ -581,18 +581,18 @@ auto main() -> int {
     // call `open_scope_from_env`, and NOTHING exercised that on the Dense path --
     // which is the configuration production runs. That gap let a regression reach
     // a built engine: the mortgage assistant logged an EMPTY weight-store error and
-    // went UNAVAILABLE with `MORTGAGE_WEIGHT_STORE` unset. A default that breaks is
+    // went UNAVAILABLE with its selector unset. A default that breaks is
     // worse than a feature that does, so it gets its own section.
     section("the DEFAULT path: open_scope_from_env + finish() with no selector set");
     {
         for (const char* sel : {static_cast<const char*>(nullptr), "dense"}) {
             if (sel == nullptr) {
-                ::unsetenv("MORTGAGE_WEIGHT_STORE");
+                ::unsetenv("STRATEGY_WEIGHT_STORE");
             } else {
-                ::setenv("MORTGAGE_WEIGHT_STORE", sel, 1);
+                ::setenv("STRATEGY_WEIGHT_STORE", sel, 1);
             }
             const std::string what = sel == nullptr ? "unset" : "explicitly dense";
-            auto scope = ws::open_scope_from_env("MORTGAGE_WEIGHT_STORE");
+            auto scope = ws::open_scope_from_env("STRATEGY_WEIGHT_STORE");
             check(scope.has_value(),
                   std::format("{}: open_scope_from_env succeeds (error: '{}')", what,
                               scope.has_value() ? std::string{} : scope.error()));
@@ -606,7 +606,7 @@ auto main() -> int {
             check(GEMM::q8WeightSourceCount() == 0 && GEMM::bf16WeightSourceCount() == 0,
                   std::format("{}: a Dense scope registers nothing in either map", what));
         }
-        ::unsetenv("MORTGAGE_WEIGHT_STORE");
+        ::unsetenv("STRATEGY_WEIGHT_STORE");
     }
 
     // ── process environment ───────────────────────────────────────────────
@@ -624,12 +624,12 @@ auto main() -> int {
         check(ws::prepare_process_environment(ws::Mode::Llq).has_value(), "unset is set to 0");
         const char* now = std::getenv("SENSEN_QKV_FUSION");
         check(now != nullptr && std::string_view{now} == "0", "and is now 0");
-        ::unsetenv("MORTGAGE_WEIGHT_STORE");
-        const auto unset = ws::mode_from_env("MORTGAGE_WEIGHT_STORE");
+        ::unsetenv("STRATEGY_WEIGHT_STORE");
+        const auto unset = ws::mode_from_env("STRATEGY_WEIGHT_STORE");
         check(unset.has_value() && *unset == ws::Mode::Dense, "an unset selector is dense");
-        ::setenv("MORTGAGE_WEIGHT_STORE", "lql", 1);
-        check(!ws::mode_from_env("MORTGAGE_WEIGHT_STORE").has_value(), "a misspelt selector is refused");
-        ::unsetenv("MORTGAGE_WEIGHT_STORE");
+        ::setenv("STRATEGY_WEIGHT_STORE", "lql", 1);
+        check(!ws::mode_from_env("STRATEGY_WEIGHT_STORE").has_value(), "a misspelt selector is refused");
+        ::unsetenv("STRATEGY_WEIGHT_STORE");
     }
 
     // ── the row-restricted projection: identity, and BOTH of its branches ──
