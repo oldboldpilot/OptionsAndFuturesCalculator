@@ -140,6 +140,44 @@ The second arm's discriminator is the check it does NOT break: "a missing GRANT 
 passes, because that is the one key it still reads. An arm that fails everything proves far less
 than one that fails exactly what it removed.
 
+## The review found a gate two of whose arms a COMMENT satisfied
+
+A Sonnet review of commit `98d6341`, run before it was pushed, returned eleven findings, eight of them real, and the verdict **"not safe to push as is"**.
+
+**THE WORST FINDING WAS TWO VACUOUS ARMS.** `scripts/check_gateway_deploy_guard.sh` asserted that `deploy/gateway/redeploy.sh` uses each predicate by grepping for the bare name, for example `grep -q 'submodules_pinned_ok'`. That string also occurs in redeploy.sh's own line `# shellcheck source=deploy/gateway/submodules_pinned_ok.sh`, so deleting BOTH the `.` source line and the call left the gate printing ok. The posture predicate had the same defect. The arms now match the CALL shape, `grep -qE '\|[[:space:]]*predicate'`.
+
+**THE SECOND FINDING WAS A PROBE RUN AFTER THE SERVING CONTAINERS WERE GONE.** The posture probe ran in section 3b, after `podman rm -f` had already removed the serving containers. The probe needs only the database container, never the new gateway containers, so every way it can fail (no such container, wrong database, psql cannot authenticate) was a discovery made with the serving containers already removed and no rollback available. It is section 1c now, before anything is replaced. The gate asserts that ordering by comparing line numbers, not by trusting a comment.
+
+**THE THIRD FINDING WAS A PROBE THAT TRUSTED ITS OWN DEFAULTS.** The probe took the operator defaults `PGC` and `GWDB` to name the store the gateway opens. They cannot promise that, because the store is named by the `sgw_store_dsn` podman secret, which the script deliberately cannot read. The probe now also reports `probe_schema_version` and `probe_orgs`, and they must equal the `schema_version` and `orgs` that `admin show` read through that secret in section 1b. Before this, a probe pointed at another database answered confidently.
+
+**Smaller fixes in the same pass:**
+
+* `git submodule status` is taken with its EXIT STATUS. A listing cut short by a broken submodule gitdir can be all-clean and incomplete, so the number of lines it reports is compared against the count in `.gitmodules`.
+* Each submodule is also compared against HEAD's tree. `git submodule status` compares to the INDEX, so a staged-but-uncommitted gitlink bump read as clean.
+* The `ldd` prefix is canonicalised through `realpath`, because `SRC` may be a symlink while `ldd` prints the resolved path.
+* `podman ps | grep -q` became a podman `--filter`. Under `pipefail`, grep exiting on its first match can SIGPIPE the writer and fail the pipeline.
+* The pass path prints only well-formed `key=value` lines, because psql can emit NOTICE text alongside the rows.
+* The log filters now refuse `postgres://` as well as `postgresql://`.
+
+**THE NEW ORDERING ARM'S OWN FIRST RUN WAS THE DEFECT IT EXISTS FOR.** It reported `rm=154`, which is a COMMENT in section 1b that names `podman rm -f`, rather than the command itself a hundred lines further down (a line number this file deliberately does not pin, because editing the script moves it). The arm is anchored with `^[[:space:]]*` now.
+
+**A DIRTY SUBMODULE WORKTREE IS STATED, NOT REFUSED.** A dirty submodule worktree is still invisible to the predicate, and that is deliberate. Measured, `external/tbqwf` carries a regenerated `src/bpf/steering.skel.h` on every build, so refusing a dirty submodule would refuse every deploy. The claim the block supports is "every submodule is at the commit HEAD records", not "byte-identical to the recorded tree".
+
+The gate went from **47 passed / 0 failed** to **54 passed / 0 failed**. Both files were restored byte-identically after mutation:
+
+| arm | fails |
+| --- | --- |
+| predicate CALL removed, shellcheck comment left in place | exactly 1, where the old grep passed |
+| posture call moved to after container replacement | exactly the ordering arm |
+
+The real deploy was then re-run on the edited script, and every stage passed:
+
+    preflight ok: sensen=e8c8dfc97 tbqwf=dd94b7890 submodules=5-at-HEADs-recorded-commits
+    store ok: schema_version=13 orgs=1
+    fair posture ok: capacity_can_select_orgs_id=true orgs_capacity_policy=true fair_tenants_includes_planless=true probe_schema_version=13 probe_orgs=1
+
+The regression suite was **20 passed, 0 failed** before and after a restart that returned ready in **2 s** against a **20 s** budget. Restart count was 0 and the exit code was 0.
+
 ## Still open
 
 * **tbqwf's `build/` directory cannot compile at all, and it is not this change.** It fails on
