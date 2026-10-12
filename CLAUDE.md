@@ -6777,7 +6777,7 @@ answers by being read, not by being argued.
   with`) and carry a positive control proving the pattern still fires on a planted
   trailer. Same defect family as the `[WARN ]` padding that made a zero look clean.
 - **Documentation citation gate:** `python3 tools/check_docs_claims.py` before every
-  commit that changes a `*.md`, and `bash tools/test_check_docs_claims.sh` (30 checks, a
+  commit that changes a `*.md`, and `bash tools/test_check_docs_claims.sh` (53 checks, a
   throwaway fixture repository, no build and no network) to prove the copy here works. It
   takes every backticked span in the lines a branch ADDED that names code and looks it up in
   this repository's tracked files outside `docs/` and `*.md`. `MISSING` is fatal (exit 1);

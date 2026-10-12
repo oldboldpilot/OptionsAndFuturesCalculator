@@ -165,7 +165,8 @@ in which case we should use the appropriate STL algorithms and data structures t
     identifier, a qualified name, a flag, an environment variable, a repository path, a quoted
     message, a git revision, a command line) and looks it up in this repository's own tracked
     files outside docs/ and *.md -- the tree is read once and every lookup is answered in
-    memory, so a doc with a thousand citations costs one pass:
+    memory (a revision is the one exception: it asks git), so a doc with a thousand citations costs
+    one pass over the repository:
 
       python3 tools/check_docs_claims.py                   # lines added since the default branch
       python3 tools/check_docs_claims.py --base REV         # ... since REV

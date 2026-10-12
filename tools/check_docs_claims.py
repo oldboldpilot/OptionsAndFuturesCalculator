@@ -32,6 +32,16 @@ semantic fact-check is still needed for that. Kernel and external-tool names (`T
 `conmon`) and another repository's code names come back missing; spell them without backticks or
 justify them in the lane report.
 
+What is NOT checked, listed because an unchecked citation is indistinguishable from a verified one:
+  * the qualifier of a qualified name -- `nosuch::realFn` checks `realFn` only;
+  * a flag inside a command-line span -- `python3 x.py --nosuchflag` checks the paths only;
+  * a glob or a path outside the work tree -- `src/*.cpp`, `/abs/nosuch.h`;
+  * a lowercase-hex invented identifier of 7 to 40 characters carrying both a digit and a letter
+    (`bad1dea`): indistinguishable from a short sha, so it is a non-fatal REVISION, not MISSING;
+  * anything in a file the diff does not list -- a *.md deleted on the branch (correctly), or one
+    whose added lines carry no backticked span at all.
+A citation that matches no rule is not an error and is not counted in `checked`.
+
 Usage: tools/check_docs_claims.py [--repo DIR] [--base REV | --all] [--json] [FILE.md ...]
        default base: merge-base of HEAD and this repository's default branch (origin/HEAD, else
        origin/master, else origin/main); default files: every changed *.md.
@@ -46,20 +56,50 @@ import sys
 DESIGN_MARK = "Design (not built)"
 
 
-def marks_design(line):
-    """A heading that says Design (not built), or the bold status marker -- not a sentence that mentions the phrase.
+LIST_PREFIX = re.compile(r"^\s*(?:[-*+]\s+|>\s*|\d+[.)]\s+)*")
+STATUS_PREFIX = re.compile(r"^\*\*[^*]{1,40}\*\*\s*:\s*")
 
-    Inline code spans are stripped first, so a line DOCUMENTING the marker does not APPLY it. Measured
-    2026-10-12: the section of sensen's docs/agentic/ROADMAP_AND_TESTING.md that documents this checker
-    has a table row quoting the marker, which marked that whole section as a design and made every
-    citation in the section non-fatal -- the gate switched off exactly where it is explained.
+
+def marks_design(line):
+    """A heading that says Design (not built), or a line whose CONTENT STARTS with the bold marker.
+
+    Two measured defects, both 2026-10-12, both of which switched the gate off:
+      * inline code spans are stripped first, so a line DOCUMENTING the marker does not APPLY it --
+        the section of sensen's docs/agentic/ROADMAP_AND_TESTING.md that documents this checker has a
+        table row quoting the marker, and every citation in that section was reported DESIGN;
+      * the marker must OPEN the line's content, after list bullets and an optional `**Status**:`
+        prefix, because `Never write **Design (not built)** on built code.` is prose about the marker
+        and used to exempt the whole file around it -- 7 of 7 citations, including lines above it.
+    Both admitted shapes are the ones the docs actually use: `**Design (not built)**` alone, a list
+    entry opening with it, `**Status**: **Design (not built)**`, and the phrase in a heading.
     """
     bare = re.sub(r"`[^`]*`", "", line)
-    return (re.match(r"^#{1,6}\s", bare) is not None and DESIGN_MARK in bare) or f"**{DESIGN_MARK}**" in bare
+    if re.match(r"^#{1,6}\s", bare):
+        return DESIGN_MARK in bare
+    rest = LIST_PREFIX.sub("", bare)
+    marker = f"**{DESIGN_MARK}**"
+    return rest.startswith(marker) or STATUS_PREFIX.sub("", rest).startswith(marker)
 
 
 def git(repo, *args):
-    return subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True, check=True).stdout
+    """Run git, and REFUSE by name when it fails: a traceback is not a diagnosis.
+
+    `--base nosuchrev`, an empty repository, unrelated histories and a shallow clone with no
+    merge base all reach git with something it cannot answer, and all of them used to end in a
+    CalledProcessError traceback at exit status 1 -- the same status a legitimate MISSING uses.
+    """
+    r = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True)
+    if r.returncode != 0:
+        first = next((l for l in r.stderr.splitlines() if l.strip()), "")
+        sys.exit(f"check_docs_claims: git {' '.join(args)} failed in {repo}: {first}")
+    return r.stdout
+
+
+def toplevel(where):
+    """The work tree root. --repo defaults to '.', and from a subdirectory `git ls-files` lists only
+    that subdirectory while `git diff --name-only` lists repo-root-relative paths -- so every file
+    was skipped and the run printed a clean checked=0 (measured 2026-10-12)."""
+    return git(where, "rev-parse", "--show-toplevel").strip()
 
 
 def default_base(repo):
@@ -73,8 +113,16 @@ def default_base(repo):
 
 
 def added_lines(repo, base, path):
-    """Line numbers (1-based, in the current file) added since base."""
-    out = git(repo, "diff", "-U0", base, "--", path)
+    """Line numbers (1-based, in the current file) added since base.
+
+    --no-color is not decoration: with color.ui=always git puts ANSI escapes ahead of every @@,
+    the hunk regex matches nothing, and the run reports a clean checked=0 over a document it
+    never read (measured 2026-10-12).
+    """
+    out = git(repo, "diff", "--no-color", "-U0", base, "--", path)
+    if re.search(r"^Binary files .* differ$", out, re.M):
+        sys.exit(f"check_docs_claims: {path} has no readable diff (binary, or a -diff attribute); "
+                 "check it with --all or make it text")
     lines = set()
     for m in re.finditer(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", out, re.M):
         start, count = int(m.group(1)), int(m.group(2) or "1")
@@ -82,9 +130,26 @@ def added_lines(repo, base, path):
     return lines
 
 
+def fenced(text_lines):
+    """Which lines sit inside a ``` or ~~~ fence: a `# comment` in a shell block is not a heading."""
+    out, open_mark = [], None
+    for line in text_lines:
+        m = re.match(r"^\s*(```+|~~~+)", line)
+        if open_mark is None and m:
+            open_mark, inside = m.group(1)[:3], True
+        elif open_mark is not None and m and m.group(1).startswith(open_mark):
+            open_mark, inside = None, True
+        else:
+            inside = open_mark is not None
+        out.append(inside)
+    return out
+
+
 def design_lines(text_lines):
     """Lines whose heading section, or top-level list entry, is marked Design (not built)."""
     n = len(text_lines)
+    in_fence = fenced(text_lines)
+    text_lines = ["" if in_fence[i] else l for i, l in enumerate(text_lines)]
     design = [False] * n
     # Heading sections: a marked heading marks everything under it until a heading of the same or higher level.
     stack = []  # (level, marked)
@@ -125,10 +190,13 @@ def looks_like_path(word, tops):
     pass, which is the direction that hides. `and/or` is neither a tracked directory nor a
     filename and stays unchecked.
     """
-    if "/" not in word or not re.fullmatch(r"[\w.@+-]+(/[\w.@+-]+)+/?(:\d+)?", word):
+    if "/" not in word or not re.fullmatch(r"\.?/?[\w.@+-]+(/[\w.@+-]+)*/?(:\d+)*", word):
         return False
-    bare = word.split(":")[0].rstrip("/")
-    return word.split("/")[0] in tops or re.search(r"\.[A-Za-z][\w+-]{0,7}$", bare) is not None
+    bare = os.path.normpath(word.split(":")[0]).rstrip("/")
+    # A trailing slash is path syntax and nothing else, so `nosuchdir/` is checked rather than
+    # skipped; prose does not end a word that way, where `and/or` has no slash to end on.
+    return (word.rstrip().endswith("/") or bare.split("/")[0] in tops
+            or re.search(r"\.[A-Za-z][\w+-]{0,7}$", bare) is not None)
 
 
 def atoms(span, tops):
@@ -136,12 +204,12 @@ def atoms(span, tops):
     t = span.strip()
     if re.fullmatch(r"[A-Za-z_]\w*(::[\w~]+)+(\(\))?", t):
         return [t.split("::")[-1].rstrip("()")]
-    if re.fullmatch(r"[0-9a-f]{7,40}", t) and re.search(r"\d", t):
+    if re.fullmatch(r"[0-9a-f]{7,40}", t) and re.search(r"\d", t) and re.search(r"[a-f]", t):
         return [("rev", t)]
     if re.fullmatch(r"[A-Za-z_]\w*\(\)", t) or re.fullmatch(r"[A-Za-z_]\w{3,}", t):
         return [t.rstrip("()")]
     if looks_like_path(t, tops):
-        return [("path", t.split(":")[0])]
+        return [("path", os.path.normpath(t.split(":")[0]))]
     if re.fullmatch(r"--[\w-]+(=\S*)?", t):
         return [t.split("=")[0]]
     if t.startswith("sen ") or t.startswith("sensen_serve "):
@@ -149,7 +217,7 @@ def atoms(span, tops):
         out += [w.split("=")[0] for w in t.split() if w.startswith("--")]
         return out
     if re.match(r"(python3?|bash|sh|git|ninja|ctest|cmake)\s", t):
-        return [("path", w.split(":")[0]) for w in t.split()[1:] if looks_like_path(w, tops)]
+        return [("path", os.path.normpath(w.split(":")[0])) for w in t.split()[1:] if looks_like_path(w, tops)]
     if " " in t and len(t) > 18 and not re.search(r"[|<>$;&]", t):
         return [("text", t)]
     return []
@@ -171,6 +239,13 @@ class Tree:
         chunks = []
         for f in files:
             if f.startswith("docs/") or f.endswith(".md"):
+                continue
+            # The self-test SPELLS invented names on purpose, so reading it would answer a doc's
+            # citation of one with the gate's own test data: measured 2026-10-12, four of five
+            # invented names passed in every repository because the fixture names them. A gate
+            # may not be its own evidence. This script stays IN the corpus and deliberately
+            # spells no invented name, so its own identifiers remain citable from a document.
+            if os.path.basename(f) == "test_check_docs_claims.sh":
                 continue
             try:
                 with open(os.path.join(repo, f), "rb") as fh:
@@ -210,11 +285,22 @@ def main():
     ap.add_argument("--json", action="store_true")
     ap.add_argument("files", nargs="*")
     a = ap.parse_args()
-    repo = a.repo
+    repo = toplevel(a.repo)
     base = None
     if not a.all:
         base = a.base or default_base(repo)
-    files = a.files or [f for f in git(repo, "diff", "--name-only", base, "--", "*.md").split("\n") if f]
+    # -z, because --name-only QUOTES a non-ASCII name ("docs/caf\303\251.md") and the quoted
+    # string then matches no file on disk and was skipped in silence. icase and the two other
+    # Markdown extensions, because a *.md pathspec selects neither README.MD nor a .mdx.
+    specs = [":(icase)*.md", ":(icase)*.markdown", ":(icase)*.mdx"]
+    whole = set()
+    files = a.files
+    if not files:
+        files = [f for f in git(repo, "diff", "--no-color", "--name-only", "-z", base, "--", *specs).split("\0") if f]
+        # An UNTRACKED document is not in any diff, so a new doc in a lane -- the commonest case
+        # there is -- was never checked. Every line of it is new, so it is checked whole.
+        whole = {f for f in git(repo, "ls-files", "--others", "--exclude-standard", "-z", "--", *specs).split("\0") if f}
+        files += sorted(whole)
     if a.all and not a.files:
         sys.exit("check_docs_claims: --all needs the files to check")
     # A file NAMED on the command line and not there is an error: silently skipping it reports
@@ -233,7 +319,7 @@ def main():
             continue
         with open(path, encoding="utf-8", errors="replace") as fh:
             lines = fh.read().split("\n")
-        want = set(range(1, len(lines) + 1)) if a.all else added_lines(repo, base, f)
+        want = set(range(1, len(lines) + 1)) if (a.all or f in whole) else added_lines(repo, base, f)
         design = design_lines(lines)
         for ln in sorted(want):
             if ln > len(lines):

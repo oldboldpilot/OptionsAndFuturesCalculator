@@ -96,11 +96,17 @@ h add -A && h commit -q -m base
 base2=$(h rev-parse HEAD)
 h update-ref refs/remotes/origin/main "$base2"              # name the default branch without a network
 h symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+# The empty blob exists in every git repository once written, and it starts with a hex LETTER --
+# so without the revision rule it would match the identifier rule and be reported. A fixture
+# COMMIT sha would not: one starting with a digit matches no rule at all, so the arm below would
+# pass whether or not the rule exists. A check that discriminates only for some random inputs is
+# not a check.
+empty_blob=$(printf '' | git -C "$fx2" hash-object -w --stdin)
 cat >> "$fx2/docs/b.md" <<EOF
 
 A real path \`deploy/run.sh\` and an invented one \`deploy/no_such.sh\`.
 Prose with a slash: \`and/or\` names no tracked directory and no file, so it is not checked.
-Revision \`$base2\` resolves here; \`dd94b7890\` is another repository's commit.
+Revision \`$empty_blob\` resolves here; \`dd94b7890\` is another repository's commit.
 The word \`acceded\` is seven letters that are all hex digits and is still an identifier.
 EOF
 h add -A && h commit -q -m docs
@@ -113,7 +119,7 @@ check "exactly the invented path and the hex-letter word are missing" "$(grep -c
 check "an invented path under a tracked directory no prefix list names is missing" "$(grep -c '^MISSING.*deploy/no_such.sh' <<<"$out2")" "1"
 check "a real path under that same directory is found" "$(grep -c 'deploy/run.sh' <<<"$out2")" "0"
 check "prose with a slash is not treated as a path" "$(grep -c 'and/or' <<<"$out2")" "0"
-check "a revision this repository resolves is found" "$(grep -c "$base2" <<<"$out2")" "0"
+check "a revision this repository resolves is found" "$(grep -c "$empty_blob" <<<"$out2")" "0"
 check "another repository's revision is reported as a revision, not missing" "$(grep -c '^REVISION.*dd94b7890' <<<"$out2")" "1"
 check "a word spelled only in hex letters is an identifier, not a revision" "$(grep -c '^MISSING.*acceded' <<<"$out2")" "1"
 
@@ -139,6 +145,103 @@ out3=$(python3 "$checker" --repo "$fx3" 2>&1)
 check "no origin ref refuses with a status" "$?" "1"
 check "the refusal names what is missing and what to pass" "$(grep -c 'no origin/HEAD, origin/master or origin/main' <<<"$out3")" "1"
 check "the refusal is not a Python traceback" "$(grep -c 'Traceback' <<<"$out3")" "0"
+
+# ---------------------------------------------------------------------------
+# The silent-clean-pass arms (2026-10-12, from an adversarial review). Every case here was
+# MEASURED reporting "checked=0 missing=0" at exit 0, or reporting a citation as verified that
+# nothing had looked up. A gate that passes vacuously is worse than no gate, so these come with
+# their own fixture and each one is checked in BOTH directions where that is possible.
+i() { git -C "$fx3" -c user.name=fixture -c user.email=fixture@example.invalid "$@"; }
+mkdir -p "$fx3/src" "$fx3/docs" "$fx3/deep/er"
+printf 'auto realFn() -> int { return 0; }\n' > "$fx3/src/a.cpp"
+printf 'x\n' > "$fx3/deep/er/keep.txt"
+printf '# Doc\n' > "$fx3/docs/a.md"
+i add -A && i commit -q -m base
+base3=$(i rev-parse HEAD)
+i update-ref refs/remotes/origin/main "$base3"
+i symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+cat >> "$fx3/docs/a.md" <<'EOF'
+
+Cites `inventedThree` and `src/nosuch.cpp` and `./src/a.cpp` and `src/a.cpp:12:5` and
+`src/nosuch.cpp:9` and `nosuchdir/` and `src/` and `and/or` and `1234567`.
+Never write **Design (not built)** on built code -- then `inventedProse` must stay missing.
+
+## Planned -- Design (not built)
+
+```bash
+# a comment that is not a heading
+```
+
+`inventedAfterFence` is still inside the design section.
+EOF
+# A COMMITTED .MD and a non-ASCII name, so the file list is exercised through the DIFF and not
+# only through the untracked sweep: a *.md pathspec selects neither, and --name-only without -z
+# QUOTES the second one into a path that matches no file on disk. Both were dropped in silence.
+printf '# U\nCites `inventedUpperTracked`.\n' > "$fx3/docs/UPPER.MD"
+printf '# C\nCites `inventedCafe`.\n' > "$fx3/docs/caf\xc3\xa9.md"
+i add -A && i commit -q -m docs
+printf '# U\nCites `inventedUpper`.\n' > "$fx3/docs/UP.MD"
+printf '# N\nCites `inventedUntracked`.\n' > "$fx3/docs/new.md"
+
+out3a=$(python3 "$checker" --repo "$fx3")
+# The 9: inventedThree, src/nosuch.cpp, the same path again with :9 (a second span is a second
+# citation), nosuchdir/, inventedProse, inventedUpper, inventedUntracked,
+# plus inventedUpperTracked and inventedCafe. Not among them, and each
+# pinned by its own arm below: ./src/a.cpp and src/a.cpp:12:5 and src/ resolve, and/or and 1234567
+# match no rule, inventedAfterFence is DESIGN.
+check "the baseline fixture reports exactly its invented names" "$(grep -c '^MISSING' <<<"$out3a")" "9"
+
+# 1. Colour. With color.ui=always git puts ANSI escapes ahead of every @@ and the hunk regex
+#    matched nothing, so the run read no line of the document and said so in the clean voice.
+out_colour=$(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=color.ui GIT_CONFIG_VALUE_0=always python3 "$checker" --repo "$fx3")
+check "coloured git output does not turn the gate off" "$out_colour" "$out3a"
+
+# 2. A subdirectory. --repo defaults to '.', and from a subdirectory ls-files lists only that
+#    subdirectory while the diff lists repo-root-relative paths, so every file was skipped.
+out_sub=$(cd "$fx3/deep/er" && python3 "$checker")
+check "running from a subdirectory checks the whole repository" "$out_sub" "$out3a"
+
+# 3. The documents the file list used to drop in silence.
+check "an UNTRACKED new document is checked" "$(grep -c '^MISSING.*inventedUntracked' <<<"$out3a")" "1"
+check "an untracked .MD is selected as well as a .md" "$(grep -c '^MISSING docs/UP.MD' <<<"$out3a")" "1"
+check "a COMMITTED .MD is selected by the diff" "$(grep -c '^MISSING.*inventedUpperTracked' <<<"$out3a")" "1"
+check "a non-ASCII file name is read, not quoted into a path that does not exist" "$(grep -c '^MISSING.*inventedCafe' <<<"$out3a")" "1"
+printf 'a\000b\n' > "$fx3/docs/bin.md"
+i add -A && i commit -q -m bin
+out_bin=$(python3 "$checker" --repo "$fx3" 2>&1)
+check "a *.md with no readable diff is refused, not skipped" "$(grep -c 'docs/bin.md has no readable diff' <<<"$out_bin")" "1"
+i rm -q --cached docs/bin.md >/dev/null && rm -f "$fx3/docs/bin.md" && i commit -q -m unbin
+
+# 4. The gate is not its own evidence: this checker and this fixture spell invented names, and a
+#    doc citing them used to pass because those files are tracked code outside docs/.
+mkdir -p "$fx3/tools"
+cp "$checker" "$fx3/tools/check_docs_claims.py"
+cp "$here/test_check_docs_claims.sh" "$fx3/tools/test_check_docs_claims.sh"
+i add -A && i commit -q -m tools
+out_self=$(python3 "$checker" --repo "$fx3")
+check "a name the checker's own fixture spells is still missing" "$(grep -c '^MISSING.*inventedFunction\|^MISSING.*NotARealName' <<<"$out_self")" "0"
+printf 'Cites `inventedFunction` and `NotARealName` and `--fake-flag`.\n' > "$fx3/docs/self.md"
+out_self=$(python3 "$checker" --repo "$fx3")
+check "the checker and its fixture are not evidence for a citation" "$(grep -c '^MISSING.*inventedFunction' <<<"$out_self")" "1"
+check "nor for a design-fixture name" "$(grep -c '^MISSING.*NotARealName' <<<"$out_self")" "1"
+check "nor for an invented flag" "$(grep -c '^MISSING.*fake-flag' <<<"$out_self")" "1"
+rm -f "$fx3/docs/self.md"
+
+# 5-9. Shapes, the prose marker, the fence and a leading ./
+check "the bold marker in PROSE does not exempt the section" "$(grep -c '^MISSING.*inventedProse' <<<"$out3a")" "1"
+check "a marked heading still exempts what follows it" "$(grep -c '^DESIGN.*inventedAfterFence' <<<"$out3a")" "1"
+check "a # comment inside a fence does not end the design section" "$(grep -c '^MISSING.*inventedAfterFence' <<<"$out3a")" "0"
+check "./path resolves rather than reading as missing" "$(grep -c 'src/a.cpp' <<<"$out3a")" "0"
+check "path:line:col is checked" "$(grep -c '^MISSING.*src/nosuch.cpp:9' <<<"$out3a")" "1"
+check "a bare directory with a trailing slash is checked" "$(grep -c '^MISSING.*nosuchdir/' <<<"$out3a")" "1"
+check "a tracked bare directory is found" "$(grep -c '`src/`' <<<"$out3a")" "0"
+check "prose with a slash is still not a path" "$(grep -c 'and/or' <<<"$out3a")" "0"
+check "a span of digits alone is not a revision" "$(grep -c '1234567' <<<"$out3a")" "0"
+
+# 10. git failures are named refusals, not tracebacks, and not the status a MISSING uses alone.
+out_badbase=$(python3 "$checker" --repo "$fx3" --base nosuchrev 2>&1)
+check "a base revision that does not exist refuses by name" "$(grep -c "check_docs_claims: git diff" <<<"$out_badbase")" "1"
+check "that refusal is not a traceback" "$(grep -c 'Traceback' <<<"$out_badbase")" "0"
 
 [ $fail -eq 0 ] && echo "=== check_docs_claims: all passed ===" || echo "=== check_docs_claims: FAILURES ==="
 exit $fail
