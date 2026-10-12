@@ -6776,6 +6776,20 @@ answers by being read, not by being argued.
   (`^\s*(Co-Authored-By|Signed-off-by|Claude-Session):`, `@author`, `generated
   with`) and carry a positive control proving the pattern still fires on a planted
   trailer. Same defect family as the `[WARN ]` padding that made a zero look clean.
+- **Documentation citation gate:** `python3 tools/check_docs_claims.py` before every
+  commit that changes a `*.md`, and `bash tools/test_check_docs_claims.sh` (30 checks, a
+  throwaway fixture repository, no build and no network) to prove the copy here works. It
+  takes every backticked span in the lines a branch ADDED that names code and looks it up in
+  this repository's tracked files outside `docs/` and `*.md`. `MISSING` is fatal (exit 1);
+  `DESIGN`, `FRAGMENT` and `REVISION` are reported and never fatal. Leave `MISSING` at zero or
+  list every remaining line with its justification in the commit message -- another
+  repository's code names are that class, and this file cites sensen's constantly. **The
+  lookup is TEXTUAL: a pass proves a cited name EXISTS, never that the sentence around it is
+  true.** The copy of record is sensen's `tools/check_docs_claims.py` and all six
+  repositories carry it byte-identically; change sensen's and copy it out, never edit a copy
+  in place. Nothing here can compare the two -- `backend/sensen` is pinned at a commit that
+  predates the script -- so that is kept by hand. Rule 61 of `config/cpp_details.txt`.
+
 - **Backend Tests:** `ninja -C backend/build build_tests && ctest --test-dir backend/build`
   (ctest is **211 TESTS, 0 FAILED as of 2026-10-10**, measured TWICE in one session either side of the
   sensen bump `8d39843dd -> fcaaa3760`: 211/0 in 899.51 s at the old pin and 211/0 in 911.92 s at the new
