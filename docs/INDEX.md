@@ -149,6 +149,17 @@ describes why it is that way and what it cost to find out.
 
 ## Session logs
 
+- [2026-10-12 — the documentation citation gate in six repositories](session_logs/session_2026-10-12_docs_citation_gate_in_six_repositories.md)
+- [2026-10-11 — The gateway store is migrated and serving, and the documented procedure could never have done it](session_logs/session_2026-10-11_gateway_store_migrated_and_the_role_that_could_not.md)
+- [2026-10-11 — Gateway store migrated to 13, and the submodule nobody had named](session_logs/session_2026-10-11_gateway_store_13_and_the_submodule_nobody_named.md)
+- [2026-10-11 — A redeploy would have taken the gateway down, and the preflight that stops it](session_logs/session_2026-10-11_gateway_schema_preflight.md)
+- [2026-10-10 — the sensen bump to master, and the stragglers that were not stragglers](session_logs/session_2026-10-10_sensen_bump_and_stragglers.md)
+- [2026-10-10 — The open gateway defects, the deploy guard, and two mutation arms that passed](session_logs/session_2026-10-10_open_issues_closed.md)
+- [2026-10-07 — the mortgage assistant answers with what the visitor stated](session_logs/session_2026-10-07_mortgage_assistant_stated_only.md)
+- [2026-10-07 — DRY: the canonical flags leave this repository, and three smaller duplicates go with them](session_logs/session_2026-10-07_dry_shared_recipe.md)
+- [2026-10-07 — #81 step 2: the build recipe moves into sensen](session_logs/session_2026-10-07_assistant_move_step2.md)
+- [2026-10-07 — #81 step 1: the shared assistant code moves into sensen](session_logs/session_2026-10-07_assistant_move_step1.md)
+- [2026-10-06 — the TIME_WAIT fix reaches the rig, and Rule 3 learns an idiom](session_logs/session_2026-10-06_gateway_pg_redeploy.md)
 - [2026-10-05 — both gateway lanes onto sensen master, and OFC takes the bump: a clean merge that proved nothing until the content was checked byte for byte, sensen master's own clang-tidy gate that only fires on a warm build directory, and a `smoke_client` four hours stale because `build_tests` sweeps `^test_` only](session_logs/session_2026-10-05_gateway_lanes_to_master_and_the_ofc_bump.md)
 - [2026-10-02 — the two assistants are doing EXTRACTION while served by an architecture that GENERATES: 99.99% of gold fields are a literal plus an enumerated map, a 0.50M-parameter encoder beat the 0.6B decoder's recorded 95.0%, and four sensen defects including a cross-entropy backward that was 3x wrong in a live consumer](session_logs/session_2026-10-02_small_encoder_assistants.md)
 - [2026-09-23 — the 18→38 decimal scale shipped, and the one thing it broke was a consumer test pinning the scale that `FINANCE_API.md` had told callers not to pin](session_logs/session_2026-09-23_scale38_deploy_and_contract_drift.md)
