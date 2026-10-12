@@ -182,5 +182,96 @@ else
     no "deploy/gateway/store_version_ok.sh is not readable"
 fi
 
+# --- every submodule is at its recorded pin ---------------------------------
+# A release must be the tree that was recorded. This replaced a check that named `external/tbqwf`
+# ALONE, and the day it was written the deploy source had built with `external/
+# fastestjsoninthewest` at `e8c970c` against a recorded `25ffd2e6` -- so the binary was not the
+# recorded tree and nothing said so, because fastjson was not the submodule anybody had named.
+SPO="$(dirname "$GUARD")/submodules_pinned_ok.sh"
+if [ -r "$SPO" ]; then
+    # shellcheck source=/dev/null
+    . "$SPO"
+    pinned(){ if printf '%s' "$1" | submodules_pinned_ok; then echo admitted; else echo refused; fi; }
+    check "every submodule at its pin is ADMITTED" \
+          "$(pinned ' 1111111111111111111111111111111111111111 external/a (heads/main)
+ 2222222222222222222222222222222222222222 external/b (v1.0)')" "admitted"
+    # '+' is the case that actually happened, and it is refused in BOTH directions: a submodule
+    # AHEAD of its pin is code that was never recorded, which is no safer than one behind.
+    check "a submodule NOT at its pin (+) is REFUSED" \
+          "$(pinned ' 1111111111111111111111111111111111111111 external/a (heads/main)
++e8c970c0dc76fd662316d1e8a09cb7e52c9cb48c external/fastestjsoninthewest (heads/main-13-ge8c970c)')" "refused"
+    check "an UNINITIALISED submodule (-) is REFUSED" \
+          "$(pinned '-1111111111111111111111111111111111111111 external/fastestjsoninthewest')" "refused"
+    check "a CONFLICTED submodule (U) is REFUSED" \
+          "$(pinned 'U1111111111111111111111111111111111111111 external/a')" "refused"
+    # The deploy source has five submodules, so "nothing to check" means the check did not run.
+    check "empty submodule status is REFUSED" "$(pinned '')" "refused"
+    if grep -q 'submodules_pinned_ok' "$RD" 2>/dev/null; then
+        ok "redeploy.sh uses the submodule predicate"
+    else
+        no "redeploy.sh does not use the submodule predicate, so gating it proves nothing"
+    fi
+    if grep -q 'is not the recorded pin' "$RD" 2>/dev/null; then
+        no "redeploy.sh still checks only the single named submodule"
+    else
+        ok "redeploy.sh no longer checks one submodule by name"
+    fi
+else
+    no "deploy/gateway/submodules_pinned_ok.sh is not readable"
+fi
+
+# --- migration 13's artefacts are in force ----------------------------------
+# Section 1b proves the store's VERSION (the binary refuses a store behind OR ahead of it), and
+# that is all it proves: `schema_migrations` keeps reading 13 after an object is dropped. The
+# artefacts matter because losing one is SILENT -- `model_fair_tenants` is SECURITY DEFINER and
+# fair rationing divides a model's capacity across the rows it returns, so a missing grant or
+# policy hands every surviving tenant too LARGE a share with no error anywhere.
+FPO="$(dirname "$GUARD")/fair_posture_ok.sh"
+if [ -r "$FPO" ]; then
+    # shellcheck source=/dev/null
+    . "$FPO"
+    posture(){ if printf '%s' "$1" | fair_posture_ok; then echo admitted; else echo refused; fi; }
+    ALL3='capacity_can_select_orgs_id=true
+orgs_capacity_policy=true
+fair_tenants_includes_planless=true'
+    check "all three artefacts present is ADMITTED" "$(posture "$ALL3")" "admitted"
+    # One arm per artefact, because a predicate that only reads the first key would pass two of
+    # these and still be wrong in the direction that over-admits.
+    check "a missing GRANT is REFUSED" \
+          "$(posture "$(printf '%s' "$ALL3" | sed 's/capacity_can_select_orgs_id=true/capacity_can_select_orgs_id=false/')")" "refused"
+    check "a missing POLICY is REFUSED" \
+          "$(posture "$(printf '%s' "$ALL3" | sed 's/orgs_capacity_policy=true/orgs_capacity_policy=false/')")" "refused"
+    check "a stale model_fair_tenants is REFUSED" \
+          "$(posture "$(printf '%s' "$ALL3" | sed 's/fair_tenants_includes_planless=true/fair_tenants_includes_planless=false/')")" "refused"
+    # MEASURED on the live store at schema 12 on 2026-10-11, before migration 13 was applied:
+    # all three answered false. So this is the real pre-migration text, not an invented one.
+    check "the real schema-12 probe is REFUSED" \
+          "$(posture 'capacity_can_select_orgs_id=false
+orgs_capacity_policy=false
+fair_tenants_includes_planless=false')" "refused"
+    # A probe that errored before its third statement matches two keys. Requiring the KEY as
+    # well as the value is what makes that a refusal instead of a pass.
+    check "a TRUNCATED probe (third key absent) is REFUSED" \
+          "$(posture 'capacity_can_select_orgs_id=true
+orgs_capacity_policy=true')" "refused"
+    check "a psql error instead of a probe is REFUSED" \
+          "$(posture 'psql: error: connection to server failed')" "refused"
+    check "empty probe output is REFUSED" "$(posture '')" "refused"
+    if grep -q 'fair_posture_ok' "$RD" 2>/dev/null; then
+        ok "redeploy.sh uses the posture predicate"
+    else
+        no "redeploy.sh does not use the posture predicate, so gating it proves nothing"
+    fi
+    # The probe must not need a credential: it runs inside the database container, so no DSN or
+    # password can be leaked by a refusal that prints what it saw.
+    if grep -qE 'fair posture|POSTURE=' "$RD" 2>/dev/null && ! grep -qE 'POSTURE=.*(SGW_|DSN|PGPASSWORD)' "$RD" 2>/dev/null; then
+        ok "the posture probe carries no DSN or password"
+    else
+        no "the posture probe appears to take a credential"
+    fi
+else
+    no "deploy/gateway/fair_posture_ok.sh is not readable"
+fi
+
 printf '\n%s: %d passed, %d failed\n' "gateway deploy guard" "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

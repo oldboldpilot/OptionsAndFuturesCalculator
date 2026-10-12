@@ -69,14 +69,41 @@ STALE="$(find "$SRC/agent" -type f -newer "$BIN" -print -quit 2>/dev/null)"
 [ -z "$STALE" ] || die "binary is older than $STALE -- rebuild"
 SC="$(git -C "$SRC" rev-parse --short=9 HEAD)"
 TC="$(git -C "$SRC/external/tbqwf" rev-parse --short=9 HEAD)"
-TP="$(git -C "$SRC" ls-tree HEAD external/tbqwf | awk '{print substr($3,1,9)}')"
-[ "$TC" = "$TP" ] || die "tbqwf checkout $TC is not the recorded pin $TP"
-say "preflight ok: sensen=$SC tbqwf=$TC"
+# EVERY submodule must be at its recorded commit, not just the one somebody named. This checked
+# `external/tbqwf` alone until 2026-10-11, and that day the deploy source built with
+# `external/fastestjsoninthewest` at `e8c970c` against a recorded `25ffd2e6` -- a binary that was
+# not the recorded tree, with nothing to say so, because fastjson was not the submodule the check
+# names. The predicate is DERIVED from `git submodule status` so a submodule added later is
+# covered without anyone remembering to add it, and it lives in its own file so it can be fed
+# controls (`scripts/check_gateway_deploy_guard.sh`).
+# shellcheck source=deploy/gateway/submodules_pinned_ok.sh
+. "$OFC/deploy/gateway/submodules_pinned_ok.sh"
+SUBS="$(git -C "$SRC" submodule status 2>/dev/null)"
+printf '%s\n' "$SUBS" | submodules_pinned_ok \
+  || die "a submodule of $SRC is not at its recorded pin, so this binary would not be the recorded tree. Run: git -C $SRC submodule update --init
+    offending: $(printf '%s\n' "$SUBS" | submodules_unpinned_lines | awk '{print $2}' | tr '\n' ' ')"
+say "preflight ok: sensen=$SC tbqwf=$TC submodules=all-at-recorded-pin"
 
 # --- 1. image, and prove the loader runs as the unprivileged uid --------------
 CTX="$WORK/ctx"; mkdir -p "$CTX/runtime"
 cp "$OFC/deploy/gateway/Dockerfile" "$OFC/deploy/gateway/entrypoint.sh" "$BIN" "$CTX/"
 cp -L /usr/local/lib/x86_64-unknown-linux-gnu/{libc++.so.1,libc++abi.so.1,libunwind.so.1} "$CTX/runtime/"
+# THE BUILD TREE'S OWN SHARED OBJECTS TRAVEL WITH THE BINARY, and the list is DERIVED from `ldd`
+# rather than globbed or written down. On 2026-10-11 the gateway began linking
+# `libsensen_gateway_decision.so.1`, which this step did not ship, and the image died before main
+# with "cannot open shared object file" -- caught by the loader probe below, but only after a
+# build. Deriving it covers the next library nobody remembers to add.
+#
+# A GLOB WOULD SHIP THE WRONG SET, measured: `build-gateway/lib` also holds `libsensen.so.1` at
+# 215 MB, which this binary does not link at all, and two test plugins. `ldd` names the 20 MB one
+# the loader actually needs and nothing else. /opt/sensen-runtime is already on LD_LIBRARY_PATH.
+mapfile -t BUILDLIBS < <(ldd "$BIN" 2>/dev/null | awk -v s="$SRC/" 'index($3,s)==1 {print $3}')
+for l in ${BUILDLIBS+"${BUILDLIBS[@]}"}; do cp -L "$l" "$CTX/runtime/" || die "could not stage $l"; done
+# A HOST-SIDE `not found` IS THE SAME DEFECT ONE STEP EARLIER. The image's own loader probe is
+# the authority, but it costs a full image build to ask; this names the library for free.
+NF="$(ldd "$BIN" 2>/dev/null | awk '/not found/{print $1}' | tr '\n' ' ')"
+[ -z "$NF" ] || die "the binary has unresolved shared objects on the build host, so the image cannot load it either: $NF"
+say "runtime libs: $(ls "$CTX/runtime" | tr '\n' ' ')"
 SHA="$(sha256sum "$BIN" | cut -d' ' -f1)"
 podman build -q --build-arg GATEWAY_SHA256="$SHA" --build-arg SENSEN_COMMIT="$SC" \
   --build-arg TBQWF_COMMIT="$TC" -t "$IMG" "$CTX" > "$WORK/img.log" 2>&1 \
@@ -172,6 +199,37 @@ RL="$(podman logs sensen-gw-reaper-pg 2>&1 | grep -v 'postgresql://')"
 printf '%s\n' "$RL" | grep -qE 'reaper: tick 1 outcome=(not_due|reaped) .*orgs_without_retention=0' \
   || die "reaper did not tick healthily: $(printf '%s' "$RL" | tail -2 | tr '\n' ' ')"
 say "reaper ok: $(printf '%s' "$RL" | tail -1 | cut -c1-110)"
+
+# --- 3b. MIGRATION 13'S ARTEFACTS ARE IN FORCE, NOT MERELY RECORDED ---------
+# WHY THIS IS NOT COVERED BY ANYTHING ABOVE. Section 1b proves the store's VERSION, because the
+# binary refuses to open a store behind it or ahead of it -- so reaching this line means
+# `schema_migrations` reads 13. It says nothing about the OBJECTS migration 13 installed, and
+# `schema_migrations` keeps reading 13 after one of them is dropped.
+#
+# It matters because the failure is silent and the wrong answer is plausible.
+# `sensen_gateway.model_fair_tenants` is SECURITY DEFINER and returns one row per tenant
+# competing for a model's capacity; fair rationing divides `max_concurrent` across those rows. Cut
+# the `orgs_capacity` policy or the `select (id)` grant to `gateway_capacity` and the function
+# returns FEWER tenants -- so each one is handed a LARGER share. No error, no refusal, no log
+# line: the gateway over-admits and looks healthy. This is the same reason the strategy store
+# asserts its RLS posture directly rather than through behaviour.
+#
+# THE PROBE CARRIES NO CREDENTIAL. It runs inside the database container, so there is no DSN, no
+# password and nothing a printed line could leak; the gateway's own store secret stays untouched.
+PGC="${PGC:-sensen-postgres}"; GWDB="${GWDB:-sensen_gw}"; GWSCHEMA="${GWSCHEMA:-sensen_gateway}"
+podman ps --format '{{.Names}}' | grep -qx "$PGC" \
+  || die "no running container named '$PGC' to probe the store posture in -- set PGC to the database container"
+# shellcheck source=deploy/gateway/fair_posture_ok.sh
+. "$OFC/deploy/gateway/fair_posture_ok.sh"
+POSTURE="$(podman exec -i "$PGC" psql -U postgres -d "$GWDB" -At <<SQL 2>&1
+select 'capacity_can_select_orgs_id=' || coalesce(has_column_privilege('gateway_capacity','$GWSCHEMA.orgs','id','select')::text,'false');
+select 'orgs_capacity_policy=' || exists(select 1 from pg_policies where schemaname='$GWSCHEMA' and tablename='orgs' and policyname='orgs_capacity')::text;
+select 'fair_tenants_includes_planless=' || coalesce((select (position('op.org_id is null' in pg_get_functiondef(p.oid))>0)::text from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='$GWSCHEMA' and p.proname='model_fair_tenants' limit 1),'false');
+SQL
+)"
+printf '%s\n' "$POSTURE" | fair_posture_ok \
+  || die "migration 13's artefacts are NOT in force on the store, so fair rationing would divide a model's capacity across too few tenants and over-admit every one of them. The probe said: $(printf '%s' "$POSTURE" | grep -viE 'postgres(ql)?://|password' | tr '\n' ' ')"
+say "fair posture ok: $(printf '%s' "$POSTURE" | tr '\n' ' ')"
 
 # --- 4. THE GATE: restart with sockets in TIME_WAIT -------------------------
 say "restart test: budget ${RESTART_BUDGET}s"
