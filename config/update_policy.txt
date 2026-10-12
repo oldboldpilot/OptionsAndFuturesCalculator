@@ -87,6 +87,15 @@ This policy covers everything in the repository:
    - Record what was measured, not what was expected. Where a prediction turned
      out wrong, keep the wrong prediction next to what replaced it — that is
      usually the most useful part of the record.
+   - Run the documentation citation gate before every commit that changes a *.md, and
+     again on the branch before landing it:
+       python3 tools/check_docs_claims.py          # every code name a doc cites must exist
+       bash tools/test_check_docs_claims.sh        # the gate's own gate
+     MISSING must be zero, or every remaining line is listed with its justification in the
+     commit message (another repository's code names and kernel/external-tool names are that
+     class). DESIGN, FRAGMENT and REVISION are reported and are not fatal. The gate is
+     TEXTUAL: it proves a cited name exists, never that the sentence around it is true, so it
+     does not replace reading. See the documentation-citation rule in config/cpp_details.txt.
 
 4. **Session State**
    - Save a session log to docs/session_logs/ named

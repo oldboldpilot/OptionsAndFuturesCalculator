@@ -154,3 +154,42 @@ in which case we should use the appropriate STL algorithms and data structures t
 58. Use perf to discover and improve and eliminate performance bottlenecks in the codebase. This includes identifying hot paths, optimizing critical sections of code, and ensuring that the code is efficient and performs well under real-world conditions. Make sure to use perf regularly as part of the development workflow, and to address any performance issues that are identified in a timely manner to maintain code quality and prevent technical debt from accumulating over time. Additionally, use appropriate optimization techniques such as algorithmic improvements, data structure optimizations, and SIMD vectorization with dynamic dispatch where applicable to further improve performance while maintaining code readability and maintainability.
 59. Use Nvidia nsight to discover and improve GPU performance bottlenecks in the codebase. This includes identifying hot paths, optimizing critical sections of GPU code, and ensuring that the code is efficient and performs well under real-world conditions when running on Nvidia GPUs. Make sure to use Nvidia nsight regularly as part of the development workflow, and to address any performance issues that are identified in a timely manner to maintain code quality and prevent technical debt from accumulating over time. Additionally, use appropriate optimization techniques such as algorithmic improvements, data structure optimizations, and GPU-specific optimizations to further improve performance while maintaining code readability and maintainability when running on Nvidia GPUs.
 60. FAST-FOLLOW TO C++26: While the project currently utilizes C++23 (compiled via clang++-23), the architecture and module implementation must remain forward-compatible. We intend to migrate to the C++26 standard as soon as the compiler ecosystem (Clang/libc++) provides robust, production-ready support for it. All code should anticipate this upgrade (e.g. tracking standard library deprecations).
+
+61. EVERY CODE NAME A DOC CITES MUST EXIST IN THE CODE (owner 2026-10-12). A document is part
+    of the deliverable, so an invented name in it is a defect of the same kind as an invented
+    function in code, and it is worse in one way: the next reader TRUSTS it, so a stale note
+    recording why something is impossible is the one they believe instead of measuring. On
+    2026-10-07 a docs lane's report marked every citation "verified" while its docs named
+    functions, files and error strings that do not exist. GATE: `tools/check_docs_claims.py`
+    reads the Markdown lines a branch ADDED, takes every backticked span that names code (an
+    identifier, a qualified name, a flag, an environment variable, a repository path, a quoted
+    message, a git revision, a command line) and looks it up in this repository's own tracked
+    files outside docs/ and *.md -- the tree is read once and every lookup is answered in
+    memory, so a doc with a thousand citations costs one pass:
+
+      python3 tools/check_docs_claims.py                   # lines added since the default branch
+      python3 tools/check_docs_claims.py --base REV         # ... since REV
+      python3 tools/check_docs_claims.py --all FILE.md ...  # whole files
+      python3 tools/check_docs_claims.py --json             # machine-readable
+      bash tools/test_check_docs_claims.sh                  # the gate's own gate, on a throwaway repo
+
+    Four buckets. MISSING is fatal (exit status 1): the name is not in this repository. DESIGN
+    (inside a heading section or top-level list entry marked "Design (not built)"), FRAGMENT
+    (two backticks paired across a sentence -- a Markdown defect) and REVISION (a commit this
+    repository cannot resolve, i.e. another repository's) are reported and never fatal. A
+    commit that changes a *.md runs the gate and leaves MISSING at zero, or lists every
+    remaining line WITH its justification in the commit message or lane report; another
+    repository's code names and kernel/external-tool names are that justified class, and a
+    lane's own statement that its citations were verified is not evidence. LIMIT, stated
+    because it is the half this cannot do: the lookup is TEXTUAL, so a pass proves the cited
+    name EXISTS, not that the sentence around it is true -- the semantic fact-check is still a
+    human's. Nothing in it is specific to one repository: the base is derived from this
+    repository's own default branch (origin/HEAD, else origin/master, else origin/main) and the
+    path prefixes from its own tracked top-level directories, because a recorded list is right
+    for one tree and silently skips every citation outside it. The COPY OF RECORD is sensen's
+    `tools/check_docs_claims.py`; sensen, OptionsAndFuturesCalculator, ThinButQuickWebFramework,
+    mortgage-nest-egg, fastestjsoninthewest and cpp23-logger each carry a BYTE-IDENTICAL copy.
+    Change sensen's and copy it out; never edit a copy in place. Nothing in a consuming
+    repository can compare the two today -- OptionsAndFuturesCalculator's backend/sensen pin
+    predates the script -- so that rule is kept by hand, and the self-test is the only local
+    proof that the copy where it sits works.
