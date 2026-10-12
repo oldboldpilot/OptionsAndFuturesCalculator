@@ -78,11 +78,38 @@ TC="$(git -C "$SRC/external/tbqwf" rev-parse --short=9 HEAD)"
 # controls (`scripts/check_gateway_deploy_guard.sh`).
 # shellcheck source=deploy/gateway/submodules_pinned_ok.sh
 . "$OFC/deploy/gateway/submodules_pinned_ok.sh"
-SUBS="$(git -C "$SRC" submodule status 2>/dev/null)"
+# THE EXIT STATUS IS CHECKED, not just the text. `git submodule status` that aborts part way
+# through -- a broken submodule gitdir will do it -- prints the lines it managed and exits
+# non-zero, and every line it managed may be a clean ' '. Reading only the text would then pass
+# with the rest of the submodules unexamined, which is a silent version of the defect this block
+# exists to catch.
+SUBS="$(git -C "$SRC" submodule status)" || die "could not read the submodule status of $SRC, so the recorded tree cannot be established"
 printf '%s\n' "$SUBS" | submodules_pinned_ok \
   || die "a submodule of $SRC is not at its recorded pin, so this binary would not be the recorded tree. Run: git -C $SRC submodule update --init
     offending: $(printf '%s\n' "$SUBS" | submodules_unpinned_lines | awk '{print $2}' | tr '\n' ' ')"
-say "preflight ok: sensen=$SC tbqwf=$TC submodules=all-at-recorded-pin"
+# AND EVERY DECLARED SUBMODULE MUST HAVE BEEN REPORTED ON. The count comes from `.gitmodules`,
+# so a listing cut short agrees with neither it nor itself.
+NDECL="$(git -C "$SRC" config -f .gitmodules --get-regexp '^submodule\..*\.path$' 2>/dev/null | wc -l)"
+NSEEN="$(printf '%s\n' "$SUBS" | grep -c .)"
+[ "$NDECL" = "$NSEEN" ] || die "$SRC declares $NDECL submodules and the status reported $NSEEN, so some were not examined"
+# AND THE COMPARISON MUST BE AGAINST HEAD, WHICH IS WHAT A RELEASE MEANS. `git submodule status`
+# compares the checkout to the INDEX, so a gitlink bump that is staged but not committed reads as
+# a clean ' ' -- and `git diff --quiet HEAD -- agent/` above only covers `agent/`. This asks
+# HEAD's own tree, which is what the single-submodule check it replaced did.
+while read -r _ sp _; do
+  [ -n "${sp:-}" ] || continue
+  SA="$(git -C "$SRC/$sp" rev-parse HEAD 2>/dev/null)" || die "submodule $sp has no checkout to compare"
+  SR="$(git -C "$SRC" ls-tree HEAD "$sp" | awk '{print $3}')"
+  [ "$SA" = "$SR" ] || die "submodule $sp is at ${SA:0:9} but HEAD records ${SR:0:9}, so this binary would not be the recorded tree"
+done <<< "$SUBS"
+# WHAT THIS STILL DOES NOT SEE, stated rather than implied: a DIRTY submodule worktree. `git
+# submodule status` reports the gitlink, so modified or untracked files inside a submodule still
+# read ' '. It is deliberately not refused, because measured on this deploy source
+# `external/tbqwf` carries a regenerated `src/bpf/steering.skel.h` on every build -- the build
+# produces it -- so refusing a dirty submodule would refuse every deploy. The claim this block
+# supports is therefore "every submodule is at the COMMIT HEAD records", not "byte-identical to
+# the recorded tree".
+say "preflight ok: sensen=$SC tbqwf=$TC submodules=$NSEEN-at-HEADs-recorded-commits"
 
 # --- 1. image, and prove the loader runs as the unprivileged uid --------------
 CTX="$WORK/ctx"; mkdir -p "$CTX/runtime"
@@ -97,7 +124,14 @@ cp -L /usr/local/lib/x86_64-unknown-linux-gnu/{libc++.so.1,libc++abi.so.1,libunw
 # A GLOB WOULD SHIP THE WRONG SET, measured: `build-gateway/lib` also holds `libsensen.so.1` at
 # 215 MB, which this binary does not link at all, and two test plugins. `ldd` names the 20 MB one
 # the loader actually needs and nothing else. /opt/sensen-runtime is already on LD_LIBRARY_PATH.
-mapfile -t BUILDLIBS < <(ldd "$BIN" 2>/dev/null | awk -v s="$SRC/" 'index($3,s)==1 {print $3}')
+# The prefix is CANONICALISED on both sides: `SRC` may be a symlink or a non-canonical path while
+# `ldd` prints the resolved one, and a prefix match between the two spellings would silently stage
+# nothing. Missing a library is caught by the loader probe below, but only after a full image build.
+SRCR="$(realpath "$SRC" 2>/dev/null || printf '%s' "$SRC")"
+mapfile -t BUILDLIBS < <(ldd "$BIN" 2>/dev/null | awk '{print $3}' | while read -r L; do
+  [ -n "${L:-}" ] && [ -e "${L:-/nonexistent}" ] || continue
+  case "$(realpath "$L" 2>/dev/null)" in "$SRCR"/*) printf '%s\n' "$L";; esac
+done)
 for l in ${BUILDLIBS+"${BUILDLIBS[@]}"}; do cp -L "$l" "$CTX/runtime/" || die "could not stage $l"; done
 # A HOST-SIDE `not found` IS THE SAME DEFECT ONE STEP EARLIER. The image's own loader probe is
 # the authority, but it costs a full image build to ask; this names the library for free.
@@ -170,6 +204,61 @@ else
     the store said: $(printf '%s' "$SHOW" | grep -viE 'postgres(ql)?://|password=|dbname=' | tail -2 | tr '\n' ' ')"
 fi
 
+# --- 1c. MIGRATION 13'S ARTEFACTS ARE IN FORCE, NOT MERELY RECORDED ---------
+# IT RUNS HERE, BEFORE ANY CONTAINER IS TOUCHED, and that placement is the point. The probe needs
+# only the database, never the new gateway containers, and it was briefly in section 3b -- after
+# `podman rm -f` -- where every way it can fail (no such container, wrong database, psql cannot
+# authenticate) was a discovery made with the serving containers already gone and no rollback.
+# A precondition belongs with the other preconditions.
+#
+# WHAT IT ADDS OVER SECTION 1b. 1b proves the store's VERSION, because the binary refuses a store
+# behind it or ahead of it, so reaching this line means `schema_migrations` reads what the binary
+# knows. It says nothing about the OBJECTS a migration installed, and the version row keeps
+# reading 13 after one of them is dropped.
+#
+# The failure it catches is silent and its wrong answer is plausible.
+# `<schema>.model_fair_tenants` is SECURITY DEFINER and returns one row per tenant competing for a
+# model's capacity; fair rationing divides `max_concurrent` across those rows. Cut the
+# `orgs_capacity` policy or the `select (id)` grant to `gateway_capacity` and the function returns
+# FEWER tenants -- so each one is handed a LARGER share. No error, no refusal, no log line: the
+# gateway over-admits and looks healthy. This is the same reason the strategy store asserts its
+# RLS posture directly rather than through behaviour.
+#
+# THE PROBE CARRIES NO CREDENTIAL. It runs inside the database container, so there is no DSN, no
+# password and nothing a printed line could leak; the gateway's own store secret stays untouched.
+PGC="${PGC:-sensen-postgres}"; GWDB="${GWDB:-sensen_gw}"; GWSCHEMA="${GWSCHEMA:-sensen_gateway}"
+# No pipe into `grep -q`: under `pipefail` a `grep` that exits on its first match can SIGPIPE the
+# writer and fail the pipeline, which would be a spurious refusal. The filter does it in podman.
+[ -n "$(podman ps --filter "name=^${PGC}$" --format '{{.Names}}')" ] \
+  || die "no running container named '$PGC' to probe the store posture in -- set PGC to the database container"
+# shellcheck source=deploy/gateway/fair_posture_ok.sh
+. "$OFC/deploy/gateway/fair_posture_ok.sh"
+POSTURE="$(podman exec -i "$PGC" psql -U postgres -d "$GWDB" -At <<SQL 2>&1
+select 'capacity_can_select_orgs_id=' || coalesce(has_column_privilege('gateway_capacity','$GWSCHEMA.orgs','id','select')::text,'false');
+select 'orgs_capacity_policy=' || exists(select 1 from pg_policies where schemaname='$GWSCHEMA' and tablename='orgs' and policyname='orgs_capacity')::text;
+select 'fair_tenants_includes_planless=' || coalesce((select (position('op.org_id is null' in pg_get_functiondef(p.oid))>0)::text from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='$GWSCHEMA' and p.proname='model_fair_tenants' limit 1),'false');
+select 'probe_schema_version=' || coalesce((select max(version)::text from $GWSCHEMA.schema_migrations),'none');
+select 'probe_orgs=' || (select count(*)::text from $GWSCHEMA.orgs);
+SQL
+)"
+# THE PROBE MUST HAVE LOOKED AT THE STORE THIS GATEWAY OPENS, and `PGC`/`GWDB` are operator
+# defaults that cannot promise that: the store is named by the `sgw_store_dsn` SECRET, which this
+# script deliberately cannot read. So the two are RECONCILED instead of assumed -- the schema
+# version and org count the probe read must equal the ones `admin show` reported through that
+# secret in 1b. A probe pointed at a different database answers about the wrong store, and
+# before this it would have answered confidently.
+PSV="$(printf '%s\n' "$POSTURE" | sed -n 's/^probe_schema_version=//p')"
+PSO="$(printf '%s\n' "$POSTURE" | sed -n 's/^probe_orgs=//p')"
+SSV="$(printf '%s' "$SHOW" | grep -oE 'schema_version=[0-9-]+' | head -1 | cut -d= -f2)"
+SSO="$(printf '%s' "$SHOW" | grep -oE 'orgs=[0-9-]+' | head -1 | cut -d= -f2)"
+[ -n "$PSV" ] && [ -n "$SSV" ] && [ "$PSV" = "$SSV" ] && [ "$PSO" = "$SSO" ] \
+  || die "the posture probe did not look at the store this gateway opens: the probe read schema_version=${PSV:-?} orgs=${PSO:-?} from '$GWDB' in '$PGC', and the gateway's own store reported schema_version=${SSV:-?} orgs=${SSO:-?}. Set PGC/GWDB/GWSCHEMA to the database the store DSN names."
+printf '%s\n' "$POSTURE" | fair_posture_ok \
+  || die "migration 13's artefacts are NOT in force on the store, so fair rationing would divide a model's capacity across too few tenants and over-admit every one of them. The probe said: $(printf '%s' "$POSTURE" | grep -E '^[a-z_]+=[A-Za-z0-9]+$' | tr '\n' ' ')"
+# Only well-formed `key=value` lines are echoed. psql can emit NOTICE or WARNING text alongside
+# the rows, and the pass path has no business printing whatever else arrived.
+say "fair posture ok: $(printf '%s' "$POSTURE" | grep -E '^[a-z_]+=[A-Za-z0-9]+$' | tr '\n' ' ')"
+
 # --- 2. replace the two containers -------------------------------------------
 GK="$(cat "$CFG/regress.key" 2>/dev/null)" || true
 [ -n "${GK:-}" ] || die "no regression key at $CFG/regress.key"
@@ -186,7 +275,7 @@ podman run -d --name sensen-gw-reaper-pg --network host --restart unless-stopped
   --secret sgw_maint_dsn,type=env,target=SGW_MAINT_DSN \
   --entrypoint /usr/local/bin/sensen-gateway \
   "$IMG" admin reap-loop env:SGW_MAINT_DSN >/dev/null || die "reaper container did not start"
-wait_ready 60 || die "not ready in 60s: $(podman logs sensen-gw-pg 2>&1 | grep -v 'postgresql://' | tail -2 | tr '\n' ' ')"
+wait_ready 60 || die "not ready in 60s: $(podman logs sensen-gw-pg 2>&1 | grep -viE 'postgres(ql)?://|password' | tail -2 | tr '\n' ' ')"
 say "readyz: $(curl -sk -m3 "$BASE/readyz" | grep -oE '"(ready|store_reachable|epoch_id|epoch_current|admission_wired)":[^,]*' | tr '\n' ' ')"
 
 # --- 3. regression, which is also what puts a socket into TIME_WAIT ----------
@@ -195,47 +284,16 @@ say "regression rc=$rc $(grep -oE '[0-9]+ passed, [0-9]+ failed' "$WORK/regress.
 [ $rc = 0 ] || { grep -E 'FAIL' "$WORK/regress.txt" | grep -v "$GK" | head -5; die "regression failed"; }
 
 sleep 3
-RL="$(podman logs sensen-gw-reaper-pg 2>&1 | grep -v 'postgresql://')"
+RL="$(podman logs sensen-gw-reaper-pg 2>&1 | grep -viE 'postgres(ql)?://|password')"
 printf '%s\n' "$RL" | grep -qE 'reaper: tick 1 outcome=(not_due|reaped) .*orgs_without_retention=0' \
   || die "reaper did not tick healthily: $(printf '%s' "$RL" | tail -2 | tr '\n' ' ')"
 say "reaper ok: $(printf '%s' "$RL" | tail -1 | cut -c1-110)"
-
-# --- 3b. MIGRATION 13'S ARTEFACTS ARE IN FORCE, NOT MERELY RECORDED ---------
-# WHY THIS IS NOT COVERED BY ANYTHING ABOVE. Section 1b proves the store's VERSION, because the
-# binary refuses to open a store behind it or ahead of it -- so reaching this line means
-# `schema_migrations` reads 13. It says nothing about the OBJECTS migration 13 installed, and
-# `schema_migrations` keeps reading 13 after one of them is dropped.
-#
-# It matters because the failure is silent and the wrong answer is plausible.
-# `sensen_gateway.model_fair_tenants` is SECURITY DEFINER and returns one row per tenant
-# competing for a model's capacity; fair rationing divides `max_concurrent` across those rows. Cut
-# the `orgs_capacity` policy or the `select (id)` grant to `gateway_capacity` and the function
-# returns FEWER tenants -- so each one is handed a LARGER share. No error, no refusal, no log
-# line: the gateway over-admits and looks healthy. This is the same reason the strategy store
-# asserts its RLS posture directly rather than through behaviour.
-#
-# THE PROBE CARRIES NO CREDENTIAL. It runs inside the database container, so there is no DSN, no
-# password and nothing a printed line could leak; the gateway's own store secret stays untouched.
-PGC="${PGC:-sensen-postgres}"; GWDB="${GWDB:-sensen_gw}"; GWSCHEMA="${GWSCHEMA:-sensen_gateway}"
-podman ps --format '{{.Names}}' | grep -qx "$PGC" \
-  || die "no running container named '$PGC' to probe the store posture in -- set PGC to the database container"
-# shellcheck source=deploy/gateway/fair_posture_ok.sh
-. "$OFC/deploy/gateway/fair_posture_ok.sh"
-POSTURE="$(podman exec -i "$PGC" psql -U postgres -d "$GWDB" -At <<SQL 2>&1
-select 'capacity_can_select_orgs_id=' || coalesce(has_column_privilege('gateway_capacity','$GWSCHEMA.orgs','id','select')::text,'false');
-select 'orgs_capacity_policy=' || exists(select 1 from pg_policies where schemaname='$GWSCHEMA' and tablename='orgs' and policyname='orgs_capacity')::text;
-select 'fair_tenants_includes_planless=' || coalesce((select (position('op.org_id is null' in pg_get_functiondef(p.oid))>0)::text from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='$GWSCHEMA' and p.proname='model_fair_tenants' limit 1),'false');
-SQL
-)"
-printf '%s\n' "$POSTURE" | fair_posture_ok \
-  || die "migration 13's artefacts are NOT in force on the store, so fair rationing would divide a model's capacity across too few tenants and over-admit every one of them. The probe said: $(printf '%s' "$POSTURE" | grep -viE 'postgres(ql)?://|password' | tr '\n' ' ')"
-say "fair posture ok: $(printf '%s' "$POSTURE" | tr '\n' ' ')"
 
 # --- 4. THE GATE: restart with sockets in TIME_WAIT -------------------------
 say "restart test: budget ${RESTART_BUDGET}s"
 T0=$SECONDS
 podman restart sensen-gw-pg >/dev/null || die "restart command failed"
-wait_ready "$RESTART_BUDGET" || die "NOT ready ${RESTART_BUDGET}s after a restart that followed live traffic -- the TIME_WAIT bind stall is present: $(podman logs --tail 5 sensen-gw-pg 2>&1 | grep -v 'postgresql://' | tr '\n' ' ')"
+wait_ready "$RESTART_BUDGET" || die "NOT ready ${RESTART_BUDGET}s after a restart that followed live traffic -- the TIME_WAIT bind stall is present: $(podman logs --tail 5 sensen-gw-pg 2>&1 | grep -viE 'postgres(ql)?://|password' | tr '\n' ' ')"
 say "restart ok: ready in $((SECONDS-T0))s"
 RESTARTS="$(podman inspect sensen-gw-pg --format '{{.RestartCount}}')"
 say "restart count: $RESTARTS"

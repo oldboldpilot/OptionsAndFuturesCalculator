@@ -206,15 +206,36 @@ if [ -r "$SPO" ]; then
           "$(pinned 'U1111111111111111111111111111111111111111 external/a')" "refused"
     # The deploy source has five submodules, so "nothing to check" means the check did not run.
     check "empty submodule status is REFUSED" "$(pinned '')" "refused"
-    if grep -q 'submodules_pinned_ok' "$RD" 2>/dev/null; then
-        ok "redeploy.sh uses the submodule predicate"
+    # MATCH THE CALL, NOT THE NAME. The first version of this arm grepped for
+    # `submodules_pinned_ok`, which also appears in redeploy.sh's own
+    # `# shellcheck source=deploy/gateway/submodules_pinned_ok.sh` comment -- so deleting BOTH the
+    # source line and the call left this check printing ok. A gate that a comment satisfies is
+    # the `ad-routes.test.ts` defect again: written from the same list as the code, able to ask
+    # only whether something was spelled, never whether it runs.
+    [ -r "$RD" ] || no "redeploy.sh is not readable, so none of the arms below mean anything"
+    if grep -qE '\|[[:space:]]*submodules_pinned_ok' "$RD" 2>/dev/null; then
+        ok "redeploy.sh PIPES INTO the submodule predicate (not merely names it in a comment)"
     else
-        no "redeploy.sh does not use the submodule predicate, so gating it proves nothing"
+        no "redeploy.sh does not pipe into the submodule predicate, so gating it proves nothing"
     fi
-    if grep -q 'is not the recorded pin' "$RD" 2>/dev/null; then
-        no "redeploy.sh still checks only the single named submodule"
+    # The HEAD comparison is the half `git submodule status` cannot do: status compares to the
+    # INDEX, so a staged-but-uncommitted gitlink bump reads as clean.
+    if grep -q 'ls-tree HEAD "$sp"' "$RD" 2>/dev/null; then
+        ok "redeploy.sh also compares each submodule against HEAD's own tree"
     else
+        no "redeploy.sh trusts submodule status alone, which compares to the index and not to HEAD"
+    fi
+    if [ -r "$RD" ] && ! grep -q 'is not the recorded pin' "$RD" 2>/dev/null; then
         ok "redeploy.sh no longer checks one submodule by name"
+    else
+        no "redeploy.sh still checks only the single named submodule, or could not be read"
+    fi
+    # The status text must be taken with its EXIT STATUS. A listing cut short by a broken
+    # submodule gitdir can be all-clean and still be incomplete.
+    if grep -q 'submodule status)" || die' "$RD" 2>/dev/null; then
+        ok "redeploy.sh refuses when git submodule status itself fails"
+    else
+        no "redeploy.sh discards the exit status of git submodule status"
     fi
 else
     no "deploy/gateway/submodules_pinned_ok.sh is not readable"
@@ -257,10 +278,41 @@ orgs_capacity_policy=true')" "refused"
     check "a psql error instead of a probe is REFUSED" \
           "$(posture 'psql: error: connection to server failed')" "refused"
     check "empty probe output is REFUSED" "$(posture '')" "refused"
-    if grep -q 'fair_posture_ok' "$RD" 2>/dev/null; then
-        ok "redeploy.sh uses the posture predicate"
+    if grep -qE '\|[[:space:]]*fair_posture_ok' "$RD" 2>/dev/null; then
+        ok "redeploy.sh PIPES INTO the posture predicate (not merely names it in a comment)"
     else
-        no "redeploy.sh does not use the posture predicate, so gating it proves nothing"
+        no "redeploy.sh does not pipe into the posture predicate, so gating it proves nothing"
+    fi
+    # THE KEYS THE PREDICATE REQUIRES MUST BE THE KEYS THE PROBE EMITS. Nothing else ties the SQL
+    # labels to the predicate's list, so renaming a label in the query would leave this gate green
+    # and produce a refusal only on a live deploy.
+    for k in capacity_can_select_orgs_id orgs_capacity_policy fair_tenants_includes_planless; do
+        if grep -q "'${k}=' ||" "$RD" 2>/dev/null; then
+            ok "the probe emits the key the predicate requires: $k"
+        else
+            no "the predicate requires '$k' and the probe in redeploy.sh does not emit it"
+        fi
+    done
+    # THE PROBE MUST BE RECONCILED WITH THE STORE THE GATEWAY OPENS. PGC/GWDB are operator
+    # defaults and cannot promise they name the database the store DSN points at.
+    if grep -q 'did not look at the store this gateway opens' "$RD" 2>/dev/null; then
+        ok "redeploy.sh reconciles the probe's store against the gateway's own"
+    else
+        no "redeploy.sh trusts PGC/GWDB to be the store the gateway opens"
+    fi
+    # ORDERING IS A PROPERTY WORTH ASSERTING, not a comment. The probe needs only the database, so
+    # it must run BEFORE the containers are replaced: in section 3b every way it could fail was a
+    # discovery made after `podman rm -f`, with the serving containers already gone.
+    PL="$(grep -n '| fair_posture_ok' "$RD" 2>/dev/null | head -1 | cut -d: -f1)"
+    # ANCHORED, because the unanchored pattern matched a COMMENT in section 1b that mentions
+    # `podman rm -f` by name -- the first run of this very check reported rm=154, the comment,
+    # instead of 262, the command. That is the defect two arms above it exist for, found in the
+    # arm written to find it.
+    RL="$(grep -nE '^[[:space:]]*podman rm -f' "$RD" 2>/dev/null | head -1 | cut -d: -f1)"
+    if [ -n "$PL" ] && [ -n "$RL" ] && [ "$PL" -lt "$RL" ]; then
+        ok "the posture check runs BEFORE the first container is removed (line $PL < $RL)"
+    else
+        no "the posture check runs at or after container replacement (posture=${PL:-none} rm=${RL:-none})"
     fi
     # The probe must not need a credential: it runs inside the database container, so no DSN or
     # password can be leaked by a refusal that prints what it saw.
