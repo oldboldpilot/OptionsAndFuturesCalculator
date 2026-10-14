@@ -5,7 +5,7 @@
 This is the short version: what every session needs on every turn. The full engineering record (each measurement, each
 defect's history and the reasoning behind every rule) is `docs/ENGINEERING_NOTES.md`, byte-identical to the former 497 KB
 CLAUDE.md. Code comments, migrations and docs that cite "CLAUDE.md" for a section mean that section there, under the same
-heading. Find one with `grep -n '^## ' docs/ENGINEERING_NOTES.md` and read it by line range; never read the file whole.
+heading. Find one with grep -n '^## ' docs/ENGINEERING_NOTES.md and read it by line range; never read the file whole.
 
 ## Architecture
 
