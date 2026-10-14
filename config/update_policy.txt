@@ -71,8 +71,12 @@ This policy covers everything in the repository:
      delta.
 
 3. **Documentation Updates** (required for every push)
-   - Update CLAUDE.md — architecture, gRPC surface, deployment, DNS, and any
+   - Update docs/ENGINEERING_NOTES.md — architecture, gRPC surface, deployment, DNS, and any
      operational constraint that is not otherwise represented in the repository
+   - CLAUDE.md is loaded into EVERY turn of every session, so it holds only what a session needs on every turn
+     and stays at most 7 KB (owner 2026-10-14: at 497 KB it cost ~230k tokens a turn). The technical record --
+     measurements, defect histories, the reasoning behind a rule -- goes in docs/ENGINEERING_NOTES.md under a
+     heading, and that heading goes in CLAUDE.md's index. Change CLAUDE.md itself only when an every-turn rule changes.
    - Update docs/INDEX.md if documents were added or removed, and verify every
      link in it still resolves
    - Update docs/PRD_OPTIONS_AND_FUTURES_CALCULATOR.md (status, scope changes)
