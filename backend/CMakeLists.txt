@@ -1985,3 +1985,15 @@ endforeach()
 # a binary nothing compiles rots exactly the way a binary nothing commits does: it sat
 # untracked in a worktree while its generator sat in version control, gated by nothing.
 add_dependencies(build_tests workflow_check)
+
+# The documentation citation gate's own gate. `tools/check_docs_claims.py` is shipped
+# byte-identically to six repositories, and `tools/test_check_docs_claims.sh` is the only local
+# proof that THIS copy of it works; sensen registers it as the ctest `check_docs_claims` and here
+# it was carried but reachable only by hand. A gate nothing runs is indistinguishable from a gate
+# that passes, which is the same defect the gate itself exists to catch in prose.
+#
+# It needs no build target and no WORKING_DIRECTORY: the script resolves its own directory and
+# builds its fixtures under TMPDIR, so it passes from any cwd (checked from /tmp).
+add_test(NAME CheckDocsClaimsGate
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/../tools/test_check_docs_claims.sh)
+set_tests_properties(CheckDocsClaimsGate PROPERTIES TIMEOUT 120 LABELS "docs;policy")

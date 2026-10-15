@@ -115,3 +115,9 @@ config/google_search_console_token.json
 # the workflow, so these WILL recur; a 26 MB untracked core from
 # replicated_broker_tests is what prompted this line.
 vgcore.*
+
+# PID files from backgrounded measurement runs. `usage_arms.pid` held 3811710,
+# a process long dead, and sat untracked in the repository root for half a day
+# while nothing tracked ever referenced the name: a harness writes it, reads it
+# back and does not clean up after itself.
+*.pid
