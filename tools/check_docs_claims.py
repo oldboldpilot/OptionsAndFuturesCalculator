@@ -294,6 +294,7 @@ def main():
     # Markdown extensions, because a *.md pathspec selects neither README.MD nor a .mdx.
     specs = [":(icase)*.md", ":(icase)*.markdown", ":(icase)*.mdx"]
     whole = set()
+    fixtures = []
     files = a.files
     if not files:
         files = [f for f in git(repo, "diff", "--no-color", "--name-only", "-z", base, "--", *specs).split("\0") if f]
@@ -301,6 +302,11 @@ def main():
         # there is -- was never checked. Every line of it is new, so it is checked whole.
         whole = {f for f in git(repo, "ls-files", "--others", "--exclude-standard", "-z", "--", *specs).split("\0") if f}
         files += sorted(whole)
+        # A Markdown file under a tests/fixtures/ directory is TEST INPUT, not documentation: a
+        # fixture may cite a stale path on purpose (policy-facts stale lookup, 2026-10-14). Only
+        # the diff-derived set skips them; a fixture named on the command line is still checked.
+        fixtures = [f for f in files if re.search(r"(^|/)tests/fixtures/", f)]
+        files = [f for f in files if f not in fixtures]
     if a.all and not a.files:
         sys.exit("check_docs_claims: --all needs the files to check")
     # A file NAMED on the command line and not there is an error: silently skipping it reports
@@ -338,12 +344,16 @@ def main():
                     found[bucket].append((f, ln, span, name))
 
     if a.json:
-        print(json.dumps({"checked": checked,
+        print(json.dumps({"checked": checked, "fixture_inputs_skipped": fixtures,
                           **{k: [dict(file=f, line=l, span=s, atom=n) for f, l, s, n in v] for k, v in found.items()}},
                          indent=1))
     else:
         print(f"checked={checked} missing={len(found['missing'])} design={len(found['design'])}"
-              f" fragment={len(found['fragment'])} revision={len(found['revision'])}")
+              f" fragment={len(found['fragment'])} revision={len(found['revision'])}"
+              + (f" fixture_inputs_skipped={len(fixtures)}" if fixtures else ""))
+        # Say what was NOT looked at, so a skip never reads as a clean pass over that file.
+        for f in fixtures:
+            print(f"SKIPPED {f}: tests/fixtures/ input, not documentation (name it to check it)")
         for kind in ("missing", "design", "fragment", "revision"):
             for f, l, s, n in found[kind]:
                 print(f"{kind.upper()} {f}:{l}: `{s}`" + (f"  (atom: {n})" if n != s else ""))

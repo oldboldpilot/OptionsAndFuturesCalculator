@@ -80,6 +80,17 @@ check "exit status is 0 when nothing is missing" "$?" "0"
 python3 "$checker" --repo "$fx" --all docs/a.md > /dev/null
 check "--all on the cleaned file passes" "$?" "0"
 
+# A tests/fixtures/ Markdown input is test data, not a doc; naming it explicitly still checks it.
+mkdir -p "$fx/agent/tests/fixtures/x"
+printf 'See `docs/gone_fixture.md`.\n' > "$fx/agent/tests/fixtures/x/input.md"
+g add -A && g commit -q -m fixture
+out_fx=$(python3 "$checker" --repo "$fx" --base "$base")
+check "a tests/fixtures/ Markdown input in the diff is not checked as a doc" "$?" "0"
+check "the skipped fixture is named, not silently dropped" "$(grep -c '^SKIPPED agent/tests/fixtures/x/input.md' <<<"$out_fx")" "1"
+python3 "$checker" --repo "$fx" --all agent/tests/fixtures/x/input.md > /dev/null
+check "a fixture named on the command line is still checked" "$?" "1"
+g rm -q -r agent && g commit -q -m unfixture
+
 # ---------------------------------------------------------------------------
 # Portability arms (2026-10-12). The checker is copied into five other repositories;
 # three of them are on `main`, and their code lives in directories a sensen-shaped prefix
