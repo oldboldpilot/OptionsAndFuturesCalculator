@@ -39,7 +39,7 @@ port needs no proxy change — but each one must still be added to Envoy's
 | --- | --- | --- |
 | `calculator.OptionsCalculator` | `backend/proto/calculator.proto` | This application's own API — strategies, legs, payoff curves, market data |
 | `sensen.finance.Finance` | `backend/proto/finance.proto` | The general-purpose sensen financial library, exposed for reuse by other applications |
-| `calculator.assistant.StrategyAssistant` | `backend/proto/assistant.proto` | Natural-language strategy parsing, served by a fine-tuned Qwen3-0.6B running in-process |
+| `calculator.assistant.StrategyAssistant` | `backend/proto/assistant.proto` | Natural-language strategy parsing, served IN-PROCESS by a ~1M-parameter custom ENCODER (backend/models/strategy-encoder.gguf, 2.8 MB, gitignored, named by `STRATEGY_ENCODER_PATH`) through `sensen.encoder_assistant`. NOT a fine-tuned Qwen3-0.6B: that generation was superseded, and the 639 MB GGUFs in `backend/models/` are its weights |
 
 > **MOVED 2026-10: the former fourth service, `mortgage.assistant.MortgageAssistant`, is no
 > longer served by this engine.** It runs as the separate `mfv-assistant` Railway service built
@@ -538,11 +538,24 @@ moving afterwards is attributable.
 
 ## Strategy assistant
 
-A fine-tuned Qwen3-0.6B (QLoRA, rank 16, 95.0% params exact-match) converts a
-plain-English request into calculator parameters. It runs **in-process**, Q8_0
-on CPU, fetched at image build time with the checksum pinned — it cannot travel
+**WHAT SERVES IT NOW.** A ~1M-parameter custom ENCODER, trained from scratch,
+running **in-process** on CPU: backend/models/strategy-encoder.gguf (2,796,448
+bytes, named by `STRATEGY_ENCODER_PATH`), reached through
+`sensen.encoder_assistant` from `backend/src/modules/encoder_queue.cppm`. It
+EXTRACTS rather than generates — it names an operation and points at numeric
+spans in the user's own text, and every value is computed from those spans, so it
+emits no digit of its own. One GGUF carries the weights, the label schema and the
+tokenizer. Its trainer is `agent/train/train_encoder.py` and its measurements of
+record are the nine `docs/evidence/encoder-*` directories.
+
+**THE GENERATION BELOW IS SUPERSEDED, and the rest of this section is its
+record.** A fine-tuned Qwen3-0.6B (QLoRA, rank 16, 95.0% params exact-match) used
+to convert a plain-English request into calculator parameters, Q8_0 on CPU,
+fetched at image build time with the checksum pinned — it could not travel
 through `railway up`, which enforces an upload deadline that 62 MB already
-failed.
+failed. Nothing serves those weights now. They are kept, and documented here,
+because a number attributed to "the strategy model" has to be traceable to the
+weights that produced it.
 
 **The replacement hosting mechanism EXISTS and both models are deployed and
 loaded.** This section said the opposite until 2026-08-12 — "no model is in the
@@ -1735,6 +1748,14 @@ against a queue that is working correctly. **Canonicalise before hashing, or
 compare the parsed object.** The strategy assistant has no map field and IS
 byte-stable, so the two assistants need different gates.
 
+
+> **TWO THINGS BELOW ARE NO LONGER TRUE OF THIS REPOSITORY.** The mortgage
+> assistant MOVED to nest-egg-loan (Railway service `mfv-assistant`) in 2026-10
+> and nothing here serves it, so it is not "in the same process"; and it is now a
+> ~1M-parameter custom encoder, not a fine-tuned Qwen3-0.6B. Its model, training
+> and serving chain are documented in that repository's
+> docs/MODEL_TRAINING_AND_INFERENCE.md. What follows is the record of the
+> superseded generation, kept for traceability.
 
 A **second, different** fine-tuned Qwen3-0.6B, serving
 `mortgage.assistant.MortgageAssistant` in the same process. It turns a
