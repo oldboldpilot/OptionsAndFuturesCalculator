@@ -39,7 +39,7 @@ port needs no proxy change — but each one must still be added to Envoy's
 | --- | --- | --- |
 | `calculator.OptionsCalculator` | `backend/proto/calculator.proto` | This application's own API — strategies, legs, payoff curves, market data |
 | `sensen.finance.Finance` | `backend/proto/finance.proto` | The general-purpose sensen financial library, exposed for reuse by other applications |
-| `calculator.assistant.StrategyAssistant` | `backend/proto/assistant.proto` | Natural-language strategy parsing, served IN-PROCESS by a ~1M-parameter custom ENCODER (backend/models/strategy-encoder.gguf, 2.8 MB, gitignored, named by `STRATEGY_ENCODER_PATH`) through `sensen.encoder_assistant`. NOT a fine-tuned Qwen3-0.6B: that generation was superseded, and the 639 MB GGUFs in `backend/models/` are its weights |
+| `calculator.assistant.StrategyAssistant` | `backend/proto/assistant.proto` | Natural-language strategy parsing, served IN-PROCESS by a 692,175-parameter custom ENCODER (backend/models/strategy-encoder.gguf, 2.8 MB, gitignored, named by `STRATEGY_ENCODER_PATH`) through `sensen.encoder_assistant`. NOT a fine-tuned Qwen3-0.6B: that generation was superseded, and the 639 MB GGUFs in `backend/models/` are its weights |
 
 > **MOVED 2026-10: the former fourth service, `mortgage.assistant.MortgageAssistant`, is no
 > longer served by this engine.** It runs as the separate `mfv-assistant` Railway service built
@@ -538,15 +538,35 @@ moving afterwards is attributable.
 
 ## Strategy assistant
 
-**WHAT SERVES IT NOW.** A ~1M-parameter custom ENCODER, trained from scratch,
-running **in-process** on CPU: backend/models/strategy-encoder.gguf (2,796,448
-bytes, named by `STRATEGY_ENCODER_PATH`), reached through
+**WHAT SERVES IT NOW.** A **692,175-parameter** custom ENCODER, trained from
+scratch, running **in-process** on CPU: backend/models/strategy-encoder.gguf
+(2,796,448 bytes, gitignored, named by `STRATEGY_ENCODER_PATH`), reached through
 `sensen.encoder_assistant` from `backend/src/modules/encoder_queue.cppm`. It
 EXTRACTS rather than generates — it names an operation and points at numeric
 spans in the user's own text, and every value is computed from those spans, so it
 emits no digit of its own. One GGUF carries the weights, the label schema and the
 tokenizer. Its trainer is `agent/train/train_encoder.py` and its measurements of
 record are the nine `docs/evidence/encoder-*` directories.
+
+Read from the artefact on 2026-10-18, because a figure in prose is a measurement:
+
+| | |
+| --- | --- |
+| `general.architecture` / `general.name` | `sensen-encoder` / "sensen tiny encoder (strategy)" |
+| parameters / tensors | **692,175** / 35 |
+| blocks / d_model / heads / ffn | 3 / 128 / 4 / 344 (swiglu) |
+| context length / pooling | 160 / `cls` |
+| attention | **bidirectional** (`causal = 0`) |
+| tokenizer | wordpiece, 689 tokens |
+| output heads | operation (48 classes), convention (29), (slot, map) pairs (2) |
+
+**There is no output head over the vocabulary** — those three heads are the whole
+output side. A generative model needs a vocab-sized projection; this has none, so
+it cannot emit a token at all. That is the mechanism behind "emits no digit of its
+own", and it is a property of the weights rather than of a prompt or a guard.
+Compare the mortgage encoder in nest-egg-loan: same architecture and geometry, a
+different LABEL SPACE (29 operations, 13 conventions, 110–129 pairs) and a larger
+vocabulary — one design, two domains.
 
 **THE GENERATION BELOW IS SUPERSEDED, and the rest of this section is its
 record.** A fine-tuned Qwen3-0.6B (QLoRA, rank 16, 95.0% params exact-match) used
