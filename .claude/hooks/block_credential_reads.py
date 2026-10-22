@@ -284,21 +284,29 @@ def trusted_program(value: str, names: set) -> bool:
         found = shutil.which(value)
         if not found:
             return False
-        resolved = os.path.realpath(found)
+        written = os.path.abspath(found)
     else:
-        resolved = os.path.realpath(os.path.expanduser(value))
+        written = os.path.abspath(os.path.expanduser(value))
+    resolved = os.path.realpath(written)
 
-    if inside_repo(resolved):
+    # BOTH the path as written and the path it resolves to must be trusted. What
+    # gets executed is the written path, and only its target is what realpath
+    # reports, so checking the target alone validates a different thing than the
+    # one that runs: a link under a writable directory could be re-pointed
+    # between this check and the build. Requiring both closes that window.
+    return all(_trusted_location(p) for p in (written, resolved))
+
+
+def _trusted_location(path: str) -> bool:
+    if inside_repo(path):
         return False
     home = os.path.realpath(os.path.expanduser("~"))
-    if resolved == home or resolved.startswith(home + os.sep):
+    if path == home or path.startswith(home + os.sep):
         return False
     for bad in UNTRUSTED_PREFIXES:
-        if resolved == bad or resolved.startswith(bad + os.sep):
+        if path == bad or path.startswith(bad + os.sep):
             return False
-    return any(
-        resolved == d or resolved.startswith(d + os.sep) for d in TRUSTED_TOOL_DIRS
-    )
+    return any(path == d or path.startswith(d + os.sep) for d in TRUSTED_TOOL_DIRS)
 
 
 def cache_entry_permitted(token: str) -> bool:

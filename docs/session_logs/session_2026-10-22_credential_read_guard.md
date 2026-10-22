@@ -174,6 +174,26 @@ checked as RESOLVED, because the resolved basename legitimately differs -- the u
 compiler symlink lands on a versioned binary, so resolving first and then checking the name would
 refuse the toolchain this repository mandates.
 
+#### Checking a different path than the one that runs
+
+An eighth review, graded high, observed that the location check ran on the RESOLVED target while
+what executes is the path as WRITTEN. The grade is higher than the mechanism warrants and the
+reasoning is worth recording, because accepting a severity without checking it is its own
+failure: executing a symlink executes its target, so a link under a writable directory pointing
+at the genuine compiler runs the genuine compiler. Pointing a link at something safe is not an
+escalation.
+
+The real residual is narrower -- a race, in which the link is trusted when the hook looks and
+something else when the build runs. That needs an attacker already executing code here
+concurrently, and such an attacker can read the dotenv directly and needs no bypass at all. It
+was closed anyway, because the fix is two lines and removes a check-vs-use mismatch on
+principle: both the written path and the resolved target must now be trusted.
+
+Declined from the same review: walking every directory component and requiring root ownership.
+It is host-fragile in a way that would break this very repository -- the mandated compiler lives
+under a prefix that is commonly user-owned, so the check would refuse the documented toolchain --
+and it adds nothing once both paths must be trusted.
+
 #### The arm that was not an arm
 
 The first attempt at the mutation for this rule replaced a guard line in a way that left the
@@ -201,15 +221,15 @@ exchange for no security. This is the ceiling described above, reached from a di
 
 ## The arms
 
-`.claude/hooks/test-block-credential-reads.sh` holds 118 cases, including every reported bypass
-from all seven findings as a positive control. It lives in a file rather than an inline command because the live hook
+`.claude/hooks/test-block-credential-reads.sh` holds 119 cases, including every reported bypass
+from all eight findings as a positive control. It lives in a file rather than an inline command because the live hook
 blocks any Bash call that names credential material — including a test runner that passes such
 a command as an argument. Each arm was restored before the next, and the restore was verified by
 digest rather than assumed.
 
 | arm | result |
 |---|---|
-| baseline | 118 pass, 0 fail |
+| baseline | 119 pass, 0 fail |
 | the compound-command refusal removed | 6 failed |
 | the anchored exemptions reverted to substring | 3 failed |
 | the loader's child allowlist removed entirely | 3 failed |
@@ -220,11 +240,12 @@ digest rather than assumed.
 | the per-tool flag allowlist disabled | 19 failed |
 | flag-value confinement disabled | 11 failed |
 | the executed value pinned by basename only | 5 failed |
+| only the resolved target checked, not the written path | 1 failed |
 
-Every repair is independently load-bearing: no two arms fail the same cases, so none of the ten
+Every repair is independently load-bearing: no two arms fail the same cases, so none of the eleven
 is redundant and none alone is sufficient. The first two arms were measured against the shell
-implementation and the last eight against the Python one that replaced it. Each arm was restored
-before the next and the restore compared by digest, with the baseline re-run to 118 after the
+implementation and the last nine against the Python one that replaced it. Each arm was restored
+before the next and the restore compared by digest, with the baseline re-run to 119 after the
 last.
 
 ## The cost, which is real and was accepted rather than carved around

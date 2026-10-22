@@ -138,6 +138,19 @@ run BLOCK "scripts/run_with_env.py -- cmake -DCMAKE_CXX_COMPILER=~/bin/clang++"
 run BLOCK "scripts/run_with_env.py -- cmake -DCMAKE_CXX_COMPILER_LAUNCHER=/tmp/ccache"
 run BLOCK "scripts/run_with_env.py -- cmake -DCMAKE_C_COMPILER=/var/tmp/gcc"
 run BLOCK "scripts/run_with_env.py -- cmake -DCMAKE_CXX_COMPILER=/usr/local/bin/nonexistent-clang++"
+# A link under a writable directory that RESOLVES somewhere trusted: checking
+# only the target would validate a different path than the one that executes,
+# and the link could be re-pointed in between. Needs a real symlink, so the
+# fixture is built here and removed again.
+REALCXX=$(command -v clang++ 2>/dev/null || command -v g++ 2>/dev/null)
+if [ -n "$REALCXX" ]; then
+  FIXTURE=$(mktemp -d)
+  ln -s "$REALCXX" "$FIXTURE/clang++"
+  run BLOCK "scripts/run_with_env.py -- cmake -DCMAKE_CXX_COMPILER=$FIXTURE/clang++"
+  rm -rf "$FIXTURE"
+else
+  echo "  SKIP  no system C++ compiler found, symlink case not exercised"
+fi
 
 echo
 echo "=== direct reads (must BLOCK) ==="
