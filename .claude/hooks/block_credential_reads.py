@@ -90,7 +90,13 @@ LOADER_CHILD_OK = {
 LOADER_CHILD_BAD_FLAGS = {
     "-f", "--file", "--makefile", "--eval", "-E", "-c", "--call", "--exec",
     "-e", "--command", "--entrypoint", "-i", "--interactive",
+    "-P", "--script", "--prefix", "-p", "-o",
 }
+
+# Short options may carry their value ATTACHED, so `-f/tmp/evil.mk` is a single
+# token that equals no entry above. Comparing whole tokens therefore misses it.
+# These prefixes are normalised back to the bare flag before the check.
+ATTACHED_SHORT = ("-f", "-E", "-P", "-p", "-e", "-c", "-o")
 LOADER_CHILD_BAD_SUBCOMMANDS = {"exec", "run-script-shell", "explore"}
 
 # A built binary, named by shape rather than by a blanket "./" acceptance: a
@@ -205,6 +211,23 @@ def token_kinds(tokens):
     return creds, examples
 
 
+def normalise_flag(token: str) -> str:
+    """Reduce a flag token to the bare flag it is.
+
+    `--eval=x` and `-f/tmp/evil.mk` both name a flag that a whole-token
+    comparison would miss: the first carries its value after an equals sign, the
+    second attached directly to a short option."""
+    if not token.startswith("-"):
+        return token
+    head = token.split("=", 1)[0]
+    if token.startswith("--"):
+        return head
+    for short in ATTACHED_SHORT:
+        if token.startswith(short) and len(token) > len(short):
+            return short
+    return head
+
+
 def program_name(tokens):
     return os.path.basename(tokens[0]) if tokens else ""
 
@@ -267,7 +290,7 @@ def loader_exempt(tokens) -> bool:
 
     rest = child[1:]
     for token in rest:
-        if token.split("=", 1)[0] in LOADER_CHILD_BAD_FLAGS:
+        if normalise_flag(token) in LOADER_CHILD_BAD_FLAGS:
             return False
         if token in LOADER_CHILD_BAD_SUBCOMMANDS:
             return False

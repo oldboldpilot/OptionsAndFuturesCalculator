@@ -113,28 +113,44 @@ the problem is not decidable from the command line, not that the next round will
 So this round is the last of its kind. Further confidence has to come from the operating system,
 not from a better pattern.
 
+### One more mechanical defect, and what was declined
+
+A fourth review found a genuine bug of the same family as the first: the flag denylist compared
+WHOLE tokens, and a short option may carry its value attached, so a makefile named as one token
+with no space equalled no entry and passed. Flags are now normalised to the bare flag before the
+comparison — an attached short value and an equals-sign value both reduce correctly — and script
+mode for the configuration tool, which executes a named script, joined the denylist. Reverting
+the normalisation reopens exactly the three attached-option shapes.
+
+Declined, with reasons, from the same review: removing the test runners, and pinning the Python
+one to repository test paths. Both run TEST CODE, which is arbitrary code by construction, so
+neither change closes the hole it names; and the build-and-test invocations in this repository's
+own instructions are exactly those commands, so removing them breaks the documented workflow in
+exchange for no security. This is the ceiling described above, reached from a different side.
+
 ## The arms
 
-`.claude/hooks/test-block-credential-reads.sh` holds 73 cases, including every reported bypass
-from all three findings as a positive control. It lives in a file rather than an inline command because the live hook
+`.claude/hooks/test-block-credential-reads.sh` holds 80 cases, including every reported bypass
+from all four findings as a positive control. It lives in a file rather than an inline command because the live hook
 blocks any Bash call that names credential material — including a test runner that passes such
 a command as an argument. Each arm was restored before the next, and the restore was verified by
 digest rather than assumed.
 
 | arm | result |
 |---|---|
-| baseline | 73 pass, 0 fail |
+| baseline | 80 pass, 0 fail |
 | the compound-command refusal removed | 6 failed |
 | the anchored exemptions reverted to substring | 3 failed |
 | the loader's child allowlist removed entirely | 3 failed |
 | the second tokenisation removed | 2 failed |
 | the metadata flag allowlist removed | 5 failed |
 | the loader's child argv rules reverted to name-only | 14 failed |
+| flag normalisation reverted to whole-token comparison | 3 failed |
 
-Every repair is independently load-bearing: no two arms fail the same cases, so none of the six
+Every repair is independently load-bearing: no two arms fail the same cases, so none of the seven
 is redundant and none alone is sufficient. The first two arms were measured against the shell
-implementation and the last four against the Python one that replaced it. Each arm was restored
-before the next and the restore compared by digest, with the baseline re-run to 73 after the
+implementation and the last five against the Python one that replaced it. Each arm was restored
+before the next and the restore compared by digest, with the baseline re-run to 80 after the
 last.
 
 ## The cost, which is real and was accepted rather than carved around

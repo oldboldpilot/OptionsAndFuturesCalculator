@@ -94,6 +94,15 @@ run BLOCK "scripts/run_with_env.py -- npm whatever"
 run BLOCK "scripts/run_with_env.py -- ./scripts/anything.sh"
 run BLOCK "scripts/run_with_env.py -- ./a.out"
 run BLOCK "scripts/run_with_env.py -- wrangler whatever"
+# A short option with its value ATTACHED is one token that equals no denylist
+# entry, so a whole-token comparison misses it.
+run BLOCK "scripts/run_with_env.py -- make -f/tmp/evil.mk"
+run BLOCK "scripts/run_with_env.py -- make --eval=x"
+run BLOCK "scripts/run_with_env.py -- cmake -P /tmp/evil.cmake"
+run BLOCK "scripts/run_with_env.py -- cmake -P/tmp/evil.cmake"
+run BLOCK "scripts/run_with_env.py -- pytest -p evil"
+run BLOCK "scripts/run_with_env.py -- pytest -pevil"
+run BLOCK "scripts/run_with_env.py -- make -e"
 
 echo
 echo "=== direct reads (must BLOCK) ==="
