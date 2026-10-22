@@ -111,6 +111,29 @@ TOOL_FLAGS = {
     "pytest": {"exact": {"-q", "-x", "-v", "-s"}, "prefix": ("-k", "--maxfail", "--tb")},
     "true": {"exact": set(), "prefix": ()},
 }
+
+# Naming a permitted FLAG is not the same as permitting its VALUE. A cache entry
+# can name a script the configuration tool will execute, or a launcher it will
+# run every compiler invocation through; a directory flag can point at a tree
+# outside this repository whose build files are someone else's. So the few flags
+# whose value is a path are constrained to resolve inside the repository, and
+# cache entries are allowlisted BY KEY -- the keys this repository's own
+# instructions use, and no others.
+PATH_VALUE_FLAGS = ("-C", "-S", "-B", "--test-dir", "--build")
+
+# Allowlisting the KEY is still not enough: the compiler and launcher keys that
+# this repository's instructions require both name a program that will be
+# executed, so an arbitrary path there is an arbitrary program. Each permitted
+# key therefore also pins the shape of its value.
+CACHE_VALUE_OK = {
+    "CMAKE_BUILD_TYPE": lambda v: v in {"Debug", "Release", "RelWithDebInfo", "MinSizeRel"},
+    "CMAKE_CXX_COMPILER": lambda v: os.path.basename(v) in {"clang++", "g++", "c++"},
+    "CMAKE_C_COMPILER": lambda v: os.path.basename(v) in {"clang", "gcc", "cc"},
+    "CMAKE_CXX_COMPILER_LAUNCHER": lambda v: os.path.basename(v) in {"ccache", "sccache"},
+    "CMAKE_C_COMPILER_LAUNCHER": lambda v: os.path.basename(v) in {"ccache", "sccache"},
+    "CMAKE_EXPORT_COMPILE_COMMANDS": lambda v: v in {"ON", "OFF", "1", "0", "TRUE", "FALSE"},
+    "CMAKE_CXX_STANDARD": lambda v: v.isdigit(),
+}
 LOADER_CHILD_BAD_SUBCOMMANDS = {"exec", "run-script-shell", "explore"}
 
 # A built binary, named by shape rather than by a blanket "./" acceptance: a
@@ -225,15 +248,53 @@ def token_kinds(tokens):
     return creds, examples
 
 
-def flag_permitted(token: str, rules) -> bool:
-    """Is this flag one the tool is allowed to carry?
+def repo_root() -> str:
+    return os.path.realpath(os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd())
+
+
+def inside_repo(value: str) -> bool:
+    root = repo_root()
+    resolved = os.path.realpath(os.path.join(root, os.path.expanduser(value)))
+    return resolved == root or resolved.startswith(root + os.sep)
+
+
+def cache_entry_permitted(token: str) -> bool:
+    """A -D cache entry: the key must be one this repository uses, and the value
+    must have the shape that key is allowed to carry."""
+    body = token[2:]
+    if "=" not in body:
+        return False
+    key, value = body.split("=", 1)
+    key = key.split(":", 1)[0]  # -DKEY:TYPE=value
+    check = CACHE_VALUE_OK.get(key)
+    return bool(check) and check(value)
+
+
+def flag_permitted(token: str, rules, following: str | None) -> bool:
+    """Is this flag one the tool may carry, with a value it may carry?
 
     Deciding membership of a small allowlist is possible; deciding non-membership
-    of every dangerous spelling is not."""
+    of every dangerous spelling is not. And a permitted flag name does not imply
+    a permitted value -- see CACHE_VALUE_OK and PATH_VALUE_FLAGS."""
     head = token.split("=", 1)[0]
-    if head in rules["exact"]:
-        return True
-    return any(token.startswith(p) for p in rules["prefix"])
+
+    if token.startswith("-D"):
+        return "-D" in rules["prefix"] and cache_entry_permitted(token)
+
+    permitted = head in rules["exact"] or any(
+        token.startswith(p) for p in rules["prefix"]
+    )
+    if not permitted:
+        return False
+
+    for pf in PATH_VALUE_FLAGS:
+        if token == pf:
+            # value is the next token; absent means nothing to check here
+            return following is None or inside_repo(following)
+        if token.startswith(pf) and len(token) > len(pf):
+            attached = token[len(pf):].lstrip("=")
+            return inside_repo(attached)
+    return True
 
 
 def program_name(tokens):
@@ -298,10 +359,17 @@ def loader_exempt(tokens) -> bool:
 
     rules = TOOL_FLAGS[name]
     rest = child[1:]
-    for token in rest:
-        if token.startswith("-") and not flag_permitted(token, rules):
-            return False
+    for i, token in enumerate(rest):
+        following = rest[i + 1] if i + 1 < len(rest) else None
+        if token.startswith("-"):
+            if not flag_permitted(token, rules, following):
+                return False
+            continue
         if token in LOADER_CHILD_BAD_SUBCOMMANDS:
+            return False
+        # A positional NAME=value is a variable override, and the build tools
+        # read variables that name a program to run (SHELL, CC, LD). Refuse.
+        if "=" in token and not token.startswith("-"):
             return False
 
     required = LOADER_CHILD_OK[name]

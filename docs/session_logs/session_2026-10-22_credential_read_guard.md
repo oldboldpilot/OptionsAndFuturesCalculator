@@ -131,6 +131,29 @@ against the workflow rather than guessed at. One asymmetry is worth noting: the 
 permitted for the build tools, where it selects a directory, and refused for the configuration
 tool, where the same letter loads and executes a script.
 
+### Permitting a flag is not permitting its value
+
+A sixth review found the one genuinely new category in the series. Every round before it was
+about IDENTIFYING something -- the command, the exempt fragment, the flag. This one is about what
+an already-permitted flag's VALUE does. A cache entry whose key names a script makes the
+configuration tool execute that script; a key naming a compiler launcher makes it run a program
+of the caller's choosing on every compile; and a directory flag can point at a tree outside this
+repository whose build files are someone else's.
+
+Three constraints close it. Cache entries are allowlisted BY KEY, to the keys this repository's
+instructions actually use. Each permitted key then also pins the SHAPE of its value, because two
+of those keys -- the compiler and the launcher -- name a program that will be executed, so an
+arbitrary path there is an arbitrary program: the compiler must be a compiler by basename, the
+launcher must be a compiler cache, a build type must be one of the four, a boolean must be a
+boolean. And the flags whose value is a path are resolved with the real path and required to land
+inside this repository, which also disposes of a relative value that climbs out with dot-dot.
+
+Separately, a positional assignment of the form NAME=value is refused outright: the build tools
+read variables that name a program to run, so an override is an execution request wearing a
+different hat. Four legitimate configuration invocations from this repository's own instructions
+are ALLOW cases, including the mandated compiler path and the compiler cache as launcher, so the
+constraint was fitted to the real workflow rather than imagined.
+
 ### One more mechanical defect, and what was declined
 
 A fourth review found a genuine bug of the same family as the first: the flag denylist compared
@@ -148,15 +171,15 @@ exchange for no security. This is the ceiling described above, reached from a di
 
 ## The arms
 
-`.claude/hooks/test-block-credential-reads.sh` holds 95 cases, including every reported bypass
-from all five findings as a positive control. It lives in a file rather than an inline command because the live hook
+`.claude/hooks/test-block-credential-reads.sh` holds 112 cases, including every reported bypass
+from all six findings as a positive control. It lives in a file rather than an inline command because the live hook
 blocks any Bash call that names credential material — including a test runner that passes such
 a command as an argument. Each arm was restored before the next, and the restore was verified by
 digest rather than assumed.
 
 | arm | result |
 |---|---|
-| baseline | 95 pass, 0 fail |
+| baseline | 112 pass, 0 fail |
 | the compound-command refusal removed | 6 failed |
 | the anchored exemptions reverted to substring | 3 failed |
 | the loader's child allowlist removed entirely | 3 failed |
@@ -165,11 +188,12 @@ digest rather than assumed.
 | the loader's child argv rules reverted to name-only | 14 failed |
 | flag normalisation reverted to whole-token comparison | 3 failed |
 | the per-tool flag allowlist disabled | 19 failed |
+| flag-value confinement disabled | 11 failed |
 
-Every repair is independently load-bearing: no two arms fail the same cases, so none of the eight
+Every repair is independently load-bearing: no two arms fail the same cases, so none of the nine
 is redundant and none alone is sufficient. The first two arms were measured against the shell
-implementation and the last six against the Python one that replaced it. Each arm was restored
-before the next and the restore compared by digest, with the baseline re-run to 95 after the
+implementation and the last seven against the Python one that replaced it. Each arm was restored
+before the next and the restore compared by digest, with the baseline re-run to 112 after the
 last.
 
 ## The cost, which is real and was accepted rather than carved around
