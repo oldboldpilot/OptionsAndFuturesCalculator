@@ -113,6 +113,24 @@ the problem is not decidable from the command line, not that the next round will
 So this round is the last of its kind. Further confidence has to come from the operating system,
 not from a better pattern.
 
+### The denylist could not be completed, so it was inverted
+
+A fifth review made the decisive observation: a denylist of FLAG SPELLINGS cannot be finished.
+A short option may be clustered with another, so a token naming a makefile equals neither of its
+letters; and a GNU long option accepts any unambiguous abbreviation, so a three-letter prefix
+reaches the dangerous one. Both were reproduced. For every entry a denylist holds there is a
+spelling that misses it, which is the same shape of defect as the first finding one more time:
+the check was asking about the text rather than about the thing.
+
+So the flag check was inverted. Each permitted child now carries a per-tool ALLOWLIST of flags,
+and any token beginning with a dash that is not on it refuses the command. Deciding membership of
+a small allowlist is possible; deciding non-membership of every dangerous spelling is not. The
+allowlists were drawn from the build and test invocations in this repository's own instructions,
+and seven of those invocations are now ALLOW cases in the suite, so the narrowing is measured
+against the workflow rather than guessed at. One asymmetry is worth noting: the directory flag is
+permitted for the build tools, where it selects a directory, and refused for the configuration
+tool, where the same letter loads and executes a script.
+
 ### One more mechanical defect, and what was declined
 
 A fourth review found a genuine bug of the same family as the first: the flag denylist compared
@@ -130,15 +148,15 @@ exchange for no security. This is the ceiling described above, reached from a di
 
 ## The arms
 
-`.claude/hooks/test-block-credential-reads.sh` holds 80 cases, including every reported bypass
-from all four findings as a positive control. It lives in a file rather than an inline command because the live hook
+`.claude/hooks/test-block-credential-reads.sh` holds 95 cases, including every reported bypass
+from all five findings as a positive control. It lives in a file rather than an inline command because the live hook
 blocks any Bash call that names credential material — including a test runner that passes such
 a command as an argument. Each arm was restored before the next, and the restore was verified by
 digest rather than assumed.
 
 | arm | result |
 |---|---|
-| baseline | 80 pass, 0 fail |
+| baseline | 95 pass, 0 fail |
 | the compound-command refusal removed | 6 failed |
 | the anchored exemptions reverted to substring | 3 failed |
 | the loader's child allowlist removed entirely | 3 failed |
@@ -146,11 +164,12 @@ digest rather than assumed.
 | the metadata flag allowlist removed | 5 failed |
 | the loader's child argv rules reverted to name-only | 14 failed |
 | flag normalisation reverted to whole-token comparison | 3 failed |
+| the per-tool flag allowlist disabled | 19 failed |
 
-Every repair is independently load-bearing: no two arms fail the same cases, so none of the seven
+Every repair is independently load-bearing: no two arms fail the same cases, so none of the eight
 is redundant and none alone is sufficient. The first two arms were measured against the shell
-implementation and the last five against the Python one that replaced it. Each arm was restored
-before the next and the restore compared by digest, with the baseline re-run to 80 after the
+implementation and the last six against the Python one that replaced it. Each arm was restored
+before the next and the restore compared by digest, with the baseline re-run to 95 after the
 last.
 
 ## The cost, which is real and was accepted rather than carved around

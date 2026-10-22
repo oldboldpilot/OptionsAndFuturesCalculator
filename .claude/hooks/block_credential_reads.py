@@ -85,18 +85,32 @@ LOADER_CHILD_OK = {
     "true": None,
 }
 
-# Flags that make an allowlisted child execute something of the caller's
-# choosing, which is the whole point of excluding generic executors.
-LOADER_CHILD_BAD_FLAGS = {
-    "-f", "--file", "--makefile", "--eval", "-E", "-c", "--call", "--exec",
-    "-e", "--command", "--entrypoint", "-i", "--interactive",
-    "-P", "--script", "--prefix", "-p", "-o",
+# Flags are ALLOWLISTED per tool, not denylisted. A denylist of flag spellings
+# cannot be completed: a short option may be clustered with another (-kf names a
+# makefile while equalling neither -k nor -f), and GNU long options accept any
+# unambiguous abbreviation (--ev reaches --eval), so for every entry there is a
+# spelling that misses it. The allowlist asks the decidable question instead --
+# is this flag one of the few this repository's workflow actually uses?
+#
+# "exact" matches the flag as written; "prefix" additionally permits a value
+# attached directly to it, as in -C<dir> or -j8. Note -C is permitted for the
+# build tools, where it selects a directory, and REFUSED for the configuration
+# tool, where it loads and executes a script.
+TOOL_FLAGS = {
+    "ninja": {"exact": {"-v", "-k", "-n"}, "prefix": ("-C", "-j")},
+    "make": {"exact": {"-k", "-n", "-s", "-B"}, "prefix": ("-C", "-j")},
+    "cmake": {
+        "exact": {"--build", "--install", "--fresh", "-S", "-B", "-G"},
+        "prefix": ("-D", "-S", "-B", "-G"),
+    },
+    "ctest": {
+        "exact": {"--output-on-failure", "--test-dir", "-V", "--verbose", "-N"},
+        "prefix": ("-R", "-j", "--test-dir"),
+    },
+    "npm": {"exact": {"--silent"}, "prefix": ()},
+    "pytest": {"exact": {"-q", "-x", "-v", "-s"}, "prefix": ("-k", "--maxfail", "--tb")},
+    "true": {"exact": set(), "prefix": ()},
 }
-
-# Short options may carry their value ATTACHED, so `-f/tmp/evil.mk` is a single
-# token that equals no entry above. Comparing whole tokens therefore misses it.
-# These prefixes are normalised back to the bare flag before the check.
-ATTACHED_SHORT = ("-f", "-E", "-P", "-p", "-e", "-c", "-o")
 LOADER_CHILD_BAD_SUBCOMMANDS = {"exec", "run-script-shell", "explore"}
 
 # A built binary, named by shape rather than by a blanket "./" acceptance: a
@@ -211,21 +225,15 @@ def token_kinds(tokens):
     return creds, examples
 
 
-def normalise_flag(token: str) -> str:
-    """Reduce a flag token to the bare flag it is.
+def flag_permitted(token: str, rules) -> bool:
+    """Is this flag one the tool is allowed to carry?
 
-    `--eval=x` and `-f/tmp/evil.mk` both name a flag that a whole-token
-    comparison would miss: the first carries its value after an equals sign, the
-    second attached directly to a short option."""
-    if not token.startswith("-"):
-        return token
+    Deciding membership of a small allowlist is possible; deciding non-membership
+    of every dangerous spelling is not."""
     head = token.split("=", 1)[0]
-    if token.startswith("--"):
-        return head
-    for short in ATTACHED_SHORT:
-        if token.startswith(short) and len(token) > len(short):
-            return short
-    return head
+    if head in rules["exact"]:
+        return True
+    return any(token.startswith(p) for p in rules["prefix"])
 
 
 def program_name(tokens):
@@ -288,9 +296,10 @@ def loader_exempt(tokens) -> bool:
     if name not in LOADER_CHILD_OK:
         return False
 
+    rules = TOOL_FLAGS[name]
     rest = child[1:]
     for token in rest:
-        if normalise_flag(token) in LOADER_CHILD_BAD_FLAGS:
+        if token.startswith("-") and not flag_permitted(token, rules):
             return False
         if token in LOADER_CHILD_BAD_SUBCOMMANDS:
             return False
