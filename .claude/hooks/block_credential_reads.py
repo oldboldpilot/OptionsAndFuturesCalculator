@@ -35,6 +35,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import sys
 
 HOME = os.path.expanduser("~")
@@ -125,12 +126,21 @@ PATH_VALUE_FLAGS = ("-C", "-S", "-B", "--test-dir", "--build")
 # this repository's instructions require both name a program that will be
 # executed, so an arbitrary path there is an arbitrary program. Each permitted
 # key therefore also pins the shape of its value.
+# A BASENAME is text, not identity: a path ending in the right program name is
+# trivially arranged anywhere. So a value naming a program to execute must also
+# RESOLVE into a trusted system location. Measured on this host: the mandated
+# compiler resolves within /usr/local/bin and the compiler cache within /usr/bin,
+# so confining to these directories admits the documented toolchain while
+# refusing a lookalike under the repository, the home directory or a temp dir.
+TRUSTED_TOOL_DIRS = ("/usr/bin", "/usr/local/bin", "/bin", "/opt")
+UNTRUSTED_PREFIXES = ("/tmp", "/var/tmp", "/dev/shm")
+
 CACHE_VALUE_OK = {
     "CMAKE_BUILD_TYPE": lambda v: v in {"Debug", "Release", "RelWithDebInfo", "MinSizeRel"},
-    "CMAKE_CXX_COMPILER": lambda v: os.path.basename(v) in {"clang++", "g++", "c++"},
-    "CMAKE_C_COMPILER": lambda v: os.path.basename(v) in {"clang", "gcc", "cc"},
-    "CMAKE_CXX_COMPILER_LAUNCHER": lambda v: os.path.basename(v) in {"ccache", "sccache"},
-    "CMAKE_C_COMPILER_LAUNCHER": lambda v: os.path.basename(v) in {"ccache", "sccache"},
+    "CMAKE_CXX_COMPILER": lambda v: trusted_program(v, {"clang++", "g++", "c++"}),
+    "CMAKE_C_COMPILER": lambda v: trusted_program(v, {"clang", "gcc", "cc"}),
+    "CMAKE_CXX_COMPILER_LAUNCHER": lambda v: trusted_program(v, {"ccache", "sccache"}),
+    "CMAKE_C_COMPILER_LAUNCHER": lambda v: trusted_program(v, {"ccache", "sccache"}),
     "CMAKE_EXPORT_COMPILE_COMMANDS": lambda v: v in {"ON", "OFF", "1", "0", "TRUE", "FALSE"},
     "CMAKE_CXX_STANDARD": lambda v: v.isdigit(),
 }
@@ -256,6 +266,39 @@ def inside_repo(value: str) -> bool:
     root = repo_root()
     resolved = os.path.realpath(os.path.join(root, os.path.expanduser(value)))
     return resolved == root or resolved.startswith(root + os.sep)
+
+
+def trusted_program(value: str, names: set) -> bool:
+    """A value that names a program to EXECUTE.
+
+    The written name must be one of `names`, and the path it resolves to must sit
+    in a trusted system directory -- never under this repository, the home
+    directory or a temp dir, each of which is writable by whatever wrote the
+    command. Note the resolved basename may legitimately differ from the written
+    one (a versioned compiler behind an unversioned symlink), which is why the
+    name is checked as WRITTEN and the location as RESOLVED."""
+    if os.path.basename(value) not in names:
+        return False
+
+    if os.sep not in value:
+        found = shutil.which(value)
+        if not found:
+            return False
+        resolved = os.path.realpath(found)
+    else:
+        resolved = os.path.realpath(os.path.expanduser(value))
+
+    if inside_repo(resolved):
+        return False
+    home = os.path.realpath(os.path.expanduser("~"))
+    if resolved == home or resolved.startswith(home + os.sep):
+        return False
+    for bad in UNTRUSTED_PREFIXES:
+        if resolved == bad or resolved.startswith(bad + os.sep):
+            return False
+    return any(
+        resolved == d or resolved.startswith(d + os.sep) for d in TRUSTED_TOOL_DIRS
+    )
 
 
 def cache_entry_permitted(token: str) -> bool:

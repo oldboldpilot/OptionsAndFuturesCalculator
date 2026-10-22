@@ -154,6 +154,36 @@ different hat. Four legitimate configuration invocations from this repository's 
 are ALLOW cases, including the mandated compiler path and the compiler cache as launcher, so the
 constraint was fitted to the real workflow rather than imagined.
 
+### A basename is text, not identity
+
+A seventh review found a defect in the sixth repair, committed minutes earlier: the values that
+name a program to execute were pinned by BASENAME. A lookalike ending in the right program name
+is trivially arranged in any directory the caller can write, so the check asked about the text
+again rather than about the thing -- the same error as the very first finding, now one level
+further in.
+
+The value must therefore RESOLVE into a trusted system location. A bare name is looked up on the
+path; a name containing a separator is resolved directly; either way the result must sit in a
+trusted system directory and must not sit under this repository, the home directory or a temp
+directory, each of which is writable by whatever wrote the command. The trusted directories were
+measured rather than assumed: on this host the mandated compiler resolves within one of them and
+the compiler cache within another.
+
+One asymmetry matters and is deliberate. The NAME is checked as WRITTEN while the LOCATION is
+checked as RESOLVED, because the resolved basename legitimately differs -- the unversioned
+compiler symlink lands on a versioned binary, so resolving first and then checking the name would
+refuse the toolchain this repository mandates.
+
+#### The arm that was not an arm
+
+The first attempt at the mutation for this rule replaced a guard line in a way that left the
+following line wrongly indented. The hook then raised at import, exited non-zero but not with the
+blocking code, and the harness read every crash as a permitted command: 90 of 118 cases
+"failed". That number is the signature of a broken script, not of a weak rule -- a real arm for
+one rule cannot reopen cases that rule never governed. The arm was redone as a syntactically
+valid change to only the four value predicates, with an unrelated control re-run to confirm the
+arm was isolated, and it then reopened exactly the five lookalike-path cases.
+
 ### One more mechanical defect, and what was declined
 
 A fourth review found a genuine bug of the same family as the first: the flag denylist compared
@@ -171,15 +201,15 @@ exchange for no security. This is the ceiling described above, reached from a di
 
 ## The arms
 
-`.claude/hooks/test-block-credential-reads.sh` holds 112 cases, including every reported bypass
-from all six findings as a positive control. It lives in a file rather than an inline command because the live hook
+`.claude/hooks/test-block-credential-reads.sh` holds 118 cases, including every reported bypass
+from all seven findings as a positive control. It lives in a file rather than an inline command because the live hook
 blocks any Bash call that names credential material — including a test runner that passes such
 a command as an argument. Each arm was restored before the next, and the restore was verified by
 digest rather than assumed.
 
 | arm | result |
 |---|---|
-| baseline | 112 pass, 0 fail |
+| baseline | 118 pass, 0 fail |
 | the compound-command refusal removed | 6 failed |
 | the anchored exemptions reverted to substring | 3 failed |
 | the loader's child allowlist removed entirely | 3 failed |
@@ -189,11 +219,12 @@ digest rather than assumed.
 | flag normalisation reverted to whole-token comparison | 3 failed |
 | the per-tool flag allowlist disabled | 19 failed |
 | flag-value confinement disabled | 11 failed |
+| the executed value pinned by basename only | 5 failed |
 
-Every repair is independently load-bearing: no two arms fail the same cases, so none of the nine
+Every repair is independently load-bearing: no two arms fail the same cases, so none of the ten
 is redundant and none alone is sufficient. The first two arms were measured against the shell
-implementation and the last seven against the Python one that replaced it. Each arm was restored
-before the next and the restore compared by digest, with the baseline re-run to 112 after the
+implementation and the last eight against the Python one that replaced it. Each arm was restored
+before the next and the restore compared by digest, with the baseline re-run to 118 after the
 last.
 
 ## The cost, which is real and was accepted rather than carved around

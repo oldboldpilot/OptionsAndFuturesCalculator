@@ -130,6 +130,14 @@ run BLOCK "scripts/run_with_env.py -- ninja -C/tmp/evil"
 run BLOCK "scripts/run_with_env.py -- ninja -C ../../tmp"
 run BLOCK "scripts/run_with_env.py -- make SHELL=/tmp/evil"
 run BLOCK "scripts/run_with_env.py -- make CC=/tmp/evil"
+# A basename is text, not identity: a lookalike is trivially arranged anywhere
+# the caller can write, so the value must RESOLVE into a trusted location.
+run BLOCK "scripts/run_with_env.py -- cmake -DCMAKE_CXX_COMPILER=/tmp/evil/clang++"
+run BLOCK "scripts/run_with_env.py -- cmake -DCMAKE_CXX_COMPILER=./clang++"
+run BLOCK "scripts/run_with_env.py -- cmake -DCMAKE_CXX_COMPILER=~/bin/clang++"
+run BLOCK "scripts/run_with_env.py -- cmake -DCMAKE_CXX_COMPILER_LAUNCHER=/tmp/ccache"
+run BLOCK "scripts/run_with_env.py -- cmake -DCMAKE_C_COMPILER=/var/tmp/gcc"
+run BLOCK "scripts/run_with_env.py -- cmake -DCMAKE_CXX_COMPILER=/usr/local/bin/nonexistent-clang++"
 
 echo
 echo "=== direct reads (must BLOCK) ==="
