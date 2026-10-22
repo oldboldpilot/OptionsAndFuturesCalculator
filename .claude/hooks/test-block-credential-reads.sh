@@ -1,24 +1,33 @@
 #!/bin/bash
-# Test suite for block-credential-reads.sh.
+# Test suite for the credential read guard.
 #
 # It lives in a FILE rather than an inline command because the hook under test
 # blocks any Bash call that names credential material -- including a test runner
 # that passes such a command as an argument. Running it by path keeps the
 # invoking command clean.
 #
-# The first block holds the bypasses an automated review found in the first cut:
-# every exemption was tested as a SUBSTRING, so a compound command containing an
-# exempt fragment was waved through while its second half printed the real file.
-# They are kept as positive controls -- if any of them goes back to ALLOW, the
-# anchoring regressed.
+# Pass the hook to exercise as $1 (default: the installed one). Two groups are
+# kept as permanent positive controls, each from an automated review finding:
+#
+#   group A -- exemptions tested as a SUBSTRING of the command, so a compound
+#              line with an exempt fragment was waved through;
+#   group B -- the raw string reasoned about instead of parsed, so the loader
+#              exemption ran an arbitrary child, quote-splitting and globs
+#              evaded detection, and a list-of-files flag echoed contents.
+#
+# If any control returns to ALLOW, that repair regressed.
 
 cd "$(dirname "$0")/../.." || exit 1
-H=.claude/hooks/block-credential-reads.sh
+H=${1:-.claude/hooks/block_credential_reads.py}
+case "$H" in
+  *.py) RUNNER=(python3 -I "$H") ;;
+  *)    RUNNER=(bash "$H") ;;
+esac
 pass=0; fail=0
 
 run() { # $1 = expected BLOCK|ALLOW, $2 = command under test
   printf '%s' "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":$(printf '%s' "$2" | jq -Rs .)}}" \
-    | bash "$H" >/dev/null 2>&1
+    | "${RUNNER[@]}" >/dev/null 2>&1
   [ $? -eq 2 ] && got=BLOCK || got=ALLOW
   if [ "$got" = "$1" ]; then
     pass=$((pass+1)); printf '  PASS  %-5s  %s\n' "$got" "$2"
@@ -27,57 +36,81 @@ run() { # $1 = expected BLOCK|ALLOW, $2 = command under test
   fi
 }
 
-DOTENV='config/.env'
-EXAMPLE='config/.env.example'
+D='config/.env'
+E='config/.env.example'
 
-echo "=== reported bypasses: must BLOCK ==="
-run BLOCK "cat $EXAMPLE; cat $DOTENV"
-run BLOCK "ls $DOTENV; cat $DOTENV"
-run BLOCK "cat $DOTENV  # run_with_env.py"
-run BLOCK "ls $DOTENV && cat $DOTENV"
-run BLOCK "stat $DOTENV | cat $DOTENV"
-run BLOCK "scripts/run_with_env.py -- true; cat $DOTENV"
-run BLOCK "echo \$(cat $DOTENV)"
-run BLOCK "echo \`cat $DOTENV\`"
-run BLOCK "cat $DOTENV > /tmp/leak"
-run BLOCK "cat < $DOTENV"
-run BLOCK "sha256sum $EXAMPLE; cat $DOTENV"
-run BLOCK "cat $DOTENV || true"
-run BLOCK "$(printf 'ls %s\ncat %s' "$DOTENV" "$DOTENV")"
-run BLOCK "cat $EXAMPLE $DOTENV"
+echo "=== group A: substring-exemption bypasses (must BLOCK) ==="
+run BLOCK "cat $E; cat $D"
+run BLOCK "ls $D; cat $D"
+run BLOCK "cat $D  # run_with_env.py"
+run BLOCK "ls $D && cat $D"
+run BLOCK "stat $D | cat $D"
+run BLOCK "scripts/run_with_env.py -- true; cat $D"
+run BLOCK "echo \$(cat $D)"
+run BLOCK "echo \`cat $D\`"
+run BLOCK "cat $D > /tmp/leak"
+run BLOCK "cat < $D"
+run BLOCK "sha256sum $E; cat $D"
+run BLOCK "cat $D || true"
+run BLOCK "$(printf 'ls %s\ncat %s' "$D" "$D")"
+run BLOCK "cat $E $D"
 
 echo
-echo "=== direct reads: must BLOCK ==="
-run BLOCK "cat $DOTENV"
-run BLOCK "grep FINANCE_API_KEY $DOTENV"
-run BLOCK "sed -n '1,5p' $DOTENV"
-run BLOCK "awk '{print}' $DOTENV"
-run BLOCK "xxd $DOTENV"
+echo "=== group B: raw-string-reasoning bypasses (must BLOCK) ==="
+# B1: the loader exemption must not launder an arbitrary child.
+run BLOCK "scripts/run_with_env.py -- cat $D"
+run BLOCK "python3 scripts/run_with_env.py -- sh -c 'cat $D'"
+run BLOCK "scripts/run_with_env.py -- env"
+run BLOCK "scripts/run_with_env.py -- bash -lc id"
+run BLOCK "scripts/run_with_env.py $D -- printenv"
+# B2: quoting, escaping and globbing must not hide the path.
+run BLOCK 'cat conf*/.en*'
+run BLOCK 'cat "config/.e""nv"'
+run BLOCK "cat 'config'/.env"
+run BLOCK 'cat config/.en\v'
+run BLOCK 'cat ./config/./.env'
+# B3: a flag that treats the file as a list of names echoes its contents.
+run BLOCK "file -f $D"
+run BLOCK "wc --files0-from=$D"
+run BLOCK "wc --files-from=$D"
+run BLOCK "sha256sum -c $D"
+run BLOCK "md5sum -c $D"
+
+echo
+echo "=== direct reads (must BLOCK) ==="
+run BLOCK "cat $D"
+run BLOCK "grep FINANCE_API_KEY $D"
+run BLOCK "sed -n '1,5p' $D"
+run BLOCK "awk '{print}' $D"
+run BLOCK "xxd $D"
 run BLOCK "cat ~/.ssh/id_rsa"
 run BLOCK "strings certs/server.pem"
 run BLOCK "cat .env.production"
 run BLOCK "head -20 /home/muyiwa/.railway/config.json"
 run BLOCK "cat /home/muyiwa/.aws/credentials"
-run BLOCK "cp $DOTENV /tmp/copy"
+run BLOCK "cp $D /tmp/copy"
+run BLOCK "tar cf /tmp/x.tar $D"
 
 echo
-echo "=== sanctioned, metadata-only, unrelated: must ALLOW ==="
+echo "=== sanctioned, metadata-only, unrelated (must ALLOW) ==="
 run ALLOW "scripts/run_with_env.py -- ./backend/build/engine"
-run ALLOW "python3 scripts/run_with_env.py $DOTENV -- ninja -C backend/build"
+run ALLOW "python3 scripts/run_with_env.py $D -- ninja -C backend/build"
 run ALLOW "./scripts/run_with_env.py -- ctest --test-dir backend/build"
-run ALLOW "ls -la $DOTENV"
-run ALLOW "stat -c %s $DOTENV"
-run ALLOW "wc -l $DOTENV"
-run ALLOW "sha256sum $DOTENV"
-run ALLOW "git check-ignore -v $DOTENV"
-run ALLOW "git ls-files $DOTENV"
-run ALLOW "cat $EXAMPLE"
-run ALLOW "cat $EXAMPLE config/.env.sample"
+run ALLOW "scripts/run_with_env.py -- npm run build"
+run ALLOW "ls -la $D"
+run ALLOW "stat -c %s $D"
+run ALLOW "wc -l $D"
+run ALLOW "sha256sum $D"
+run ALLOW "git check-ignore -v $D"
+run ALLOW "git ls-files $D"
+run ALLOW "cat $E"
+run ALLOW "cat $E config/.env.sample"
 run ALLOW "cat README.md"
 run ALLOW "git status --short"
 run ALLOW "ls *.md"
 run ALLOW "npm test -- --watch=false | tail -5"
 run ALLOW "echo hello"
+run ALLOW "grep -rn TODO src/"
 
 echo
 echo "pass=$pass fail=$fail"

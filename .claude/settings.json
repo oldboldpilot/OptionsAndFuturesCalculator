@@ -20,6 +20,19 @@
       "Read(//home/muyiwa/.config/gh/hosts.yml)"
     ]
   },
+  "sandbox": {
+    "filesystem": {
+      "denyRead": [
+        "config/.env",
+        "~/.ssh",
+        "~/.aws/credentials",
+        "~/.railway/config.json",
+        "~/.netrc",
+        "~/.npmrc",
+        "~/.config/gh/hosts.yml"
+      ]
+    }
+  },
   "hooks": {
     "PreToolUse": [
       {
@@ -27,7 +40,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/block-credential-reads.sh\"",
+            "command": "python3 -I \"$CLAUDE_PROJECT_DIR/.claude/hooks/block_credential_reads.py\"",
             "timeout": 10,
             "onFailure": "block",
             "statusMessage": "Checking for credential reads..."

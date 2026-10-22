@@ -18,8 +18,11 @@ So the guard is three layers, of which only the third refuses a shell read:
 1. `.claudeignore` — advisory, and on its own it guarantees nothing.
 2. `.claude/settings.json` — 17 `permissions.deny` `Read(...)` rules over the dotenvs, keys,
    certificates and the credential stores under the home directory.
-3. `.claude/hooks/block-credential-reads.sh` — a `PreToolUse` hook on Bash, the only layer that
+3. `.claude/hooks/block_credential_reads.py` — a `PreToolUse` hook on Bash, the only layer that
    stops `cat`, `grep`, `sed`, `awk`, `xxd`, `strings` and `cp`.
+
+A fourth entry, `sandbox.filesystem.denyRead`, is declared for when the sandbox is enabled. It
+is the only one of the four that is an actual boundary; see the closing section.
 
 A gate placed where the traffic is not is the same defect this repository's advertising policy
 ran into from the other side: the condition was true, and nothing that could be fetched said so.
@@ -59,35 +62,86 @@ whether those two letters occur anywhere, and on a credential path they do. The 
 and end-of-string anchors are what turn a letter-pair search into a question about the command's
 identity.
 
+## The second finding: reasoning about the raw string at all was the mistake
+
+A second review of the committed version found fifteen more bypasses, in three families, and
+each was reproduced before being believed:
+
+* **the loader exemption laundered an arbitrary child.** `scripts/run_with_env.py -- cat` on the
+  dotenv satisfied the exemption and printed the file. Worse, two shapes named no credential
+  path whatsoever — a child of `env`, and a child of `bash -lc` — and printed the whole loaded
+  set. The exemption's own purpose is to hand the child the secrets, so an arbitrary child is
+  the read with extra steps.
+* **quoting, escaping and globbing hid the path.** A regex over the raw text saw nothing in a
+  path split across two adjacent quoted strings, in one with a backslash before a letter, or in
+  a wildcard that expands to it.
+* **a "metadata-only" tool echoed the contents.** `file` with a list-of-names flag prints each
+  line of its argument as a filename; `wc` with the same kind of flag and the checksum tools in
+  check mode do likewise. All were on the metadata allowlist.
+
+The repair is to stop deciding from the string. The hook is now Python: it tokenises with the
+standard-library shlex module, normalises and glob-expands each token, and classifies the resulting PATHS rather than
+matching text. Children of the loader and flags of the metadata tools are both deny-by-default
+against fixed allowlists, and `file` is gone from the metadata set entirely.
+
+Two subtleties only measurement found. First, shlex alone is insufficient: in a command
+substitution it yields a token with the closing parenthesis attached, whose basename matches no
+rule, so the metacharacter travels INTO the token and hides the path — the command is therefore
+tokenised a second time with metacharacters replaced by spaces and both token sets searched.
+Second, the loader must be judged whenever it is INVOKED, not only when a credential path is
+named, because its most dangerous uses name no path at all.
+
 ## The arms
 
-`.claude/hooks/test-block-credential-reads.sh` holds 41 cases, including every reported bypass
-as a positive control. It lives in a file rather than an inline command because the live hook
+`.claude/hooks/test-block-credential-reads.sh` holds 59 cases, including every reported bypass
+from both findings as a positive control. It lives in a file rather than an inline command because the live hook
 blocks any Bash call that names credential material — including a test runner that passes such
 a command as an argument. Each arm was restored before the next, and the restore was verified by
 digest rather than assumed.
 
 | arm | result |
 |---|---|
-| baseline | 41 pass, 0 fail |
+| baseline | 59 pass, 0 fail |
 | the compound-command refusal removed | 6 failed |
 | the anchored exemptions reverted to substring | 3 failed |
-| baseline restored, digest compared | 41 pass, 0 fail |
+| the loader's child allowlist removed | 3 failed |
+| the second tokenisation removed | 2 failed |
+| the metadata flag allowlist removed | 5 failed |
+| baseline restored, digest compared | 59 pass, 0 fail |
 
-Both repairs are independently load-bearing: six of the bypasses are caught by the refusal and
-three more only by the anchoring, so neither alone is sufficient.
+Every repair is independently load-bearing: no two arms fail the same cases, so none of the five
+is redundant and none alone is sufficient. The first two arms were measured against the shell
+implementation and the last three against the Python one that replaced it.
 
 ## The cost, which is real and was accepted rather than carved around
 
-Two legitimate things are now refused. A `scripts/run_with_env.py` invocation that also names
-the dotenv AND pipes its output is blocked, and so is any compound command that merely MENTIONS
-a credential path — including writing documentation about one, which is how this log came to be
-written through the file-writing tool rather than a shell heredoc.
+Three legitimate things are now refused. A `scripts/run_with_env.py` invocation that also names
+the dotenv AND pipes its output is blocked; so is any compound command that merely MENTIONS a
+credential path — including writing documentation about one, which is how this log came to be
+written through the file-writing tool rather than a shell heredoc; and so is a loader child
+outside the build-and-test allowlist, which means an interpreter or a one-off shell under the
+loader has to be spelled as a script and invoked as a program.
 
 Carving an exception for either case means reasoning about which part of a compound command the
 path belongs to, and that is exactly the reasoning that produced the bypass. The friction is the
 price of the gate being decidable. A single simple command, or the file-writing tool for prose,
 is the way through.
+
+## What this is, and what it is NOT
+
+This is defence in depth. It is not a security boundary, and it should not be described as one.
+A determined command can always reach a file the process is allowed to open: through an
+interpreter, a statically linked helper, or a path assembled at runtime from pieces no inspector
+of the command line ever sees. Three rounds of patching a filter is evidence for that claim, not
+against it — each round closed the shapes that had been thought of.
+
+The boundary is the operating system: the file's own permissions, or a sandbox that makes the
+path unreadable. `sandbox.filesystem.denyRead` is declared for the latter and takes effect when
+the sandbox is enabled. The dotenv's mode was NOT inspected — the command to read it was itself
+refused — so whether it is already owner-only is unverified here and worth confirming.
+
+What the hook buys is that a careless or accidental read is refused loudly, at the moment it is
+attempted, instead of landing in a transcript. That is worth having, and it is all it is.
 
 ## What is NOT claimed
 
