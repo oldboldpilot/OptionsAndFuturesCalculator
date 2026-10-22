@@ -1,0 +1,39 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(config/.env)",
+      "Read(config/.env.*)",
+      "Read(.env)",
+      "Read(.env.*)",
+      "Read(**/.env)",
+      "Read(**/.env.local)",
+      "Read(**/.env.production)",
+      "Read(**/*.pem)",
+      "Read(**/*.key)",
+      "Read(**/*.p12)",
+      "Read(**/secrets/**)",
+      "Read(//home/muyiwa/.railway/config.json)",
+      "Read(//home/muyiwa/.aws/credentials)",
+      "Read(//home/muyiwa/.ssh/**)",
+      "Read(//home/muyiwa/.netrc)",
+      "Read(//home/muyiwa/.npmrc)",
+      "Read(//home/muyiwa/.config/gh/hosts.yml)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/block-credential-reads.sh\"",
+            "timeout": 10,
+            "onFailure": "block",
+            "statusMessage": "Checking for credential reads..."
+          }
+        ]
+      }
+    ]
+  }
+}

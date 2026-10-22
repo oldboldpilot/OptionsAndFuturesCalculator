@@ -1,0 +1,28 @@
+# Credential material. Claude must never read or print these.
+# The enforcing rules live beside this file in .claude/settings.json:
+#   permissions.deny Read(...)        - blocks the Read tool
+#   hooks.PreToolUse Bash             - blocks cat/grep/sed/... in the shell
+# This file alone is not a guarantee; the two above are what actually refuse.
+
+config/.env
+config/.env.*
+.env
+.env.*
+**/.env
+**/.env.*
+
+# ...but example/template dotenvs carry no values and stay readable.
+!**/.env.example
+!**/.env.sample
+!**/.env.template
+
+# Keys, certificates and tokens.
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+id_rsa
+id_ed25519
+**/secrets/**
+**/.secrets/**
