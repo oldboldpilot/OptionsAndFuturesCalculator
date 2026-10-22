@@ -77,6 +77,25 @@ run BLOCK "sha256sum -c $D"
 run BLOCK "md5sum -c $D"
 
 echo
+echo "=== group C: the loader's child must not be a generic executor (must BLOCK) ==="
+# Each of these loads the secrets and then runs a command of the caller's
+# choosing. They name no credential path, so only the loader rule catches them.
+run BLOCK "scripts/run_with_env.py -- npx whatever"
+run BLOCK "scripts/run_with_env.py -- uv run python -c 'import os'"
+run BLOCK "scripts/run_with_env.py -- go run x.go"
+run BLOCK "scripts/run_with_env.py -- cargo run"
+run BLOCK "scripts/run_with_env.py -- yarn whatever"
+run BLOCK "scripts/run_with_env.py -- pnpm whatever"
+run BLOCK "scripts/run_with_env.py -- make -f /tmp/evil.mk"
+run BLOCK "scripts/run_with_env.py -- make --eval=x"
+run BLOCK "scripts/run_with_env.py -- npm exec whatever"
+run BLOCK "scripts/run_with_env.py -- ninja -f /tmp/evil.ninja"
+run BLOCK "scripts/run_with_env.py -- npm whatever"
+run BLOCK "scripts/run_with_env.py -- ./scripts/anything.sh"
+run BLOCK "scripts/run_with_env.py -- ./a.out"
+run BLOCK "scripts/run_with_env.py -- wrangler whatever"
+
+echo
 echo "=== direct reads (must BLOCK) ==="
 run BLOCK "cat $D"
 run BLOCK "grep FINANCE_API_KEY $D"

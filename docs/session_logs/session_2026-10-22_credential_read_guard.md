@@ -91,27 +91,51 @@ tokenised a second time with metacharacters replaced by spaces and both token se
 Second, the loader must be judged whenever it is INVOKED, not only when a credential path is
 named, because its most dangerous uses name no path at all.
 
+## The third finding, and the ceiling it makes visible
+
+A third review observed that the loader's child allowlist was checked by NAME only, and that
+several names on it exist precisely to execute an arbitrary command: a package runner, a Python
+project runner, a Go or Rust `run` subcommand. Others accept a flag that does the same — a
+makefile named on the command line, a package manager's exec subcommand. And the blanket
+acceptance of any dot-slash path let any local script through. All true, and all now closed: the
+generic executors are off the list, the exec-style flags are refused, a package manager must
+carry one of a fixed set of subcommands, and a built binary is matched by shape — a direct child
+of a build directory of this repository — rather than by a leading dot-slash.
+
+That hardening is worth having, because those names were pure surface with no use this
+repository needs. But it should not be mistaken for closure, and this is the honest limit of the
+whole approach: the loader exemption cannot be made safe, because its PURPOSE is to put the
+secrets in a child's environment. Every remaining name runs project-defined work — the build
+tool runs what the build file says, the package manager what the manifest says — and a built
+binary is a file someone can replace. Three rounds of patching a command filter is evidence that
+the problem is not decidable from the command line, not that the next round will finish it.
+
+So this round is the last of its kind. Further confidence has to come from the operating system,
+not from a better pattern.
+
 ## The arms
 
-`.claude/hooks/test-block-credential-reads.sh` holds 59 cases, including every reported bypass
-from both findings as a positive control. It lives in a file rather than an inline command because the live hook
+`.claude/hooks/test-block-credential-reads.sh` holds 73 cases, including every reported bypass
+from all three findings as a positive control. It lives in a file rather than an inline command because the live hook
 blocks any Bash call that names credential material — including a test runner that passes such
 a command as an argument. Each arm was restored before the next, and the restore was verified by
 digest rather than assumed.
 
 | arm | result |
 |---|---|
-| baseline | 59 pass, 0 fail |
+| baseline | 73 pass, 0 fail |
 | the compound-command refusal removed | 6 failed |
 | the anchored exemptions reverted to substring | 3 failed |
-| the loader's child allowlist removed | 3 failed |
+| the loader's child allowlist removed entirely | 3 failed |
 | the second tokenisation removed | 2 failed |
 | the metadata flag allowlist removed | 5 failed |
-| baseline restored, digest compared | 59 pass, 0 fail |
+| the loader's child argv rules reverted to name-only | 14 failed |
 
-Every repair is independently load-bearing: no two arms fail the same cases, so none of the five
+Every repair is independently load-bearing: no two arms fail the same cases, so none of the six
 is redundant and none alone is sufficient. The first two arms were measured against the shell
-implementation and the last three against the Python one that replaced it.
+implementation and the last four against the Python one that replaced it. Each arm was restored
+before the next and the restore compared by digest, with the baseline re-run to 73 after the
+last.
 
 ## The cost, which is real and was accepted rather than carved around
 

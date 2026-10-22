@@ -61,14 +61,41 @@ SECRET_EXT = {".pem", ".key", ".p12", ".pfx", ".jks"}
 SECRET_BASENAME = {"id_rsa", "id_ed25519", ".netrc", ".npmrc"}
 GLOB_CHARS = set("*?[")
 
-# A child of the sanctioned loader must come from this list. Deny-by-default is
-# the only defensible rule here: the loader's whole PURPOSE is to hand the child
-# the secrets, so a shell, an interpreter or a printer as the child is simply the
-# read with extra steps.
+# A child of the sanctioned loader must come from this list, with the argv shape
+# its entry allows. Deny-by-default is the only defensible rule: the loader's
+# whole PURPOSE is to hand the child the secrets, so a shell, an interpreter or a
+# printer as the child is simply the read with extra steps.
+#
+# This list SHRINKS the surface; it does not close it. Any build tool runs
+# project-defined work -- ninja runs what the build file says, npm what the
+# package manifest says -- so a child that can build can in principle emit the
+# environment. What is excluded here are the programs that exist ONLY to execute
+# an arbitrary command (npx, uv, go run, cargo run, yarn, pnpm): pure surface
+# with no use this repository needs. The boundary remains the operating system.
+#
+# A value of None means "no subcommand required"; a set means the first non-flag
+# argument must be one of these.
 LOADER_CHILD_OK = {
-    "ninja", "cmake", "ctest", "make", "npm", "npx", "pnpm", "yarn",
-    "pytest", "uv", "go", "cargo", "wrangler", "true",
+    "ninja": None,
+    "cmake": None,
+    "ctest": None,
+    "make": None,
+    "npm": {"run", "run-script", "test", "ci", "install", "build"},
+    "pytest": None,
+    "true": None,
 }
+
+# Flags that make an allowlisted child execute something of the caller's
+# choosing, which is the whole point of excluding generic executors.
+LOADER_CHILD_BAD_FLAGS = {
+    "-f", "--file", "--makefile", "--eval", "-E", "-c", "--call", "--exec",
+    "-e", "--command", "--entrypoint", "-i", "--interactive",
+}
+LOADER_CHILD_BAD_SUBCOMMANDS = {"exec", "run-script-shell", "explore"}
+
+# A built binary, named by shape rather than by a blanket "./" acceptance: a
+# direct child of a build directory of this repository.
+BUILD_OUTPUT = re.compile(r"^(\./)?backend/build[^/]*/[A-Za-z0-9_.+-]+$")
 
 # Metadata-only tools, and the ONLY flags each may carry. A flag that makes a
 # tool treat its argument as a LIST OF NAMES (file -f, wc --files0-from,
@@ -231,9 +258,26 @@ def loader_exempt(tokens) -> bool:
         return False  # a child argument names credential material
 
     head = child[0]
-    if head.startswith("./") or head.startswith("backend/build/"):
+    if BUILD_OUTPUT.match(head):
         return True
-    return os.path.basename(head) in LOADER_CHILD_OK
+
+    name = os.path.basename(head)
+    if name not in LOADER_CHILD_OK:
+        return False
+
+    rest = child[1:]
+    for token in rest:
+        if token.split("=", 1)[0] in LOADER_CHILD_BAD_FLAGS:
+            return False
+        if token in LOADER_CHILD_BAD_SUBCOMMANDS:
+            return False
+
+    required = LOADER_CHILD_OK[name]
+    if required is not None:
+        positional = [t for t in rest if not t.startswith("-")]
+        if not positional or positional[0] not in required:
+            return False
+    return True
 
 
 def metadata_exempt(tokens) -> bool:
