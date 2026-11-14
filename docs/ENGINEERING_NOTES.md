@@ -5221,6 +5221,85 @@ rather than deleted, because the counter pair is the evidence.
 - **Not run on the GPU or on Railway.** This is CPU, on a shared 16-core Ryzen 9
   9955HX.
 
+
+### The fused bf16 tier was NOT bit-identical, and two vacuous gates hid it (2026-11-14)
+
+`llq-fused` at 16 bits promises that serving from the compressed image changes
+no bit. It did not keep that promise, and the gate that should have said so was
+unfalsifiable, so the defect sat behind a green suite.
+
+**The gate first.** `test_llq_weight_store`'s two seam arms built their weight
+from a generator that injects non-finite words ON PURPOSE -- `awkward[]` holds
+`0x7F80` (+inf), `0xFF80` (-inf), `0x7FC1` and `0xFFFF` (NaN), used every 37th
+word. That is correct for the materialise round-trip it was written for: a codec
+that canonicalises a NaN payload or flushes a subnormal must be caught, and a
+test made only of normal numbers would pass anyway. Reused unchanged for an
+ARITHMETIC IDENTITY check it is fatal. 664 non-finite words put several in every
+256-column row, so every dense output was NaN -- 192 of 192 at m = 1, 960 of 960
+at m = 5 -- and `bit_equal` over NaN decides nothing. The non-fused arm "passed"
+by comparing NaN against NaN, which agree only because the operation order was
+identical. **One dataset, two tests, opposite requirements.**
+
+The repair is a finite twin for the seam arms only (the same words with the top
+exponent bit cleared where the exponent is all ones, keeping zeros, signed zeros
+and subnormals), the original inf/NaN weight kept for the materialise checks,
+and an assertion in each loop that the dense reference is entirely finite so the
+fixture cannot degenerate again unnoticed. The identity assertion itself is
+unchanged and is NOT NaN-tolerant.
+
+**Then the real defect.** With finite data the fused arm failed because
+`LlqBf16Source::gemvSlice` called `llq::LlqGemv::runBf16Slice`, the codec's
+CANONICAL kernel: 64 accumulator slots folded by a tree reduce, using `fmadd`,
+one rounding per term. The dense 16-bit kernel runs a sequential chain per
+output with a separate multiply and add, two roundings per term. Different
+ORDER and different ROUNDING, so they cannot agree -- while the comment above
+`gemvSlice` asserted "BIT-IDENTICAL, and not by luck".
+
+Measured on a 192x256 bf16 weight against the dense reference:
+
+| compared | differing |
+|---|---|
+| image materialise round trip | 0 of 49152 words |
+| materialise path (`Mode::Llq`) vs dense | 0 of 192 and 0 of 960 |
+| canonical fused vs dense | 179 of 192 and 869 of 960 |
+| plain sequential chain vs dense | **0** -- 192 of 192 MATCH |
+| canonical fused vs that chain | 179 of 192 (13 coincide) |
+
+So the image and the decode were never in question; only the summation order
+was. The AVX-512 fused kernels were ruled out independently by forcing
+`kFusedBf16 = false` and confirming the translation unit recompiled: the failure
+survived, so it was never the SIMD.
+
+`gemvSlice` now decodes each row with `bf16Join` and sums it with
+`dense_order::chains` -- four independent sequential chains, the multiply and
+the add separate STATEMENTS with `#pragma clang fp contract(off)`, so no
+compiler flag can fuse them into an FMA and quietly reintroduce the divergence.
+The codec's canonical kernel is still right for a caller that wants its speed
+and does not need identity; it is wrong for this source, whose whole contract is
+identity.
+
+**THIS WAS NOT TEST-ONLY.** The canonical kernel is what the engine serves under
+`STRATEGY_WEIGHT_STORE=llq-fused`, so it was a latent serving-correctness bug for
+the strategy assistant here and for the mortgage assistant in nest-egg-loan,
+which serves from the same tier. It stayed latent only because the default is
+dense and the variable is set in no start script, Dockerfile or deploy script.
+
+**And it was already fixed upstream, in the other copy.** sensen's own
+`llq_weight_store.cppm` grew a `Bf16FusedOrder` with a DenseOrder path and
+records in its gate that "the LIBRARY's fused kernel ... canonical order ... is
+NOT bit-identical to the dense kernel". This repository has its OWN
+`backend/src/modules/llq_weight_store.cppm` -- same design, same filename,
+different module (`llq_weight_store` against `sensen.llq_weight_store`) and
+different API spelling (`from_bf16_row_major` against fromBf16RowMajor) -- and
+it never received that fix. A duplicated implementation does not merely double
+the maintenance: one copy can be repaired while the other stays broken with the
+repair visible in the next directory. Hours of this investigation went into
+auditing sensen's AVX-512 kernels before noticing the failing code was here.
+
+Gated: `test_llq_weight_store` 118 checks 0 failures (114/2 before the fixture
+repair, 118/2 after it and before the kernel fix), and the full suite 212 of 212
+with 9 skipped.
+
 ## Memory, and what the Railway bill is actually buying
 
 **94% of the bill is RAM, and Railway's receipt states it in MB-MINUTES.** The

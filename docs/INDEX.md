@@ -149,6 +149,7 @@ describes why it is that way and what it cost to find out.
 
 ## Session logs
 
+- [2026-11-14 — the LLQ fused tier was not bit-identical, and two vacuous gates hid it](session_logs/session_2026-11-14_llq_fused_identity_and_sensen_bump.md)
 - [2026-10-12 — the documentation citation gate in six repositories](session_logs/session_2026-10-12_docs_citation_gate_in_six_repositories.md)
 - [2026-10-11 — The gateway store is migrated and serving, and the documented procedure could never have done it](session_logs/session_2026-10-11_gateway_store_migrated_and_the_role_that_could_not.md)
 - [2026-10-11 — Gateway store migrated to 13, and the submodule nobody had named](session_logs/session_2026-10-11_gateway_store_13_and_the_submodule_nobody_named.md)
