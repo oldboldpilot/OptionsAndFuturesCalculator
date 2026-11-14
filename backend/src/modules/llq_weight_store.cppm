@@ -121,6 +121,49 @@ import std;
 import sensen.gemm;
 import sensen.lossless_quant;
 
+namespace llq_weight_store::dense_order {
+
+/// Up to four independent sequential chains over rows already widened to float, summed EXACTLY as
+/// sensen's dense 16-bit kernel sums them: one chain per output row, each step a ROUNDED multiply
+/// and then a ROUNDED add.
+///
+/// WHY THIS EXISTS RATHER THAN CALLING THE CODEC'S OWN FUSED KERNEL.
+///
+/// `llq::LlqGemv::runBf16Slice` accumulates into 64 canonical slots and folds them with a tree
+/// reduce, using `fmadd` -- one rounding per term. The dense kernel runs a sequential chain with a
+/// separate multiply and add -- two roundings per term. Both are internally consistent across
+/// their own architecture arms, and they are NOT equal to each other: measured 2026-11-14 on a
+/// 192x256 bf16 weight, the canonical kernel agreed with the dense kernel on 13 of 192 outputs,
+/// and a plain sequential chain agreed on 192 of 192. sensen records the same finding in its own
+/// gate ("the LIBRARY's fused kernel ... canonical order ... is NOT bit-identical to the dense
+/// kernel"), which is why sensen's copy of this store grew a `Bf16FusedOrder` with a dense-order
+/// path. THIS store never got that fix and kept calling the canonical kernel while asserting
+/// identity, so the gate in test_llq_weight_store.cpp was red for a real reason.
+///
+/// The multiply and the add are separate STATEMENTS and contraction is switched off, so neither a
+/// compiler flag nor a default can fuse them back into an FMA and silently reintroduce the
+/// divergence. Four rows are carried at once purely for instruction-level parallelism; each row's
+/// chain is its own and never sees the others, so the grouping changes no bit.
+inline auto chains(const float* a, const float* wf, std::size_t k, std::size_t g,
+                   float* out) noexcept -> void {
+#if defined(__clang__)
+#pragma clang fp contract(off)
+#endif
+    std::array<float, 4> acc{0.0F, 0.0F, 0.0F, 0.0F};
+    for (std::size_t c = 0; c < k; ++c) {
+        const float x = a[c];
+        for (std::size_t l = 0; l < g; ++l) {
+            const float p = x * wf[(l * k) + c];
+            acc[l] = acc[l] + p;
+        }
+    }
+    for (std::size_t l = 0; l < g; ++l) {
+        out[l] = acc[l];
+    }
+}
+
+}  // namespace llq_weight_store::dense_order
+
 export namespace llq_weight_store {
 
 namespace llq = sensen::llq;
@@ -876,10 +919,19 @@ class LlqBf16Source final : public sensen::GEMM::Bf16WeightSource {
     /// slower -- it is kept as the identity REFERENCE and as the fallback, not as
     /// the thing to serve.
     ///
-    /// BIT-IDENTICAL, and not by luck. `runBf16Slice` runs `runBf16`'s per-row
-    /// body unchanged over this slice, and joining an exponent plane to a raw
-    /// sign|mantissa plane is a bit operation, so the floats summed and their
-    /// order are the dense kernel's. Gated by measurement all the same.
+    /// BIT-IDENTICAL, and by construction rather than by assertion. The join from an exponent
+    /// plane to a raw sign|mantissa plane is a bit operation, so the FLOATS are the dense
+    /// kernel's exactly; what remained to get right is the ORDER they are summed in, and that is
+    /// `dense_order::chains` -- a sequential chain per row with a rounded multiply and a rounded
+    /// add, which is what the dense 16-bit kernel does.
+    ///
+    /// THIS USED TO CALL `llq::LlqGemv::runBf16Slice` AND THE CLAIM ABOVE WAS FALSE. That kernel
+    /// sums into 64 canonical slots with `fmadd` and a tree reduce, which is a different order
+    /// AND a different rounding, so it agreed with the dense kernel on 13 of 192 outputs. See
+    /// `dense_order::chains` for the measurement and for sensen's own record of the same finding.
+    /// The codec's canonical kernel is still the right thing for a caller that wants its speed
+    /// and does not need identity; it is not right for THIS source, whose whole contract is that
+    /// serving from the compressed image changes no bit.
     [[nodiscard]] auto gemvSlice(std::span<const float> a, std::span<float> c,
                                  std::size_t r_start, std::size_t r_end) const noexcept
         -> bool override {
@@ -889,20 +941,31 @@ class LlqBf16Source final : public sensen::GEMM::Bf16WeightSource {
         if (a.size() != k_ || c.size() != r_end - r_start || r_start >= r_end || r_end > rows_) {
             return false;
         }
-        llq::LlqGemv gemv;
-        (void)gemv.withSerialExecution(true);  // already inside a worker's slice
-        for (std::size_t p = r_start / kPanelRows; p * kPanelRows < r_end; ++p) {
-            const auto& panel = panels_[p];
-            const std::size_t base = p * kPanelRows;
-            const std::size_t lo = std::max(r_start, base);
-            const std::size_t hi = std::min(r_end, base + panel.rows());
-            if (lo >= hi) {
-                continue;
+        // Four rows at a time: the chains are independent, so this is instruction-level
+        // parallelism and not a reassociation.
+        constexpr std::size_t kLanes = 4;
+        thread_local std::vector<std::int8_t> codes;
+        thread_local std::vector<float> wf;
+        codes.resize(k_);
+        wf.resize(kLanes * k_);
+        for (std::size_t r = r_start; r < r_end; r += kLanes) {
+            const std::size_t g = std::min(kLanes, r_end - r);
+            for (std::size_t l = 0; l < g; ++l) {
+                const std::size_t row = r + l;
+                const auto& panel = panels_[row / kPanelRows];
+                const std::size_t pr = row % kPanelRows;
+                panel.exponent().decodeRow(pr, codes);
+                const auto sm = panel.signMantissa().subspan(pr * k_, k_);
+                const auto centre = static_cast<std::int32_t>(panel.centre());
+                float* dst = wf.data() + (l * k_);
+                for (std::size_t col = 0; col < k_; ++col) {
+                    const std::uint16_t word = llq::bf16Join(
+                        sm[col],
+                        static_cast<std::uint8_t>(static_cast<std::int32_t>(codes[col]) + centre));
+                    dst[col] = std::bit_cast<float>(static_cast<std::uint32_t>(word) << 16U);
+                }
             }
-            if (!gemv.runBf16Slice(panel, a, c.subspan(lo - r_start, hi - lo), lo - base,
-                                   hi - base)) {
-                return false;  // declined: the caller materialises instead
-            }
+            dense_order::chains(a.data(), wf.data(), k_, g, c.data() + (r - r_start));
         }
         return true;
     }

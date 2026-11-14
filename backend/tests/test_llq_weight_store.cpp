@@ -449,37 +449,62 @@ auto main() -> int {
             check(!(*src)->materialise(150, 250, tile2), "bf16 rows beyond the weight are refused");
         }
 
+        // The seam arms below run a GEMV, and the weight above deliberately carries
+        // +-inf and NaN words (they are what the materialise round trip must
+        // preserve). With 256 columns every row then holds several of them, so every
+        // dense output is NaN and "bit-identical" would compare NaN payloads and no
+        // arithmetic at all. The seam therefore reads a FINITE twin of the weight:
+        // the same words with the top exponent bit cleared wherever the exponent is
+        // all ones. Zeros, signed zeros and subnormals are kept.
+        std::vector<std::uint16_t> fwords = words;
+        for (std::uint16_t& w : fwords) {
+            if ((w & 0x7F80U) == 0x7F80U) {
+                w = static_cast<std::uint16_t>(w & 0xBFFFU);
+            }
+        }
+        std::vector<std::uint16_t> fdense(rows * k);
+        for (std::size_t r = 0; r < rows; ++r) {
+            for (std::size_t c = 0; c < k; ++c) {
+                fdense[(c * rows) + r] = fwords[(r * k) + c];
+            }
+        }
+        const auto fbytes = std::span(reinterpret_cast<const std::uint8_t*>(fwords.data()),
+                                      fwords.size() * 2);
+
         // The seam, through sensen's own kernel, with the dense buffer destroyed.
         for (const std::size_t m : {std::size_t{1}, std::size_t{5}}) {
             const auto a = make_activation(m, k, static_cast<std::uint32_t>(700 + m));
             std::vector<float> ref(m * rows, -1.0F);
             GEMM::clearBf16WeightSources();
-            GEMM::matvecQuantizedBatch(a.data(), dense.data(), ref.data(), m, k, rows,
+            GEMM::matvecQuantizedBatch(a.data(), fdense.data(), ref.data(), m, k, rows,
                                        GEMM::QType::BF16);
+            // Bit-identity of an all-NaN reference proves nothing about the sums.
+            check(std::ranges::all_of(ref, [](float v) { return std::isfinite(v); }),
+                  std::format("bf16 m = {}: the dense reference is entirely finite", m));
 
-            const auto s2 = ws::LlqBf16Source::from_bf16_row_major(bytes, rows, k, ws::Mode::Llq);
+            const auto s2 = ws::LlqBf16Source::from_bf16_row_major(fbytes, rows, k, ws::Mode::Llq);
             check(s2.has_value(), "the bf16 source rebuilds for the seam arm");
             if (!s2.has_value()) {
                 continue;
             }
-            GEMM::registerBf16WeightSource(dense.data(), *s2);
-            const auto saved = dense;
-            std::ranges::fill(dense, 0xA5A5);
+            GEMM::registerBf16WeightSource(fdense.data(), *s2);
+            const auto saved = fdense;
+            std::ranges::fill(fdense, 0xA5A5);
 
             std::vector<float> got(m * rows, -2.0F);
-            GEMM::matvecQuantizedBatch(a.data(), dense.data(), got.data(), m, k, rows,
+            GEMM::matvecQuantizedBatch(a.data(), fdense.data(), got.data(), m, k, rows,
                                        GEMM::QType::BF16);
             check(bit_equal(ref, got),
                   std::format("bf16 m = {}: LLQ output is bit-identical to dense", m));
 
-            GEMM::unregisterBf16WeightSource(dense.data());
+            GEMM::unregisterBf16WeightSource(fdense.data());
             std::vector<float> garbage(m * rows, -3.0F);
-            GEMM::matvecQuantizedBatch(a.data(), dense.data(), garbage.data(), m, k, rows,
+            GEMM::matvecQuantizedBatch(a.data(), fdense.data(), garbage.data(), m, k, rows,
                                        GEMM::QType::BF16);
             check(!bit_equal(ref, garbage),
                   std::format("bf16 m = {}: the poisoned dense buffer gives a DIFFERENT answer "
                               "(positive control)", m));
-            dense = saved;
+            fdense = saved;
         }
         check(GEMM::bf16WeightSourceCount() == 0, "no bf16 registration is left behind");
 
@@ -497,33 +522,35 @@ auto main() -> int {
             const auto a = make_activation(m, k, static_cast<std::uint32_t>(900 + m));
             std::vector<float> ref(m * rows, -1.0F);
             GEMM::clearBf16WeightSources();
-            GEMM::matvecQuantizedBatch(a.data(), dense.data(), ref.data(), m, k, rows,
+            GEMM::matvecQuantizedBatch(a.data(), fdense.data(), ref.data(), m, k, rows,
                                        GEMM::QType::BF16);
+            // Bit-identity of an all-NaN reference proves nothing about the sums.
+            check(std::ranges::all_of(ref, [](float v) { return std::isfinite(v); }),
+                  std::format("bf16 FUSED m = {}: the dense reference is entirely finite", m));
 
-            const auto sf = ws::LlqBf16Source::from_bf16_row_major(bytes, rows, k,
+            const auto sf = ws::LlqBf16Source::from_bf16_row_major(fbytes, rows, k,
                                                                    ws::Mode::LlqFused);
             check(sf.has_value(), "llq-fused ADOPTS a bf16 weight");
             if (!sf.has_value()) {
                 continue;
             }
-            GEMM::registerBf16WeightSource(dense.data(), *sf);
-            const auto saved = dense;
-            std::ranges::fill(dense, 0xA5A5);
+            GEMM::registerBf16WeightSource(fdense.data(), *sf);
+            const auto saved = fdense;
+            std::ranges::fill(fdense, 0xA5A5);
 
             std::vector<float> got(m * rows, -2.0F);
-            GEMM::matvecQuantizedBatch(a.data(), dense.data(), got.data(), m, k, rows,
+            GEMM::matvecQuantizedBatch(a.data(), fdense.data(), got.data(), m, k, rows,
                                        GEMM::QType::BF16);
             check(bit_equal(ref, got),
                   std::format("bf16 FUSED m = {}: output is bit-identical to dense", m));
-
-            GEMM::unregisterBf16WeightSource(dense.data());
+            GEMM::unregisterBf16WeightSource(fdense.data());
             std::vector<float> garbage(m * rows, -3.0F);
-            GEMM::matvecQuantizedBatch(a.data(), dense.data(), garbage.data(), m, k, rows,
+            GEMM::matvecQuantizedBatch(a.data(), fdense.data(), garbage.data(), m, k, rows,
                                        GEMM::QType::BF16);
             check(!bit_equal(ref, garbage),
                   std::format("bf16 FUSED m = {}: the poisoned dense buffer gives a DIFFERENT "
                               "answer (positive control)", m));
-            dense = saved;
+            fdense = saved;
         }
         check(GEMM::bf16WeightSourceCount() == 0, "no fused bf16 registration is left behind");
 
