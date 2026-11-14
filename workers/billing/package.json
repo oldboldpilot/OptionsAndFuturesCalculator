@@ -7,7 +7,13 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "secrets:check": "node scripts/install-secrets.mjs --check --all",
+    "secrets:scan": "node scripts/install-secrets.mjs --scan",
+    "secrets:scan:alpaca": "node scripts/install-secrets.mjs --scan --match=ALPACA",
+    "secrets:mfv:dry": "node scripts/install-secrets.mjs --railway=mfv-web --check",
+    "secrets:mfv": "node scripts/install-secrets.mjs --railway=mfv-web",
+    "secrets:install": "node scripts/install-secrets.mjs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250204.0",
