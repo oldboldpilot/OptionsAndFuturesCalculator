@@ -150,6 +150,16 @@ static_resources:
                       allow_headers: keep-alive,user-agent,cache-control,content-type,content-transfer-encoding,custom-header-1,x-accept-content-transfer-encoding,x-accept-response-streaming,x-user-agent,x-grpc-web,grpc-timeout,x-api-key,authorization
                       max_age: "1728000"
                       expose_headers: custom-header-1,grpc-status,grpc-message
+              # Do NOT add envoy.filters.http.decompressor here with the Brotli library.
+              # The Envoy binary copied into this image links libbrotlidec, and Ubuntu
+              # 24.04 ships brotli 1.1.0 -- the version with CVE-2026-111497, an
+              # out-of-bounds write in the DECODER. Today that decoder is unreachable
+              # only because no filter below feeds it: Envoy decompresses a request or
+              # response body solely when the decompressor filter is configured. Adding
+              # one would turn a dormant library into a pre-auth path from a request
+              # body. libbrotli1 must stay in the Dockerfile regardless -- Envoy needs
+              # it to load, so removing the package breaks process start, it does not
+              # harden anything.
               http_filters:
                 - name: envoy.filters.http.local_ratelimit
                   typed_config:

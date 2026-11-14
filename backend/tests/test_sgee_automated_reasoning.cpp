@@ -5,8 +5,10 @@
 //   2. FinanceRequestLifecycle (finance_service.cpp)
 //   3. StrategyAssistantWorkflow (assistant_service.cpp)
 //
-// Powered by sensen's Z3-backed General-Purpose Automated Reasoning Agent (GP-ARA Z3Reasoner,
-// backend/sensen/src/gp_ara_interfaces.cppm).
+// Powered by sensen's General-Purpose Automated Reasoning Agent (GP-ARA SmtReasoner,
+// backend/sensen/src/gp_ara_smt_reasoner.cppm), which decides over sensen's own native SMT stack
+// -- a CDCL/local-search portfolio with exact bigint and rational arithmetic and LRAT proof
+// checking. Nothing that ships links libz3.
 //
 // Architectural Invariants Formally Proved:
 //   P1. Action Binding Completeness: Every Execute(name) in a graph has a corresponding bound action in ActionRegistry.
@@ -23,6 +25,9 @@ import sgee.core.types;
 import sgee.core.blueprint;
 import sgee.builder.fluent;
 import sensen.gp_ara_interfaces;
+// `SmtReasoner` is NOT in sensen.gp_ara_interfaces -- the `sen-no-z3` lane put it in its own
+// module, implemented over sensen's native parallel SMT stack instead of libz3.
+import sensen.gp_ara_smt_reasoner;
 
 // Global test accounting
 static int g_checks = 0;
@@ -109,12 +114,12 @@ inline auto build_strategy_assistant_workflow() -> WorkflowGraph {
 }
 
 // ---------------------------------------------------------------------------
-// Formal Prover Engine using sensen::gp_ara::Z3Reasoner
+// Formal Prover Engine using sensen::gp_ara::SmtReasoner
 // ---------------------------------------------------------------------------
 class GraphProver {
   private:
-    sensen::gp_ara::Z3Reasoner reasoner_;
-    sensen::gp_ara::Z3Reasoner::ContextType ctx_;
+    sensen::gp_ara::SmtReasoner reasoner_;
+    sensen::gp_ara::SmtReasoner::ContextType ctx_;
 
   public:
     struct ProofResult {
@@ -181,7 +186,7 @@ class GraphProver {
             }
         } else {
             res.proved = false;
-            res.details = std::format("Z3 error: {} ({})", proof.error().message, sensen::gp_ara::to_string(proof.error().code));
+            res.details = std::format("SMT error: {} ({})", proof.error().message, sensen::gp_ara::to_string(proof.error().code));
         }
         return res;
     }
@@ -249,7 +254,7 @@ class GraphProver {
             }
         } else {
             res.proved = false;
-            res.details = std::format("Z3 error: {} ({})", proof.error().message, sensen::gp_ara::to_string(proof.error().code));
+            res.details = std::format("SMT error: {} ({})", proof.error().message, sensen::gp_ara::to_string(proof.error().code));
         }
         return res;
     }
@@ -305,7 +310,7 @@ class GraphProver {
             }
         } else {
             res.proved = false;
-            res.details = std::format("Z3 error: {} ({})", proof.error().message, sensen::gp_ara::to_string(proof.error().code));
+            res.details = std::format("SMT error: {} ({})", proof.error().message, sensen::gp_ara::to_string(proof.error().code));
         }
         return res;
     }
@@ -364,7 +369,7 @@ class GraphProver {
             }
         } else {
             res.proved = false;
-            res.details = std::format("Z3 error: {} ({})", proof.error().message, sensen::gp_ara::to_string(proof.error().code));
+            res.details = std::format("SMT error: {} ({})", proof.error().message, sensen::gp_ara::to_string(proof.error().code));
         }
         return res;
     }
@@ -418,7 +423,7 @@ class GraphProver {
             }
         } else {
             res.proved = false;
-            res.details = std::format("Z3 error: {} ({})", proof.error().message, sensen::gp_ara::to_string(proof.error().code));
+            res.details = std::format("SMT error: {} ({})", proof.error().message, sensen::gp_ara::to_string(proof.error().code));
         }
         return res;
     }
@@ -455,8 +460,11 @@ class GraphProver {
         const std::uint64_t worst_failover = election_base_ms * 2 + heartbeat_ms;
 
         // SMT-LIB2: assert the concrete derivation and that BOTH bounds hold.
-        // NOTE: no identifier here may contain the substring "timeout" -- Z3Reasoner
-        // short-circuits on it before the formula ever reaches the solver.
+        // NOTE: no identifier here may contain the substring "timeout" -- the reasoner
+        // short-circuits on it before the formula ever reaches the solver. Re-checked against
+        // the replacement on 2026-11-14: SmtReasoner::prove_safety still does exactly this
+        // (`if (formula.contains("timeout"))` -> ReasonerErrorCode::Timeout), so the constraint
+        // on identifier spelling carried over from Z3Reasoner unchanged.
         std::string smt;
         smt += "(declare-const election_base_ms Int)\n";
         smt += "(declare-const heartbeat_ms Int)\n";
@@ -498,7 +506,7 @@ class GraphProver {
             }
         } else {
             res.proved = false;
-            res.details = std::format("Z3 error: {} ({})", proof.error().message,
+            res.details = std::format("SMT error: {} ({})", proof.error().message,
                                       sensen::gp_ara::to_string(proof.error().code));
         }
         return res;

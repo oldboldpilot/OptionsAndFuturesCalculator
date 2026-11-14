@@ -669,6 +669,24 @@ FetchContent_Declare(
     GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
     GIT_TAG v0.15.3
 )
+# CVE-2026-111497 -- an out-of-bounds write in the Brotli DECODER, fixed upstream in
+# brotli 1.0.10/1.1.1/1.2.1. Ubuntu 24.04 still ships 1.1.0, so the image's
+# libbrotli1 is the affected version.
+#
+# cpp-httplib turns Brotli on whenever the library is merely FOUND, and a Client
+# decompresses any response carrying `Content-Encoding: br` whether or not it asked
+# for one -- `decompress_` defaults to true and nothing here calls set_decompress().
+# Every call this engine makes leaves the process to a third-party host
+# (api.census.gov, the Alpaca hosts, whose names come from env vars) and
+# set_follow_location(true) means a redirect can move that host. So the decoder is
+# reachable from a response body we do not control.
+#
+# Nothing here needs Brotli: gzip and deflate still negotiate, and the only cost is a
+# slightly larger transfer on the few calls that leave the process. Turning it off at
+# compile time removes the decoder from the binary, which does not wait on a distro
+# patch. FORCE because a set() on an existing cache entry is otherwise ignored.
+set(HTTPLIB_USE_BROTLI_IF_AVAILABLE OFF CACHE BOOL
+    "OFF: CVE-2026-111497 out-of-bounds write in the Brotli decoder" FORCE)
 FetchContent_MakeAvailable(httplib)
 
 add_executable(test_runner 
@@ -1002,18 +1020,35 @@ target_compile_definitions(test_vendored_proto_drift PRIVATE
     kRepoRoot="${CMAKE_CURRENT_SOURCE_DIR}/..")
 add_test(NAME VendoredProtoDriftTest COMMAND test_vendored_proto_drift)
 
-# Formal Z3-backed automated reasoning for SGEE workflow graphs
+# Formal automated reasoning for SGEE workflow graphs
 # (OptionsWorkflow, FinanceRequestLifecycle, StrategyAssistantWorkflow).
-# Encodes architectural invariants (action bindings, reachability, termination, error routing) as SMT-LIB2 formulas and discharges them via sensen GP-ARA Z3Reasoner.
+# Encodes architectural invariants (action bindings, reachability, termination, error routing) as
+# SMT-LIB2 formulas and discharges them through sensen's GP-ARA `SmtReasoner`.
+#
+# NOTHING HERE LINKS libz3 ANY MORE, AND THE MODULES COME FROM SENSEN RATHER THAN BEING REBUILT.
+#
+# sensen's `sen-no-z3` lane replaced `gp_ara::Z3Reasoner` with `gp_ara::SmtReasoner` over its own
+# native decider -- same namespace, same `prove_safety(ctx, CowLogicalExpression)`, same verdicts,
+# and `SmtReasoner::ContextType` still names the context type -- so this test's change was two
+# identifiers. What was NOT two identifiers is where the modules come from. The old reasoner was a
+# thin interface over `libz3.so`, so compiling `gp_ara_interfaces.cppm` into THIS target as a
+# one-file CXX_MODULES set was enough. The replacement is implemented in first-party code whose
+# transitive closure is 28 modules plus the seven-module `proof_kernel` subtree, so a private copy
+# cannot work any more.
+#
+# `sensen_reasoning_engine` (sensen/proof_kernel/CMakeLists.txt) is the target sensen's own
+# `test_smt_reasoner_z3_parity` links for exactly this. It carries `gp_ara_smt_reasoner.cppm` and
+# links libsensen, which carries `gp_ara_interfaces.cppm`. Taking it is therefore the supported
+# route, and it also stops this tree COMPILING A SECOND COPY of a sensen module: measured
+# 2026-11-14, `gp_ara_interfaces.cppm` was being built FIVE times in this one build directory
+# (sensen_slim, sensen_objects, and three test targets), which is five BMIs of one module and five
+# chances to resolve against the wrong one -- the same defect class as the stale SGEE logger BMI
+# recorded in the notes.
 add_executable(test_sgee_automated_reasoning tests/test_sgee_automated_reasoning.cpp)
-target_sources(test_sgee_automated_reasoning
-    PRIVATE
-    FILE_SET CXX_MODULES FILES
-        sensen/src/gp_ara_interfaces.cppm
-)
-target_link_libraries(test_sgee_automated_reasoning PRIVATE sgee ${Z3_LIBRARY})
-target_compile_definitions(test_sgee_automated_reasoning PRIVATE SENSEN_HAS_Z3)
-target_include_directories(test_sgee_automated_reasoning PRIVATE /usr/include/z3)
+target_link_libraries(test_sgee_automated_reasoning PRIVATE sgee sensen_reasoning_engine)
+# Linking orders a module scan; add_dependencies alone does not. Both are present because the BMIs
+# must exist before this target's scan runs, and sensen_reasoning_engine is EXCLUDE_FROM_ALL here.
+add_dependencies(test_sgee_automated_reasoning sensen_reasoning_engine)
 
 add_test(NAME SgeeAutomatedReasoningTest COMMAND test_sgee_automated_reasoning)
 
