@@ -137,8 +137,139 @@ endif()
 # BoringSSL), the OpenSSL 3.5 ENGINE shim and the C++17 dialect for gRPC itself are
 # explained there. It runs here, before add_subdirectory(sensen), exactly where the
 # inline block used to.
+# ----------------------------------------------------------------------------
+# gRPC's VERSION IS PINNED HERE, AHEAD OF sensen's OWN DECLARATION.
+#
+# sensen/cmake/SensenGrpc.cmake declares grpc at v1.62.0 (February 2024). The
+# abseil that tag vendors predates clang 23's rename of the relocatability
+# builtin, so every abseil header that asks about it emits
+#
+#   warning: builtin __is_trivially_relocatable is deprecated;
+#            use __builtin_is_cpp_trivially_relocatable instead
+#
+# from thousands of translation units. That is not cosmetic here: it buried the
+# real build failure past Railway's 2 MiB log retrieval limit, so the deploy
+# reported FAILED with the error itself unreachable -- measured twice, on
+# builds ee166100 and a7cef549, both clipped at roughly [1437/2275].
+#
+# Checked rather than assumed: grpc v1.85.2 vendors abseil 5650e9cf, whose
+# absl/meta/type_traits.h guards on ABSL_HAVE_BUILTIN(
+# __builtin_is_cpp_trivially_relocatable) and falls back to the old spelling.
+# The abseil at v1.62.0 (4a2c6336) contains no mention of the new builtin.
+#
+# FetchContent's FIRST declaration wins, which is why this sits BEFORE the
+# include above rather than editing sensen: a superproject is allowed to pin a
+# dependency its subproject merely declares, and sensen stays untouched. It
+# also means sensen's PATCH_COMMAND does not run -- that patch fixes two
+# v1.62.0 files that C++23 rejected, and it does not apply to this tree.
+# gRPC is still built as C++17 by the logic in SensenGrpc.cmake, which is where
+# the reasoning for that lives.
+# ----------------------------------------------------------------------------
+# The abseil v1.85.2 vendors includes a clang intrinsic header DIRECTLY, which
+# clang refuses:
+#
+#   absl/container/internal/raw_hash_set.h:229:  #include <bmi2intrin.h>
+#   /usr/local/lib/clang/23/include/bmi2intrin.h:11:2: error:
+#       "Never use <bmi2intrin.h> directly; include <immintrin.h> instead."
+#
+# Note the guard is `#ifdef __BMI2__`, NOT a language standard: this fires
+# because the tree is built -march=x86-64-v3, which implies BMI2, and it would
+# fire identically at C++17. It is abseil's bug and abseil has since removed the
+# include outright -- master's raw_hash_set.h contains no intrinsic include at
+# all -- but no released grpc tag yet vendors that abseil.
+#
+# Rewriting the include to the umbrella header is the minimal fix that satisfies
+# clang's guard and keeps the BMI2 intrinsics available. `sed` is used rather
+# than a patch file because it is IDEMPOTENT by construction: a second
+# configure against an already-rewritten tree matches nothing and changes
+# nothing, where `git apply` would fail on the second run. It is also narrow
+# enough to fail loudly if upstream renames the line -- the build returns to the
+# original error rather than silently skipping a patch.
+include(FetchContent)
+FetchContent_Declare(
+    grpc
+    GIT_REPOSITORY https://github.com/grpc/grpc
+    GIT_TAG v1.85.2
+    GIT_SHALLOW TRUE
+    PATCH_COMMAND sed -i
+        "s|#include <bmi2intrin.h>|#include <immintrin.h>|"
+        third_party/abseil-cpp/absl/container/internal/raw_hash_set.h
+)
+
 include(${CMAKE_CURRENT_SOURCE_DIR}/sensen/cmake/SensenGrpc.cmake)
 sensen_fetch_grpc()
+
+# ----------------------------------------------------------------------------
+# gRPC IS BUILT AT C++23, THE SAME STANDARD AS EVERYTHING ELSE HERE.
+#
+# SensenGrpc.cmake builds the fetched tree at C++17: it saves
+# CMAKE_CXX_STANDARD, sets 17 for the fetch and restores it afterwards, so
+# nothing of sensen's or this engine's is affected -- both are C++23. Its
+# stated reason was that v1.62.0's xds certificate provider does not compile
+# under C++23, because std::bind_front's result stopped converting to
+# std::function. That reason belonged to v1.62.0, and this tree now pins
+# v1.85.2 above.
+#
+# Raising the dialect AFTER FetchContent_MakeAvailable rather than before it is
+# deliberate: the subproject's own configure-time feature probes then run at the
+# standard its authors test, and only the compilation of its targets moves. The
+# two properties are set together because the second is the whole cost of the
+# first:
+#
+#   CXX_STANDARD 23         the dialect asked for
+#   CXX_SCAN_FOR_MODULES OFF  gRPC HAS no module interface units, and at C++20+
+#                             CMake would otherwise run clang-scan-deps over
+#                             every one of its ~3000 translation units, adding a
+#                             scan step per file and pulling the whole tree into
+#                             the module dependency graph for nothing.
+#
+# SensenGrpc.cmake notes that not scanning C++17 targets is a "side benefit" of
+# the old setting; this keeps that benefit explicitly instead of as a
+# consequence of the dialect.
+#
+# Abseil's ABI-significant split is pre-C++17 vs C++17-and-later, so 17 and 23
+# sit on the same side of it and this changes no ABI decision -- the same
+# argument SensenGrpc.cmake makes for mixing them in the first place.
+# ----------------------------------------------------------------------------
+function(_ofc_collect_targets dir out_var)
+    get_property(_subdirs DIRECTORY "${dir}" PROPERTY SUBDIRECTORIES)
+    get_property(_here DIRECTORY "${dir}" PROPERTY BUILDSYSTEM_TARGETS)
+    set(_acc ${_here})
+    foreach(_sub IN LISTS _subdirs)
+        _ofc_collect_targets("${_sub}" _child)
+        list(APPEND _acc ${_child})
+    endforeach()
+    set(${out_var} ${_acc} PARENT_SCOPE)
+endfunction()
+
+if(DEFINED grpc_SOURCE_DIR AND EXISTS "${grpc_SOURCE_DIR}")
+    _ofc_collect_targets("${grpc_SOURCE_DIR}" _ofc_grpc_targets)
+    set(_ofc_raised 0)
+    foreach(_t IN LISTS _ofc_grpc_targets)
+        if(NOT TARGET ${_t})
+            continue()
+        endif()
+        # INTERFACE and IMPORTED targets compile nothing, and set_target_properties
+        # on an IMPORTED target is an error.
+        get_target_property(_type ${_t} TYPE)
+        get_target_property(_imported ${_t} IMPORTED)
+        if(_imported OR _type STREQUAL "INTERFACE_LIBRARY" OR _type STREQUAL "UTILITY")
+            continue()
+        endif()
+        set_target_properties(${_t} PROPERTIES
+            CXX_STANDARD 23
+            CXX_STANDARD_REQUIRED ON
+            CXX_SCAN_FOR_MODULES OFF
+        )
+        math(EXPR _ofc_raised "${_ofc_raised} + 1")
+    endforeach()
+    message(STATUS "gRPC: ${_ofc_raised} target(s) raised to C++23, module scanning off")
+else()
+    message(FATAL_ERROR
+        "grpc_SOURCE_DIR is not set after sensen_fetch_grpc(), so the C++23 dialect "
+        "was NOT applied to the gRPC tree. Refusing to configure rather than build it "
+        "at a standard this file claims to have changed.")
+endif()
 
 # Generate gRPC and Protobuf C++ code
 set(PROTO_FILE "${CMAKE_CURRENT_SOURCE_DIR}/proto/calculator.proto")
