@@ -13,7 +13,8 @@
     "secrets:scan:alpaca": "node scripts/install-secrets.mjs --scan --match=ALPACA",
     "secrets:mfv:dry": "node scripts/install-secrets.mjs --railway=mfv-web --check",
     "secrets:mfv": "node scripts/install-secrets.mjs --railway=mfv-web",
-    "secrets:install": "node scripts/install-secrets.mjs"
+    "secrets:install": "node scripts/install-secrets.mjs",
+    "cf:verify": "node scripts/verify-cloudflare-token.mjs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250204.0",
