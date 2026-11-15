@@ -242,7 +242,52 @@ function(_ofc_collect_targets dir out_var)
     set(${out_var} ${_acc} PARENT_SCOPE)
 endfunction()
 
-if(DEFINED grpc_SOURCE_DIR AND EXISTS "${grpc_SOURCE_DIR}")
+# gRPC IS BUILT AT C++23, THE STANDARD THE REST OF THIS TREE USES.
+#
+# A NOTE ON WHAT THIS IS *NOT* RESPONSIBLE FOR, because it was briefly blamed
+# here and the record is worth keeping. The engine built with this raise linked
+# and then died before main:
+#
+#   podman run <builder image> /src/build/calculator_engine --help
+#   Segmentation fault (core dumped)
+#
+# The obvious reading was an abseil ODR/ABI mismatch from mixing dialects, and
+# it was wrong. The backtrace names something else entirely:
+#
+#   #0 tbb::detail::r1::global_control_impl::create(...)
+#   #1 sensen::parallel::TbbLimit::set(unsigned long)
+#   #2 _GLOBAL__sub_I_parallel.cpp
+#   #3 call_init
+#
+# A static initialiser constructs a tbb::global_control, and the binary links
+# BOTH libc++.so.1 and libstdc++.so.6 with TBB statically inside it -- a
+# standard-library ABI mismatch that detonates the moment TBB's static init
+# touches a std:: type. That is independent of this dialect: it is the condition
+# the mortgage service's Dockerfile has an explicit FATAL check for ("the binary
+# links a SYSTEM libtbb (compiled against libstdc++), not the one built from
+# source") and this tree has none.
+#
+# SensenGrpc.cmake's dialect argument also still holds for the type it names:
+# abseil's ABI-significant split is pre-C++17 vs C++17-and-later, so 17 and 23
+# sit on the same side of it.
+#
+# CXX_SCAN_FOR_MODULES OFF travels WITH the raise and is the whole cost of it:
+# gRPC has no module interface units, and at C++20+ CMake would otherwise run
+# clang-scan-deps over every one of its ~3000 translation units. SensenGrpc.cmake
+# calls not-scanning a "side benefit" of its C++17 setting, so raising the
+# dialect without this would silently remove a property the build depends on.
+#
+# The option exists so the dialect can be isolated in one configure if a future
+# failure makes it a suspect again -- it should not be the first suspect.
+option(OFC_GRPC_CXX23
+    "Build the vendored gRPC tree at C++23 (the standard the rest of this tree uses)."
+    ON)
+
+if(NOT OFC_GRPC_CXX23)
+    message(STATUS
+        "gRPC: left at the dialect SensenGrpc.cmake chose (C++17) because "
+        "OFC_GRPC_CXX23=OFF. The default is ON; this is the isolation setting.")
+elseif(DEFINED grpc_SOURCE_DIR AND EXISTS "${grpc_SOURCE_DIR}")
     _ofc_collect_targets("${grpc_SOURCE_DIR}" _ofc_grpc_targets)
     set(_ofc_raised 0)
     foreach(_t IN LISTS _ofc_grpc_targets)
