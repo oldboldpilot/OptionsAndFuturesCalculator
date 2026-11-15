@@ -544,6 +544,22 @@ COPY backend/ /src/backend/
 # Building it first makes the ordering a property of the build COMMAND rather
 # than of the dependency graph, so it cannot be undone by a target added in a
 # third directory later. It costs one short step and is a no-op once warm.
+#
+# THE ENGINE BUILD'S OUTPUT GOES TO A FILE, AND ONLY ITS ERRORS REACH THE LOG.
+#
+# Railway returns the FIRST ~2 MiB of a build log and drops the rest. A full
+# build of this tree is an order of magnitude more than that, and CMake's own
+# configure output alone is a large fraction of it -- so when a compile fails,
+# the error is past the cut and `railway logs --build <id>` returns the
+# beginning: the configure, ending at "Build files have been written to". The
+# step then reports a bare exit code with no cause anywhere in the retrievable
+# log. That cost four deployments on this build alone (40241511, 5178b25d among
+# them), each one a guess about an error nobody could read.
+#
+# So the compile is redirected and, on failure, the step prints every `error:`
+# and `FAILED:` line plus the last 80 lines. A failing build therefore emits a
+# bounded, always-visible summary that cannot be pushed past the cap by the
+# successful output that precedes it.
 RUN cmake -S /src/backend -B /src/build -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_C_COMPILER=/usr/lib/llvm-${LLVM_VERSION}/bin/clang \
@@ -561,7 +577,16 @@ RUN cmake -S /src/backend -B /src/build -G Ninja \
               ls -la /src/build/std_modules/ 2>&1 >&2 || echo "  (no std_modules directory at all)" >&2; \
               find /src/build -name 'std.pcm' -printf '  found: %p\n' 2>/dev/null >&2; \
               exit 1; }; } \
-    && cmake --build /src/build --target calculator_engine smoke_client proto_descriptor
+    && { cmake --build /src/build --target calculator_engine smoke_client proto_descriptor \
+             > /tmp/engine-build.log 2>&1 \
+         || { echo "=================================================================" >&2; \
+              echo "BUILD FAILED. The compile log is $(wc -l < /tmp/engine-build.log) lines;" >&2; \
+              echo "what follows is every error line, then the last 80 lines of output." >&2; \
+              echo "=================================================================" >&2; \
+              grep -nE '(^FAILED:|error:|ninja: build stopped)' /tmp/engine-build.log | tail -40 >&2; \
+              echo "----------------------------- tail ------------------------------" >&2; \
+              tail -80 /tmp/engine-build.log >&2; \
+              exit 1; }; }
 
 # calculator_engine and smoke_client now link against libc++ instead of
 # libstdc++6, which is a problem the runtime stage below cannot solve out of
