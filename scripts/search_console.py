@@ -32,6 +32,7 @@ Nothing here ever prints the client secret, an auth code, or a token.
 from __future__ import annotations
 
 import argparse
+import datetime
 import base64
 import concurrent.futures as cf
 import glob
@@ -53,11 +54,29 @@ TOKEN_PATH = os.path.join(CONFIG, "google_search_console_token.json")
 # PKCE verifier between `auth-url` and `auth --redirect`. Outside the repo:
 # it is a one-login secret and has no business in any tree that gets synced.
 STATE_PATH = os.path.expanduser("~/.cache/search_console_oauth_state.json")
-SCOPE = "https://www.googleapis.com/auth/webmasters"
+# TWO scopes, and the second one is why a re-consent is needed after this change.
+#
+# `webmasters` covers the Search Console surface: properties, sitemaps, search
+# analytics. It does NOT cover ownership verification, which lives in a separate
+# product (Site Verification) with its own scope. Adding a DOMAIN property is a
+# webmasters call and succeeds while leaving the property siteUnverifiedUser; the
+# DNS TXT token that turns it into siteOwner can only be minted with
+# `siteverification`.
+#
+# A refresh token carries the scopes it was granted, so widening this list does
+# not widen an existing token -- the next call fails with insufficient scope
+# until `auth` is run again. That is the correct behaviour and worth the one
+# interactive step, because it makes verification scriptable for every future
+# domain rather than a hunt through a UI that never prompted.
+SCOPE = " ".join([
+    "https://www.googleapis.com/auth/webmasters",
+    "https://www.googleapis.com/auth/siteverification",
+])
 PORT = 8765
 REDIRECT_URI = f"http://localhost:{PORT}/"
 API = "https://www.googleapis.com/webmasters/v3"
 INSPECT_API = "https://searchconsole.googleapis.com/v1/urlInspection/index:inspect"
+VERIFY_API = "https://www.googleapis.com/siteVerification/v1"
 
 
 def die(msg: str) -> None:
@@ -157,12 +176,37 @@ def exchange(redirected: str) -> None:
     os.remove(STATE_PATH)
     print(f"ok: token saved to {os.path.relpath(TOKEN_PATH, ROOT)} (0600, gitignored)")
 
+    # CHECK WHAT WAS ACTUALLY GRANTED, AND SAY SO.
+    #
+    # Google returns the granted scopes in the token response, and they are not
+    # necessarily the scopes requested: a consent screen approved before this
+    # tool's SCOPE list grew yields a token that is valid, refreshes happily,
+    # and then fails one specific call with "Request had insufficient
+    # authentication scopes" -- hundreds of lines away from the cause, with
+    # nothing pointing back at the consent. That happened: a token minted at
+    # 23:50 could not mint a verification token because the scope was widened
+    # at 00:08, and the only visible symptom was a 403 on an unrelated-looking
+    # command. Comparing here turns an invisible staleness into one line.
+    granted = set((tok.get("scope") or "").split())
+    wanted = set(SCOPE.split())
+    missing = sorted(wanted - granted)
+    print(f"  scopes granted: {len(granted)}")
+    for s in sorted(granted):
+        print(f"    {s}")
+    if missing:
+        print()
+        print("  WARNING: the consent screen did NOT grant every requested scope:")
+        for s in missing:
+            print(f"    MISSING {s}")
+        print("  Re-run `auth` and approve ALL permissions it asks for. Until then")
+        print("  the calls needing those scopes fail with 403 insufficient scopes.")
+
 
 def listen() -> None:
     url = auth_url()
     print("Open this link in a browser ON THIS MACHINE and approve access:\n")
     print(url + "\n")
-    print(f"Waiting on {REDIRECT_URI} for Google's redirect (5 minutes)...")
+    print(f"Waiting on {REDIRECT_URI} for Google's redirect (15 minutes)...")
     got: dict = {}
 
     class H(http.server.BaseHTTPRequestHandler):
@@ -177,7 +221,7 @@ def listen() -> None:
             pass
 
     srv = http.server.HTTPServer(("127.0.0.1", PORT), H)
-    srv.timeout = 300
+    srv.timeout = 900  # 5 minutes timed out twice in practice
     srv.handle_request()
     if "url" not in got:
         die("timed out waiting for the redirect")
@@ -237,6 +281,168 @@ def enc(site: str) -> str:
 def cmd_sites(_: argparse.Namespace) -> None:
     for s in call("GET", f"{API}/sites").get("siteEntry", []):
         print(f"{s['siteUrl']}\t{s['permissionLevel']}")
+
+
+def cmd_verify_token(a: argparse.Namespace) -> None:
+    """Mint the DNS TXT token that verifies ownership of a DOMAIN property.
+
+    Search Console shows this string in its own add-property wizard. A property
+    added through the API never runs that wizard, so the UI offers nowhere to
+    read it -- which is exactly the dead end this command exists for.
+
+    `identifier` is the bare domain, NOT the "sc-domain:" form: Site Verification
+    is a different product and names the thing itself rather than the Search
+    Console property. Passing the prefixed form mints a token for a domain
+    literally called "sc-domain:example.com", which then never verifies.
+
+    The token is PUBLIC by design -- it is published in DNS for the world to
+    read -- so printing it is the point.
+    """
+    body = {
+        "site": {"type": "INET_DOMAIN", "identifier": a.domain},
+        "verificationMethod": "DNS_TXT",
+    }
+    out = call("POST", f"{VERIFY_API}/token", body)
+    tok = out.get("token", "")
+    if not tok:
+        die(f"no token returned: {json.dumps(out)[:300]}")
+    print(f"domain: {a.domain}")
+    print(f"record: TXT @ (the zone apex)")
+    print(f"value:  {tok}")
+    print()
+    print("Add that as a TXT record at the apex, wait for it to resolve, then:")
+    print(f"  scripts/search_console.py verify-domain {a.domain}")
+
+
+def cmd_verify_domain(a: argparse.Namespace) -> None:
+    """Ask Google to check the DNS TXT record and take ownership.
+
+    Fails until the record is visible to Google's resolvers, which is a
+    propagation question and not an error in the request -- the message says
+    which.
+    """
+    body = {"site": {"type": "INET_DOMAIN", "identifier": a.domain}}
+    out = call(
+        "POST",
+        f"{VERIFY_API}/webResource?verificationMethod=DNS_TXT",
+        body,
+    )
+    owners = out.get("owners", [])
+    print(f"verified: {out.get('id', a.domain)}")
+    if owners:
+        print(f"  owners: {len(owners)}")
+    print("Re-run `sites`; the domain property should now read siteOwner.")
+
+
+def cmd_scopes(_: argparse.Namespace) -> None:
+    """What the stored token is actually allowed to do.
+
+    Cheaper and clearer than discovering it as a 403 on whichever command
+    happens to need the missing scope.
+    """
+    if not os.path.exists(TOKEN_PATH):
+        die("no token stored -- run `auth --listen`")
+    with open(TOKEN_PATH) as f:
+        tok = json.load(f)
+    granted = set((tok.get("scope") or "").split())
+    wanted = set(SCOPE.split())
+    age_days = (int(time.time()) - int(tok.get("obtained_at", 0))) / 86400
+    print(f"token obtained {age_days:.1f} days ago")
+    print(f"granted {len(granted)} scope(s):")
+    for s in sorted(granted):
+        print(f"  {s}")
+    missing = sorted(wanted - granted)
+    if missing:
+        print("MISSING, so the matching commands will 403:")
+        for s in missing:
+            print(f"  {s}")
+        print("Re-run `auth --listen` and approve every permission shown.")
+    else:
+        print("every scope this tool needs is granted.")
+    if age_days > 6:
+        print()
+        print("NOTE: a refresh token from an OAuth app still in 'Testing' publishing")
+        print("status expires after 7 days. If refreshes start failing with")
+        print("invalid_grant, publish the app rather than re-consenting weekly.")
+
+
+def cmd_add_site(a: argparse.Namespace) -> None:
+    """Add a property to this account's Search Console set.
+
+    A URL-PREFIX property ("https://example.com/") covers exactly that scheme and
+    host: traffic to www, to http, or to any other subdomain is invisible to it.
+    A DOMAIN property ("sc-domain:example.com") covers every subdomain and both
+    schemes, which is why a reported click count from a url-prefix property is a
+    lower bound rather than a measurement.
+
+    This call only ADDS the property; it does not verify it. A domain property is
+    verifiable only by DNS TXT, and the token for that comes from the Site
+    Verification API, which needs the siteverification scope this tool does not
+    request. The next step is therefore stated, not performed.
+    """
+    call("PUT", f"{API}/sites/{enc(a.site)}")
+    print(f"added: {a.site}")
+    for s in call("GET", f"{API}/sites").get("siteEntry", []):
+        if s["siteUrl"] == a.site:
+            print(f"  permission now: {s['permissionLevel']}")
+            if s["permissionLevel"] == "siteUnverifiedUser":
+                print("  NOT VERIFIED yet. A domain property takes DNS TXT only:")
+                print("  add the TXT record Search Console shows for this property at the")
+                print("  zone apex, then re-run `sites` -- it becomes siteOwner.")
+            return
+    print("  (not listed back yet; re-run `sites` in a moment)")
+
+
+def cmd_query(a: argparse.Namespace) -> None:
+    """Search Analytics: clicks, impressions, CTR and position over a window.
+
+    WHY THIS EXISTS. The rest of this tool answers "is the site indexed" --
+    sitemaps and URL inspection. It could not answer "does anyone arrive", which
+    is the question that decides whether a monetisation problem is a conversion
+    problem or a traffic problem. Those have opposite responses, so guessing
+    between them is expensive.
+
+    The API caps a response at 25,000 rows and reports the LAST ~2 days
+    incompletely, so a window ending today understates. `--days` therefore ends
+    the window 3 days back by default rather than at today, and the dates used
+    are printed so a number can be re-taken against the same window.
+    """
+    end = datetime.date.today() - datetime.timedelta(days=a.lag)
+    start = end - datetime.timedelta(days=a.days - 1)
+    body: dict = {
+        "startDate": start.isoformat(),
+        "endDate": end.isoformat(),
+        "rowLimit": a.limit,
+    }
+    if a.dimension:
+        body["dimensions"] = [a.dimension]
+    out = call("POST", f"{API}/sites/{enc(a.site)}/searchAnalytics/query", body)
+    rows = out.get("rows", [])
+    print(f"{a.site}  {start} .. {end}  ({a.days} days, ending {a.lag} days back)")
+    if not rows:
+        print("  no rows -- the property has no recorded search traffic in this window")
+        return
+    if not a.dimension:
+        r = rows[0]
+        print(f"  clicks {int(r.get('clicks', 0)):>8}")
+        print(f"  impressions {int(r.get('impressions', 0)):>3}")
+        print(f"  ctr {r.get('ctr', 0) * 100:>11.2f}%")
+        print(f"  position {r.get('position', 0):>8.1f}")
+        return
+    print(f"  {'KEY':<54} {'CLICKS':>7} {'IMPR':>8} {'CTR':>7} {'POS':>6}")
+    for r in rows:
+        key = (r.get("keys") or ["(none)"])[0]
+        if len(key) > 54:
+            key = key[:51] + "..."
+        print(
+            f"  {key:<54} {int(r.get('clicks', 0)):>7} {int(r.get('impressions', 0)):>8} "
+            f"{r.get('ctr', 0) * 100:>6.2f}% {r.get('position', 0):>6.1f}"
+        )
+    total_c = sum(int(r.get("clicks", 0)) for r in rows)
+    total_i = sum(int(r.get("impressions", 0)) for r in rows)
+    print(f"  {'-- shown rows':<54} {total_c:>7} {total_i:>8}")
+    if len(rows) == a.limit:
+        print(f"  (exactly {a.limit} rows returned: raise --limit, the window may hold more)")
 
 
 def cmd_sitemaps(a: argparse.Namespace) -> None:
@@ -326,6 +532,20 @@ def main() -> None:
     g.add_argument("--listen", action="store_true")
     g.add_argument("--redirect")
     sub.add_parser("sites")
+    sub.add_parser("scopes", help="what the stored token is allowed to do")
+    asite = sub.add_parser("add-site", help="add a property (does not verify it)")
+    asite.add_argument("site")
+    vt = sub.add_parser("verify-token", help="mint the DNS TXT value for a domain property")
+    vt.add_argument("domain", help="bare domain, NOT the sc-domain: form")
+    vd = sub.add_parser("verify-domain", help="ask Google to check the TXT and take ownership")
+    vd.add_argument("domain", help="bare domain, NOT the sc-domain: form")
+    q = sub.add_parser("query", help="search analytics: clicks/impressions over a window")
+    q.add_argument("site")
+    q.add_argument("--days", type=int, default=28)
+    q.add_argument("--lag", type=int, default=3,
+                   help="end the window this many days back; the API's last ~2 days are incomplete")
+    q.add_argument("--dimension", choices=["query", "page", "country", "device", "date"])
+    q.add_argument("--limit", type=int, default=25)
     sm = sub.add_parser("sitemaps")
     sm.add_argument("site")
     ss = sub.add_parser("submit-sitemap")
@@ -346,6 +566,16 @@ def main() -> None:
         listen() if a.listen else exchange(a.redirect)
     elif a.cmd == "sites":
         cmd_sites(a)
+    elif a.cmd == "scopes":
+        cmd_scopes(a)
+    elif a.cmd == "add-site":
+        cmd_add_site(a)
+    elif a.cmd == "verify-token":
+        cmd_verify_token(a)
+    elif a.cmd == "verify-domain":
+        cmd_verify_domain(a)
+    elif a.cmd == "query":
+        cmd_query(a)
     elif a.cmd == "sitemaps":
         cmd_sitemaps(a)
     elif a.cmd == "submit-sitemap":
