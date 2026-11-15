@@ -14,7 +14,12 @@
     "secrets:mfv:dry": "node scripts/install-secrets.mjs --railway=mfv-web --check",
     "secrets:mfv": "node scripts/install-secrets.mjs --railway=mfv-web",
     "secrets:install": "node scripts/install-secrets.mjs",
-    "cf:verify": "node scripts/verify-cloudflare-token.mjs"
+    "cf:verify": "node scripts/verify-cloudflare-token.mjs",
+    "cf:dns": "node scripts/cloudflare-dns.mjs",
+    "cf:dns:txt": "DNS_TYPE=TXT node scripts/cloudflare-dns.mjs",
+    "cf:dns:ofc": "DNS_ZONE=optionsandfuturescalculator.com DNS_TYPE=TXT node scripts/cloudflare-dns.mjs",
+    "secrets:scan:cf": "node scripts/install-secrets.mjs --scan '--match=CLOUDFLARE|CF_|WRANGLER'",
+    "cf:dns:main": "CF_TOKEN_VAR=CLOUDFLARE_API_TOKEN DNS_TYPE=TXT node scripts/cloudflare-dns.mjs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250204.0",
