@@ -470,6 +470,7 @@ set(SKIP_CLANG_TIDY ON CACHE BOOL "Disable clang-tidy due to c++23 module scanni
 # all, because the only consumer of z3++ is gp_ara, which sensen_slim excludes,
 # and nothing here includes pqxx. `ldd` on the built engine confirms both: no
 # libpq, no libz3.
+#
 add_subdirectory(sensen EXCLUDE_FROM_ALL)
 
 # ----------------------------------------------------------------------------
@@ -619,7 +620,40 @@ sensen_add_slim_library(sensen_slim GROUPS ALL)
 # The two subprojects still agree with each other, which was the other thing the
 # old setting bought -- they now agree on `import std;` rather than on the shim.
 set(SGEE_NO_IMPORT_STD OFF CACHE BOOL "Use SGEE's header shim rather than import std; the standard library is libc++ either way" FORCE)
-set(SGEE_EXTERNAL_STD_PCM "${CMAKE_BINARY_DIR}/std_modules/std.pcm" CACHE FILEPATH
+# THE PATH IS sensen'S BINARY DIR, NOT THIS ONE, AND THAT IS NOT A DETAIL.
+#
+# sensen arrives through add_subdirectory, so it writes the BMI into
+# ${CMAKE_BINARY_DIR}/sensen/std_modules/std.pcm. This line used to name
+# ${CMAKE_BINARY_DIR}/std_modules/std.pcm -- one directory short -- and NOTHING
+# IN THE GENERATED BUILD GRAPH CREATES THAT PATH: grep build.ninja and the only
+# rule is for sensen/std_modules/std.pcm.
+#
+# It stayed green locally because an older configure had left a real file at the
+# short path and every development build since read that leftover. A container
+# has no leftover, so deployments failed where no local build could. Found by
+# building the image with podman rather than by another deploy:
+#
+#   FATAL: std_module_precompile ran but /src/build/std_modules/std.pcm does not exist.
+#   ls: cannot access '/src/build/std_modules/': No such file or directory
+#
+# Handing sensen BIGBROTHER_STD_PCM_DIR / BIGBROTHER_STD_PCM instead is the
+# WRONG repair and was measured as such: those mean "the superproject has
+# already built one, consume it", so sensen stops compiling a std.pcm and this
+# directory never starts -- the same FATAL with the paths now agreeing. The
+# producer is sensen; this is the consumer, and the consumer follows.
+#
+# sensen publishes the real location as TBQWF_EXTERNAL_STD_PCM (a FORCEd cache
+# entry set from its own STD_PCM_PATH), which is authoritative and already set
+# by the add_subdirectory above. Prefer it, and fall back to the documented
+# default so a sensen that stops publishing it fails here rather than 800
+# targets later.
+if(TBQWF_EXTERNAL_STD_PCM)
+    set(_ofc_std_pcm "${TBQWF_EXTERNAL_STD_PCM}")
+else()
+    set(_ofc_std_pcm "${CMAKE_BINARY_DIR}/sensen/std_modules/std.pcm")
+endif()
+message(STATUS "the one std.pcm, for SGEE and this directory: ${_ofc_std_pcm}")
+set(SGEE_EXTERNAL_STD_PCM "${_ofc_std_pcm}" CACHE FILEPATH
     "The single std.pcm this tree builds; SGEE imports it rather than compiling a second one" FORCE)
 set(SGEE_USE_GRPC ON CACHE BOOL "Build the gRPC consensus transport backend for SGEE" FORCE)
 

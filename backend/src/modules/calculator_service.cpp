@@ -1881,7 +1881,17 @@ public:
         // either way, so this is not needed for correctness -- it is so that a
         // stored document read in psql shows every field it was saved with,
         // rather than only the ones that happened to be non-default.
-        print_opts.always_print_primitive_fields = true;
+        //
+        // The field was `always_print_primitive_fields` until the protobuf that
+        // grpc v1.85.2 vendors renamed it. The new name is not a pure rename: it
+        // covers every field WITHOUT PRESENCE, which is the old set (implicit-
+        // presence scalars at their zero value) PLUS empty lists and maps. So a
+        // saved document now also carries its empty repeated fields explicitly.
+        // That is a widening in the same direction as the intent above -- show
+        // what was saved rather than what happened to differ from a default --
+        // and it only ever ADDS keys to the JSON, so a reader that tolerated the
+        // old output tolerates this.
+        print_opts.always_print_fields_with_no_presence = true;
         if (const auto st = google::protobuf::json::MessageToJsonString(
                 request->request(), &payload_json, print_opts);
             !st.ok()) {
