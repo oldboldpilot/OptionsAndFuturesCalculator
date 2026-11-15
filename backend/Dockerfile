@@ -553,6 +553,14 @@ RUN cmake -S /src/backend -B /src/build -G Ninja \
         -DCPP23_LOGGER_LIBCXX_MODULES_PATH=/usr/lib/llvm-${LLVM_VERSION}/share/libc++/v1 \
         -DENABLE_LLAMACPP_BACKEND=OFF \
     && cmake --build /src/build --target std_module_precompile \
+    && { test -f /src/build/std_modules/std.pcm \
+         || { echo "FATAL: std_module_precompile ran but /src/build/std_modules/std.pcm does not exist." >&2; \
+              echo "Every src/modules/*.cppm compiles with -fmodule-file=std=<that path>, so the next" >&2; \
+              echo "step would fail with 'module file not found' on an arbitrary subset of files -- a" >&2; \
+              echo "race that reads as a compiler bug. What the build dir actually has:" >&2; \
+              ls -la /src/build/std_modules/ 2>&1 >&2 || echo "  (no std_modules directory at all)" >&2; \
+              find /src/build -name 'std.pcm' -printf '  found: %p\n' 2>/dev/null >&2; \
+              exit 1; }; } \
     && cmake --build /src/build --target calculator_engine smoke_client proto_descriptor
 
 # calculator_engine and smoke_client now link against libc++ instead of
