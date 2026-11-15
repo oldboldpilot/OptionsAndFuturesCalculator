@@ -520,6 +520,30 @@ COPY backend/ /src/backend/
 # The -DLIBCXX_MODULES_PATH lines below already point the LOGGER at the same
 # directory; this is the same fact, for sensen, expressed the way sensen looks
 # it up.
+#
+# std.pcm IS BUILT AS ITS OWN STEP, AND THAT IS NOT REDUNDANT WITH THE ORDERING
+# EDGES IN backend/CMakeLists.txt.
+#
+# That file adds std_module_precompile as a dependency of every target declared
+# in ITS directory ("Ordering: nothing may compile `import std;` before std.pcm
+# exists"). Two things fall outside that: SGEE's own targets, which are created
+# in another directory and so are not in BUILDSYSTEM_TARGETS, and anything for
+# which the edge orders the LINK rather than the module scan. Measured in this
+# builder on 2026-11-15, one ninja invocation for the three targets below failed
+# with
+#
+#   error: module file '/src/build/std_modules/std.pcm' not found
+#   FAILED: CMakeFiles/calculator_engine.dir/src/modules/quota.cppm.o
+#   FAILED: sgee/CMakeFiles/sgee.dir/src/parser/lexer.cppm.o
+#
+# NO LOCAL BUILD REPRODUCES IT, which is why it reached a deployment: a
+# developer's build directory already HAS std.pcm from an earlier run, so the
+# missing edge is invisible and the race never runs. A clean container is the
+# only place the first build of that BMI happens under -j.
+#
+# Building it first makes the ordering a property of the build COMMAND rather
+# than of the dependency graph, so it cannot be undone by a target added in a
+# third directory later. It costs one short step and is a no-op once warm.
 RUN cmake -S /src/backend -B /src/build -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_C_COMPILER=/usr/lib/llvm-${LLVM_VERSION}/bin/clang \
@@ -528,6 +552,7 @@ RUN cmake -S /src/backend -B /src/build -G Ninja \
         -DLIBCXX_MODULES_PATH=/usr/lib/llvm-${LLVM_VERSION}/share/libc++/v1 \
         -DCPP23_LOGGER_LIBCXX_MODULES_PATH=/usr/lib/llvm-${LLVM_VERSION}/share/libc++/v1 \
         -DENABLE_LLAMACPP_BACKEND=OFF \
+    && cmake --build /src/build --target std_module_precompile \
     && cmake --build /src/build --target calculator_engine smoke_client proto_descriptor
 
 # calculator_engine and smoke_client now link against libc++ instead of
