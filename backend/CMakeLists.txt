@@ -341,6 +341,60 @@ set(SKIP_CLANG_TIDY ON CACHE BOOL "Disable clang-tidy due to c++23 module scanni
 # libpq, no libz3.
 add_subdirectory(sensen EXCLUDE_FROM_ALL)
 
+# ----------------------------------------------------------------------------
+# COMPLETE sensen's export closure for the targets its own list has not caught
+# up with yet.
+#
+# install(EXPORT) refuses an export set whose members require a target outside
+# it, and it refuses it as a HARD CONFIGURE ERROR at GENERATE time -- after
+# every "Configuring done" line, so the log reads as a successful configure
+# until the last second. sensen maintains the list for exactly this (its
+# `foreach(_sensen_vendored logger fastjson std_module)` loop, with the same
+# reasoning written above it), but a pin bump can add a member to the closure
+# without adding it to that loop. Measured on sensen c337a8915, this deploy's
+# container failed with:
+#
+#   install(EXPORT "SensenTargets" ...) includes target "sensen_code_naming"
+#   which requires target "sensen_code_facts_reader" that is not in any export set.
+#   install(EXPORT "SensenTargets" ...) includes target "sensen_universal_codegen"
+#   which requires target "sensen_proof_kernel_sha256" that is not in any export set.
+#
+# THIS TREE NEVER SEES IT LOCALLY, and that is the whole reason it is here: the
+# builder image has no clang development files, so `code facts` configure OFF
+# and the shape of sensen's target graph differs from the one every local build
+# produces. A local configure of this very commit succeeds.
+#
+# The right home for this is sensen's own loop; adding it from here keeps a
+# deploy moving without reaching into that repository. install(TARGETS) from
+# another directory has been legal since CMake 3.13, which is the same
+# allowance sensen's own comment relies on. Each entry is guarded by
+# if(TARGET), so this block is a no-op the moment sensen adopts it -- it will
+# never fight a fixed upstream.
+# ----------------------------------------------------------------------------
+foreach(_ofc_export_gap sensen_code_facts_reader sensen_proof_kernel_sha256)
+    if(TARGET ${_ofc_export_gap})
+        # An ALIAS is rejected by install(TARGETS) with a hard configure error,
+        # and `ALIAS` is not a queryable property -- ALIASED_TARGET is.
+        get_target_property(_ofc_aliased ${_ofc_export_gap} ALIASED_TARGET)
+        if(_ofc_aliased)
+            set(_ofc_real ${_ofc_aliased})
+        else()
+            set(_ofc_real ${_ofc_export_gap})
+        endif()
+        # FILE_SET CXX_MODULES on a target that has none is a SILENT no-op, so
+        # ask rather than assume.
+        get_target_property(_ofc_msets ${_ofc_real} INTERFACE_CXX_MODULE_SETS)
+        if(_ofc_msets)
+            install(TARGETS ${_ofc_real}
+                EXPORT SensenTargets
+                FILE_SET CXX_MODULES DESTINATION lib/cxx/miu
+            )
+        else()
+            install(TARGETS ${_ofc_real} EXPORT SensenTargets)
+        endif()
+    endif()
+endforeach()
+
 # ============================================================================
 # The one std module, and the slim sensen library
 # ============================================================================

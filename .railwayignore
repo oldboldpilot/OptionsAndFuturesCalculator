@@ -63,7 +63,7 @@ out
 /docs
 .playwright-mcp
 .claude
-config
+./config
 # A DANGLING SYMLINK into ~/.gemini, which Railway's indexer follows and then
 # fails on with "No such file or directory", aborting the upload before it
 # starts. Agent tooling, never a build input.
