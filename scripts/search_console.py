@@ -110,6 +110,68 @@ def write_private(path: str, data: dict) -> None:
         json.dump(data, f)
 
 
+def stored_scopes() -> set:
+    """The scopes on the token already saved, or an empty set if there is none."""
+    try:
+        with open(TOKEN_PATH) as f:
+            return set((json.load(f).get("scope") or "").split())
+    except (OSError, ValueError):
+        return set()
+
+
+def site_key(site: str) -> str:
+    """A property string normalised for comparison.
+
+    Google returns a url-prefix property with a trailing slash whatever was
+    sent, so "https://example.com" and "https://example.com/" are one property
+    spelled two ways. A domain property has no such slack and is left alone.
+    """
+    return site if site.startswith("sc-domain:") else site.rstrip("/") + "/"
+
+
+def bare_domain(d: str) -> str:
+    """The Site Verification identifier for a domain, or a fatal error.
+
+    Site Verification names the DOMAIN; Search Console names a PROPERTY, and
+    its domain properties are spelled "sc-domain:example.com". The two are easy
+    to confuse because `sites` prints the property form, which is therefore the
+    string that gets copied. Passing it through mints a token for a domain
+    literally called "sc-domain:example.com": the API accepts it, the TXT record
+    publishes fine, and verification then never succeeds with nothing anywhere
+    saying why. Both docstrings here warned about that trap and neither command
+    enforced it, so it is refused rather than described -- with the corrected
+    value printed, because the whole failure is a copy-paste.
+    """
+    if d.startswith("sc-domain:"):
+        die(f"that is the Search Console property form. Pass the bare domain: "
+            f"{d[len('sc-domain:'):]}")
+    if "://" in d:
+        host = urllib.parse.urlsplit(d).hostname or d
+        die(f"that is a URL-prefix property. Pass the bare domain: {host}")
+    if "/" in d:
+        die(f"a domain carries no path. Pass the bare domain: {d.split('/')[0]}")
+    return d
+
+
+def int_at_least(lo: int):
+    """An argparse type that refuses a value the derived window cannot survive.
+
+    `--days 0` makes start one day AFTER end (an inverted window, reported by
+    the API as a generic 400 that reads as a request bug), and a negative
+    `--lag` queries dates in the future, which return no rows and read as a
+    traffic collapse -- the exact misreading the lag default exists to prevent.
+    """
+    def parse(v: str) -> int:
+        try:
+            n = int(v)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"{v!r} is not an integer")
+        if n < lo:
+            raise argparse.ArgumentTypeError(f"must be {lo} or more, got {n}")
+        return n
+    return parse
+
+
 def post_form(url: str, fields: dict) -> dict:
     body = urllib.parse.urlencode(fields).encode()
     req = urllib.request.Request(url, data=body, method="POST")
@@ -171,12 +233,17 @@ def exchange(redirected: str) -> None:
     )
     if "refresh_token" not in tok:
         die("no refresh token returned; revoke the app's access in your Google account and retry")
-    tok["obtained_at"] = int(time.time())
-    write_private(TOKEN_PATH, tok)
-    os.remove(STATE_PATH)
-    print(f"ok: token saved to {os.path.relpath(TOKEN_PATH, ROOT)} (0600, gitignored)")
+    now = int(time.time())
+    tok["obtained_at"] = now
+    # CONSENT TIME IS A SEPARATE KEY, because obtained_at cannot answer for it.
+    # access_token() rewrites obtained_at on every refresh -- it has to, since
+    # expires_in is measured from it -- so on any token that has been used it
+    # records the age of the last ACCESS token, minutes old, not the age of the
+    # REFRESH token. Reading the 7-day Testing-mode expiry off it meant the
+    # warning was dead code for precisely the tokens in daily use.
+    tok["consented_at"] = now
 
-    # CHECK WHAT WAS ACTUALLY GRANTED, AND SAY SO.
+    # CHECK WHAT WAS ACTUALLY GRANTED, AND SAY SO -- BEFORE STORING IT.
     #
     # Google returns the granted scopes in the token response, and they are not
     # necessarily the scopes requested: a consent screen approved before this
@@ -187,19 +254,40 @@ def exchange(redirected: str) -> None:
     # 23:50 could not mint a verification token because the scope was widened
     # at 00:08, and the only visible symptom was a 403 on an unrelated-looking
     # command. Comparing here turns an invisible staleness into one line.
+    # The order matters and used to be wrong. write_private() is destructive and
+    # what it destroys needs another interactive consent to get back, so a
+    # half-scope token -- one unticked box on the consent screen -- replaced a
+    # fully scoped one, and the command still exited 0 for anything reading the
+    # status. Now the comparison decides whether to write at all.
     granted = set((tok.get("scope") or "").split())
     wanted = set(SCOPE.split())
     missing = sorted(wanted - granted)
-    print(f"  scopes granted: {len(granted)}")
+    held = stored_scopes()
+    rel = os.path.relpath(TOKEN_PATH, ROOT)
+    print(f"scopes granted: {len(granted)}")
     for s in sorted(granted):
-        print(f"    {s}")
+        print(f"  {s}")
     if missing:
         print()
-        print("  WARNING: the consent screen did NOT grant every requested scope:")
+        print("WARNING: the consent screen did NOT grant every requested scope:")
         for s in missing:
-            print(f"    MISSING {s}")
-        print("  Re-run `auth` and approve ALL permissions it asks for. Until then")
-        print("  the calls needing those scopes fail with 403 insufficient scopes.")
+            print(f"  MISSING {s}")
+        lost = sorted(held - granted)
+        if lost:
+            print(f"The token already in {rel} holds {len(lost)} scope(s) this one")
+            print("does not, so it was LEFT IN PLACE rather than overwritten:")
+            for s in lost:
+                print(f"  KEPT {s}")
+        else:
+            write_private(TOKEN_PATH, tok)
+            print(f"Saved to {rel} anyway -- it loses nothing the previous token had.")
+        os.remove(STATE_PATH)
+        print("Re-run `auth` and approve ALL permissions it asks for. Until then the")
+        print("calls needing those scopes fail with 403 insufficient scopes.")
+        sys.exit(1)
+    write_private(TOKEN_PATH, tok)
+    os.remove(STATE_PATH)
+    print(f"ok: token saved to {rel} (0600, gitignored)")
 
 
 def listen() -> None:
@@ -298,20 +386,21 @@ def cmd_verify_token(a: argparse.Namespace) -> None:
     The token is PUBLIC by design -- it is published in DNS for the world to
     read -- so printing it is the point.
     """
+    domain = bare_domain(a.domain)
     body = {
-        "site": {"type": "INET_DOMAIN", "identifier": a.domain},
+        "site": {"type": "INET_DOMAIN", "identifier": domain},
         "verificationMethod": "DNS_TXT",
     }
     out = call("POST", f"{VERIFY_API}/token", body)
     tok = out.get("token", "")
     if not tok:
         die(f"no token returned: {json.dumps(out)[:300]}")
-    print(f"domain: {a.domain}")
+    print(f"domain: {domain}")
     print(f"record: TXT @ (the zone apex)")
     print(f"value:  {tok}")
     print()
     print("Add that as a TXT record at the apex, wait for it to resolve, then:")
-    print(f"  scripts/search_console.py verify-domain {a.domain}")
+    print(f"  scripts/search_console.py verify-domain {domain}")
 
 
 def cmd_verify_domain(a: argparse.Namespace) -> None:
@@ -321,14 +410,15 @@ def cmd_verify_domain(a: argparse.Namespace) -> None:
     propagation question and not an error in the request -- the message says
     which.
     """
-    body = {"site": {"type": "INET_DOMAIN", "identifier": a.domain}}
+    domain = bare_domain(a.domain)
+    body = {"site": {"type": "INET_DOMAIN", "identifier": domain}}
     out = call(
         "POST",
         f"{VERIFY_API}/webResource?verificationMethod=DNS_TXT",
         body,
     )
     owners = out.get("owners", [])
-    print(f"verified: {out.get('id', a.domain)}")
+    print(f"verified: {out.get('id', domain)}")
     if owners:
         print(f"  owners: {len(owners)}")
     print("Re-run `sites`; the domain property should now read siteOwner.")
@@ -346,8 +436,15 @@ def cmd_scopes(_: argparse.Namespace) -> None:
         tok = json.load(f)
     granted = set((tok.get("scope") or "").split())
     wanted = set(SCOPE.split())
-    age_days = (int(time.time()) - int(tok.get("obtained_at", 0))) / 86400
-    print(f"token obtained {age_days:.1f} days ago")
+    # consented_at, NOT obtained_at: see exchange(). obtained_at is rewritten on
+    # every refresh, so reading the refresh token's age off it reported "0.0 days
+    # ago" for a token consented weeks earlier and skipped the note below.
+    consented = int(tok.get("consented_at", 0))
+    age_days = (int(time.time()) - consented) / 86400 if consented else None
+    if age_days is None:
+        print("consent date not recorded (this token predates consented_at)")
+    else:
+        print(f"consent granted {age_days:.1f} days ago")
     print(f"granted {len(granted)} scope(s):")
     for s in sorted(granted):
         print(f"  {s}")
@@ -359,8 +456,13 @@ def cmd_scopes(_: argparse.Namespace) -> None:
         print("Re-run `auth --listen` and approve every permission shown.")
     else:
         print("every scope this tool needs is granted.")
-    if age_days > 6:
+    # Printed when the age is UNKNOWN as well as when it is over six days: the
+    # cost of the note when it does not apply is three lines, and the cost of
+    # withholding it is a refresh chain that dies with invalid_grant and no clue.
+    if age_days is None or age_days > 6:
         print()
+        if age_days is None:
+            print("(the consent date is unknown, so this cannot be ruled out)")
         print("NOTE: a refresh token from an OAuth app still in 'Testing' publishing")
         print("status expires after 7 days. If refreshes start failing with")
         print("invalid_grant, publish the app rather than re-consenting weekly.")
@@ -377,18 +479,35 @@ def cmd_add_site(a: argparse.Namespace) -> None:
 
     This call only ADDS the property; it does not verify it. A domain property is
     verifiable only by DNS TXT, and the token for that comes from the Site
-    Verification API, which needs the siteverification scope this tool does not
-    request. The next step is therefore stated, not performed.
+    Verification API -- which this tool now does request a scope for, so the next
+    step is `verify-token`, named here rather than left to a UI that does not
+    show it for a property added this way.
     """
     call("PUT", f"{API}/sites/{enc(a.site)}")
     print(f"added: {a.site}")
+    # Compared on a NORMALISED key, because Google does not store back what was
+    # sent: a url-prefix property given without a trailing slash is listed with
+    # one, so an exact match reported a successful add as "not listed yet" and
+    # skipped the siteUnverifiedUser branch that says verification is still owed.
     for s in call("GET", f"{API}/sites").get("siteEntry", []):
-        if s["siteUrl"] == a.site:
+        if site_key(s["siteUrl"]) == site_key(a.site):
+            print(f"  listed as: {s['siteUrl']}")
             print(f"  permission now: {s['permissionLevel']}")
             if s["permissionLevel"] == "siteUnverifiedUser":
-                print("  NOT VERIFIED yet. A domain property takes DNS TXT only:")
-                print("  add the TXT record Search Console shows for this property at the")
-                print("  zone apex, then re-run `sites` -- it becomes siteOwner.")
+                print("  NOT VERIFIED yet.")
+                if a.site.startswith("sc-domain:"):
+                    bare = a.site[len("sc-domain:"):]
+                    print("  A domain property verifies by DNS TXT and nothing else, and the")
+                    print("  value is not shown in the UI for a property added through the API:")
+                    print(f"    scripts/search_console.py verify-token {bare}")
+                    print(f"    scripts/search_console.py verify-domain {bare}")
+                else:
+                    host = urllib.parse.urlsplit(a.site).hostname or a.site
+                    print("  A url-prefix property also verifies by HTML file or meta tag in")
+                    print("  the UI. To do it by DNS instead -- which verifies the whole domain")
+                    print("  and so covers this property too:")
+                    print(f"    scripts/search_console.py verify-token {host}")
+                    print(f"    scripts/search_console.py verify-domain {host}")
             return
     print("  (not listed back yet; re-run `sites` in a moment)")
 
@@ -541,11 +660,12 @@ def main() -> None:
     vd.add_argument("domain", help="bare domain, NOT the sc-domain: form")
     q = sub.add_parser("query", help="search analytics: clicks/impressions over a window")
     q.add_argument("site")
-    q.add_argument("--days", type=int, default=28)
-    q.add_argument("--lag", type=int, default=3,
+    q.add_argument("--days", type=int_at_least(1), default=28,
+                   help="window length; 0 would invert the window")
+    q.add_argument("--lag", type=int_at_least(0), default=3,
                    help="end the window this many days back; the API's last ~2 days are incomplete")
     q.add_argument("--dimension", choices=["query", "page", "country", "device", "date"])
-    q.add_argument("--limit", type=int, default=25)
+    q.add_argument("--limit", type=int_at_least(1), default=25)
     sm = sub.add_parser("sitemaps")
     sm.add_argument("site")
     ss = sub.add_parser("submit-sitemap")
