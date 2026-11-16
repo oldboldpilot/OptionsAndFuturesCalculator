@@ -8,6 +8,7 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
+    "test": "node --test scripts/",
     "secrets:check": "node scripts/install-secrets.mjs --check --all",
     "secrets:scan": "node scripts/install-secrets.mjs --scan",
     "secrets:scan:alpaca": "node scripts/install-secrets.mjs --scan --match=ALPACA",

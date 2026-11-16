@@ -12,10 +12,18 @@
  * the truth is "not authorized to look", which is the same misreading that
  * `/user/tokens/verify` produces for an account-owned token.
  *
- * So every failure here is classified rather than collapsed:
+ * So every failure here is classified rather than collapsed, and the
+ * classification lives in cloudflare-dns-lib.mjs where it can be tested:
  *
- *   403 / "not authorized"  -> the permission is missing from the token
- *   200 with an empty list  -> authorized, and the zone really has none
+ *   "not authorized" in the body  -> the permission is missing from the token
+ *   401 / code 1000 / code 6003   -> the token itself is invalid or revoked
+ *   a bare 403 with code 10000    -> EITHER of those; Cloudflare does not say
+ *   200 with an empty list        -> authorized, and the zone really has none
+ *   200 short of result_info      -> authorized, and this answer is INCOMPLETE
+ *
+ * The last two are the pair worth separating. A truncated listing read as a
+ * complete one is how a duplicate TXT gets written over an existing record
+ * nobody could see.
  *
  * Cloudflare's edge also bans some default client signatures with error 1010
  * BEFORE auth is consulted, so every request names a client explicitly.
@@ -33,10 +41,27 @@
 
 import { createHash } from "node:crypto";
 
+import {
+  PER_PAGE,
+  classify,
+  errText,
+  fqdnIn,
+  isPermissionVerdict,
+  paginate,
+  unquote,
+} from "./cloudflare-dns-lib.mjs";
+
 const API = "https://api.cloudflare.com/client/v4";
 const UA = "ofc-ops-check/1.0";
 
 const witness = (v) => createHash("sha256").update(v).digest("hex").slice(0, 12);
+
+/** paginate(), bound to this tool's one request shape. */
+const listRecords = (basePath, token) =>
+  paginate((page) => {
+    const sep = basePath.includes("?") ? "&" : "?";
+    return cf(`${basePath}${sep}per_page=${PER_PAGE}&page=${page}`, token);
+  });
 
 async function cf(path, token) {
   try {
@@ -58,23 +83,6 @@ async function cf(path, token) {
   } catch (e) {
     return { status: 0, body: `${e.name}: ${e.message}` };
   }
-}
-
-const errText = (body) =>
-  Array.isArray(body?.errors) && body.errors.length
-    ? body.errors.map((e) => `${e.code}: ${e.message}`).join("; ")
-    : typeof body === "string"
-      ? body
-      : JSON.stringify(body).slice(0, 200);
-
-/** The distinction this tool exists for. */
-function classify(status, body) {
-  if (status === 200) return "AUTHORIZED";
-  const msg = errText(body).toLowerCase();
-  if (status === 403 || msg.includes("not authorized") || msg.includes("permission"))
-    return "DENIED (permission missing from the token)";
-  if (status === 404) return "NOT FOUND";
-  return `HTTP ${status}`;
 }
 
 // WHICH TOKEN. This account holds several, and they differ in permission, not
@@ -114,18 +122,32 @@ if (!zone) {
 }
 console.log(`zone id resolved (status=${zone.status})`);
 
-const q = wantType ? `?type=${encodeURIComponent(wantType)}&per_page=100` : "?per_page=100";
-const rres = await cf(`/zones/${zone.id}/dns_records${q}`, token);
-console.log(`dns_records read -> ${classify(rres.status, rres.body)}`);
+const q = wantType ? `?type=${encodeURIComponent(wantType)}` : "";
+const rres = await listRecords(`/zones/${zone.id}/dns_records${q}`, token);
+const verdict = classify(rres.status, rres.body);
+console.log(`dns_records read -> ${verdict}`);
 if (rres.status !== 200) {
   console.log(`  ${errText(rres.body)}`);
-  console.log();
-  console.log("A DNS record read is its own permission group (Zone:DNS:Read).");
-  console.log("Zone:Read alone -- which this token has -- does not include it.");
+  // THE ADVICE IS GATED, because printed unconditionally it was wrong more
+  // often than right: it ran for a thrown fetch, a 404 and a 429 alike, and
+  // asserted that the token "has" Zone:Read when CF_TOKEN_VAR decides which
+  // token is in play at all. Telling an operator that a network blip is a
+  // missing permission is the same confusion of "not authorized to look" with
+  // "nothing is there" that the header says this tool was split in two to avoid.
+  if (isPermissionVerdict(verdict)) {
+    console.log();
+    console.log("A DNS record read is its own permission group (Zone:DNS:Read).");
+    console.log(`Zone:Read alone does not include it, and ${tokenVar} may carry only that.`);
+  }
   process.exit(1);
 }
 
-const rows = rres.body?.result ?? [];
+const rows = rres.rows;
+if (rres.short) {
+  console.log(
+    `  WARNING: read ${rres.short.got} of ${rres.short.total} record(s) -- this listing is INCOMPLETE`,
+  );
+}
 console.log(`  ${rows.length} record(s)`);
 for (const r of rows) {
   // A TXT value can be a verification token; it is public by design (it is
@@ -133,34 +155,59 @@ for (const r of rows) {
   const val = String(r.content ?? "").slice(0, 120);
   console.log(`  ${String(r.type).padEnd(6)} ${String(r.name).padEnd(44)} ${val}`);
 }
-if (!rows.length) {
+if (!rows.length && !rres.short) {
   console.log("  (authorized, and the zone genuinely has no record of this type)");
 }
 
 // ---------------------------------------------------------------------------
-// OPTIONAL WRITE: add a TXT record at the apex.
+// OPTIONAL WRITE: add a TXT record, at the apex by default.
 //
 // Driven by DNS_TXT_NAME + DNS_TXT_VALUE so the value arrives through the
-// loader's environment rather than a command line. Writing is IDEMPOTENT by
-// content: if a record with the same name and value already exists the call is
-// skipped, so re-running the verification chain never stacks duplicates (and a
-// duplicate google-site-verification TXT is not harmless -- it makes the zone's
-// answer ambiguous).
+// loader's environment rather than a command line. DNS_TXT_NAME may be the
+// apex (omit it, or pass "@" or the zone), a relative label, or an already
+// qualified name; fqdnIn() reduces all of those to the one spelling the API
+// lists records under. Writing is IDEMPOTENT by content: if a record with the
+// same name and value already exists the call is skipped, so re-running the
+// verification chain never stacks duplicates (and a duplicate
+// google-site-verification TXT is not harmless -- it makes the zone's answer
+// ambiguous). Where the check cannot be made CONCLUSIVELY, it refuses to write
+// rather than risk the duplicate it exists to prevent.
 // ---------------------------------------------------------------------------
 const txtName = process.env.DNS_TXT_NAME;
 const txtValue = process.env.DNS_TXT_VALUE;
 if (txtValue) {
-  const name = txtName || zoneName;
-  const existing = rows.find(
-    (r) => String(r.name) === name && String(r.content).replace(/^"|"$/g, "") === txtValue,
+  const name = fqdnIn(txtName || zoneName, zoneName);
+  // ITS OWN LOOKUP, not the listing printed above. That listing is filtered by
+  // DNS_TYPE and was truncated to one page, and either of those makes it answer
+  // a different question than the one asked here: with DNS_TYPE=A it holds no
+  // TXT at all, find() returned undefined, and a SECOND
+  // google-site-verification TXT was written -- which the comment above
+  // correctly calls not harmless, because it makes the zone's answer ambiguous.
+  const look = await listRecords(
+    `/zones/${zone.id}/dns_records?type=TXT&name=${encodeURIComponent(name)}`,
+    token,
   );
+  if (look.status !== 200) {
+    console.log();
+    console.log(`  TXT pre-check -> ${classify(look.status, look.body)}`);
+    console.log(`  ${errText(look.body)}`);
+    console.log("  refusing to write: a duplicate cannot be ruled out.");
+    process.exit(1);
+  }
+  if (look.short) {
+    console.log();
+    console.log(`  refusing to write: read ${look.short.got} of ${look.short.total} TXT record(s)`);
+    console.log("  at that name, so a duplicate cannot be ruled out.");
+    process.exit(1);
+  }
+  const existing = look.rows.find((r) => unquote(r.content) === txtValue);
   if (existing) {
     console.log();
     console.log(`TXT ${name} already carries that exact value -- nothing to do.`);
     process.exit(0);
   }
   console.log();
-  console.log(`adding TXT ${name} ...`);
+  console.log(`adding TXT ${name} (${look.rows.length} other TXT at that name) ...`);
   const res = await fetch(`${API}/zones/${zone.id}/dns_records`, {
     method: "POST",
     headers: {
