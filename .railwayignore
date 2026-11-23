@@ -37,12 +37,33 @@ agent
 # Literal paths are NOT sufficient here and listing them one by one is how
 # this kept breaking: backend/external/SGEE/build is 1.2 GB of today's
 # verification builds and matched none of the specific rules above it. Match
-# any build directory at any depth instead -- no source directory in this tree
-# is named `build`, so the glob is safe, and a build dir appearing somewhere
+# any build directory at any depth instead, and a build dir appearing somewhere
 # new no longer silently becomes a deploy outage.
-**/build
-**/build-*
-**/build_*
+#
+# THE TRAILING `/*` IS WHAT MAKES THESE MATCH DIRECTORIES ONLY, and it is load
+# bearing. The rule above used to read `**/build_*`, justified by "no source
+# directory in this tree is named `build`, so the glob is safe". That sentence
+# was true, and it was about DIRECTORIES while the pattern matched FILES too.
+# The 2026-11-22 sensen bump added src/build_roots.cpp and src/build_roots.cppm;
+# both matched, neither shipped, and the container build died at CONFIGURE with
+#
+#     CMake Error at sensen/src/CMakeLists.txt:106 (target_sources):
+#       Cannot find source file: build_roots.cpp
+#
+# on deployment 71010ea5 -- 300 s of configure, then nothing. 183 tracked paths
+# matched the three globs in total; the rest are .log files, docs/ and tests/
+# that other rules here exclude anyway, which is why only this one bit.
+#
+# A TRAILING SLASH DOES NOT WORK AND IS THE OBVIOUS WRONG FIX. Measured with
+# GNU tar 1.35, which is what tools/railway_upload.sh feeds --exclude-from:
+# `**/build/` excludes NOTHING AT ALL, so every build tree would ship and the
+# archive would go from 30 MB to multiple GB. The header of railway_upload.sh
+# records the same thing for --exclude-vcs-ignores. `**/build/*` excludes the
+# CONTENTS and leaves an empty directory entry in the archive, which costs
+# nothing and is the behaviour wanted here.
+**/build/*
+**/build-*/*
+**/build_*/*
 **/__pycache__
 .next
 out
