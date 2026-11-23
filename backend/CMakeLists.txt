@@ -157,13 +157,38 @@ endif()
 # __builtin_is_cpp_trivially_relocatable) and falls back to the old spelling.
 # The abseil at v1.62.0 (4a2c6336) contains no mention of the new builtin.
 #
-# FetchContent's FIRST declaration wins, which is why this sits BEFORE the
-# include above rather than editing sensen: a superproject is allowed to pin a
-# dependency its subproject merely declares, and sensen stays untouched. It
-# also means sensen's PATCH_COMMAND does not run -- that patch fixes two
-# v1.62.0 files that C++23 rejected, and it does not apply to this tree.
+# FetchContent's FIRST declaration wins, which is why this sits BEFORE
+# sensen_fetch_grpc() rather than editing sensen: a superproject is allowed to
+# pin a dependency its subproject merely declares, and sensen stays untouched.
 # gRPC is still built as C++17 by the logic in SensenGrpc.cmake, which is where
 # the reasoning for that lives.
+#
+# WINNING THE DECLARATION MEANS INHERITING ITS PATCHES, and for two months this
+# block did not. The sentence that used to sit here said sensen's PATCH_COMMAND
+# "does not run -- that patch fixes two v1.62.0 files that C++23 rejected, and
+# it does not apply to this tree", which was TRUE WHEN WRITTEN and expired
+# silently when the sensen pin moved. By v1.85.2 sensen's patch set is one
+# patch that makes gRPC REUSE an existing protobuf instead of adding its own,
+# because 1.85.2 has no guard of its own; suppressing it meant sensen and gRPC
+# each ran add_subdirectory on the same protobuf, and every protobuf target
+# collided -- libprotobuf, libprotobuf-lite, libprotoc and libupb all "already
+# exists", which is where the 2026-11-22 pin bump stopped. A fresh build
+# directory failed identically, which is what ruled out stale FetchContent
+# state and pointed here.
+#
+# So the list is READ FROM SENSEN rather than restated. A patch sensen adds
+# later arrives here the day it lands, and the failure mode above -- a
+# justification that quietly stops being true -- cannot recur, because there is
+# no second copy of the list to go stale. Including SensenGrpc.cmake first is
+# safe and does not declare anything: it defines sensen_fetch_grpc() and sets
+# the patch list; the declaration happens inside the function.
+#
+# The chain mirrors sensen's own, for the reasons documented there:
+#   * reverse --check FIRST, so an already-patched tree is a no-op rather than
+#     an error on the second configure;
+#   * sh -c, because PATCH_COMMAND is handed to the process directly and a bare
+#     `||` would reach git as an ARGUMENT, never as an operator;
+#   * NO `;` anywhere, because CMake splits a PATCH_COMMAND argument on it.
 # ----------------------------------------------------------------------------
 # The abseil v1.85.2 vendors includes a clang intrinsic header DIRECTLY, which
 # clang refuses:
@@ -186,17 +211,32 @@ endif()
 # enough to fail loudly if upstream renames the line -- the build returns to the
 # original error rather than silently skipping a patch.
 include(FetchContent)
+include(${CMAKE_CURRENT_SOURCE_DIR}/sensen/cmake/SensenGrpc.cmake)
+
+get_property(_ofc_grpc_patches GLOBAL PROPERTY SENSEN_GRPC_PATCHES)
+if(NOT _ofc_grpc_patches)
+    message(FATAL_ERROR
+        "SENSEN_GRPC_PATCHES is empty. SensenGrpc.cmake sets it at include time, so an "
+        "empty list means this file won the gRPC declaration while silently dropping "
+        "sensen's patches -- which is the defect this block exists to prevent.")
+endif()
+set(_ofc_grpc_patch_command "")
+foreach(_ofc_grpc_patch IN LISTS _ofc_grpc_patches)
+    string(APPEND _ofc_grpc_patch_command
+           "(git apply --reverse --check '${_ofc_grpc_patch}' 2>/dev/null || git apply '${_ofc_grpc_patch}') && ")
+endforeach()
+string(APPEND _ofc_grpc_patch_command
+       "sed -i 's|#include <bmi2intrin.h>|#include <immintrin.h>|' third_party/abseil-cpp/absl/container/internal/raw_hash_set.h && ")
+message(STATUS "gRPC patches inherited from sensen: ${_ofc_grpc_patches}")
+
 FetchContent_Declare(
     grpc
     GIT_REPOSITORY https://github.com/grpc/grpc
     GIT_TAG v1.85.2
     GIT_SHALLOW TRUE
-    PATCH_COMMAND sed -i
-        "s|#include <bmi2intrin.h>|#include <immintrin.h>|"
-        third_party/abseil-cpp/absl/container/internal/raw_hash_set.h
+    PATCH_COMMAND sh -c "${_ofc_grpc_patch_command} true"
 )
 
-include(${CMAKE_CURRENT_SOURCE_DIR}/sensen/cmake/SensenGrpc.cmake)
 sensen_fetch_grpc()
 
 # ----------------------------------------------------------------------------
@@ -779,6 +819,31 @@ set(SGEE_BUILD_TESTS ON CACHE BOOL "Build SGEE's tests: ctest registers them, so
 
 add_subdirectory(external/SGEE sgee EXCLUDE_FROM_ALL)
 
+# SGEE DELEGATES THE LOGGER LINK TO THIS FILE, and until the 2026-11-22 sensen
+# bump nothing here had to act on that. SGEE fetches its own cpp23-logger as
+# `sgee_logger` ONLY when no parent already supplies a `logger` target
+# (external/SGEE/CMakeLists.txt:720), and its whole "Link logger library
+# explicitly" block is guarded by `if(TARGET sgee_logger)`. sensen now exports
+# `logger`, so that branch flipped: SGEE no longer creates `sgee_logger`, the
+# block is skipped in full, and nothing puts the logger archive on any link
+# line. SGEE is right to delegate -- a logger it did not create is not one it
+# can describe -- but the delegation only works if the parent acts on it.
+#
+# calculator_engine never noticed, because it names `logger` in its own
+# target_link_libraries. SGEE's test tools link `sgee` ALONE, so they lost every
+# logger.code_generator symbol transpiler.cppm imports: causal_signal_gen failed
+# with undefined references to logger::codegen::CodeGenerator and
+# ::TemplateValue, having linked cleanly on 2026-11-14 under the previous pin.
+# Nothing in SGEE or sensen changed to cause it -- ADDING a target flipped a
+# configure-time test, which is why the engine built and only the tests broke.
+#
+# PUBLIC rather than PRIVATE is the whole fix: the requirement has to reach
+# whatever links sgee, not just sgee's own objects.
+if(TARGET sgee AND TARGET ${CPP23_LOGGER_TARGET_NAME})
+    target_link_libraries(sgee PUBLIC ${CPP23_LOGGER_TARGET_NAME})
+    message(STATUS "sgee links the parent logger target: ${CPP23_LOGGER_TARGET_NAME}")
+endif()
+
 # SGEE imports the same BMI as everything else here (SGEE_EXTERNAL_STD_PCM
 # above), so it needs the same ordering edge, and this is the first point at
 # which its targets exist. SGEE already routes every one of its targets through
@@ -1033,7 +1098,26 @@ add_test(NAME OptionChainCacheTest COMMAND test_option_chain_cache)
 # when unrelated modules elsewhere in the (large, actively-developed)
 # sensen_slim closure are mid-edit and momentarily non-building -- exactly
 # the situation this target was first built under.
-add_executable(test_assistant_verification tests/test_assistant_verification.cpp)
+# gp_ara_rcu.cpp IS NOT OPTIONAL HERE, and it became necessary without this file
+# changing. gp_ara_interfaces.cppm DECLARES RcuDomainCore; as of the 2026-11-22
+# sensen bump it no longer DEFINES it, because sensen moved the body into an
+# implementation unit (its own rule 72: logic in implementation units, thin port
+# modules). A target that compiles the interface privately therefore has to
+# compile the implementation privately too, or it links with every
+# RcuDomainCore symbol undefined -- constructor, destructor, synchronize(),
+# register_thread(), domain_id() and registry_size(), which is exactly how this
+# target failed.
+#
+# IT IS A PRIVATE COPY, WHICH IS THE PATTERN THE COMMENT ON
+# test_sgee_automated_reasoning BELOW ARGUES AGAINST: linking the library that
+# carries the module is the supported route, and private copies are why
+# gp_ara_interfaces.cppm was measured building five times in one build
+# directory. This stays a private copy for now because changing this target's
+# linkage is a larger change than the bump needs, and the duplicate it adds is
+# an implementation unit rather than a sixth BMI. Folding this target onto
+# libsensen is the real fix and is not done here.
+add_executable(test_assistant_verification tests/test_assistant_verification.cpp
+    sensen/src/gp_ara_rcu.cpp)
 target_sources(test_assistant_verification
     PRIVATE
     FILE_SET CXX_MODULES FILES
@@ -1852,18 +1936,33 @@ if(ENABLE_LLAMACPP_BACKEND)
     # only adds seven #include lines changes no behaviour and no number, which
     # a version bump cannot promise.
     #
-    # The command is idempotent by construction: `git apply` succeeds on a
-    # clean tree, and the `--reverse --check` fallback succeeds when the patch
-    # is ALREADY applied, so a re-configure over a populated source directory
-    # is not an error. Anything else -- a genuinely conflicting tree -- still
-    # fails the configure, which is the direction to fail in.
+    # IDEMPOTENT ONLY BECAUSE OF THE `sh -c`, and the version without it was
+    # not idempotent at all. PATCH_COMMAND is handed to the process directly,
+    # not to a shell, so the `||` that used to sit here was never an operator:
+    # git received `||`, `git`, `apply`, `--reverse` and `--check` as further
+    # arguments to ONE `git apply`, and the fallback the old comment promised
+    # had never once run. The step therefore worked on a freshly cloned tree
+    # and failed on every re-configure over a populated one -- measured
+    # 2026-11-22, seven files reporting `patch does not apply` while
+    # `git apply --reverse --check` on the same tree exited 0, which is the
+    # proof the tree was cleanly patched and the guard simply never fired.
+    #
+    # The reverse check runs FIRST so the common case is "already applied".
+    # Anything else -- a genuinely conflicting tree -- still fails the
+    # configure, which is the direction to fail in.
+    #
+    # NO `;` ANYWHERE IN THIS COMMAND. CMake splits a PATCH_COMMAND argument on
+    # `;` when FetchContent forwards it to ExternalProject, which is the same
+    # trap sensen's cmake/SensenGrpc.cmake documents for its own patch chain --
+    # there the split sent every step after the first to sh as $0 and $1, so
+    # only one of them ran. `&&` and `||` inside the single quoted string are
+    # safe; a `;` is not.
     set(LLAMACPP_PATCH "${CMAKE_CURRENT_SOURCE_DIR}/patches/llamacpp-b6963-libcxx23-includes.patch")
     FetchContent_Declare(
         llamacpp
         GIT_REPOSITORY https://github.com/ggml-org/llama.cpp.git
         GIT_TAG 6db3d1ffe6d34e8becfe95cf2f109198a7154db3 # b6963
-        PATCH_COMMAND git apply --whitespace=nowarn "${LLAMACPP_PATCH}"
-                   || git apply --reverse --check "${LLAMACPP_PATCH}"
+        PATCH_COMMAND sh -c "(git apply --reverse --check '${LLAMACPP_PATCH}' 2>/dev/null || git apply --whitespace=nowarn '${LLAMACPP_PATCH}')"
     )
 
     # Build llama.cpp/ggml at C++23 as of 2026-08-29, up from C++17. The

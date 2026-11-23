@@ -3220,8 +3220,14 @@ auto main() -> int {
         // Inert BY CONSTRUCTION, each with the reason. Not a suppression list
         // for awkward failures -- every entry is a field whose effect is
         // genuinely unobservable in the response, and saying why is the point.
+        // string_view, NOT const std::string&, because that is what protobuf
+        // hands back. Descriptor::name() and FieldDescriptor::name() returned
+        // `const std::string&` through v1.62's protobuf and return
+        // `absl::string_view` as of the v36.2 that arrived with gRPC v1.85.2 on
+        // 2026-11-22. Taking the view by value costs nothing and binds to
+        // either spelling, so this does not have to move again on the next bump.
         const auto inert_reason =
-            [](const std::string& msg, const std::string& field) -> const char* {
+            [](std::string_view msg, std::string_view field) -> const char* {
             if (field == "guess") {
                 return "a Newton SEED selects a root, it does not move one";
             }
@@ -3318,7 +3324,7 @@ auto main() -> int {
                 auto st = stub.ComputeDetailedAmortization(ctx.get(), probe, &out);
                 // A refusal is an ANSWER -- the field was read and judged. Only
                 // an OK response identical to the baseline proves it was dropped.
-                if (st.ok() && digest(out) == base_digest) { unread.push_back(f->name()); }
+                if (st.ok() && digest(out) == base_digest) { unread.push_back(std::string(f->name())); }
             }
             std::string names;
             for (const auto& n : unread) { names += " " + n; }
@@ -3371,7 +3377,7 @@ auto main() -> int {
                 sensen::finance::AmortizationResponse out;
                 auto ctx = make_context();
                 auto st = stub.ComputeAmortization(ctx.get(), probe, &out);
-                if (st.ok() && digest(out) == base_digest) { unread.push_back(f->name()); }
+                if (st.ok() && digest(out) == base_digest) { unread.push_back(std::string(f->name())); }
             }
             std::string names;
             for (const auto& n : unread) { names += " " + n; }
@@ -3581,7 +3587,7 @@ auto main() -> int {
                 sensen::finance::RefinanceResponse out;
                 auto ctx = make_context();
                 auto st = stub.ComputeRefinance(ctx.get(), probe, &out);
-                if (st.ok() && digest(out) == base_digest) { unread.push_back(f->name()); }
+                if (st.ok() && digest(out) == base_digest) { unread.push_back(std::string(f->name())); }
             }
             std::string names;
             for (const auto& n : unread) { names += " " + n; }
@@ -3636,7 +3642,7 @@ auto main() -> int {
                 sensen::finance::ExplainMortgageResponse out;
                 auto ctx = make_context();
                 auto st = stub.ExplainMortgage(ctx.get(), probe, &out);
-                if (st.ok() && digest(out) == base_digest) { unread.push_back(f->name()); }
+                if (st.ok() && digest(out) == base_digest) { unread.push_back(std::string(f->name())); }
             }
             std::string names;
             for (const auto& n : unread) { names += " " + n; }
