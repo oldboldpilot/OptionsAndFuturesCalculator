@@ -58,6 +58,34 @@ static_resources:
                 virtual_hosts:
                   - name: local_service
                     domains: ["*"]
+                    # THE API SUBDOMAIN IS INDEXED AND SHOULD NOT BE. Measured
+                    # in Search Console on 2026-11-22: api.optionsandfuturescalculator.com
+                    # carried 14 impressions, with no robots.txt and no
+                    # X-Robots-Tag on any response, so nothing ever told Google
+                    # to leave it alone. An RPC endpoint in the index spends
+                    # crawl budget on URLs that can never satisfy a searcher,
+                    # and it puts a bare error body in front of anyone who
+                    # clicks one.
+                    #
+                    # X-ROBOTS-TAG, NOT A robots.txt DISALLOW, and the
+                    # difference decides whether this works. Disallow stops the
+                    # fetch; it does NOT remove a URL already in the index, and
+                    # a blocked URL can stay listed from inbound links with no
+                    # way for the crawler to read a noindex. The header is
+                    # served on every response, so the next crawl of any path
+                    # here reads it -- see the /auth note in the web app's
+                    # robots.txt, which records the same lesson from the other
+                    # direction (a page left crawlable ON PURPOSE so its
+                    # noindex could be seen).
+                    #
+                    # Set on the virtual host rather than per route so a path
+                    # added later cannot miss it: the catch-all below already
+                    # proved that naming one spelling leaves the class unswept.
+                    response_headers_to_add:
+                      - append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                        header:
+                          key: x-robots-tag
+                          value: "noindex, nofollow"
                     routes:
                       # Platform health check. Routing "/" straight at the gRPC
                       # cluster made every probe a malformed gRPC call, so the
