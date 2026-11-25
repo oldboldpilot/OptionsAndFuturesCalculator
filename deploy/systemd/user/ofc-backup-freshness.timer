@@ -1,0 +1,12 @@
+[Unit]
+Description=Every six hours, check the OFC production backup is fresh
+
+[Timer]
+# Independent of ofc-backup.timer on purpose: if that timer is disabled, removed
+# or never installed, this one still finds the missing backup and fails.
+OnCalendar=*-*-* 00/6:41:00 UTC
+Persistent=true
+Unit=ofc-backup-freshness.service
+
+[Install]
+WantedBy=timers.target

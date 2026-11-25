@@ -1,0 +1,19 @@
+# Verified backup of the production database. Installed per docs/technical/DATABASE_MIGRATIONS.md.
+# %h is the home directory; the repository is expected at %h/Development/OptionsAndFuturesCalculator.
+[Unit]
+Description=Verified backup of the OFC production database
+Documentation=file://%h/Development/OptionsAndFuturesCalculator/docs/technical/DATABASE_MIGRATIONS.md
+# Any failure runs the freshness check in alert mode, which raises the alarm.
+OnFailure=ofc-backup-freshness.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Development/OptionsAndFuturesCalculator
+# railway lives in ~/.railway/bin, which is on no systemd PATH.
+Environment=PATH=%h/.railway/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/Development/OptionsAndFuturesCalculator/scripts/backup_production_db.sh
+# Backstop for the wrapper's own timeout; every process of the run is in this
+# unit's cgroup, so stopping or timing out the unit also closes the tunnel.
+TimeoutStartSec=2h
+KillMode=control-group
+Nice=10

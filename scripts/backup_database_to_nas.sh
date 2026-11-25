@@ -46,12 +46,12 @@
 # with the repository's standard sed expression before anything is displayed.
 #
 #   OFC_DATABASE_URL    Railway Postgres behind optionsandfuturescalculator.com
-#   MFC_DATABASE_URL    Supabase Postgres behind mortgagefvcalculator.com
-#                       (Project settings -> Database -> Connection string ->
-#                        URI, session pooler; the direct 5432 host is IPv6-only)
+#   MFC_DATABASE_URL    the mortgage database behind mortgagefvcalculator.com: Railway service
+#                       mfv-postgres, database mortgagefv, private network only (reach it through
+#                       an SSH tunnel; see DATABASE_MIGRATIONS.md, "The mortgage database")
 #
-# Either may be absent. A missing URL is a SKIP with a stated reason and a
-# non-zero exit, never a silent success -- a backup script that reports OK
+# Either may be absent. A missing or unusable URL is a FAIL with a stated reason and a
+# non-zero exit, never a silent success and never a fallback to the local socket -- a backup script that reports OK
 # having backed up nothing is worse than no backup script, for the same reason
 # migration 07's zero-write refresh had to start failing loudly.
 set -uo pipefail
@@ -80,10 +80,32 @@ fi
 # a host already configured for the backend needs no new setting.
 : "${OFC_DATABASE_URL:=${DATABASE_URL:-}}"
 
+# pg_url_check URL: succeed only for a postgres URL that names a remote host AND a database. Prints the
+# reason on failure. WHY: libpq given an empty string, a bare database name, "postgres:///db", a URL with
+# host= in its query, or a percent-encoded socket directory as the host connects to the LOCAL unix socket.
+# With a database listening there that is a successful dump of the WRONG DATABASE, which is worse than no
+# dump. Nothing about the URL is echoed, only the rule it broke.
+pg_url_check() {
+    local u="$1"
+    local re='^postgres(ql)?://([^/?#@]*@)?(\[[0-9A-Fa-f:]+\]|[^]/?#:@[]+)(:[0-9]+)?/[^/?#]+(\?.*)?$'
+    [[ -n "$u" ]] || { echo "the connection string is empty"; return 1; }
+    [[ "$u" =~ $re ]] || { echo "the connection string is not a postgresql URL with an explicit host and a database name"; return 1; }
+    [[ "${BASH_REMATCH[3]}" != *%* ]] || { echo "the host is percent-encoded, which libpq decodes (a socket directory looks like that)"; return 1; }
+    [[ "$u" =~ [?\&](host|hostaddr|service|dbname)= ]] && { echo "the query string overrides host, hostaddr, service or dbname"; return 1; }
+    return 0
+}
+
 # pgtool URL TOOL [args...]: run a PostgreSQL client tool against URL; the URL
 # travels by environment NAME, never in argv. stdin and stdout pass through.
 pgtool() {
     local url="$1" tool="$2"; shift 2
+    if [[ "$tool" != pg_restore ]]; then
+        local why
+        why="$(pg_url_check "$url")" || {
+            say "REFUSED: $tool was not run: $why. A client given no usable host connects to the LOCAL socket," >&2
+            say "         which would back up whatever database happens to be there and report success." >&2
+            return 97; }
+    fi
     if [[ "$CLIENT_IMAGE" == host ]]; then
         DB_URL="$url" PGCONNECT_TIMEOUT=15 "$tool" "$@"
     else
@@ -108,6 +130,14 @@ mountpoint -q "$(dirname "$NAS_ROOT")" 2>/dev/null || \
 rc=0
 SUMMARY=()
 
+# An interrupted run (a timer stopped, a signal) must not leave its half-written
+# staging directory beside the good backups. Only THIS run's stamp is removed;
+# a verified pair is moved out of staging before the run can end, so nothing
+# good is ever in there.
+cleanup_staging() { rm -rf "$NAS_ROOT"/*/".staging-$STAMP" 2>/dev/null; }
+trap cleanup_staging EXIT
+trap 'cleanup_staging; exit 143' INT TERM HUP
+
 toc_check() { # FILE -> prints table count, nonzero when unreadable or empty
     local n
     n="$(pgtool x pg_restore --list < "$1" 2>/dev/null | grep -c 'TABLE DATA')" || return 1
@@ -121,12 +151,12 @@ prune() {
     while IFS= read -r f; do
         i=$((i+1)); [[ $i -le $KEEP_MIN ]] && continue
         if [[ -n "$(find "$f" -mtime "+${KEEP_DAYS}" -print 2>/dev/null)" ]]; then
-            say "  prune $(basename "$f")"; rm -f "$f" "${f%.dump}.roles.sql" "${f%.dump}.verify.log"
+            say "  prune $(basename "$f")"; rm -f "$f" "${f%.dump}.roles.sql" "${f%.dump}.verify.log" "${f%.dump}.fingerprint.txt"
         fi
     done < <(ls -1t "$dir"/${name}-*.dump 2>/dev/null)
     # roles and log files whose archive is gone
-    for f in "$dir"/${name}-*.roles.sql "$dir"/${name}-*.verify.log; do
-        [[ -e "$f" && ! -e "${f%.roles.sql}.dump" && ! -e "${f%.verify.log}.dump" ]] && { say "  prune $(basename "$f") (orphan)"; rm -f "$f"; }
+    for f in "$dir"/${name}-*.roles.sql "$dir"/${name}-*.verify.log "$dir"/${name}-*.fingerprint.txt; do
+        [[ -e "$f" && ! -e "${f%.roles.sql}.dump" && ! -e "${f%.verify.log}.dump" && ! -e "${f%.fingerprint.txt}.dump" ]] && { say "  prune $(basename "$f") (orphan)"; rm -f "$f"; }
     done
 }
 
@@ -148,8 +178,8 @@ fail_parked() { # NAME STAGE REASON
 dump_ofc() {
     local name="$1" url="$2" envname="$3"
     if [[ -z "$url" ]]; then
-        say "SKIP  $name -- no connection string (set ${envname})"
-        SUMMARY+=("SKIPPED  $name: no connection string"); rc=1; return
+        say "FAIL  $name -- no connection string: set ${envname}. Nothing was dumped, and no local database was tried."
+        SUMMARY+=("FAILED   $name: no connection string (${envname} unset or empty); nothing dumped"); rc=1; return
     fi
     local dir="$NAS_ROOT/$name" stage="$NAS_ROOT/$name/.staging-$STAMP"
     local base="${name}-${STAMP}" t0=$SECONDS
@@ -205,31 +235,94 @@ dump_ofc() {
     SUMMARY+=("VERIFIED $name: $base.dump + $base.roles.sql restored and checked")
 }
 
-# MFC (Supabase): archive-parse check only. verify_restore.sh asserts the OFC
-# schema, and a Supabase pooler cannot dump the cluster's roles, so this one is
-# NOT restore-verified; the summary says so rather than claiming otherwise.
+# MFC: the mortgage database, which is the Railway service mfv-postgres (database mortgagefv), NOT a
+# Supabase project: PostgREST (mfv-postgrest) and GoTrue (mfv-auth) both connect to it, and the web app's
+# Supabase URLs are Railway domains. It carries Supabase's roles and an auth schema, so it gets the same
+# pair as OFC plus a fingerprint of the source taken right after the dump. There is no migration baseline
+# for it, so the rehearsal (scripts/verify_restore_mortgage.sh) compares the restored copy to that
+# fingerprint instead of to a recorded schema. Promotes only on PASS.
 dump_mfc() {
     local name="$1" url="$2" envname="$3"
     if [[ -z "$url" ]]; then
-        say "SKIP  $name -- no connection string (set ${envname})"
-        SUMMARY+=("SKIPPED  $name: no connection string"); rc=1; return
+        say "FAIL  $name -- no connection string: set ${envname}. Nothing was dumped, and no local database was tried."
+        SUMMARY+=("FAILED   $name: no connection string (${envname} unset or empty); nothing dumped"); rc=1; return
     fi
-    local dir="$NAS_ROOT/$name" stage="$NAS_ROOT/$name/.staging-$STAMP" base="${name}-${STAMP}"
-    mkdir -p "$stage"
+    local dir="$NAS_ROOT/$name" stage="$NAS_ROOT/$name/.staging-$STAMP" base="${name}-${STAMP}" t0=$SECONDS
+    local expect_db="${MFC_EXPECT_DB:-mortgagefv}"
+    mkdir -p "$stage" || { say "FAIL  $name -- cannot create $stage"; rc=1; return; }
+    local dump="$stage/$base.dump" roles="$stage/$base.roles.sql" fp="$stage/$base.fingerprint.txt"
+
     say "dump  $name -> $base.dump"
-    if ! pgtool "$url" pg_dump --format=custom --compress=9 --no-owner > "$stage/$base.dump" 2> >(redact >&2); then
+    if ! pgtool "$url" pg_dump --format=custom --compress=9 --no-owner > "$dump" 2> >(redact >&2); then
         fail_parked "$name" "$stage" "$dir" "pg_dump refused or failed"; return
     fi
-    local tables; tables="$(toc_check "$stage/$base.dump")" || { fail_parked "$name" "$stage" "$dir" "the archive does not parse or holds no table data"; return; }
-    mv -f "$stage/$base.dump" "$dir/" && rmdir "$stage"
-    say "  ok  $name: $(du -h "$dir/$base.dump" | cut -f1), ${tables} tables, TOC parsed ONLY (not restore-verified)"
+    # The archive names the database it came from. If it is not the one this script is for, the URL
+    # pointed somewhere else and the file is worthless however well it restores.
+    local got_db
+    got_db="$(pgtool x pg_restore --list < "$dump" 2>/dev/null | sed -n 's/^;[[:space:]]*dbname: //p' | head -1)"
+    if [[ "$got_db" != "$expect_db" ]]; then
+        fail_parked "$name" "$stage" "$dir" "the archive is of database '${got_db:-?}', expected '$expect_db' (MFC_EXPECT_DB)"; return
+    fi
+    say "roles $name -> $base.roles.sql"
+    local rflags=(--roles-only)
+    [[ "${KEEP_ROLE_PASSWORDS:-0}" == 1 ]] || rflags+=(--no-role-passwords)
+    if ! pgtool "$url" pg_dumpall "${rflags[@]}" > "$roles" 2> >(redact >&2); then
+        fail_parked "$name" "$stage" "$dir" "pg_dumpall --roles-only failed (is the connecting role allowed to read pg_authid?)"; return
+    fi
+    local r
+    for r in anon authenticated authenticator service_role supabase_auth_admin; do
+        grep -q -E "^CREATE ROLE ${r}[ ;]" "$roles" || {
+            fail_parked "$name" "$stage" "$dir" "the roles file has no role $r, so a restore could not apply its grants or serve its API"; return; }
+    done
+    if [[ "${KEEP_ROLE_PASSWORDS:-0}" != 1 ]] && grep -q -i "PASSWORD '" "$roles"; then
+        fail_parked "$name" "$stage" "$dir" "the roles file carries a password hash although --no-role-passwords was set"; return
+    fi
+    local tables
+    tables="$(toc_check "$dump")" || { fail_parked "$name" "$stage" "$dir" "the archive does not parse or holds no table data"; return; }
+
+    say "fingerprint $name (read-only, counts and names only)"
+    if ! pgtool "$url" psql -X -q -At -F'|' -v ON_ERROR_STOP=1 < "$REPO/scripts/mortgage_fingerprint.sql" > "$fp" 2> >(redact >&2) || [[ ! -s "$fp" ]]; then
+        fail_parked "$name" "$stage" "$dir" "could not fingerprint the source database"; return
+    fi
+
+    say "verify $name -- restoring $base into a scratch server (scripts/verify_restore_mortgage.sh)"
+    local vlog="$stage/$base.verify.log" vrc
+    "$REPO/scripts/verify_restore_mortgage.sh" "$dump" --roles "$roles" --expect "$fp" > "$vlog" 2>&1
+    vrc=$?
+    redact < "$vlog" | sed 's/^/    | /'
+    if [[ $vrc -ne 0 ]]; then
+        local why="the restore rehearsal FAILED (exit $vrc): this archive does not restore into a copy that matches its source"
+        [[ $vrc -eq 2 ]] && why="the restore rehearsal could not run (exit 2), so this backup is UNVERIFIED and is treated as failed"
+        fail_parked "$name" "$stage" "$dir" "$why"; return
+    fi
+    mv -f "$roles" "$dir/" && mv -f "$fp" "$dir/" && mv -f "$vlog" "$dir/" && mv -f "$dump" "$dir/" && rmdir "$stage" || {
+        fail_parked "$name" "$stage" "$dir" "could not move the verified set into place"; return; }
+    say "  ok  $name: $(du -h "$dir/$base.dump" | cut -f1) dump, ${tables} tables, roles file, restore VERIFIED in $((SECONDS-t0))s"
     prune "$dir" "$name"
-    SUMMARY+=("PARSED   $name: archive parses; NOT restore-verified, no roles file")
+    SUMMARY+=("VERIFIED $name: $base.dump + .roles.sql + .fingerprint.txt restored and compared to the source")
 }
 
 say "=== database backup $STAMP -> $NAS_ROOT ==="
-dump_ofc optionsandfuturescalculator "${OFC_DATABASE_URL:-}" OFC_DATABASE_URL
-dump_mfc mortgagefvcalculator        "${MFC_DATABASE_URL:-}" MFC_DATABASE_URL
+# BACKUP_TARGETS narrows the run (default: both). The unattended wrapper
+# scripts/backup_production_db.sh sets "ofc", and the reason is narrower than it
+# first looks. The mortgage database is NOT an external Supabase project: it is
+# the Railway service mfv-postgres, database mortgagefv, PostgreSQL 18.7, proved
+# on 2026-11-25 by mfv-postgrest and mfv-auth both connecting to it while the
+# supabase-auth service points at the OFC database instead. It IS reachable and
+# IS restore-verified -- see "The mortgage database" in
+# docs/technical/DATABASE_MIGRATIONS.md.
+# What it is not is reachable through the SAME tunnel: it is a different service,
+# so it needs a second tunnel of its own, which the wrapper does not yet open.
+# Until the wrapper opens one, scheduling the mortgage half would make every run
+# exit 1 on an always-SKIPPED target, which is why the wrapper selects "ofc"
+# rather than because the database cannot be backed up.
+case " ${BACKUP_TARGETS:-ofc mfc} " in *" ofc "*)
+    dump_ofc optionsandfuturescalculator "${OFC_DATABASE_URL:-}" OFC_DATABASE_URL;; esac
+case " ${BACKUP_TARGETS:-ofc mfc} " in *" mfc "*)
+    dump_mfc mortgagefvcalculator        "${MFC_DATABASE_URL:-}" MFC_DATABASE_URL;; esac
+if [[ ${#SUMMARY[@]} -eq 0 ]]; then
+    say "FATAL: BACKUP_TARGETS='${BACKUP_TARGETS:-}' selected nothing (valid: ofc mfc)"; exit 2
+fi
 
 say "--- summary ---"
 for l in "${SUMMARY[@]}"; do say "  $l"; done

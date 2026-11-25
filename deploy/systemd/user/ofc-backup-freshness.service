@@ -1,0 +1,8 @@
+# Fails (and alerts) when the production backup is stale, absent or last failed.
+[Unit]
+Description=Check that the OFC production backup is fresh and verified
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Development/OptionsAndFuturesCalculator
+ExecStart=%h/Development/OptionsAndFuturesCalculator/scripts/check_backup_freshness.sh --alert

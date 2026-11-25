@@ -1,0 +1,17 @@
+[Unit]
+Description=Daily verified backup of the OFC production database
+
+[Timer]
+# 03:07 UTC, ahead of Railway's volume backups (04:19 product, 04:36 mortgage), so
+# the dump never reads while a snapshot is being taken.
+OnCalendar=*-*-* 03:07:00 UTC
+RandomizedDelaySec=300
+# A run missed because the machine was off fires once at the next start. The
+# backup is a real, freshly verified dump stamped with the time it ran, so it
+# cannot pass for an older one; skipping it would leave the previous backup to
+# age silently. The freshness check judges age from the stamp, never from this.
+Persistent=true
+Unit=ofc-backup.service
+
+[Install]
+WantedBy=timers.target

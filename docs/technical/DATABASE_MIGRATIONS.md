@@ -197,13 +197,130 @@ Decisions, with the reasons:
   removes the newest KEEP_MIN (default 3) pairs, so a run of failures cannot age out the last good copy.
 - The client runs in a container of the production image, because pg_dump refuses a server newer than itself and the
   host's client was 14 against production 18.7 (set OFC_PG_CLIENT_IMAGE=host to use host tools).
-- The MFC (Supabase) archive is NOT restore-verified and has no roles file: verify_restore.sh asserts the OFC schema,
-  and a pooler connection cannot dump the cluster's roles. The summary line says "NOT restore-verified" for it.
+- The mortgage database is verified by its own rehearsal; see "The mortgage database" below.
 
 Proof (2026-11-25, scratch container, nothing hosted): a green run produced the pair and verify_restore.sh consumed
 the roles file (restore, posture 28 of 28, drift all PASS) and exit 0. With one RLS policy dropped in the source,
 the same command exited 1, printed the drift failure, reported "BACKUP FAILED", left the previous pair untouched and
 parked the new one under failed/, with the most aggressive prune settings (KEEP_DAYS=0, KEEP_MIN=0) set.
+
+## The mortgage database
+
+What it is: the Railway service `mfv-postgres` (PostgreSQL 18.7, database `mortgagefv`), not a Supabase project.
+Evidence, from the services' own variables (hosts and database names only, no values): `mfv-postgrest` and `mfv-auth`
+both connect to `mfv-postgres.railway.internal` database `mortgagefv`, and the web app's Supabase URLs are the
+Railway domains of `mfv-gateway` and `mfv-auth`. It has no public endpoint and no `DATABASE_URL` variable, so
+railway connect --tunnel-only cannot open it; an SSH tunnel to the service (ssh -N -L 127.0.0.1:PORT:127.0.0.1:5432
+to the host railway ssh config --dry-run prints) does. The tunnel was measured to stop forwarding after a few
+minutes, so open it just before the run. The URL is built from the service's POSTGRES_USER, `POSTGRES_PASSWORD` and
+POSTGRES_DB with the host rewritten to the tunnel, and handed to the backup script as `MFC_DATABASE_URL`.
+
+What a backup writes (one stamp): the archive, a pg_dumpall --roles-only --no-role-passwords file, a fingerprint of the
+source taken right after the dump (scripts/mortgage_fingerprint.sql: names, counts and role membership, no row
+contents), and the verify log. scripts/verify_restore_mortgage.sh restores them into a throwaway container of the
+production image and requires four steps to pass: the roles file loads and `anon`, `authenticated`, `authenticator`,
+`service_role` and `supabase_auth_admin` exist; `pg_restore` exits 0; the restored schemas, table names, role
+memberships, grant count, policy count and RLS count equal the source's; every table with rows in the source has rows
+in the copy, and `auth.users` is populated. The reference is the source itself, because there is no migration
+baseline for this database and none is invented.
+
+What it proves: the archive and roles file restore together into a clean server and the copy has the source's shape
+and no populated table came back empty. What it does not prove: row contents or exact counts (the source takes writes
+between the dump and the fingerprint), that the app works against the copy, or anything about other images.
+
+Wrong-database guard: every client run refuses a connection string without an explicit host and database name, with
+`host=`, `hostaddr=`, `service=` or `dbname=` in its query, or with a percent-encoded host, because libpq then falls
+back to the local socket and would dump whatever database is there. The archive's own `dbname` must also equal
+`MFC_EXPECT_DB` (default `mortgagefv`). A missing variable is a FAIL, not a skip.
+
+Measured 2026-11-25 against production (read-only): green run, 37 tables, 217 grants, 25 policies, 21 RLS tables,
+15 populated tables, verified in 16 seconds. Damaged inputs, each exit 1: archive cut to half (restore, shape, data
+fail); last 100 bytes cut (restore and shape fail); roles file without the app roles (roles, restore, shape fail);
+a complete schema with no data (only the data step fails); wrong expected database name (refused before any restore).
+
+## Scheduled backups (unattended, with failure made visible)
+
+Nothing scheduled the backup script before 2026-11-25, and the script could not reach production on its own, which is
+how three ad-hoc dumps from 2026-09-15 were taken for "the backups". The production database has no public
+endpoint, so the route is: Railway SSH tunnel, then `railway run` to inject the service's DATABASE_URL, then a rewrite of
+that URL's host and port to the tunnel, then the existing verified backup. scripts/backup_production_db.sh does all of
+it and ALWAYS closes the tunnel; scripts/check_backup_freshness.sh is the alarm. Units are under deploy/systemd/user.
+
+Decisions, with the reasons:
+
+- The wrapper calls `railway run` itself. A timer starts a bare command; making the caller wrap it would put the service
+  name and linked project in a second place, and hand the Postgres service's variables to the tunnel and the
+  pre-flight checks. Now the secret-bearing environment exists in one child only. The wrapper re-invokes itself
+  with --inner under `railway run`.
+- It can authenticate from a systemd user unit. Measured 2026-11-25: with an empty environment (env -i, only HOME and
+  PATH) `railway whoami` succeeds from the stored login, and a verified production backup ran to completion as a
+  transient unit under the user manager (systemd-run --user --wait) with no terminal, display or ssh-agent. A
+  RAILWAY_API_TOKEN in the environment overrides the stored login (a bogus one is rejected with Unauthorized), so an
+  account token is a supported alternative; it was not tested against the tunnel because none exists yet. Two traps:
+  railway is installed under the home directory's .railway/bin, which no systemd PATH contains (the unit sets PATH), and
+  the stored access token lives about an hour and is refreshed from a refresh token on each CLI use. A daily
+  timer therefore depends on that refresh token staying valid between runs. That was NOT measured beyond one day. If it
+  lapses, the next run fails with "railway login is not valid", exit 2, and the freshness check alarms. The
+  durable fix is a Railway account token in a 0600 environment file named by EnvironmentFile in the unit, and it is the
+  owner's to mint.
+- The tunnel is railway connect Postgres --tunnel-only -P PORT, on a free port the wrapper chooses. Readiness is a
+  TCP connect to the port, retried for up to 60 seconds, and a port that already accepts is refused (a fixed port once
+  answered with another session's tunnel and the dump failed with "database does not exist"). `railway connect` starts an
+  ssh child in its own session, so killing the CLI's process group left the ssh process listening, orphaned (measured).
+  Teardown therefore judges the PORT: SIGINT to the PID the wrapper started, then SIGTERM to its group, then SIGTERM and
+  SIGKILL to the listener found by port, only if its command line is an ssh forward for exactly that port and it is
+  owned by this user. Never by name. After teardown the wrapper probes the port and reports a leak as a failure. The
+  unit's cgroup is a second net: stopping it kills every process of the run.
+- Persistent=true on the backup timer. A run missed because the machine was off fires once at the next start. The result
+  is a real dump stamped with the time it ran, so it cannot pass for an older one, whereas skipping it lets the last
+  backup age with nothing happening. At boot the network or the NAS may not be up yet: the wrapper checks the NAS is
+  writable first, retries the tunnel three times, and a failure there is a visible failure, not a skip.
+- Time: 03:07 UTC daily, clear of Railway's volume backups (04:19 product, 04:36 mortgage).
+- Only the OFC database is scheduled. The wrapper sets BACKUP_TARGETS=ofc: the Supabase database has a different
+  credential and no route through this tunnel, and an always-SKIPPED half would make every run exit 1.
+
+How failure and silence become noticeable:
+
+- The wrapper writes a status file (default ~/.local/state/ofc-backup/status) at the start of every attempt as
+  "running" and at the end as ok or fail, from an EXIT trap, so a signal still records a failure. Success is recorded only
+  when the backup exited 0, printed VERIFIED for the production database, and the verified pair (dump, roles, verify log
+  with VERDICT: PASS) is on the NAS.
+- check_backup_freshness.sh exits 1 when any of these holds: no verified pair exists; the NAS directory is missing; the
+  newest verified pair is older than N days (default 2) by the STAMP IN ITS FILE NAME, so touching or copying a file
+  cannot refresh it; the stamp is in the future; the last attempt failed; an attempt started over two hours ago and never
+  finished. A missing status file is not a problem by itself (a hand-run backup leaves none) but the NAS evidence must
+  hold. "Never ran" and "ran and failed" are both exit 1.
+- With --alert it also logs at crit to the journal (tag ofc-backup), sends a desktop notification if one is available,
+  and writes ALERT-BACKUP-STALE.txt beside the backups on the NAS and in the state directory; the next healthy check removes
+  them. No webhook, no credentials.
+- Two timers on purpose. The backup service has OnFailure= pointing at the freshness service, so a failure alarms
+  at once. The freshness timer runs every six hours, independently, so a backup timer that was never enabled,
+  was removed, or never fired is also caught. What this cannot catch: the whole machine being off or the user manager not
+  running (linger is enabled here, so the manager runs without a login). Only something off this host would see that.
+
+Install (owner step; nothing is enabled by this repository):
+
+    mkdir -p ~/.config/systemd/user
+    cp deploy/systemd/user/ofc-backup.service deploy/systemd/user/ofc-backup.timer \
+       deploy/systemd/user/ofc-backup-freshness.service deploy/systemd/user/ofc-backup-freshness.timer \
+       ~/.config/systemd/user/
+    systemd-analyze verify --user ~/.config/systemd/user/ofc-backup*.service ~/.config/systemd/user/ofc-backup*.timer
+    systemctl --user daemon-reload
+    systemctl --user enable --now ofc-backup.timer ofc-backup-freshness.timer
+    systemctl --user list-timers 'ofc-backup*'
+
+Enabling starts a daily production read through the SSH tunnel and a six-hourly check; the check alarms until the first
+verified run exists. To try it by hand first:
+systemctl --user start ofc-backup.service, then journalctl --user -u ofc-backup.service. Check by hand any time:
+scripts/check_backup_freshness.sh; its exit status is the answer. To see an alarm at login, add
+scripts/check_backup_freshness.sh --quiet to a shell profile.
+
+Proof (2026-11-25, production, through the tunnel): a verified backup took 26 to 35 seconds end to end with an empty
+environment and as a systemd transient unit, and the port was closed afterwards each time. A logged-out run exits 2 before opening
+a tunnel; a failure after the tunnel was open (client image missing) exited 1 with the tunnel closed; SIGTERM mid-run
+closed the tunnel, recorded the failure and removed the staging directory. The freshness check exited 1 for: an empty
+directory, a verified pair stamped five days ago with a fresh mtime, a missing NAS directory, a fresh dump whose
+verify log said FAIL, and a last attempt that failed.
 
 ## Disaster recovery runbook
 
@@ -261,6 +378,6 @@ once so the next verified pair exists.
 
 ## Still missing
 
-- One production backup has been run through this (2026-11-25, restore PASS, posture 37 of 37, drift PASS). The MFC half of the same run failed because its connection variable was not set in that environment.
-- The MFC archive is parse-checked only. Backups are not scheduled by anything in this repository.
+- One production backup has been run through this (2026-11-25, restore PASS, posture 37 of 37, drift PASS). The mortgage half is covered in its own section below.
+- Backups are not scheduled by anything in this repository.
 - The Railway restore steps were written from the API names, not run; step 2 of path A says so.
