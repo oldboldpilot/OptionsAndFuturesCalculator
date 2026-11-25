@@ -144,7 +144,11 @@ Being explicit about this is the difference between a plan and a wish. Measured 
 
 ### Fourth segment, not in the original brief but cheapest to serve: developers
 Publishable keys bound to an origin allowlist make this a **drop-in browser widget** business as
-well as a server-side API. A proptech developer who can paste a `pk_live_` key into a page and
+well as a server-side API. Those origin-bound publishable keys are THIS engine's
+(`backend/src/issue_key.cpp` requires at least one origin, and the registry refuses a publishable key
+that has none); mortgagefvcalculator.com's own public API is a different mechanism with secret
+bearer keys and no origin binding, and conflating the two wasted an afternoon once. A proptech
+developer who can paste a `pk_live_` key into a page and
 have a working calculator in ten minutes is a customer acquired with zero conversation. This is
 the segment the documentation strategy in §6 serves, and the one that fills the funnel for the
 other three.
@@ -210,11 +214,31 @@ in §3 item 2 makes this the path of least resistance anyway.
 
 ## 7. Phases, each ending in a measurable gate
 
-**Phase 0 — make it sellable.** Switch enforcement on, with the existing site's keys issued first
-so nothing we own breaks. Then learn who else was calling.
-*Gate*: an unkeyed call returns `401` and a forged key returns `401` on production, verified by the
-same two probes that produced §2's table; mortgagefvcalculator.com still renders every family; and
-the number of distinct callers that appear is written down.
+**This ordering was reversed on 2026-11-24, and the reason is worth keeping.** Phase 0 used to be
+"switch enforcement on". That is the wrong first move, because enforcement on an unknown product
+converts zero anonymous callers into zero paying ones. The asymmetry decides it: the cost of serving
+calls nobody is making is a rounding error on a replica whose memory is paid for either way, and the
+cost of staying unknown is the whole business. Enforcement is now phase 2, after there is something
+to enforce against.
+
+**Phase 0 — become known.** Three moves, none of which needs a gate.
+
+- *Take the assistant out from behind the paywall.* Done 2026-11-24: a registered free account went
+  from 3 replies a month to 240. That also ended an inversion in which signing up cut a visitor's
+  allowance sixtyfold, because a guest got 6 a day. The assistant is the only part of the mortgage
+  site that is not a commodity — fifty-one state guides and a payment calculator are replaceable by
+  a free package in an afternoon — so gating it was gating distribution.
+- *Meter, do not gate.* Record what is called and how often, and refuse nothing. That produces the
+  usage figures a buyer conversation needs and that no amount of planning substitutes for: there may
+  already be callers today and we cannot name one. State the limit honestly rather than papering
+  over it — attribution is only as good as the identity a caller presents, so unkeyed traffic can be
+  counted but not identified.
+- *Promote the embeds that already exist.* `/embed/mortgage`, `/embed/heloc`, `/embed/rental-roi` and
+  `/embed/biweekly` have been live and unpromoted. Each now carries an absolute attribution link
+  governed by the same single condition as white-label suppression, so a Pro customer still gets
+  unbranded output while every other embed on someone else's site is a backlink.
+*Gate*: one embed or caller belonging to somebody we did not create, found without paying for it,
+and a non-zero organic trend on the pages carrying the embeds.
 
 **Phase 1 — make it findable.** A public quickstart that takes a developer from nothing to a
 correct `ComputePayment` response, a developer page on the existing site, and the four documentation
@@ -223,17 +247,24 @@ pages aimed at the search terms in §6 item 2.
 and the pages are in the sitemap and indexable — the same `indexability` check the rest of the
 site already passes.
 
-**Phase 2 — first five customers, by hand.** Concierge onboarding, deliberately. Vary the price
+**Phase 2 — make it sellable.** Switch enforcement on, with the existing site's keys issued first
+so nothing we own breaks. Phase 0's metering is what makes this safe: by now the callers are known,
+so turning the gate on is a decision with evidence behind it rather than a guess about who breaks.
+*Gate*: an unkeyed call returns `401` and a forged key returns `401` on production, verified by the
+same two probes that produced §2's table; mortgagefvcalculator.com still renders every family; and
+the number of distinct callers that appear is written down.
+
+**Phase 3 — first five customers, by hand.** Concierge onboarding, deliberately. Vary the price
 inside the band and record the answers.
 *Gate*: five issued keys belonging to organizations we did not create, with usage, and a written
 record of what each accepted. One named reference closes §3 item 6.
 
-**Phase 3 — remove the manual steps that are now hurting.** Self-serve issuance and billing, built
+**Phase 4 — remove the manual steps that are now hurting.** Self-serve issuance and billing, built
 against what the first five actually needed rather than what seemed likely. An uptime statement and
 a status page, which Enterprise cannot be sold without.
 *Gate*: a customer goes from landing page to a working key and a charge without a human.
 
-The ordering is deliberate: every phase before 3 is cheap, and phase 3 is the expensive one. Doing
+The ordering is deliberate: every phase before 4 is cheap, and phase 4 is the expensive one. Doing
 it first would mean building self-serve billing for a price point nobody has yet agreed to pay.
 
 ---
