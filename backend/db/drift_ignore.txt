@@ -1,0 +1,7 @@
+# Whole-line extended regexes against schema_snapshot.sql output, removed from
+# BOTH sides before the diff. One entry per accepted difference, WITH its reason
+# after two spaces and a hash. An entry that is no longer needed must be deleted:
+# an ignore list only grows silently otherwise.
+#
+# (none yet. Add entries only after the live capture shows a difference that is
+#  deliberately not this project's, e.g. a Railway-managed role.)
