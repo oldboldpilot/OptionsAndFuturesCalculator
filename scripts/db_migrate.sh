@@ -232,7 +232,7 @@ cmd_adopt() {
     ensure_ledger || return 2
     if [[ "${SKIP_DRIFT_GATE:-0}" != 1 ]]; then
         echo "adopt records that the database ALREADY IS at $v. Proving it first (drift gate)..."
-        DB_TARGET_LIVE="$TARGET" "$(dirname "${BASH_SOURCE[0]}")/check_schema_drift.sh" --live || { echo "refusing to adopt: the live schema is not what $v describes"; return 1; }
+        DB_TARGET_LIVE="$TARGET" DRIFT_UPTO="$v" "$(dirname "${BASH_SOURCE[0]}")/check_schema_drift.sh" --live || { echo "refusing to adopt: the live schema is not what $v describes"; return 1; }
     fi
     pg_exec "$TARGET" -v ON_ERROR_STOP=1 -c \
         "INSERT INTO ofc_meta.schema_migrations(version, name, checksum, kind, applied_by)

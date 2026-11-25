@@ -76,6 +76,14 @@ cmd_live() {
         [[ -z "$upto" ]] && upto=""
         if ! DB_TARGET="$live" "$HERE/db_migrate.sh" verify; then rc=1; fi
     fi
+    # DRIFT_UPTO bounds the expected schema explicitly, overriding the ledger head.
+    # `adopt NNNN` sets it, because adopt asserts "live ALREADY IS at NNNN": bounding
+    # by the ledger head instead asks whether live is at the PREVIOUS migration, which
+    # is red precisely because the one being adopted is not recorded yet. That made
+    # adopt work exactly once per database until it was used on a second migration.
+    if [[ -n "${DRIFT_UPTO:-}" ]]; then
+        upto="$DRIFT_UPTO"; echo "bound to migration: $upto (explicit, not the ledger head)"
+    fi
     ensure_scratch
     local ver; ver="$(pg_exec "$live" -At -c 'show server_version' 2>/dev/null)"
     echo "live server: PostgreSQL ${ver:-unknown}; scratch server: $(podman exec "$CONTAINER" psql -U postgres -Atc 'show server_version')"
