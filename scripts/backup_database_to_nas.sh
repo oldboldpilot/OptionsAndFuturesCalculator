@@ -47,8 +47,8 @@
 #
 #   OFC_DATABASE_URL    Railway Postgres behind optionsandfuturescalculator.com
 #   MFC_DATABASE_URL    the mortgage database behind mortgagefvcalculator.com: Railway service
-#                       mfv-postgres, database mortgagefv, private network only (reach it through
-#                       an SSH tunnel; see DATABASE_MIGRATIONS.md, "The mortgage database")
+#                       mfv-postgres, database mortgagefv, reached through its public TCP proxy
+#                       (see DATABASE_MIGRATIONS.md, "The mortgage database")
 #
 # Either may be absent. A missing or unusable URL is a FAIL with a stated reason and a
 # non-zero exit, never a silent success and never a fallback to the local socket -- a backup script that reports OK
@@ -303,19 +303,18 @@ dump_mfc() {
 }
 
 say "=== database backup $STAMP -> $NAS_ROOT ==="
-# BACKUP_TARGETS narrows the run (default: both). The unattended wrapper
-# scripts/backup_production_db.sh sets "ofc", and the reason is narrower than it
-# first looks. The mortgage database is NOT an external Supabase project: it is
-# the Railway service mfv-postgres, database mortgagefv, PostgreSQL 18.7, proved
-# on 2026-11-25 by mfv-postgrest and mfv-auth both connecting to it while the
-# supabase-auth service points at the OFC database instead. It IS reachable and
-# IS restore-verified -- see "The mortgage database" in
+# BACKUP_TARGETS narrows the run, and the default is BOTH, which is also what the
+# unattended wrapper now runs. The mortgage database is NOT an external Supabase
+# project: it is the Railway service mfv-postgres, database mortgagefv,
+# PostgreSQL 18.7, proved on 2026-11-25 by mfv-postgrest and mfv-auth both
+# connecting to it while the supabase-auth service points at the OFC database
+# instead. It is reachable and restore-verified -- see "The mortgage database" in
 # docs/technical/DATABASE_MIGRATIONS.md.
-# What it is not is reachable through the SAME tunnel: it is a different service,
-# so it needs a second tunnel of its own, which the wrapper does not yet open.
-# Until the wrapper opens one, scheduling the mortgage half would make every run
-# exit 1 on an always-SKIPPED target, which is why the wrapper selects "ofc"
-# rather than because the database cannot be backed up.
+# It used to sit outside the schedule because it is a DIFFERENT service and the
+# wrapper opened one SSH tunnel to one service. That reason is gone: both
+# databases now have a public TCP proxy, so both are reached by a plain
+# connection string and both are scheduled. Narrowing this is now a choice for a
+# one-off run, not a limitation.
 case " ${BACKUP_TARGETS:-ofc mfc} " in *" ofc "*)
     dump_ofc optionsandfuturescalculator "${OFC_DATABASE_URL:-}" OFC_DATABASE_URL;; esac
 case " ${BACKUP_TARGETS:-ofc mfc} " in *" mfc "*)

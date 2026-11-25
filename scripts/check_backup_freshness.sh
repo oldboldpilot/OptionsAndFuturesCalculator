@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Exit non-zero unless the production database has a VERIFIED backup younger
+# Exit non-zero unless EVERY production database has a VERIFIED backup younger
 # than N days, and the last attempt did not fail.
 #
 # @author Olumuyiwa Oluwasanmi
@@ -34,7 +34,16 @@ set -uo pipefail
 MAX_DAYS="${OFC_BACKUP_MAX_AGE_DAYS:-2}"
 NAS_ROOT="${NAS_ROOT:-/home/muyiwa/PrimaryNAS/DataFolder/PycharmProjects/db-backups}"
 STATE_DIR="${OFC_BACKUP_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/ofc-backup}"
-NAME=optionsandfuturescalculator
+# EVERY production database, not just the product one. This was a single name
+# until 2026-11-25, so the mortgage database could have had no verified backup
+# for a month while this script exited 0 -- a monitor that covers half the
+# system reports health for the half it looks at and says nothing about the rest.
+# `-`, not `:-`: an UNSET variable takes the default, but an explicitly EMPTY
+# one stays empty so the "checked nothing" guard below can fire. With `:-` that
+# guard was unreachable -- an empty list silently became the full default, which
+# is the one input that could make this script report health having looked at
+# no database at all.
+NAMES="${OFC_BACKUP_NAMES-optionsandfuturescalculator mortgagefvcalculator}"
 ALERT=0
 QUIET=0
 while (( $# )); do
@@ -47,16 +56,22 @@ while (( $# )); do
 done
 [[ "$MAX_DAYS" =~ ^[0-9]+$ && "$MAX_DAYS" -ge 1 ]] || { echo "max age must be a whole number of days >= 1" >&2; exit 2; }
 
-D="$NAS_ROOT/$NAME"
 PROBLEMS=()
 INFO=()
 NOW="$(date -u +%s)"
+CHECKED=0
 
-# --- evidence on the NAS
-newest=""
-if [[ ! -d "$D" ]]; then
-    PROBLEMS+=("no backup directory at $D: the NAS is unreachable or no backup has ever run")
-else
+# --- evidence on the NAS, for EACH database in turn
+# Every message carries its database name, because "STALE" without one sends
+# whoever reads it to look at the database that is fine.
+for NAME in $NAMES; do
+    D="$NAS_ROOT/$NAME"
+    CHECKED=$(( CHECKED + 1 ))
+    newest=""
+    if [[ ! -d "$D" ]]; then
+        PROBLEMS+=("$NAME: no backup directory at $D: the NAS is unreachable or no backup has ever run")
+        continue
+    fi
     # Names sort by stamp, so the last is the newest. Anything under failed/ is
     # not matched. pre-migration dumps carry no roles/verify pair and never match.
     while IFS= read -r f; do
@@ -64,30 +79,34 @@ else
         if [[ -s "$f" && -s "$D/$b.roles.sql" ]] && grep -q '^VERDICT: PASS' "$D/$b.verify.log" 2>/dev/null; then
             newest="$b"
         else
-            INFO+=("ignored $b: not a complete verified pair")
+            INFO+=("$NAME: ignored $b: not a complete verified pair")
         fi
     done < <(ls -1 "$D/$NAME"-[0-9]*T[0-9]*Z.dump 2>/dev/null | sort)
     if [[ -z "$newest" ]]; then
-        PROBLEMS+=("no verified backup exists in $D (a verified pair is dump + roles + verify log with VERDICT: PASS)")
-    else
-        s="${newest##*-}"                                 # 20261125T180159Z
-        iso="${s:0:4}-${s:4:2}-${s:6:2}T${s:9:2}:${s:11:2}:${s:13:2}Z"
-        if ts="$(date -u -d "$iso" +%s 2>/dev/null)"; then
-            age=$(( NOW - ts ))
-            days=$(( age / 86400 ))
-            hours=$(( (age % 86400) / 3600 ))
-            if (( age < -300 )); then
-                PROBLEMS+=("the newest verified backup is stamped in the future ($iso); the clock or the file is wrong")
-            elif (( age > MAX_DAYS * 86400 )); then
-                PROBLEMS+=("STALE: the newest verified backup is $days days $hours h old ($iso), limit $MAX_DAYS days")
-            else
-                INFO+=("newest verified backup: $iso (${days}d ${hours}h old, limit ${MAX_DAYS}d)")
-            fi
-        else
-            PROBLEMS+=("cannot read the stamp of $newest")
-        fi
+        PROBLEMS+=("$NAME: no verified backup exists in $D (a verified pair is dump + roles + verify log with VERDICT: PASS)")
+        continue
     fi
-fi
+    s="${newest##*-}"                                 # 20261125T180159Z
+    iso="${s:0:4}-${s:4:2}-${s:6:2}T${s:9:2}:${s:11:2}:${s:13:2}Z"
+    if ! ts="$(date -u -d "$iso" +%s 2>/dev/null)"; then
+        PROBLEMS+=("$NAME: cannot read the stamp of $newest")
+        continue
+    fi
+    age=$(( NOW - ts ))
+    days=$(( age / 86400 ))
+    hours=$(( (age % 86400) / 3600 ))
+    if (( age < -300 )); then
+        PROBLEMS+=("$NAME: the newest verified backup is stamped in the future ($iso); the clock or the file is wrong")
+    elif (( age > MAX_DAYS * 86400 )); then
+        PROBLEMS+=("$NAME: STALE: the newest verified backup is $days days $hours h old ($iso), limit $MAX_DAYS days")
+    else
+        INFO+=("$NAME: newest verified backup: $iso (${days}d ${hours}h old, limit ${MAX_DAYS}d)")
+    fi
+done
+
+# An empty NAMES would check nothing and exit 0, which is the one way this
+# script could report health having looked at no database at all.
+(( CHECKED > 0 )) || PROBLEMS+=("no databases were checked: OFC_BACKUP_NAMES is empty")
 
 # --- the wrapper's record of the last attempt
 S="$STATE_DIR/status"
@@ -113,7 +132,7 @@ fi
 
 # --- report
 if (( ${#PROBLEMS[@]} )); then
-    echo "BACKUP PROBLEM (production database $NAME):"
+    echo "BACKUP PROBLEM (production databases: $NAMES):"
     for p in "${PROBLEMS[@]}"; do echo "  - $p"; done
     (( QUIET )) || for i in "${INFO[@]}"; do echo "  . $i"; done
     if (( ALERT )); then
@@ -132,7 +151,7 @@ This file is removed by the next healthy check."
     exit 1
 fi
 
-(( QUIET )) || { echo "backup healthy (production database $NAME):"; for i in "${INFO[@]}"; do echo "  . $i"; done; }
+(( QUIET )) || { echo "backup healthy (production databases: $NAMES):"; for i in "${INFO[@]}"; do echo "  . $i"; done; }
 if (( ALERT )); then
     rm -f "$STATE_DIR/ALERT-BACKUP-STALE.txt" "$NAS_ROOT/ALERT-BACKUP-STALE.txt" 2>/dev/null
 fi

@@ -1,5 +1,5 @@
 [Unit]
-Description=Daily verified backup of the OFC production database
+Description=Daily verified backup of both production databases
 
 [Timer]
 # 03:07 UTC, ahead of Railway's volume backups (04:19 product, 04:36 mortgage), so

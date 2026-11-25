@@ -1,5 +1,5 @@
 [Unit]
-Description=Every six hours, check the OFC production backup is fresh
+Description=Every six hours, check both production backups are fresh
 
 [Timer]
 # Independent of ofc-backup.timer on purpose: if that timer is disabled, removed

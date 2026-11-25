@@ -1,6 +1,6 @@
 # Fails (and alerts) when the production backup is stale, absent or last failed.
 [Unit]
-Description=Check that the OFC production backup is fresh and verified
+Description=Check that both production backups are fresh and verified
 
 [Service]
 Type=oneshot

@@ -1,7 +1,7 @@
-# Verified backup of the production database. Installed per docs/technical/DATABASE_MIGRATIONS.md.
+# Verified backup of BOTH production databases. Installed per docs/technical/DATABASE_MIGRATIONS.md.
 # %h is the home directory; the repository is expected at %h/Development/OptionsAndFuturesCalculator.
 [Unit]
-Description=Verified backup of the OFC production database
+Description=Verified backup of the OFC and mortgage production databases
 Documentation=file://%h/Development/OptionsAndFuturesCalculator/docs/technical/DATABASE_MIGRATIONS.md
 # Any failure runs the freshness check in alert mode, which raises the alarm.
 OnFailure=ofc-backup-freshness.service
@@ -9,11 +9,17 @@ OnFailure=ofc-backup-freshness.service
 [Service]
 Type=oneshot
 WorkingDirectory=%h/Development/OptionsAndFuturesCalculator
-# railway lives in ~/.railway/bin, which is on no systemd PATH.
-Environment=PATH=%h/.railway/bin:/usr/local/bin:/usr/bin:/bin
+# The wrapper needs podman and python3 only; it makes no Railway call, so
+# ~/.railway/bin is deliberately absent -- a backup that cannot run without the
+# Railway CLI on PATH is a backup that depends on a credential to exist.
+# /usr/bin/python3 is 3.14; the linuxbrew python3 that shadows it in a login
+# shell is NOT on this PATH, and that is intentional: the unit should run the
+# interpreter the system guarantees.
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
 ExecStart=%h/Development/OptionsAndFuturesCalculator/scripts/backup_production_db.sh
 # Backstop for the wrapper's own timeout; every process of the run is in this
-# unit's cgroup, so stopping or timing out the unit also closes the tunnel.
+# unit's cgroup, so stopping or timing out the unit reaps the whole tree,
+# including the scratch containers the restore rehearsal starts.
 TimeoutStartSec=2h
 KillMode=control-group
 Nice=10
