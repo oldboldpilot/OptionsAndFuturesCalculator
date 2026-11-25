@@ -78,10 +78,16 @@ dump_one() {
     mkdir -p "$dir"
     say "dump  $name -> $(basename "$out")"
     # --format=custom so pg_restore can read selectively and verify the TOC.
-    # --no-owner/--no-privileges so the dump restores into a database whose
-    # roles differ, which a disaster restore's will.
+    # --no-owner so the dump restores into a database whose roles differ, which
+    # a disaster restore's will. NOT --no-privileges: it drops every GRANT and
+    # column grant, so a restored database has the right rows and RLS policies
+    # and no role may touch anything. scripts/verify_restore.sh found this on
+    # 2026-11-25 (the drift gate went red on the grants of a healthy restore).
+    # The cost is that a restore needs its roles to exist first (pg_dumpall
+    # --roles-only, loaded before pg_restore), which it needed for the policies
+    # anyway.
     if ! PGCONNECT_TIMEOUT=15 pg_dump --dbname="$url" \
-            --format=custom --compress=9 --no-owner --no-privileges \
+            --format=custom --compress=9 --no-owner \
             --file="$out" 2> >(redact >&2); then
         say "FAIL  $name -- pg_dump refused; nothing written"
         rm -f "$out"; rc=1; return

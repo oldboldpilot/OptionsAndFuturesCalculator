@@ -49,7 +49,10 @@ pg_scalar() { local t="$1"; shift; pg_exec "$t" -At -v ON_ERROR_STOP=1 -c "$1"; 
 # through `podman exec`, so there is no password to leak.
 scratch_start() {
     local name="ofc-scratch-$$-$RANDOM" i
+    # SCRATCH_PGDATA: the hosted image's wrapper refuses to start unless PGDATA is under
+    # its volume path (verify_restore.sh sets it); the stock image ignores the difference.
     podman run -d --rm --name "$name" -e POSTGRES_HOST_AUTH_METHOD=trust \
+        ${SCRATCH_PGDATA:+-e "PGDATA=$SCRATCH_PGDATA"} \
         "${SCRATCH_IMAGE:-$PG_IMAGE}" >/dev/null || return 1
     for i in $(seq 1 60); do
         # the entrypoint starts a temporary server, stops it, then starts the

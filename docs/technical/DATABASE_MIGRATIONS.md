@@ -86,3 +86,49 @@ files, so it is PROVISIONAL: it is the schema as designed, not as captured. Repl
 
 Not done in this session: the hosted OFC database has no TCP proxy and `railway ssh` was refused, and the credential
 loader refuses a shell or psql as its child, so step 1 could not be run here.
+
+## Restore rehearsal
+
+`pg_restore --list`, which `scripts/backup_database_to_nas.sh` runs on every dump, reads the archive's table of
+contents. It proves the archive PARSES. scripts/verify_restore.sh (ARCHIVE, optionally --roles FILE) proves it
+RESTORES: it starts a throwaway PostgreSQL 18.7 container (the production image), runs pg_restore into it, then checks
+the restored copy with the two existing gates, `backend/tests/test_database_posture.sql` and the `--live` mode of
+`scripts/check_schema_drift.sh` (pointed at the restored copy through its own `DB_TARGET_LIVE` mechanism). The verdict
+is PASS only when all three steps pass; exit 0 PASS, 1 FAIL, 2 could not run. The container is removed on every exit
+path. It reuses `scratch_start` and `pg_exec` from `scripts/db_common.sh`; the only change there is an optional
+`SCRATCH_PGDATA`, because the hosted image's wrapper refuses to start otherwise.
+
+What it proves: pg_restore completes without error; the restored copy has RLS enabled and forced with its policies,
+no BYPASSRLS on application roles, armed guards, and a schema (columns, constraints, indexes, grants, policies, roles'
+attributes, guard rows) equal to what the recorded migrations build.
+
+What it does NOT prove:
+
+- Row contents. Tables are checked for shape, not for the right rows or the right count. The one data check is the
+  guard list and the GoTrue token columns, inside the posture file.
+- The four TLS checks of the posture file. They assert the SERVER's settings, which no archive carries. The hosted
+  image ships ssl_ciphers without the exclusions the file expects, so the script sets them on the rehearsal server
+  first; those checks are not evidence about the backup.
+- That production's roles can be rebuilt. Roles are cluster-level and live in no archive. The --roles file must come
+  from pg_dumpall --roles-only on the source cluster, and nothing in the backup script writes one yet. Without it the
+  restore fails on every policy and grant naming ofc_app, which is the honest result.
+- That production is a restorable size and time. The rehearsal restores into a small scratch database.
+- Anything about a PostgreSQL minor version other than 18.7, or extensions the image does not carry.
+
+Running it on a real backup (owner step): take a dump from the NAS directory the backup script writes, and a roles
+file from the same cluster, then run scripts/verify_restore.sh with the dump and --roles. Neither needs
+a production connection from this script; the script never connects to one.
+
+STATUS: this has only ever been run on scratch data, never on a real production backup. Measured 2026-11-25 on a
+database built from `backend/db/migrations/0001_baseline.sql`, dumped as the backup script dumps it:
+
+| Archive | restore | posture | drift | would `pg_restore --list` catch it |
+|---|---|---|---|---|
+| intact, roles supplied | PASS | PASS (28 of 28) | PASS | n/a |
+| last 100 bytes cut off | FAIL | FAIL | FAIL | NO: it passes up to a cut of about 500 bytes here and fails at 1000 |
+| one RLS policy dropped before the dump | PASS | FAIL | FAIL | NO: it lists six policies instead of seven and exits 0 |
+| roles not supplied | FAIL | FAIL | FAIL | NO: it never looks at the cluster |
+
+Finding that this rehearsal made: the backup script used `--no-privileges`, which drops every GRANT. A healthy restore
+then had the right rows and policies and no role could read anything, and the drift gate went red on the grants. The
+flag is removed from the backup script (`--no-owner` stays). A dump written before that change fails step 3.
