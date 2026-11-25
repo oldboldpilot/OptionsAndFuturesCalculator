@@ -2,7 +2,30 @@
 
 @author Olumuyiwa Oluwasanmi
 
-Plan only. Nothing here has been executed. The cutover needs the owner's approval.
+**STATUS: the minor upgrade described here was EXECUTED on 2026-11-25 and verified.** Both services now
+run `ghcr.io/railwayapp-templates/postgres-ssl:18.7` -- pinned to the explicit minor rather than the
+mutable `18` tag -- and both run image digest
+`sha256:0abac5c0e29ac4fb1633aa644b4f3beaef29a05b4dc05f93190b5a7fbb0e7089`, which is what the registry
+resolves `18.7` to.
+
+THAT DIGEST COMPARISON IS THE EVIDENCE, and the status was not. The redeploy of `mfv-postgres`
+reported SUCCESS eleven seconds in -- far too fast to have pulled an image -- and this platform is
+already on record reporting SUCCESS while a container crash-loops. A changed digest shows a new image
+ran; resolving the `18.7` tag at the registry is what makes that digest mean "18.7" rather than merely
+"different". Checked afterwards: all fourteen services SUCCESS, the engine's `/healthz` 200,
+`ComputePayment` returning its exact thirty-eight-place value, and both front ends 200.
+
+PINNING THE EXPLICIT MINOR IS THE DURABLE PART. `18` and `18.7` resolve to the same digest today, so
+the pin changed nothing about which image runs now -- it changes which image runs NEXT. Before this,
+both services tracked a mutable tag, and they had drifted apart on it: they shared `18` while running
+DIFFERENT digests, because each resolved the tag on its own deploy date seventeen days apart. A tag is
+not a version.
+
+The sections below are the plan AS WRITTEN BEFORE execution, including the 2026-11-24 measurements
+that were true when taken -- `mfv-postgres` really was 18.6 then. They are left unaltered, because a
+dated measurement rewritten to match today stops being a measurement. The 19 question is a separate
+decision with its own document, `docs/technical/POSTGRES_19_MIGRATION_PLAN.md`, whose recommendation
+is to WAIT.
 
 ## Measured state (2026-11-24)
 
@@ -43,7 +66,7 @@ advisory table; only CVE-2026-120154 was also opened on its own page. Open each 
 Most need an authenticated SQL session, and the engine's role is the only application login, so exposure is lower than
 the scores. The RLS one is the exception that bears on the product's own security posture.
 
-## Plan: 18.6 to 18.7 (recommended now)
+## Plan: 18.6 to 18.7 (EXECUTED 2026-11-25 -- see the status note above)
 
 1. Backup. `scripts/backup_database_to_nas.sh` (custom-format dump, `pg_restore --list` read-back) for both databases,
    plus a Railway Backup from the dashboard.
