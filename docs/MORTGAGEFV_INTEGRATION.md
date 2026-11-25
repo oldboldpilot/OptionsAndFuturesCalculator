@@ -210,7 +210,7 @@ picking one: the compounding frequency changes the answer materially, so no
 default is invented.
 
 **Sign convention:** `ComputePayment` returns a **negative** value —
-`-1798.651575458257198999` for $300,000 at 6% over 30 years. That is the Excel
+`-1798.65157545825718377438373105342774511169` for $300,000 at 6% over 30 years. That is the Excel
 cash-flow convention (money leaving the borrower), not a bug. Negate it for display.
 
 ### 4.2 Amortization
@@ -447,7 +447,7 @@ const total   = schedule.reduce((a, r) => a + parseFloat(r.getInterestPaid()), 0
 // RIGHT — exact end to end; round ONLY at the display edge.
 import Decimal from 'decimal.js';
 
-const payment = new Decimal(res.getValue());       // "-1798.651575458257198999", exact
+const payment = new Decimal(res.getValue());       // "-1798.65157545825718377438373105342774511169", exact
 const annual  = payment.times(12);                 // still exact — no float touched it
 const total   = schedule.reduce(
   (a, r) => a.plus(new Decimal(r.getInterestPaid())), new Decimal(0));
@@ -540,9 +540,13 @@ input that is well-formed and wrong. The defence is in your code:
 - Keep the annual rate as the single value in your app state, and convert at the
   call boundary — never store both and hope they stay in sync.
 - Name the variable for its period (`monthlyRate`, not `rate`).
-- Assert against a known answer in a test: $300,000 at 6%/30yr must return
-  `-1798.651575458257198999`. If a refactor swaps the convention, that assertion
-  is the only thing standing between it and production.
+- Assert against a known answer in a test: $300,000 at 6%/30yr must return the
+  closed-form annuity payment as a **negative** number. Compare the decimal
+  VALUE at a tolerance, never the string -- pinning the digit count is a
+  documented mistake, and this engine's money width already moved from eighteen
+  places to thirty-eight once. The sign is what the assertion is really
+  guarding: if a refactor swaps the convention, it is the only thing standing
+  between that and production.
 
 Field-by-field: the "which fields take which" column is in §4. `payments_per_year`
 is `12` monthly, `26` bi-weekly; the same convention appears as `periods_per_year`
@@ -689,10 +693,11 @@ Adapted from [`docs/API_USAGE.md`](API_USAGE.md) §8 for this site:
    `/readyz` and direct-responds `200 ok` without invoking the gRPC engine. Any
    other `GET` or `HEAD` request receives an immediate 404 `not found`.
 2. Call `ComputePayment` with `rate="0.005"`, `periods=360`,
-   `present_value="300000"`. Assert the value is exactly
-   `-1798.651575458257198999` — matching the closed-form annuity payment, not
-   merely that *a* response arrived. This assertion is also your regression guard
-   against the §6 per-period/annual mix-up.
+   `present_value="300000"`. Assert the value equals the closed-form annuity
+   payment numerically and is negative -- at a tolerance, not against a string
+   literal, because the engine's decimal width has changed once already.
+   Asserting the NUMBER rather than merely that *a* response arrived is also your
+   regression guard against the §6 per-period/annual mix-up.
 3. Send `{"rate":"12x3","periods":360,"presentValue":"300000"}`. Assert
    `grpc-status: 3` with `rate is not a decimal number: "12x3"`, and that your
    client **surfaces** it rather than substituting a default.

@@ -226,7 +226,7 @@ decimal type, compute there, and convert to a display string only at the very
 edge.
 
 **Sign convention:** payment RPCs return a **negative** value — it is a cash
-outflow. `ComputePayment(300000, 6%, 30y)` returns `-1798.651575458257198999`.
+outflow. `ComputePayment` at $300,000, 6% nominal annual over 360 months returns `-1798.65157545825718377438373105342774511169`.
 That is the full-precision decimal string, and it is exactly why the field is not
 a `double`.
 

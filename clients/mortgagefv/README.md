@@ -98,7 +98,7 @@ client.rpcCall(
   computePaymentDescriptor,
   (err, res) => {
     if (err) { console.error(err.code, err.message); return; }
-    console.log(res.getValue()); // "-1798.651575458257198999"
+    console.log(res.getValue()); // "-1798.65157545825718377438373105342774511169"
   }
 );
 ```
@@ -109,12 +109,15 @@ Run it for real:
 cd clients/mortgagefv
 npm install
 node example/compute-payment.js
-# ComputePayment -> -1798.651575458257198999
+# ComputePayment -> -1798.65157545825718377438373105342774511169
 # (negative = cash outflow; this is correct, not a bug)
 ```
 
-That call hits the live production endpoint. It was also run during this
-work unit and returned exactly that value (see "Verified live" below).
+That call hits the live production endpoint. The figure above is what it
+returns today. "Verified live" below records the same call on 2026-08-05 and
+shows eighteen decimal places, because the engine's money width moved to
+thirty-eight on 2026-09-23 -- a record from before that date differs in the
+final digits and is not a truncation of the current answer.
 
 **TypeScript / normal app code** should use the generated client class
 directly instead of hand-building a `MethodDescriptor` (the example above
@@ -250,7 +253,7 @@ convert to a display string at the very last step:
 import Decimal from 'decimal.js';
 
 const res = await client.computePayment(req, {});
-const payment = new Decimal(res.getValue());   // "-1798.651575458257198999", exact
+const payment = new Decimal(res.getValue());   // "-1798.65157545825718377438373105342774511169", exact
 const annual  = payment.times(12);              // still exact -- no float touched it
 const display = payment.negated().toFixed(2);   // "1798.65" -- round ONLY here, for display
 ```
@@ -283,7 +286,7 @@ Rules of thumb:
 
 ### Sign convention
 
-**`ComputePayment` returns a NEGATIVE value.** `-1798.651575458257198999` for
+**`ComputePayment` returns a NEGATIVE value.** `-1798.65157545825718377438373105342774511169` for
 a $300,000 loan at 6%/30yr is correct, not a bug -- it follows the Excel
 cash-flow convention sensen implements throughout (payment is money leaving
 the borrower). Flip the sign (`.negated()` in `decimal.js`, or a leading `-`

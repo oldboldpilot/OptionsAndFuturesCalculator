@@ -115,7 +115,7 @@ client.computePayment(req, {}, (err, res) => {
     console.error(err.code, err.message);   // grpc-status is exposed via CORS
     return;
   }
-  console.log(res.getValue());  // "-1798.651575458257198999"
+  console.log(res.getValue());  // "-1798.65157545825718377438373105342774511169"
 });
 ```
 

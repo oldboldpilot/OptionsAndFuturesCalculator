@@ -113,7 +113,7 @@ curl https://api.optionsandfuturescalculator.com/sensen.finance.Finance/ComputeP
 ```
 
 ```json
-{"value": "-1798.651575458257198999"}
+{"value": "-1798.65157545825718377438373105342774511169"}
 ```
 
 Errors are JSON, with the HTTP status you would expect:

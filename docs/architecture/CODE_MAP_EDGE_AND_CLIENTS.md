@@ -162,7 +162,7 @@ The billing worker is a Cloudflare Worker handling Stripe Checkout session creat
   - Malformed decimal inputs: Evaluated strictly; non-numeric values (e.g. `"12x3"`) fail with `INVALID_ARGUMENT` (code 3): `rate is not a decimal number: "12x3"` (`clients/mortgagefv/README.md:275, 427-428`).
   - Required fields: Omission fails with `INVALID_ARGUMENT` (code 3) naming the missing field (e.g. `rate is required and was not supplied`) (`clients/mortgagefv/README.md:295, 356-360`).
 - **Sign Convention**:
-  - `ComputePayment` returns a NEGATIVE decimal string (e.g. `-1798.651575458257198999` for $300,000, 6% nominal annual, 360 months) representing cash outflow (`clients/mortgagefv/README.md:112-114, 283-290`; `clients/mortgagefv/example/compute-payment.js:69-70`).
+  - `ComputePayment` returns a NEGATIVE decimal string (e.g. `-1798.65157545825718377438373105342774511169` for $300,000, 6% nominal annual, 360 months) representing cash outflow (`clients/mortgagefv/README.md` sections "Minimal working example" and "Sign convention"; `clients/mortgagefv/example/compute-payment.js:69-70`).
 - **Contract Drift Verification**:
   - Tested in CI by `backend/tests/test_vendored_proto_drift.cpp:109-123`, asserting byte-identical equivalence below the provenance header against `backend/proto/finance.proto` and verifying presence of `ComputeRentVsBuyBatch`.
 

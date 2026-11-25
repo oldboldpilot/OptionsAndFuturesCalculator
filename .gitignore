@@ -20,6 +20,10 @@ build-*/
 frontend/node_modules/
 frontend/.next/
 .playwright-mcp/
+# Agent skills installed by tooling, not source. Their code names are
+# another product's, so check_docs_claims.py reports every one as MISSING
+# and the docs gate never returns 0 while they are visible to it.
+.agents/
 current-ui.png
 
 # Worker dependencies and local wrangler state
