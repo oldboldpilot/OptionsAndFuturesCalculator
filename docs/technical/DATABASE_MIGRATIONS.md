@@ -109,15 +109,14 @@ What it does NOT prove:
 - The four TLS checks of the posture file. They assert the SERVER's settings, which no archive carries. The hosted
   image ships ssl_ciphers without the exclusions the file expects, so the script sets them on the rehearsal server
   first; those checks are not evidence about the backup.
-- That production's roles can be rebuilt. Roles are cluster-level and live in no archive. The --roles file must come
-  from pg_dumpall --roles-only on the source cluster, and nothing in the backup script writes one yet. Without it the
-  restore fails on every policy and grant naming ofc_app, which is the honest result.
+- That production's roles can be rebuilt EXACTLY. `scripts/backup_database_to_nas.sh` now writes the roles file
+  (see Backups below) and feeds it to this script, so the restore is rehearsed with the roles it will really need.
+  What is not rehearsed is a target that forbids creating superusers or has a different `postgres` role.
 - That production is a restorable size and time. The rehearsal restores into a small scratch database.
 - Anything about a PostgreSQL minor version other than 18.7, or extensions the image does not carry.
 
-Running it on a real backup (owner step): take a dump from the NAS directory the backup script writes, and a roles
-file from the same cluster, then run scripts/verify_restore.sh with the dump and --roles. Neither needs
-a production connection from this script; the script never connects to one.
+The backup script runs this on every OFC backup (next section). To run it by hand on a stored pair, pass the dump and
+its sibling roles file with --roles; neither needs a production connection and this script never makes one.
 
 STATUS: this has only ever been run on scratch data, never on a real production backup. Measured 2026-11-25 on a
 database built from `backend/db/migrations/0001_baseline.sql`, dumped as the backup script dumps it:
@@ -132,3 +131,103 @@ database built from `backend/db/migrations/0001_baseline.sql`, dumped as the bac
 Finding that this rehearsal made: the backup script used `--no-privileges`, which drops every GRANT. A healthy restore
 then had the right rows and policies and no role could read anything, and the drift gate went red on the grants. The
 flag is removed from the backup script (`--no-owner` stays). A dump written before that change fails step 3.
+
+## Backups: what the script does, and why
+
+`scripts/backup_database_to_nas.sh` writes, for the OFC database, a PAIR with one stamp:
+the archive (name-STAMP.dump), its roles file (name-STAMP.roles.sql, from `pg_dumpall --roles-only`) and the
+verification log (name-STAMP.verify.log). Roles are cluster-level and live in no archive, so a dump alone cannot be
+restored into a fresh instance: `ofc_app` and `ofc_refresh` would not exist and every policy and grant naming them fails.
+
+Decisions, with the reasons:
+
+- Roles file: WHOLE CLUSTER, not filtered. Filtering to the roles this database uses means parsing generated SQL or
+  walking pg_auth_members, ACLs, default privileges and policies by hand; a role missed there is a restore that fails
+  on the day it is needed, and the file is under 1 KB. The cost of whole is that it names superusers and carries
+  their attributes; that is a list of names and flags, not a secret. The secret part is the password hash, and the
+  file is written with `--no-role-passwords`, so no hash exists to reach a log or the NAS (the script also fails the
+  backup if one appears, and its redaction removes SCRAM and md5 strings from anything it prints). Set
+  KEEP_ROLE_PASSWORDS=1 to keep them; then the file is a credential and must be handled like one. After a restore from
+  a password-less file, set each login role's password again from the service's own variables. The script requires
+  `ofc_app` and `ofc_refresh` to be present in the file and fails the backup otherwise. `verify_restore.sh` drops the
+  file's `postgres` lines, because the scratch server already has that role.
+- Verification: EVERY backup, inline. Measured 2026-11-25 on scratch data with the production image (18.7): the
+  small schema backs up and verifies in 16 to 19 seconds end to end. A 2.5 GB database (larger than the production
+  volume's 1.1 GB, with an index) dumped in 36 seconds and restored in 19 seconds. So a full verify costs well under
+  a minute plus a fixed 15 seconds, against a script that runs unattended where no person looks at a log. A weaker
+  periodic check would leave days in which a "successful" backup is unproven, which is the defect this fixes. If the
+  restore time ever grows past what a daily run can afford, shorten the cadence of verification, not its rigor, and
+  say so here.
+- Order: the new pair is written to a staging directory and moved beside the good ones only after it verifies. A
+  failure exits 1, prints which step failed and what to do, parks the failed files under failed/ with the suffix
+  .failed, and touches nothing else. Pruning (KEEP_DAYS, default 30) runs only after a verified pair lands and never
+  removes the newest KEEP_MIN (default 3) pairs, so a run of failures cannot age out the last good copy.
+- The client runs in a container of the production image, because pg_dump refuses a server newer than itself and the
+  host's client was 14 against production 18.7 (set OFC_PG_CLIENT_IMAGE=host to use host tools).
+- The MFC (Supabase) archive is NOT restore-verified and has no roles file: verify_restore.sh asserts the OFC schema,
+  and a pooler connection cannot dump the cluster's roles. The summary line says "NOT restore-verified" for it.
+
+Proof (2026-11-25, scratch container, nothing hosted): a green run produced the pair and verify_restore.sh consumed
+the roles file (restore, posture 28 of 28, drift all PASS) and exit 0. With one RLS policy dropped in the source,
+the same command exited 1, printed the drift failure, reported "BACKUP FAILED", left the previous pair untouched and
+parked the new one under failed/, with the most aggressive prune settings (KEEP_DAYS=0, KEEP_MIN=0) set.
+
+## Disaster recovery runbook
+
+Decision rule: if the Postgres major version is staying the same and you want the whole cluster back as it was,
+use the Railway volume backup (path A); if the volume is gone, the version is changing, or the volume backups are
+suspect, rebuild from the logical dump and its roles file (path B).
+
+Before either: stop writers (scale the engine and GoTrue to zero or pause deploys) so nothing writes to a database
+that is about to be replaced; note the time; do not run any deploy script until the end.
+
+### Path A: Railway volume backup restore
+
+What it is: a snapshot of the whole database volume, so it brings back data, roles, grants, RLS and GoTrue's tables
+exactly as of the backup. It cannot cross a major PostgreSQL version. Daily, weekly and monthly schedules exist on
+both database volumes.
+
+1. In the Railway dashboard, open the Postgres service, then its Backups tab, and note the backup you will use
+   and its timestamp. Everything written after that timestamp is lost.
+2. State plainly what you are about to destroy: restoring replaces the volume's CURRENT contents with the backup.
+   Through the API this is the volumeInstanceBackupRestore mutation, and its wipeServiceIds argument names
+   services whose volume data is WIPED as part of the restore. Pass only the Postgres service, never the engine,
+   GoTrue or any sensen service. I could not run this mutation from the build session; read the argument types from
+   Railway's current API schema before using it, and prefer the dashboard's Restore button for a first use.
+3. Before restoring, if the current volume is readable at all, take a manual backup of it so the restore is undoable.
+4. Restore. Wait for the Postgres service to report running, then check its log shows recovery completing and the
+   server ready to accept connections.
+5. Start GoTrue, then the engine, one at a time. For the engine, confirm from the deployment's own log (not the
+   service's) one "model is LOADED" line per replica and no ERROR lines.
+6. Check: sign in, open a saved scenario (this proves `ofc_app` and the RLS path), and run
+   scripts/check_schema_drift.sh --live through the credential loader; it must print GREEN.
+
+### Path B: logical dump restore (can cross a major version)
+
+What it is: the latest VERIFIED pair on the NAS (the newest name-STAMP.dump with its name-STAMP.roles.sql, under
+the optionsandfuturescalculator directory of the backup root). Anything in failed/ is untrusted.
+
+1. Create the empty target PostgreSQL (new service or new major version). Note its connection string; do not paste
+   it into a ticket or chat.
+2. Rehearse first if time allows: scripts/verify_restore.sh DUMP --roles ROLES against a scratch container takes
+   about a minute and tells you whether this pair is any good. If it says FAIL, use the next older pair.
+3. Load the roles file first, as a superuser, skipping the `postgres` lines: grep -v -E '^(CREATE|ALTER) ROLE postgres[ ;]'
+   ROLES, piped to psql with ON_ERROR_STOP=1 against the postgres database. If the target is a managed service that
+   forbids superuser attributes, edit those attributes out of the copy, not the original.
+4. Set a password for each login role from the service's own variables (the file has none by design). `ofc_app` and
+   `ofc_refresh` are NOLOGIN; leave them so.
+5. Create the database, then pg_restore --no-owner into it using a client of the TARGET's major version (an older
+   client cannot read a newer archive).
+6. Verify: run backend/tests/test_database_posture.sql and scripts/check_schema_drift.sh --live against the new
+   database. Both must pass before any traffic is pointed at it.
+7. Point DATABASE_URL (engine and GoTrue) at the new server, restart GoTrue then the engine, and check as in path A
+   steps 5 and 6. Data written after the dump's stamp is lost; the stamp is in its file name.
+
+Afterwards, in both paths: write down the time of loss and the backup used, and run scripts/backup_database_to_nas.sh
+once so the next verified pair exists.
+
+## Still missing
+
+- No production backup has ever been run through this: the pipeline has only been exercised on scratch data.
+- The MFC archive is parse-checked only. Backups are not scheduled by anything in this repository.
+- The Railway restore steps were written from the API names, not run; step 2 of path A says so.

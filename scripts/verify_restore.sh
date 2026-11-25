@@ -70,7 +70,7 @@ if [[ -n "$ROLES" ]]; then
         | podman exec -i "$CONTAINER" psql -X -q -U postgres -d postgres -v ON_ERROR_STOP=1 >"$WORK/roles.log" 2>&1; then
         echo "roles: loaded from $(basename "$ROLES")"
     else
-        head -5 "$WORK/roles.log" | sed 's/^/  /'; echo "FATAL: the roles file did not load"; exit 2
+        head -5 "$WORK/roles.log" | sed -E 's/(SCRAM-SHA-256|md5)\$?[A-Za-z0-9+\/=:$]{16,}/<hash-redacted>/g; s/^/  /'; echo "FATAL: the roles file did not load"; exit 2
     fi
 else
     echo "roles: none supplied (the archive carries none)"
