@@ -48,8 +48,11 @@ UPLOAD="${REPO_ROOT}/backend/sensen/tools/railway_upload.sh"
     echo "ERROR: ${UPLOAD} not found -- run 'git submodule update --init backend/sensen'." >&2
     exit 1; }
 
-# What the engine's image cannot be built without. railway.json is what selects the Dockerfile
-# builder; without it Railway falls back to RAILPACK and the deploy fails with no build. The sensen
+# What the engine's image cannot be built without. The Dockerfile builder is NO LONGER selected by a
+# file in this archive: Railway deprecated Config as Code and stops reading railway.json on
+# 2026-12-01, so `dockerfilePath` lives on the service instance now and the Dockerfile below is what
+# that path resolves to. A Railpack build of this repository does not fail in a way that says "your
+# builder changed", so the require below is what keeps the resolved path pointing at a real file. The sensen
 # modules are what the engine imports, and the logger's BMI guard is a TRACKED file a .gitignore
 # matches (`*.cmake`), the one the tracked-files-kept rule exists for. No model weights ship: the
 # engine fetches its encoders at image build time, and `**/*.gguf` in .railwayignore is the rule
@@ -57,7 +60,6 @@ UPLOAD="${REPO_ROOT}/backend/sensen/tools/railway_upload.sh"
 UPLOAD_ARGS=(
     --expect-service "$EXPECTED_SERVICE_NAME"
     --ignore .railwayignore
-    --require railway.json
     --require backend/Dockerfile
     --require backend/CMakeLists.txt
     --require backend/src/main.cpp
@@ -190,17 +192,24 @@ trap 'rm -f "$ID_FILE"' EXIT
 DEPLOY_ID="$(cat "$ID_FILE")"
 [[ -n "$DEPLOY_ID" ]] || exit 0     # a dry run uploaded nothing, so there is nothing to confirm
 
-# Derive the expected count from railway.json rather than stating a number here. This line once said
+# Derive the expected count from the SERVICE rather than stating a number here. This line once said
 # "numReplicas 3 => 3 mortgage + 3 strategy" for four days after numReplicas dropped to 2, which
 # made the gate pass at 4 while telling the reader to expect 6. It is one line per replica now that
-# the mortgage assistant runs in its own service.
-_replicas="$(sed -n 's/.*"numReplicas"[[:space:]]*:[[:space:]]*\([0-9]\+\).*/\1/p' \
-              "${REPO_ROOT}/railway.json" 2>/dev/null | head -1)"
-_replicas="${_replicas:-1}"
+# the mortgage assistant runs in its own service. It read railway.json until 2026-11-24; that file
+# stops being read on 2026-12-01, so the count comes from the service instance -- and a count that
+# cannot be read is reported as UNKNOWN rather than guessed, because a wrong expectation makes a
+# healthy fleet read as a failed cutover.
+_replicas="$("${REPO_ROOT}/scripts/railway_replicas.sh" "$EXPECTED_SERVICE_NAME" 2>/dev/null || true)"
 echo ""
-echo "  Expect one 'model is LOADED' line per replica (the strategy assistant) --"
-echo "  numReplicas ${_replicas} => ${_replicas} lines --"
-echo "  timestamped after this upload:"
+if [[ -n "$_replicas" ]]; then
+    echo "  Expect one 'model is LOADED' line per replica (the strategy assistant) --"
+    echo "  numReplicas ${_replicas} => ${_replicas} lines --"
+    echo "  timestamped after this upload:"
+else
+    echo "  Expect one 'model is LOADED' line PER REPLICA (the strategy assistant),"
+    echo "  timestamped after this upload. The replica count could NOT be read from the"
+    echo "  service -- read it from the Railway dashboard rather than assuming a number:"
+fi
 echo "      railway logs --deployment ${DEPLOY_ID} | grep -c 'model is LOADED'"
 echo ""
 # 'model is LOADED' COUNTS weights and does not say WHICH model, which is the distinction

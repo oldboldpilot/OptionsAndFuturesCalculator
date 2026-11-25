@@ -18,7 +18,15 @@ bad()  { note "$1" "FAIL -- $2"; fail=1; }
 # Replica count DERIVED, not restated: this check once hardcoded 3 for four days
 # after numReplicas dropped to 2, so an honest 4 lines read as a shortfall.
 if [ -z "$replicas" ]; then
-  replicas=$(python3 -c "import json;print(json.load(open('railway.json'))['deploy']['numReplicas'])" 2>/dev/null || echo 2)
+  replicas=$("$(dirname "$0")/railway_replicas.sh" "$svc" 2>/dev/null || true)
+fi
+if [ -z "$replicas" ]; then
+  echo "ERROR: replica count unknown -- pass it as the third argument." >&2
+  echo "       Refusing to assume one: this check hardcoded 3 for four days after the" >&2
+  echo "       count dropped to 2, and an honest 4 lines then read as a shortfall." >&2
+  echo "       It read railway.json until 2026-11-24, which Railway stops reading" >&2
+  echo "       on 2026-12-01." >&2
+  exit 2
 fi
 want_loaded=$replicas   # one assistant per replica
 

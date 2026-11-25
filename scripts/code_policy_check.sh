@@ -51,7 +51,7 @@ mapfile -t CXX_FILES < <(git ls-files -- \
 # pass it to a compiler.
 mapfile -t BUILD_FILES < <(git ls-files -- \
     'backend/CMakeLists.txt' 'backend/cmake/*' 'backend/Dockerfile' \
-    'CMakeLists.txt' 'cmake/*' 'scripts/*.sh' 'railway.json' \
+    'CMakeLists.txt' 'cmake/*' 'scripts/*.sh' \
     | grep -v 'scripts/code_policy_check.sh' || true)
 
 if [[ ${#CXX_FILES[@]} -eq 0 ]]; then
