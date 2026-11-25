@@ -119,7 +119,7 @@ you should send it from your first commit. Two reasons:
 
 1. **Quota isolation, immediately.** Every unkeyed caller collapses into **one
    shared `~anonymous` bucket **per replica** — not per-user, not per-site, and
-   `railway.json` sets `numReplicas: 2`, so the ceiling is twice the table value
+   the engine runs `numReplicas = 2` (set on its Railway service), so the ceiling is twice the table value
    and which replica you land on decides whether you are refused. Unkeyed,
    your traffic competes with anonymous visitors of
    optionsandfuturescalculator.com and with any third party pointing at this host.

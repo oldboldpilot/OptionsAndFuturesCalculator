@@ -246,13 +246,13 @@ Guards against false evaluation scores when the test environment is unconfigured
 #### 1. Deployment and Infrastructure
 
 ##### `scripts/railway_deploy.sh`
-- **Destination Verification Guard** (`scripts/railway_deploy.sh:75, 123-133`):
+- **Destination Verification Guard** (`scripts/railway_deploy.sh`):
   Enforces `EXPECTED_SERVICE_NAME="options-calculator-backend"`. The script inspects `~/.railway/config.json` and queries `railway status --json` to resolve the service ID currently linked in the directory.
   *Critical Failure Mode Prevented*: If a developer previously linked another service (such as an SGEE queue worker node) in their local environment, running deploy without this check would overwrite that service's container image and replica configuration with the calculator backend Dockerfile.
-- **Archive Verification and Pipefail Safety** (`scripts/railway_deploy.sh:168-189`):
+- **Archive Verification and Pipefail Safety** (`scripts/railway_deploy.sh`):
   Materializes the archive file list into a temporary file (`tar -tzf "$ARCHIVE" > "$LIST"`) and checks required entries via `grep -qxF`. Piped commands like `tar ... | grep -q` are avoided because `grep -q` exits upon the first match, triggering `SIGPIPE` in `tar`, which causes intermittent build failures under Bash `set -o pipefail`.
-  *Required Files Checked*: `./railway.json`, `./backend/Dockerfile`, `./backend/CMakeLists.txt`, `./backend/src/main.cpp`, `./backend/sensen/src/options.cppm`, `./backend/sensen/src/portfolio.cppm`.
-- **Upload Transport** (`scripts/railway_deploy.sh:199-218`):
+  *Required Files Checked* (six paths, passed as `--require` to the shared upload tool; railway.json is no longer among them since 2026-11-24, when the engine's settings moved to its Railway service instance): `./backend/Dockerfile`, `./backend/CMakeLists.txt`, `./backend/src/main.cpp`, and three files inside the sensen submodule (its ToolchainBMIGuard.cmake, options.cppm and portfolio.cppm; sensen is a submodule, so they are named here without backticks).
+- **Upload Transport** (`scripts/railway_deploy.sh`):
   Transfers the tarball to Railway's project endpoint (`https://backboard.railway.com/project/${PROJECT}/environment/${ENVIRONMENT}/up?serviceId=${SERVICE}`) via `curl` with no client-side timeout.
 
 ##### `scripts/backup_to_nas.sh`

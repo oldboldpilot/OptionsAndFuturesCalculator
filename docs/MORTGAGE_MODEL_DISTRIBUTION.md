@@ -191,7 +191,7 @@ ways, so that ratio is the fleet mix, not model variance: roughly one replica
 in three was on v6 while the rest still served v2.
 
 **The cutover check is therefore N-of-N, and N must exceed the replica count.**
-`railway.json` sets `numReplicas: 3`; ten identical calls all returning the same
+The replica count was 3 when this was written (now 2, set on the Railway service instance); ten identical calls all returning the same
 shape is the statement. Both weaker checks fail here in the same direction:
 
 - `railway deployment list` read `DEPLOYING` for over an hour while the new
@@ -260,7 +260,7 @@ Identical to the strategy model's reasoning
   that. It cannot travel that way, ever. The **repository-root**
   `.railwayignore` and `.dockerignore` both exclude `**/*.gguf` for that reason.
   `backend/.dockerignore` says the same thing and cannot enforce it: the build
-  context is the repository root (`railway.json` sets `dockerfilePath:
+  context is the repository root (the engine's service instance sets `dockerfilePath =
   backend/Dockerfile`), so only the root file is read. This was verified, not
   reasoned about — with the root entry removed, a `COPY backend/models` picked
   up all 639,447,136 bytes; with it, the directory arrives empty.

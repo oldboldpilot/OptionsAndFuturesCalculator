@@ -204,7 +204,7 @@ All C++ code for the calculation engine adheres strictly to [`config/cpp_details
 6. **SIMD Waterfall Dispatch**: Dynamic runtime hardware detection (`AVX-512` -> `AVX2` -> `SSE4.2` -> `Scalar`) via per-function attributes (`config/cpp_details.txt:47-52, 109`).
 
 ### 5.2 Microservice Architecture & Performance SLA
-- **Hosting**: Railway.app Dockerized containers (`backend/Dockerfile:1-10`, `railway.json:1-10`).
+- **Hosting**: Railway.app Dockerized containers (`backend/Dockerfile`; build, replica and healthcheck settings live on the Railway service instance).
 - **Proxy & Transports**:
   - Envoy Proxy translates browser gRPC-Web into HTTP/2 gRPC for the C++ backend on port 8080 (`backend/envoy.yaml:1-50`).
   - Native gRPC is exposed over TLS on port 50443 via Railway TCP proxy (`tokaido.proxy.rlwy.net:34513`, `CLAUDE.md:94-110`).

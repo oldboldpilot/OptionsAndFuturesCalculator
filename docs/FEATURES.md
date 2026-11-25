@@ -211,7 +211,7 @@ Allowances in production are configured via the `QUOTA_POLICY` environment varia
 > [!IMPORTANT]
 > **Allowances are strictly PER REPLICA.**
 > Quota token buckets (`Bucket rate`, `Bucket budget` in `backend/src/modules/quota.cpp:64-69`) are maintained in an in-memory `std::unordered_map<std::string, CallerState>` protected by a local process mutex (`quota.cpp:82,87`). There is no distributed Redis or cross-replica coordination.
-> When the engine runs $N$ container replicas (e.g. `numReplicas: 3` in production `railway.json`), the effective site-wide capacity is multiplied by $N$ (e.g., $3 \times 6,000 = 18,000$ anonymous requests/minute). Refusals occur when an individual replica's local token bucket is exhausted.
+> When the engine runs $N$ container replicas (production runs `numReplicas = 2`, set on the Railway service instance), the effective site-wide capacity is multiplied by $N$ (e.g., $2 \times 6,000 = 12,000$ anonymous requests/minute). Refusals occur when an individual replica's local token bucket is exhausted.
 
 ---
 

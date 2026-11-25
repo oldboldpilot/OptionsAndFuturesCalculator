@@ -3598,7 +3598,7 @@ is sized as what it is:
 | partner | 2400 | 1,200,000 | per caller, **per replica** |
 
 **Every number in that table is multiplied by the ENGINE's replica count, and
-`railway.json` sets `numReplicas: 2`** (lowered from 3 on 2026-08-21 for cost —
+the service instance sets `numReplicas: 2`** (lowered from 3 on 2026-08-21 for cost —
 see the memory section above) (raised from 2 on 2026-08-10). `callers_` is an in-process
 `std::unordered_map` behind a process mutex (`quota.cpp:82`), a Meyers singleton
 with no persistence of any kind, so each replica refills its own buckets. The
@@ -4352,8 +4352,13 @@ Four things are easy to get wrong here:
   nodes that all default to id 1 form three single-node clusters that each
   accept writes, and nothing in the logs says so.
 - **The deploy stages its own upload** (`deploy/queue-node/deploy.sh`). Railway
-  reads `railway.json` from the root of the upload, and the one at the repo root
-  describes the *engine* — `backend/Dockerfile`, `numReplicas: 3`. Railway's
+  reads `railway.json` from the root of the upload. The engine no longer has one:
+  its `dockerfilePath`, replica count and healthcheck now live on its Railway
+  service instance (the root file was deleted on 2026-11-24), so this stage's
+  file is the only one a queue node can read, and the queue nodes themselves have
+  NOT been migrated off Config as Code (Railway stops reading it on 2026-12-01).
+  Before the deletion the root file described the *engine* — `backend/Dockerfile`,
+  `numReplicas: 3`. Railway's
   per-service escape hatches (`railwayConfigFile`, `rootDirectory`) are not
   reachable from the CLI. The stage also mirrors `.dockerignore`'s `backend/`
   exclusions to stay under the upload deadline, and retries: `railway up` timed
@@ -6122,8 +6127,9 @@ chain. Measured after: chain body 204 → **462px**, probability distribution
   is worse than one that prints none, because the reader has no reason to doubt
   it. The same block also hardcoded "numReplicas 3 => 3 mortgage + 3 strategy"
   for four days after `numReplicas` dropped to 2, so the honest gate of 4 lines
-  read as a shortfall against a stated 6; the count is now derived from
-  `railway.json`.
+  read as a shortfall against a stated 6; the count was then derived from
+  `railway.json`. Since 2026-11-24 that file is gone and `scripts/railway_replicas.sh`
+  reads the count from the service itself, exiting non-zero rather than guessing.
 
   **Gate on `railway deployment list --service <svc>`** — the first data row is
   the newest deployment and its status (BUILDING / DEPLOYING / SUCCESS / FAILED /
