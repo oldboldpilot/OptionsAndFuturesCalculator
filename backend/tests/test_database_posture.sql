@@ -119,6 +119,15 @@ BEGIN
 END;
 $$;
 
+-- The loop above only visits roles that EXIST, so a missing service_role passes it. The
+-- drift gate cannot see it either: service_role is an accepted external fact in
+-- backend/db/drift_ignore.txt, and an ignored line that vanishes vanishes from both sides.
+-- This is the check that makes "BYPASSRLS retained" mean something.
+SELECT pg_temp.expect('service_role exists and holds BYPASSRLS',
+    EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role' AND rolbypassrls AND NOT rolsuper),
+    (SELECT coalesce(string_agg(format('bypassrls=%s super=%s', rolbypassrls, rolsuper), ','), 'ABSENT')
+       FROM pg_roles WHERE rolname = 'service_role'));
+
 -- ---------------------------------------------------------------------------
 -- 3. Transport: TLS on, and no non-approved cipher reachable.
 --

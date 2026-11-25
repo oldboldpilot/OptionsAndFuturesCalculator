@@ -87,6 +87,39 @@ files, so it is PROVISIONAL: it is the schema as designed, not as captured. Repl
 Not done in this session: the hosted OFC database has no TCP proxy and `railway ssh` was refused, and the credential
 loader refuses a shell or psql as its child, so step 1 could not be run here.
 
+## Externally managed objects (measured against production 2026-11-25)
+
+The 0001 baseline was replayed from legacy files, so it recorded the application schema but not eleven facts that
+production holds. They are not all one kind of thing:
+
+| Fact | Decision | Why |
+|---|---|---|
+| `public.handle_new_user()` | MIGRATION `0002_handle_new_user_function.sql` | It lives in `public` and inserts into `public.profiles`: this application's own object, and SECURITY DEFINER, so the gate must watch its text. No trigger references it (measured), so it is inert today; 0002 records it and creates no trigger. |
+| `anon`, `authenticated`, `authenticator`, `service_role`, `supabase_auth_admin`, their `authenticator` memberships, `supabase_auth_admin`'s search_path, and USAGE on `public` for the first three | `drift_ignore.txt`, exact full lines | Created by self-hosted GoTrue/Supabase. A migration that CREATEs them would make this repo the owner of objects another system changes, and the first time it did, the migration would be a lie. |
+| `gateway_auditor`, `gateway_maintainer`, `gateway_tenant` | `drift_ignore.txt`, exact full lines | Belong to the sensen gateway and its own schema, `sensen_gateway`. |
+
+Disaster recovery does not need migrations to own the roles. Checked in the roles file of the 2026-11-25 backup
+(`pg_dumpall --roles-only`, no passwords): it holds all eight roles with their exact attributes (service_role with
+BYPASSRLS), `supabase_auth_admin`'s search_path and the three `authenticator` memberships; the dump holds the function
+and the three `GRANT USAGE ON SCHEMA public` lines. Restore, posture and drift then all pass.
+
+An ignore entry is an allowlist of one exact fact, never of a name. Each pattern in `backend/db/drift_ignore.txt` matches
+the whole snapshot line including every attribute, so a changed attribute (service_role losing BYPASSRLS, gaining
+CREATEROLE or SUPERUSER, `anon` gaining LOGIN), a new BYPASSRLS role, or a table grant to `authenticated` leaves the live
+line unmatched and the gate goes RED. The self-test proves each of these. Writing it found a blind spot that existed before
+this change: the snapshot skipped every superuser role, so a hand-made superuser was invisible. The snapshot now lists every
+role except the bootstrap `postgres`, and the role line carries `superuser=`.
+
+What an ignore entry cannot see is the object VANISHING: both sides lose the line. `service_role` is covered by a posture
+check (`service_role exists and holds BYPASSRLS`, ABSENT when missing). The other ignored roles are not covered by anything
+except GoTrue failing loudly. Measured on a restored copy: with `service_role` dropped the posture file fails that check
+and the drift gate says nothing about it.
+
+Production has no ledger yet (`ofc_meta.schema_migrations` does not exist), so the gate compares it with ALL migrations.
+Recording 0001 and 0002 with `db_migrate.sh adopt` is still an owner step: adopt creates the `ofc_meta` schema and inserts
+ledger rows, which is a write to production. It is `adopt`, not `apply`, that is right once the owner takes that step: both
+files describe what already exists, and `apply` would replay the whole baseline against a live database.
+
 ## Restore rehearsal
 
 `pg_restore --list`, which `scripts/backup_database_to_nas.sh` runs on every dump, reads the archive's table of
@@ -228,6 +261,6 @@ once so the next verified pair exists.
 
 ## Still missing
 
-- No production backup has ever been run through this: the pipeline has only been exercised on scratch data.
+- One production backup has been run through this (2026-11-25, restore PASS, posture 37 of 37, drift PASS). The MFC half of the same run failed because its connection variable was not set in that environment.
 - The MFC archive is parse-checked only. Backups are not scheduled by anything in this repository.
 - The Railway restore steps were written from the API names, not run; step 2 of path A says so.

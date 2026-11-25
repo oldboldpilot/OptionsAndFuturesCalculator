@@ -149,6 +149,18 @@ cmd_selftest() {
         "insert into public.protected_relations select 'public','users',true,true,0.50,25,'restored'"
     drift "GoTrue default changed" "alter table auth.users alter column recovery_token drop default" "alter table auth.users alter column recovery_token set default ''::character varying"
     drift "event trigger disabled" "alter event trigger guard_protected_drop_trg disable" "alter event trigger guard_protected_drop_trg enable"
+    echo "-- controls: roles that drift_ignore.txt accepts are pinned by attribute, not by name"
+    # Roles are cluster-level and the snapshot was pinned before these exist, so each is
+    # created, shown GREEN while it matches the accepted line exactly, then made to drift.
+    pg_exec "$L" -v ON_ERROR_STOP=1 -c "create role service_role nosuperuser noinherit nocreaterole nocreatedb nologin noreplication bypassrls" >/dev/null \
+        || { echo "  control setup failed: service_role"; fails=$((fails+1)); }
+    expect green "service_role present with its accepted attributes is ignored"
+    drift "accepted role service_role loses BYPASSRLS" "alter role service_role nobypassrls" "alter role service_role bypassrls"
+    drift "accepted role service_role gains CREATEROLE" "alter role service_role createrole" "alter role service_role nocreaterole"
+    drift "accepted role service_role gains SUPERUSER" "alter role service_role superuser" "alter role service_role nosuperuser"
+    pg_exec "$L" -v ON_ERROR_STOP=1 -c "drop role service_role" >/dev/null || fails=$((fails+1))
+    drift "a NEW role holding BYPASSRLS appears" "create role rogue_admin nologin bypassrls" "drop role rogue_admin"
+    drift "a role that MIMICS an accepted name but is not the pinned one" "create role anon login" "drop role anon"
     echo "-- control: a recorded migration edited after it was applied"
     mkdir "$WORK/migs" && cp "$MIG_DIR"/* "$WORK/migs/" && echo "-- hand edit" >> "$WORK/migs/0001_baseline.sql"
     if MIG_DIR_OVERRIDE="$WORK/migs" DB_TARGET="$L" "$HERE/db_migrate.sh" verify >/dev/null 2>&1; then
@@ -162,7 +174,7 @@ cmd_selftest() {
     ( cd "$WORK/migs" && echo "9999 $(sha256sum 9999_bad.sql | cut -d' ' -f1) bad" >> MANIFEST.sha256 )
     if MIG_DIR_OVERRIDE="$WORK/migs" DB_TARGET="$L" "$HERE/db_migrate.sh" apply >/dev/null 2>&1; then
         echo "  GREEN WANTED RED  a failing migration reported success"; fails=$((fails+1))
-    elif [[ "$(pg_scalar "$L" "select to_regclass('public.half_applied') is null and (select count(*) from ofc_meta.schema_migrations)=1")" == t ]]; then
+    elif [[ "$(pg_scalar "$L" "select to_regclass('public.half_applied') is null and (select count(*) from ofc_meta.schema_migrations)=$(mig_files | wc -l)")" == t ]]; then
         echo "  RED   as expected  failing migration left no table and no ledger row"
     else echo "  FAIL  failing migration left debris"; fails=$((fails+1)); fi
     expect green "after the controls: live == expected again"

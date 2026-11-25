@@ -3,5 +3,32 @@
 # after two spaces and a hash. An entry that is no longer needed must be deleted:
 # an ignore list only grows silently otherwise.
 #
-# (none yet. Add entries only after the live capture shows a difference that is
-#  deliberately not this project's, e.g. a Railway-managed role.)
+# HOW THESE ARE WRITTEN, AND WHY: every entry below is a FULL-LINE match that includes
+# the object's attributes ([[:space:]] stands for the snapshot's tab). It is an
+# allowlist of exact facts, never of a name. If an attribute changes (a role gains
+# BYPASSRLS or CREATEROLE, a grant widens) the live line no longer matches, is not
+# removed, and the gate goes RED. A NEW role, a role under a new name, or an extra
+# grant matches nothing here and is also RED. What an entry cannot do is notice the
+# object VANISHING: both sides lose the line, so the gate stays green. Presence is
+# asserted elsewhere (backend/tests/test_database_posture.sql: service_role must
+# exist, and hold BYPASSRLS).
+# See docs/technical/DATABASE_MIGRATIONS.md, "Externally managed objects".
+#
+# --- self-hosted GoTrue / Supabase: created by their bootstrap, not by this repo ---
+^role[[:space:]]anon[[:space:]]superuser=false inherit=false createrole=false createdb=false login=false bypassrls=false replication=false connlimit=-1$  # Supabase/GoTrue API role; this repo never creates it
+^role[[:space:]]authenticated[[:space:]]superuser=false inherit=false createrole=false createdb=false login=false bypassrls=false replication=false connlimit=-1$  # Supabase/GoTrue API role
+^role[[:space:]]authenticator[[:space:]]superuser=false inherit=false createrole=false createdb=false login=true bypassrls=false replication=false connlimit=-1$  # Supabase connection role that switches into anon/authenticated/service_role
+^role[[:space:]]service_role[[:space:]]superuser=false inherit=false createrole=false createdb=false login=false bypassrls=true replication=false connlimit=-1$  # Supabase admin role. BYPASSRLS is its purpose and is pinned here; any other value is RED
+^role[[:space:]]supabase_auth_admin[[:space:]]superuser=false inherit=false createrole=true createdb=false login=true bypassrls=false replication=false connlimit=-1$  # the role GoTrue itself runs as; owns the auth schema
+^role_config[[:space:]]supabase_auth_admin[[:space:]]search_path=auth, public$  # GoTrue's own role setting
+^role_member[[:space:]]authenticator[[:space:]]anon$  # Supabase membership, granted by its bootstrap
+^role_member[[:space:]]authenticator[[:space:]]authenticated$  # Supabase membership
+^role_member[[:space:]]authenticator[[:space:]]service_role$  # Supabase membership
+^grant[[:space:]]schema public[[:space:]]anon USAGE$  # Supabase's default USAGE on public, table grants are NOT covered and would be RED
+^grant[[:space:]]schema public[[:space:]]authenticated USAGE$  # same
+^grant[[:space:]]schema public[[:space:]]service_role USAGE$  # same
+#
+# --- the sensen gateway: its roles live in this cluster, its schema is sensen_gateway ---
+^role[[:space:]]gateway_auditor[[:space:]]superuser=false inherit=true createrole=false createdb=false login=false bypassrls=false replication=false connlimit=-1$  # sensen gateway (schema sensen_gateway), managed by that service's own migrations
+^role[[:space:]]gateway_maintainer[[:space:]]superuser=false inherit=true createrole=false createdb=false login=false bypassrls=false replication=false connlimit=-1$  # sensen gateway
+^role[[:space:]]gateway_tenant[[:space:]]superuser=false inherit=true createrole=false createdb=false login=false bypassrls=false replication=false connlimit=-1$  # sensen gateway

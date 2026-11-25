@@ -33,7 +33,7 @@ SET client_min_messages = warning;
 WITH
 roles_of_interest AS (
     SELECT r.oid, r.rolname FROM pg_roles r
-     WHERE r.rolname !~ '^pg_' AND NOT r.rolsuper
+     WHERE r.rolname !~ '^pg_' AND r.rolname <> 'postgres'   -- the bootstrap superuser only; any OTHER superuser is a fact
 ),
 rel AS (
     SELECT c.oid, c.relname, c.relkind, c.relrowsecurity, c.relforcerowsecurity,
@@ -170,7 +170,7 @@ lines(kind, key, detail) AS (
      WHERE r.relkind = 'S'
     UNION ALL
     SELECT 'role', ro.rolname,
-           'inherit=' || r.rolinherit || ' createrole=' || r.rolcreaterole || ' createdb=' || r.rolcreatedb
+           'superuser=' || r.rolsuper || ' inherit=' || r.rolinherit || ' createrole=' || r.rolcreaterole || ' createdb=' || r.rolcreatedb
            || ' login=' || r.rolcanlogin || ' bypassrls=' || r.rolbypassrls || ' replication=' || r.rolreplication
            || ' connlimit=' || r.rolconnlimit
       FROM roles_of_interest ro JOIN pg_roles r ON r.oid = ro.oid
