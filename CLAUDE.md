@@ -44,7 +44,12 @@ heading. Find one with grep -n '^## ' docs/ENGINEERING_NOTES.md and read it by l
 - Set `CCACHE_DISABLE=1` whenever a module interface changed and the binary will be measured, mutated or deployed: ccache does
   not hash imported module interfaces.
 - Never initialise sensen's submodules recursively here; it opens a flag gate and breaks the shared std.pcm.
-- After moving the sensen pin, run `scripts/sensen_module_closure.py --check`; its standing false positives are in the notes.
+- After moving the sensen pin, run `scripts/sensen_module_closure.py --check`. It is CLEAN at a good pin (measured
+  2026-11-26, both sides of a bump), so a failure names a real module the slim groups do not build: trust it rather
+  than spending a 5905-step build to be told the same thing. sensen master was red on it for 259 commits.
+- Optional shared compile cache, BMI-aware where ccache is not: configure with -DSENSEN_COMPILE_CACHE=ON. Measured
+  73 s to 5 s for sensen_slim in a fresh build directory, byte-identical output. Off unless asked; the deploy image
+  does not use it, so it changes nothing that ships.
 - Load config/.env with `scripts/run_with_env.py`, never by sourcing it (the shell strips the JSON quotes).
 - Frontend: `cd frontend && npm run build` (which runs `frontend/scripts/check-export.mjs`) and `npm test`.
 - Docs: run `python3 tools/check_docs_claims.py` before committing a changed Markdown file; MISSING must be 0.
@@ -95,3 +100,4 @@ heading. Find one with grep -n '^## ' docs/ENGINEERING_NOTES.md and read it by l
 - The Railway host has AVX-512; the BASELINE deliberately does not
 - Build Commands
 - The assistants are doing EXTRACTION while served by an architecture that GENERATES
+- The compile cache earns its place; the DI port split does not, here

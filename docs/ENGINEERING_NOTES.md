@@ -8177,3 +8177,90 @@ that as the standing gap.
 **`bench_llq_bf16_order` is registered and has never been run**, so the
 `DenseOrder`-vs-`Canonical` cost the LLQ section calls UNMEASURED is still
 unmeasured. It refuses `--repeats` under 5, citing this file's own n=1 scar.
+
+## The compile cache earns its place; the DI port split does not, here
+
+Three things were asked for together -- the latest sensen, "warm builds", and DI dynamic
+plugin libraries -- to make builds shorter so features land faster. They are one story, and
+measurement separated the part that pays from the parts that do not.
+
+**Where the time actually goes.** From this tree's own `.ninja_log`, last entry per output,
+7504 s of edge CPU over 9039 outputs: sensen 40.1 %, gRPC/protobuf/abseil 31.3 %, this
+engine 14.9 %, SGEE 11.6 %, llama.cpp and ggml 2.1 %. Split by kind instead: `.o` 67.4 %,
+`.pcm` 22.9 %, the module-scan and modmap steps under 3 % together. So **71 % is
+third-party and sensen code that does not change between builds**, which is what a cache
+can hit, and the `.pcm` share is the part ccache cannot touch at all -- the
+`CCACHE_DISABLE=1` rule exists because ccache does not hash imported module interfaces.
+
+llama.cpp was expected to be a large cost and is not: 159 s of 7504 s. The "scan steps go
+1 -> 486" figure in `backend/CMakeLists.txt` is about SCAN steps, which are cheap. It is
+still off in the deployed image (`backend/Dockerfile` passes `-DENABLE_LLAMACPP_BACKEND=OFF`),
+so a local build with it on compiles a backend the shipped binary does not contain -- worth
+turning off locally for that reason, not for the 2 %.
+
+**What the cache is measured to do.** `-DSENSEN_COMPILE_CACHE=ON`, target `sensen_slim`, two
+FRESH build directories on the same source: 73 s wall and 1397 s edge CPU cold, **5 s wall
+and 56 s edge CPU warm**, 784 outputs both times. Two directories rather than one rebuild on
+purpose -- a second `ninja` in the same directory has nothing to do and would prove nothing;
+the claim is that a different ROOT reuses the work. Both `libsensen_slim.a` are byte-identical
+(sha256 `6c6267af...`, 33 944 800 bytes), which is `-fdebug-prefix-map` doing its job.
+
+**The doubled launcher, predicted then measured.** `SensenCompileCache.cmake` prepends to
+`CMAKE_CXX_COMPILER_LAUNCHER` with no "already in the chain" guard, and sensen's own
+CMakeLists includes it again inside `add_subdirectory`. Census of `build.ninja`: 1909 of 4611
+compile edges carried the launcher twice, each with its own cache directory, so those TUs were
+preprocessed twice and the outer cache keyed on a command line naming the inner tool. Fixed
+from this side -- a normal variable hides the cache entry for that scope and below, so sensen's
+include short-circuits on its own OFF guard while its targets inherit the single launcher.
+After: 4611 of 4611 cached edges carry exactly one. The 82 with none are non-clang C edges,
+uncached by design.
+
+**Does it serve a stale module interface?** That is the ccache defect, so it is the thing to
+test, and two test designs gave confident wrong answers first. The first discarded ninja's
+output, so "object unchanged" could not be told apart from "ninja never re-ran the edge" --
+opposite conclusions -- and it demanded that unrelated objects in the same target directory
+change; it reported 30 stale objects, all of them the test being wrong. The second mutated
+`count()`, which is `constexpr` and which **nothing calls**: a change invisible in object code
+says nothing about a cache of object code, and it correctly reported INCONCLUSIVE. The third
+mutates a description string inside `kCatalogue` and makes the BMI the positive control,
+because the defect is precisely a hit that restores an object WITHOUT writing the BMI. Result:
+both `strategy_catalogue.pcm` copies changed, the 3 objects that consume the catalogue were
+rebuilt with different bytes, 24 unrelated objects did not move, and reverting restored all 45
+artifacts byte-identical. The interface unit's own `.o` does not change, which is correct --
+the edited data is `constexpr` consumed by importers, not emitted there -- and that is what
+misled the second version.
+
+**Its own event log, 34 129 events: 45.4 % hit, 46.1 % miss-stored, 8.4 % bypass.** The bypass
+share is the number to watch: sensen once ran a whole day at 95 % bypass because a flag was
+missing from the allowlist, and a speedup measured beside that would have meant nothing. 2846
+of the 2871 bypasses here are `unkeyed-bmi`, the conservative path -- a BMI whose sidecar does
+not match makes its importer uncacheable rather than assumed equal. They sit in the inner cache
+of the doubled chain, so the share should fall now that there is one; that has not been
+re-measured, and the 73-to-5 s result was obtained WITH the doubling, so the fix can only help.
+
+**Why the DI port split does not pay in this engine.** sensen's pattern is one thin module per
+service interface behind an ABI'd `.so`, refused at configure time by
+sensen_feature_check_libs if a feature links the core, and its stated purpose is build time:
+"a feature that links the core is a part of it, so an edit to the feature rebuilds the core."
+That is a cure for hub modules. sensen has about 1262 module interfaces and named hubs
+(`agent_cli.cppm`, `agent_config.cppm`). **This engine has 23 module interfaces under
+`backend/src` and a maximum fan-out of 5** (`pg` and `api_key` at 5, `inference_queue` and
+`market_data` at 4, everything else 3 or fewer). There is no hub to split, so the pattern
+removes no rebuild here. Its real benefit for this engine would be RUNTIME -- swapping an
+assistant backend without relinking or redeploying -- which is a different thing from the one
+that was asked for, and should be decided on its own merits rather than smuggled in as a
+build-time change.
+
+**The sensen pin, and why it moved 19 commits and not 278.** `tools/sensen_slim_closure.py
+--check` fails on 259 of the 278 first-parent commits between the old pin and master, run
+against sensen itself with no consumer passed; the count grows 4, 7, 13 along the way. The
+cause is one shape: the submodule's src/paged_kv_dispatch_pool.cpp imports `sensen.cuda_backend` and
+`sensen.cuda_paged_kv` outside any conditional while its whole body is inside
+`#ifdef SENSEN_HAS_CUDA`, and an import compiles the module, so a CPU-only consumer cannot
+satisfy it. Three more modules fail the same way. The newest green commit is 2b842edd6, and
+the 19 commits gained are Metal PLE kernels, the qwen4exp SFT walk and training checkpoint
+gates -- none of which this engine uses. **The compile cache exists at the OLD pin too, so the
+build-time work never depended on the bump.** The search used a geometric backward probe plus a
+binary search inside the bracket rather than `git bisect`, because bisect assumes the property
+breaks once and a gate can break and be fixed repeatedly; each commit was judged by its own
+checker, since judging an old commit with today's checker measures the checker.
