@@ -8264,3 +8264,59 @@ build-time work never depended on the bump.** The search used a geometric backwa
 binary search inside the bracket rather than `git bisect`, because bisect assumes the property
 breaks once and a gate can break and be fixed repeatedly; each commit was judged by its own
 checker, since judging an old commit with today's checker measures the checker.
+
+## Brotli CVE-2026-111497: three surfaces, and only one of them apt can fix
+
+An out-of-bounds write in the Brotli DECODER (Ubuntu priority high, USN-8956-1/-2 and USN-8958-1),
+fixed upstream in brotli 1.0.10/1.1.1/1.2.1. An earlier pass through this repository turned the
+decoder off in cpp-httplib and declined to add an Envoy decompressor filter. On 2026-11-26 the
+whole surface was re-derived by measurement, and two of the claims written down the first time
+turned out to be wrong.
+
+**The distro fix now exists, and the base pocket still serves the broken version.** Ubuntu noble
+carries the fix as `1.1.0-2ubuntu0.1` in noble-updates and noble-security; `noble` itself still
+serves the affected `1.1.0-2build2`. Measured in a container: apt-cache policy libbrotli1 lists
+both, and a plain apt-get install libbrotli1 today lands `1.1.0-2ubuntu0.1`. So the fix arrives
+only while those two pockets are enabled -- a mirror, an archive snapshot or a redirected
+sources.list silently downgrades it with no error. Every image that installs a brotli package now
+asserts the version instead of assuming it: backend/Dockerfile (both stages),
+backend/Dockerfile.queue-node (both stages) and deploy/gateway/Dockerfile. The gate is a FLOOR, so
+the next Ubuntu security update needs no edit here, and it counts the packages it compared, because
+a gate that found nothing to compare would pass vacuously.
+
+The gate's three controls, built with podman against the real archive:
+
+| Dockerfile | installed | result |
+| --- | --- | --- |
+| patched | libbrotli1 1.1.0-2ubuntu0.1 | build succeeds |
+| nothing brotli | -- | FATAL: "would pass vacuously" |
+| `libbrotli1=1.1.0-2build2` pinned on purpose | the affected version | FATAL naming the CVE and both versions |
+
+**The engine has no brotli decoder at all, which is a stronger claim than a patched library.**
+`ldd` on the built `calculator_engine` and on `smoke_client` names no libbrotli in either NEEDED
+closure (two build directories, measured). `HTTPLIB_USE_BROTLI_IF_AVAILABLE` stays OFF for that
+reason and not merely as a stopgap while waiting for a distro patch.
+
+**Envoy carries its own brotli, statically, and no apt update can reach it.** This corrects
+backend/envoy.yaml, which said the Envoy binary links libbrotlidec and that libbrotli1 "must stay
+in the Dockerfile" because "Envoy needs it to load". Both are false: `ldd` on the binary inside
+envoyproxy/envoy:v1.33-latest names no libbrotli, and that image has no libbrotli package installed
+at all, yet `envoy --mode validate` ACCEPTS a config whose decompressor_library is
+`envoy.extensions.compression.brotli.decompressor.v3.Brotli`. That acceptance is a registry fact
+rather than a parse artefact, because the same validation REJECTS a real-but-unregistered type with
+"Didn't find a registered implementation" -- the control that makes the OK mean something. So the
+decoder is inside the binary. libbrotli1 in the runtime image is therefore vestigial, not
+load-bearing; it is kept (and gated) rather than removed, because removing a package is only worth
+doing against a built image that is then proven to start.
+
+What keeps that decoder unreachable is the filter list in backend/envoy.yaml: Envoy decompresses a
+body solely when the decompressor filter is configured, and none of the six configured filters is
+one. Upstream fixed the CVE in Envoy 1.36.12, 1.37.8, 1.38.6, 1.39.3 and 1.40.0; this image is
+pinned to 1.33, a branch with no fixed release, so only moving that pin removes the decoder.
+**That pin move is cheap, and the cost was measured rather than guessed:** this repository's own
+envoy.yaml, unchanged and with the transcoder descriptor mounted, validates `OK` on v1.33-latest,
+v1.36-latest, v1.39-latest and v1.40-latest. Static validation is not runtime behaviour across
+seven minor versions, so the bump is still a deploy to verify, not a one-line certainty.
+
+This box needs nothing: Fedora 43 ships brotli 1.2.1, which is fixed. The frontend has no brotli
+dependency (zero matches in package.json and package-lock.json).

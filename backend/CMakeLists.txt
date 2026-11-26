@@ -1033,8 +1033,15 @@ FetchContent_Declare(
     GIT_TAG v0.15.3
 )
 # CVE-2026-111497 -- an out-of-bounds write in the Brotli DECODER, fixed upstream in
-# brotli 1.0.10/1.1.1/1.2.1. Ubuntu 24.04 still ships 1.1.0, so the image's
-# libbrotli1 is the affected version.
+# brotli 1.0.10/1.1.1/1.2.1. Ubuntu 24.04 NOW CARRIES THE FIX, as 1.1.0-2ubuntu0.1
+# (USN-8956-1, Ubuntu priority high), in noble-updates and noble-security; the base
+# noble pocket still serves the affected 1.1.0-2build2, which is why the Dockerfiles
+# now gate the version they installed instead of assuming the newer one arrived.
+#
+# THIS SWITCH STAYS OFF REGARDLESS. "The shared library is patched" is a weaker claim
+# than "the binary cannot decode brotli at all", and the second one is what this
+# engine has: `ldd` on the built calculator_engine and smoke_client names no
+# libbrotli in either NEEDED closure (measured 2026-11-26 in two build directories).
 #
 # cpp-httplib turns Brotli on whenever the library is merely FOUND, and a Client
 # decompresses any response carrying `Content-Encoding: br` whether or not it asked

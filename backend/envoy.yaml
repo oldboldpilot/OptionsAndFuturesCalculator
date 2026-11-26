@@ -179,15 +179,30 @@ static_resources:
                       max_age: "1728000"
                       expose_headers: custom-header-1,grpc-status,grpc-message
               # Do NOT add envoy.filters.http.decompressor here with the Brotli library.
-              # The Envoy binary copied into this image links libbrotlidec, and Ubuntu
-              # 24.04 ships brotli 1.1.0 -- the version with CVE-2026-111497, an
-              # out-of-bounds write in the DECODER. Today that decoder is unreachable
-              # only because no filter below feeds it: Envoy decompresses a request or
-              # response body solely when the decompressor filter is configured. Adding
-              # one would turn a dormant library into a pre-auth path from a request
-              # body. libbrotli1 must stay in the Dockerfile regardless -- Envoy needs
-              # it to load, so removing the package breaks process start, it does not
-              # harden anything.
+              # Envoy carries its OWN brotli, statically linked: `ldd` on the binary copied
+              # from envoyproxy/envoy:v1.33-latest names no libbrotli, and that image has no
+              # libbrotli package installed at all, yet `envoy --mode validate` ACCEPTS a
+              # config whose decompressor_library is
+              # envoy.extensions.compression.brotli.decompressor.v3.Brotli. That acceptance
+              # is a registry fact rather than a parse artefact, because the same validation
+              # REJECTS a real-but-unregistered type with "Didn't find a registered
+              # implementation" (both measured 2026-11-26).
+              #
+              # So CVE-2026-111497 -- an out-of-bounds write in the Brotli decoder, Ubuntu
+              # priority high -- sits inside the envoy binary, where no distro update can
+              # reach it. Upstream fixed it in Envoy 1.36.12, 1.37.8, 1.38.6, 1.39.3 and
+              # 1.40.0; this image is pinned to 1.33, a branch with no fixed release, so the
+              # only thing that removes the decoder is moving that pin.
+              #
+              # What keeps it unreachable TODAY is this filter list. Envoy decompresses a
+              # request or response body solely when the decompressor filter is configured,
+              # and none of the six filters below is one. Adding one would turn a dormant
+              # decoder into a pre-auth path from a request body.
+              #
+              # Correcting what this comment claimed before: libbrotli1 in the Dockerfile is
+              # NOT needed for Envoy to load. The upstream envoy image runs with no libbrotli
+              # present, and nothing else in this image asks for it either -- calculator_engine
+              # and smoke_client both measure clean. The package is vestigial, not load-bearing.
               http_filters:
                 - name: envoy.filters.http.local_ratelimit
                   typed_config:

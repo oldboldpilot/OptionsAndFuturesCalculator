@@ -385,6 +385,32 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libstdc++-14-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# CVE-2026-111497 (out-of-bounds write in the Brotli DECODER, Ubuntu priority
+# high, USN-8956-1) -- ASSERT the fix is actually in this layer rather than
+# trusting that it is. Ubuntu noble's base pocket still serves the AFFECTED
+# 1.1.0-2build2; only noble-updates/noble-security carry 1.1.0-2ubuntu0.1.
+# An `apt-get install` therefore picks up the fix only while those pockets are
+# enabled, which a mirror, a snapshot or an `-o Dir::Etc::sourcelist=` can undo
+# without any error. This gate makes that case fail the build.
+#
+# It is a FLOOR, not a pin: a newer Ubuntu brotli still passes, so the next
+# security update does not need an edit here. The package count is checked too,
+# because a gate that found nothing to compare would otherwise pass vacuously.
+RUN set -eu; \
+    floor=1.1.0-2ubuntu0.1; \
+    n=0; \
+    for p in $(dpkg-query -W -f='${Package} ${Status}\n' 'libbrotli*' 2>/dev/null \
+               | awk '$4 == "installed" { print $1 }' || true); do \
+        v="$(dpkg-query -W -f='${Version}' "$p")"; \
+        echo "brotli gate [engine builder]: $p $v (floor $floor)"; \
+        dpkg --compare-versions "$v" ge "$floor" \
+            || { echo "FATAL [engine builder]: $p $v predates the CVE-2026-111497 fix ($floor)"; exit 1; }; \
+        n=$((n + 1)); \
+    done; \
+    [ "$n" -gt 0 ] \
+        || { echo "FATAL [engine builder]: no libbrotli* package installed -- this gate would pass vacuously; delete it or fix the apt list above"; exit 1; }; \
+    echo "brotli gate [engine builder]: $n package(s) at or above $floor"
+
 # This project moved from libstdc++ to libc++ (backend/CMakeLists.txt adds
 # -stdlib=libc++ globally), which reverses the second half of what this
 # comment used to say, and that is worth spelling out rather than quietly
@@ -738,6 +764,32 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libldap2 libsasl2-2 libsystemd0 libcap2 libpcre2-8-0 libatomic1 \
         libz3-4 ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+# CVE-2026-111497 (out-of-bounds write in the Brotli DECODER, Ubuntu priority
+# high, USN-8956-1) -- ASSERT the fix is actually in this layer rather than
+# trusting that it is. Ubuntu noble's base pocket still serves the AFFECTED
+# 1.1.0-2build2; only noble-updates/noble-security carry 1.1.0-2ubuntu0.1.
+# An `apt-get install` therefore picks up the fix only while those pockets are
+# enabled, which a mirror, a snapshot or an `-o Dir::Etc::sourcelist=` can undo
+# without any error. This gate makes that case fail the build.
+#
+# It is a FLOOR, not a pin: a newer Ubuntu brotli still passes, so the next
+# security update does not need an edit here. The package count is checked too,
+# because a gate that found nothing to compare would otherwise pass vacuously.
+RUN set -eu; \
+    floor=1.1.0-2ubuntu0.1; \
+    n=0; \
+    for p in $(dpkg-query -W -f='${Package} ${Status}\n' 'libbrotli*' 2>/dev/null \
+               | awk '$4 == "installed" { print $1 }' || true); do \
+        v="$(dpkg-query -W -f='${Version}' "$p")"; \
+        echo "brotli gate [engine runtime]: $p $v (floor $floor)"; \
+        dpkg --compare-versions "$v" ge "$floor" \
+            || { echo "FATAL [engine runtime]: $p $v predates the CVE-2026-111497 fix ($floor)"; exit 1; }; \
+        n=$((n + 1)); \
+    done; \
+    [ "$n" -gt 0 ] \
+        || { echo "FATAL [engine runtime]: no libbrotli* package installed -- this gate would pass vacuously; delete it or fix the apt list above"; exit 1; }; \
+    echo "brotli gate [engine runtime]: $n package(s) at or above $floor"
 
 COPY --from=docker.io/envoyproxy/envoy:v1.33-latest \
      /usr/local/bin/envoy /usr/local/bin/envoy

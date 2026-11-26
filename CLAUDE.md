@@ -101,3 +101,4 @@ heading. Find one with grep -n '^## ' docs/ENGINEERING_NOTES.md and read it by l
 - Build Commands
 - The assistants are doing EXTRACTION while served by an architecture that GENERATES
 - The compile cache earns its place; the DI port split does not, here
+- Brotli CVE-2026-111497: three surfaces, and only one of them apt can fix
