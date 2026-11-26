@@ -114,3 +114,52 @@ Open, and NOT acted on because they belong to another property and change DNS or
 www.knobugsoft.com does not resolve at all while both other properties answer www, and that
 site's 404 view is served with HTTP 200 and robots index,follow -- a soft 404 that invites
 indexing of every nonexistent URL.
+
+## The Envoy pin moved off 1.33, and the gate that keeps it there
+
+This was the one copy of brotli the deployment earlier in this session could not fix. The engine
+runtime's libbrotli1 is asserted by apt version; Envoy's brotli is statically linked inside the
+binary, so the only lever is the image tag.
+
+`v1.33-latest` is 1.33.14 and the 1.33 branch has no fixed release for CVE-2026-111497. The pin is
+now `v1.40-latest`, which was 1.40.2. Upstream fixed the CVE in 1.36.12, 1.37.8, 1.38.6, 1.39.3 and
+1.40.0.
+
+What was measured before the one-line change, because "nothing else changes" was the only
+acceptable outcome:
+
+| check | result |
+| --- | --- |
+| glibc floor of all four candidate binaries | `GLIBC_2.30`, identical across v1.33/36/39/40 |
+| NEEDED libraries | the same five (libm, librt, libdl, libpthread, libc); no libbrotli in any |
+| libbrotli package in the Envoy image | none, at 1.33 and at 1.40 alike |
+| Envoy image base | Ubuntu 22.04 at both tags, so `backend/Dockerfile`'s compatibility comment still holds |
+| `backend/envoy.yaml` + both `backend/start.sh`-composed configs, 4 tags | 12 of 12 `OK` |
+| planted unresolvable decompressor type | REJECTED, "could not find @type ...NotAThing" |
+| the build with the new pin | "brotli gate [envoy]: 1.40.2 (floor 1.40.0)" |
+| the same build with the tag put back to v1.33-latest | FAILS: "1.33.14 is on a branch with NO CVE-2026-111497 fix" |
+| EnvoyTranscoderServicesTest | 1/1 Passed (comment-only edits to `backend/envoy.yaml`) |
+
+The validation harness had two defects of its own, both found rather than reasoned away:
+
+The verdict grep was `configuration OK` and Envoy prints `configuration '<path>' OK`, so the
+predicate never matched: all 12 arms read REJECTED while their own last line said OK, and the
+positive control "passed" for the same reason, which made it unable to discriminate anything.
+
+The control plant was anchored on a 14-space filter entry when the filters sit at 16. A substring
+search matches that happily, so the plant landed mid-line and was rejected for broken YAML -- the
+control proved the check could reject bad indentation, not an unresolvable extension type.
+Re-anchored on a newline plus the exact indent, it fails at type resolution, which is the path the
+claim in `backend/envoy.yaml` actually depends on.
+
+The build gate is a per-branch floor table rather than one number, because "fixed" is not a single
+version: 1.39.6 is fixed and 1.40.0 is fixed, yet 1.39.6 < 1.40.0, so a single floor would reject a
+patched image. Anything below 1.36 fails outright (no fixed release exists to compare against) and
+an unparseable version fails too. Exercised over 14 strings inside the same ubuntu:24.04 the gate
+runs in -- the first attempt ran on this Fedora box, which has no `dpkg`, so every arm reported the
+missing tool instead of a verdict. 7 pass, 7 fail, both directions.
+
+Still a deploy to verify: static validation across seven minor versions is not runtime behaviour.
+The two deprecation warnings Envoy prints (`VirtualHost.cors`, `RegexMatcher.google_re2`) are
+present on 1.33 as well, so the bump does not introduce them; the migration they eventually force
+is a separate change.

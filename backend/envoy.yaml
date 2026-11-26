@@ -180,7 +180,7 @@ static_resources:
                       expose_headers: custom-header-1,grpc-status,grpc-message
               # Do NOT add envoy.filters.http.decompressor here with the Brotli library.
               # Envoy carries its OWN brotli, statically linked: `ldd` on the binary copied
-              # from envoyproxy/envoy:v1.33-latest names no libbrotli, and that image has no
+              # from envoyproxy/envoy names no libbrotli, and that image has no
               # libbrotli package installed at all, yet `envoy --mode validate` ACCEPTS a
               # config whose decompressor_library is
               # envoy.extensions.compression.brotli.decompressor.v3.Brotli. That acceptance
@@ -189,10 +189,15 @@ static_resources:
               # implementation" (both measured 2026-11-26).
               #
               # So CVE-2026-111497 -- an out-of-bounds write in the Brotli decoder, Ubuntu
-              # priority high -- sits inside the envoy binary, where no distro update can
+              # priority high -- sat inside the envoy binary, where no distro update could
               # reach it. Upstream fixed it in Envoy 1.36.12, 1.37.8, 1.38.6, 1.39.3 and
-              # 1.40.0; this image is pinned to 1.33, a branch with no fixed release, so the
-              # only thing that removes the decoder is moving that pin.
+              # 1.40.0. The pin was 1.33, a branch with no fixed release; it moved to
+              # v1.40-latest on 2026-11-26 (see the COPY in backend/Dockerfile, which now
+              # asserts a per-branch version floor so the pin cannot silently go back).
+              #
+              # That bump is what removes the vulnerable decoder. This comment stays
+              # because the pin is not what makes the decoder UNREACHABLE, and a future
+              # pin on an unfixed branch would make the distinction matter again.
               #
               # What keeps it unreachable TODAY is this filter list. Envoy decompresses a
               # request or response body solely when the decompressor filter is configured,

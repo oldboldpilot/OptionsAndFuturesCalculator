@@ -8350,7 +8350,9 @@ reason and not merely as a stopgap while waiting for a distro patch.
 backend/envoy.yaml, which said the Envoy binary links libbrotlidec and that libbrotli1 "must stay
 in the Dockerfile" because "Envoy needs it to load". Both are false: `ldd` on the binary inside
 envoyproxy/envoy:v1.33-latest names no libbrotli, and that image has no libbrotli package installed
-at all, yet `envoy --mode validate` ACCEPTS a config whose decompressor_library is
+at all ("dpkg-query: no packages found matching libbrotli*" -- re-checked on v1.40-latest when the
+pin moved, so this is a property of the image family, not of one tag), yet `envoy --mode validate`
+ACCEPTS a config whose decompressor_library is
 `envoy.extensions.compression.brotli.decompressor.v3.Brotli`. That acceptance is a registry fact
 rather than a parse artefact, because the same validation REJECTS a real-but-unregistered type with
 "Didn't find a registered implementation" -- the control that makes the OK mean something. So the
@@ -8360,12 +8362,61 @@ doing against a built image that is then proven to start.
 
 What keeps that decoder unreachable is the filter list in backend/envoy.yaml: Envoy decompresses a
 body solely when the decompressor filter is configured, and none of the six configured filters is
-one. Upstream fixed the CVE in Envoy 1.36.12, 1.37.8, 1.38.6, 1.39.3 and 1.40.0; this image is
-pinned to 1.33, a branch with no fixed release, so only moving that pin removes the decoder.
-**That pin move is cheap, and the cost was measured rather than guessed:** this repository's own
-envoy.yaml, unchanged and with the transcoder descriptor mounted, validates `OK` on v1.33-latest,
-v1.36-latest, v1.39-latest and v1.40-latest. Static validation is not runtime behaviour across
-seven minor versions, so the bump is still a deploy to verify, not a one-line certainty.
+one. Upstream fixed the CVE in Envoy 1.36.12, 1.37.8, 1.38.6, 1.39.3 and 1.40.0; the image was
+pinned to 1.33, a branch with no fixed release, so only moving that pin removed the decoder.
+
+### Moving the Envoy pin, and a gate for the brotli apt cannot see
+
+The pin moved from `v1.33-latest` (1.33.14) to `v1.40-latest` (1.40.2) on 2026-11-26. Four things
+were measured first, because the pin was not chosen for a feature and the only acceptable outcome
+was "nothing else changes".
+
+**The binary still loads on the 24.04 runtime.** This is the property `backend/Dockerfile`'s long comment
+exists for: Envoy is copied into an Ubuntu 24.04 runtime, so an Envoy wanting a newer glibc would
+not load at all. All four candidates need at most `GLIBC_2.30` and name the same five libraries
+(libm, librt, libdl, libpthread, libc) -- so the compatibility argument is untouched by the bump.
+The Envoy image is still built on Ubuntu 22.04 at 1.40, the same as at 1.33, so that part of the
+comment needed only a version number.
+
+**The configuration that actually runs validates, not just the file in the repo.** `backend/start.sh` copies
+`backend/envoy.yaml` and appends a native-gRPC listener at container start, so validating the checked-in file
+alone proves less than it appears to. The listener text was sliced out of `backend/start.sh` by line range
+rather than retyped, and both arms were built: plaintext, and TLS with a throwaway certificate
+(Envoy opens the files a DownstreamTlsContext names while validating, so placeholder paths cannot
+check that arm). 12 of 12 arms report `OK` -- three configs across v1.33, v1.36, v1.39 and v1.40.
+
+**Two defects in the harness itself, both of the kind that produces a confident wrong answer:**
+
+  1. The verdict grep was `configuration OK`, and Envoy prints `configuration '<path>' OK`. The
+     path sits in the middle, so the predicate never matched and all 12 arms read as REJECTED while
+     their last line said OK. The positive control "passed" for the same reason, which is worse:
+     anything that fails to match reads as a rejection, so the control could not discriminate.
+  2. The control plant was anchored on a 14-space filter entry when the filters are indented 16.
+     A substring search matches that anyway, so the plant landed mid-line and Envoy rejected it for
+     broken YAML -- the gate proved it could reject malformed indentation, not an unresolvable
+     extension type. Re-anchored with a leading newline and the exact indent, it is rejected with
+     "could not find @type '...brotli.decompressor.v3.NotAThing'", which is the type-resolution
+     path the surrounding claim actually rests on.
+
+**The pin is now asserted at build time, with a per-branch floor table.** A single floor cannot
+express this CVE: 1.39.6 is fixed and 1.40.0 is fixed, but 1.39.6 < 1.40.0, so one number would
+reject a patched image. The gate therefore maps 1.36 to 1.36.12, 1.37 to 1.37.8, 1.38 to 1.38.6,
+1.39 to 1.39.3, anything 1.40 or newer to 1.40.0, and fails outright on any branch below 1.36,
+which has no fixed release to compare against. An unparseable version fails too, since a gate that
+cannot read a version would otherwise pass on an empty string.
+
+It was exercised against 14 version strings inside the same ubuntu:24.04 the gate runs in -- the
+first run was against this Fedora box, which has no `dpkg`, so every arm reported the missing tool
+instead of a verdict. 1.36.13, 1.37.8, 1.38.6, 1.39.6, 1.40.0, 1.40.2 and 1.41.0 pass; 1.33.14,
+1.35.9, 1.36.11, 1.37.7, 1.39.2, `""` and `"nonsense"` fail. Then the block was built for real:
+"brotli gate [envoy]: 1.40.2 (floor 1.40.0)" with the new pin, and with the tag reverted to
+`v1.33-latest` the build FAILS with "1.33.14 is on a branch with NO CVE-2026-111497 fix". The gate
+is load-bearing, not decorative.
+
+Static validation is not runtime behaviour across seven minor versions, so this is still a deploy
+to verify rather than a one-line certainty. Two deprecation warnings (`VirtualHost.cors` and
+`RegexMatcher.google_re2`) print on every validation, but they print on 1.33 as well -- the bump
+does not introduce them, and the config migration they eventually force is a separate change.
 
 This box needs nothing: Fedora 43 ships brotli 1.2.1, which is fixed. The frontend has no brotli
 dependency (zero matches in package.json and package-lock.json).

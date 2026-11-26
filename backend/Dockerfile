@@ -671,7 +671,9 @@ RUN set -eu; \
 # Envoy is not in the Ubuntu archives — `apt-get install envoy` fails — so the
 # proxy binary is lifted out of the official image rather than starting FROM it.
 #
-# The direction matters. envoyproxy/envoy:v1.33 is built on Ubuntu 22.04, while
+# The direction matters. envoyproxy/envoy is built on Ubuntu 22.04 (checked on
+# both v1.33-latest and the v1.40-latest this now pins -- the base has not
+# moved), while
 # the engine is built on 24.04 against glibc 2.39. (Which C++ standard library
 # the engine links — libstdc++ before this codebase moved to libc++, libc++
 # since — doesn't change this argument: glibc is the shared floor both images
@@ -791,8 +793,71 @@ RUN set -eu; \
         || { echo "FATAL [engine runtime]: no libbrotli* package installed -- this gate would pass vacuously; delete it or fix the apt list above"; exit 1; }; \
     echo "brotli gate [engine runtime]: $n package(s) at or above $floor"
 
-COPY --from=docker.io/envoyproxy/envoy:v1.33-latest \
+# The pin moved off v1.33-latest on 2026-11-26, and the reason is brotli rather
+# than any Envoy feature. Envoy carries its OWN brotli codec, statically linked:
+# `readelf -d` on the copied binary names five NEEDED libraries
+# (libm/librt/libdl/libpthread/libc) and no libbrotli, and the Envoy image has no
+# libbrotli package installed either ("dpkg-query: no packages found matching
+# libbrotli*", measured on v1.33-latest and v1.40-latest). So the apt gate above
+# cannot reach it: it is inside this binary, and only the tag changes it.
+# Upstream fixed CVE-2026-111497 in 1.36.12, 1.37.8, 1.38.6, 1.39.3 and 1.40.0.
+# The 1.33 branch has no fixed release at all, so staying there meant shipping a
+# vulnerable decoder forever. v1.40-latest was 1.40.2 when this moved.
+#
+# What was measured before moving, rather than assumed:
+#   - the binary still loads on this 24.04 runtime. All four candidates need at
+#     most GLIBC_2.30 and the same five libraries, so the compatibility argument
+#     in the long comment above is unchanged by the bump.
+#   - the configuration this container ACTUALLY runs still validates. Not just
+#     backend/envoy.yaml, but the file start.sh composes from it at startup, in
+#     both the plaintext and the TLS arm of the native-gRPC listener. 12 of 12
+#     arms OK across v1.33/v1.36/v1.39/v1.40, with a planted unresolvable
+#     decompressor type as the control that the check can still say no.
+# Both deprecation warnings Envoy prints (VirtualHost.cors, RegexMatcher.google_re2)
+# are already present on 1.33 and are NOT newly introduced by this bump; they
+# will need a config migration before the field removals land, which is a
+# separate change from this one.
+COPY --from=docker.io/envoyproxy/envoy:v1.40-latest \
      /usr/local/bin/envoy /usr/local/bin/envoy
+
+# The same assertion as the brotli gate above, for the copy of brotli apt cannot
+# see. It is deliberately a per-BRANCH floor table rather than one number,
+# because "fixed" is not a single version here: 1.39.6 is fixed and 1.40.0 is
+# fixed, but 1.39.6 < 1.40.0, so a single floor would reject a patched image.
+# A branch with no fixed release (anything below 1.36) fails outright rather
+# than being compared against a floor that does not exist.
+#
+# The unparseable case fails too. A gate that cannot read a version would
+# otherwise pass on an empty string, which is the failure mode that makes a
+# security check worse than nothing.
+#
+# Exercised against 14 version strings inside this same ubuntu:24.04 before
+# being written here: 1.36.13 / 1.37.8 / 1.38.6 / 1.39.6 / 1.40.0 / 1.40.2 /
+# 1.41.0 pass, and 1.33.14 / 1.35.9 / 1.36.11 / 1.37.7 / 1.39.2 / "" /
+# "nonsense" fail. Both directions, not just the one this image happens to hit.
+RUN set -eu; \
+    v="$(/usr/local/bin/envoy --version 2>&1 \
+         | sed -n 's|^.*version: [0-9a-f]*/\([0-9][0-9.]*\)/.*$|\1|p')"; \
+    case "$v" in \
+        ''|*[!0-9.]*) \
+            echo "FATAL [envoy]: no version could be read from \`envoy --version\` -- this gate would pass vacuously"; \
+            exit 1 ;; \
+    esac; \
+    case "${v%.*}" in \
+        1.36) floor=1.36.12 ;; \
+        1.37) floor=1.37.8  ;; \
+        1.38) floor=1.38.6  ;; \
+        1.39) floor=1.39.3  ;; \
+        *) if dpkg --compare-versions "$v" ge 1.40.0; then \
+               floor=1.40.0; \
+           else \
+               echo "FATAL [envoy]: $v is on a branch with NO CVE-2026-111497 fix (fixed: 1.36.12, 1.37.8, 1.38.6, 1.39.3, 1.40.0)"; \
+               exit 1; \
+           fi ;; \
+    esac; \
+    echo "brotli gate [envoy]: $v (floor $floor)"; \
+    dpkg --compare-versions "$v" ge "$floor" \
+        || { echo "FATAL [envoy]: $v predates the CVE-2026-111497 fix ($floor)"; exit 1; }
 
 WORKDIR /app
 
