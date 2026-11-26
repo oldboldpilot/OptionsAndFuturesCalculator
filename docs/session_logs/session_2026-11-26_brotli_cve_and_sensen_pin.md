@@ -159,7 +159,41 @@ an unparseable version fails too. Exercised over 14 strings inside the same ubun
 runs in -- the first attempt ran on this Fedora box, which has no `dpkg`, so every arm reported the
 missing tool instead of a verdict. 7 pass, 7 fail, both directions.
 
-Still a deploy to verify: static validation across seven minor versions is not runtime behaviour.
+Deployed and confirmed; see the cutover below. Static validation across seven minor versions is
+not runtime behaviour, which is why the live surfaces were exercised one by one.
 The two deprecation warnings Envoy prints (`VirtualHost.cors`, `RegexMatcher.google_re2`) are
 present on 1.33 as well, so the bump does not introduce them; the migration they eventually force
 is a separate change.
+
+### Cutover of the Envoy pin
+
+Deployment `b2c4e7de-e230-4e3a-822e-b025b4d3a78a`, SUCCESS, booted 17:44:10Z. Archive 30.9 MB,
+9192 entries, `http=200` in 5.3 s, built from `~/.cache/deploy-ofc` detached at 9ede389 with a
+clean `git status` and every submodule on its pinned commit.
+
+Envoy logs no version line at info, and the build log the CLI returns is truncated to the last six
+stage-2 steps -- which excludes the gate. So the live binary was identified from its extension
+registry: `envoy.clusters.mcp_multicluster`, `envoy.clusters.reverse_connection`,
+`envoy.clusters.dynamic_modules` and `envoy.tls.upstream_certificate_mappers` are present in the
+1.40 binary, absent from the 1.33 binary, and appear twice each in the production log -- one per
+replica. The registry also moved from "source/server/server.cc:434" to "server.cc:463", ":465" and ":467".
+
+| check | result |
+| --- | --- |
+| `Starting Container` | 2 |
+| `model is LOADED` | 2, at 17:44:10.588 and 17:44:11.633 |
+| which model | 2x "Strategy ENCODER assistant ready: ... 48 operations ... vocab 689" |
+| `[ERROR` | 0, control `[INFO` = 30 |
+| "][error][" / "][critical][" | 0 / 0, controls "][warning][" = 24, "][info][" = 256 |
+| gRPC-Web CalculateStrategy | LIVE (REDUCED), exit 0 |
+| JSON transcoder, same method | 200, 23,529 bytes, breakEven 727.95 and maxLoss -1095 both derivable by hand |
+| Finance/ComputePayment | 200, matches the closed form to 12 significant figures |
+| Assistant/ParseStrategy anonymous | 403 code 7 with the engine's Pro-gate text |
+| CORS preflight | 200, all five headers -- the deprecated VirtualHost.cors still works on 1.40 |
+| native gRPC via the TCP proxy | TLS 1.3, ALPN `h2` |
+
+Correction to the entry above: there are FIVE deprecated-field warnings, not two
+(`Admin.access_log_path`, `Cluster.http2_protocol_options`, `VirtualHost.cors`,
+`FileAccessLog.format`, `RegexMatcher.google_re2`). The set is identical on 1.33, on 1.40 and in
+production, so the bump introduces none of them -- the point stands in a stronger form than it was
+first written.

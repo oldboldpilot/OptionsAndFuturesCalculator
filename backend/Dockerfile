@@ -813,8 +813,11 @@ RUN set -eu; \
 #     both the plaintext and the TLS arm of the native-gRPC listener. 12 of 12
 #     arms OK across v1.33/v1.36/v1.39/v1.40, with a planted unresolvable
 #     decompressor type as the control that the check can still say no.
-# Both deprecation warnings Envoy prints (VirtualHost.cors, RegexMatcher.google_re2)
-# are already present on 1.33 and are NOT newly introduced by this bump; they
+# Envoy prints FIVE deprecated-field warnings against this config:
+# Admin.access_log_path, Cluster.http2_protocol_options, VirtualHost.cors,
+# FileAccessLog.format and RegexMatcher.google_re2. The set is IDENTICAL on
+# v1.33-latest, on v1.40-latest and in the production log after the cutover --
+# measured, not assumed -- so this bump introduces exactly none of them. They
 # will need a config migration before the field removals land, which is a
 # separate change from this one.
 COPY --from=docker.io/envoyproxy/envoy:v1.40-latest \

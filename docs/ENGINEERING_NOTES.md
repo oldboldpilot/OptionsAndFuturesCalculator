@@ -8413,10 +8413,48 @@ instead of a verdict. 1.36.13, 1.37.8, 1.38.6, 1.39.6, 1.40.0, 1.40.2 and 1.41.0
 `v1.33-latest` the build FAILS with "1.33.14 is on a branch with NO CVE-2026-111497 fix". The gate
 is load-bearing, not decorative.
 
-Static validation is not runtime behaviour across seven minor versions, so this is still a deploy
-to verify rather than a one-line certainty. Two deprecation warnings (`VirtualHost.cors` and
-`RegexMatcher.google_re2`) print on every validation, but they print on 1.33 as well -- the bump
-does not introduce them, and the config migration they eventually force is a separate change.
+### The cutover, and how the live binary was identified without a version string
+
+Deployment `b2c4e7de-e230-4e3a-822e-b025b4d3a78a`, SUCCESS, booted 17:44:10Z on 2026-11-26.
+
+**Envoy does not log its version at info**, so the deployment log cannot be grepped for 1.40.2 and
+the build log the CLI returns is truncated to the last six stage-2 steps, which excludes the gate.
+The live binary was identified from its extension registry instead: `envoy.clusters.mcp_multicluster`,
+`envoy.clusters.reverse_connection`, `envoy.clusters.dynamic_modules` and
+`envoy.tls.upstream_certificate_mappers` each appear in the 1.40 binary's strings, in NONE of the
+1.33 binary's, and twice in the production log -- once per replica. The 1.33 image printed its
+registry from "source/server/server.cc:434"; this one prints from "server.cc:463", ":465" and ":467".
+
+Cutover, each zero carrying a control that matched:
+
+| check | result |
+| --- | --- |
+| `Starting Container` | 2 (numReplicas 2, no crash loop) |
+| `model is LOADED` | 2, at 17:44:10.588 and 17:44:11.633 |
+| which model answered | 2x "Strategy ENCODER assistant ready: backend=sensen device=cpu, 48 operations ... vocab 689" |
+| engine family `[ERROR` | 0, control `[INFO` = 30 |
+| engine family `[WARN ]` | 0 |
+| Envoy family "][error][" / "][critical][" | 0 and 0, controls "][warning][" = 24 and "][info][" = 256 |
+
+Then the runtime behaviour static validation cannot reach, all three services on the one port:
+
+| surface | result |
+| --- | --- |
+| gRPC-Web `CalculateStrategy` (`scripts/probe_live_engine.py` with `--skip-pro`) | LIVE (REDUCED), exit 0; dividend yield moves delta 54.72 -> 51.45 |
+| JSON transcoder, same method | 200, 23,529 bytes, 18 top-level fields |
+| the numbers, derived independently | `breakEven` 727.95 = strike 717 + premium 10.95; `maxLoss` -1095 = 10.95 x 100; `curveDaysToExpiration` 30 present |
+| `sensen.finance.Finance/ComputePayment` | 200, `-2997.75262576376197295730621842237957518615` against a closed-form 2997.7526257637846 -- agreeing to 12 significant figures, the 38-place decimal being the more precise of the two |
+| `StrategyAssistant/ParseStrategy`, anonymous | 403 code 7 with the engine's own Pro-gate text, so `convert_grpc_status` still turns a gRPC refusal into JSON |
+| CORS preflight | 200 with all five access-control headers, so the deprecated `VirtualHost.cors` still FUNCTIONS on 1.40 |
+| `/healthz` and `GET /` | 200 and 404, both by construction |
+| native gRPC listener via the TCP proxy | TLS 1.3, ALPN negotiates `h2`, CN grpc-native.optionsandfuturescalculator.com -- the TLS arm validated statically, now confirmed at runtime |
+
+**A correction to the paragraph this replaced**, which said "two deprecation warnings". There are
+five: `Admin.access_log_path`, `Cluster.http2_protocol_options`, `VirtualHost.cors`,
+`FileAccessLog.format` and `RegexMatcher.google_re2`. The set is byte-identical on v1.33-latest, on
+v1.40-latest and in the production log, so the substantive claim holds in a stronger form than it
+was stated: the bump introduces NONE of them. The migration they will eventually force is a
+separate change.
 
 This box needs nothing: Fedora 43 ships brotli 1.2.1, which is fixed. The frontend has no brotli
 dependency (zero matches in package.json and package-lock.json).
