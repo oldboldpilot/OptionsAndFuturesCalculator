@@ -47,6 +47,28 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/ToolchainBMIGuard.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/sensen/cmake/SensenCanonicalFlags.cmake)
 sensen_canonical_flags()
 
+# The shared, BMI-aware compile cache is sensen's too, and it has to be included HERE for the same
+# reason the canonical flags are: it sets CMAKE_CXX_COMPILER_LAUNCHER in the INCLUDER's scope, and a
+# launcher only reaches directories added after it. sensen's own CMakeLists.txt includes this file as
+# well, but that happens inside `add_subdirectory(sensen EXCLUDE_FROM_ALL)` below, so without this line
+# the cache covers sensen's own targets -- which this engine mostly does not build -- and never
+# proto_lib, sensen_slim, calculator_engine, test_runner or SGEE, which are the objects it does.
+#
+# WHY IT EARNS ITS PLACE, from this tree's own .ninja_log rather than from the idea: of 7504 s of edge
+# CPU, .o compiles are 67.4 % and .pcm (BMI) compiles are 22.9 %. The BMI share is uncacheable by
+# ccache BY CONSTRUCTION -- the "Set CCACHE_DISABLE=1" rule in CLAUDE.md exists because ccache does not
+# hash imported module interfaces, so a hit would restore an object built against a different BMI.
+# sensen_cc_cache keys a compile on the preprocessed translation unit plus the compile key AND the byte
+# digest of every imported BMI (docs/technical/COMPILE_CACHE.md in the submodule), which is the exact
+# thing ccache lacks.
+#
+# OPT-IN, AND OFF UNLESS ASKED: the file decides OFF in a main checkout with no -DSENSEN_COMPILE_CACHE,
+# so this line changes no compile command by itself. backend/Dockerfile does not ask for it, so the
+# deployed image is unaffected. Turn it on for a working tree with
+#     cmake -B backend/build -S backend -DSENSEN_COMPILE_CACHE=ON
+# and confirm it is real by the `compile cache: <dir>` line configure then prints -- not by assuming.
+include(${CMAKE_CURRENT_SOURCE_DIR}/sensen/cmake/SensenCompileCache.cmake)
+
 # ON, and it has to be: this is the switch that decides whether TBB is built
 # from source at all. sensen guards its FetchContent TBB block with
 # `if(ENABLE_PARALLEL_STL)` (sensen/CMakeLists.txt:708), so forcing this OFF --
@@ -556,7 +578,19 @@ set(SKIP_CLANG_TIDY ON CACHE BOOL "Disable clang-tidy due to c++23 module scanni
 # and nothing here includes pqxx. `ldd` on the built engine confirms both: no
 # libpq, no libz3.
 #
+# SHADOW THE COMPILE-CACHE SWITCH FOR THIS SUBDIRECTORY, and only for it. sensen's own
+# CMakeLists.txt includes cmake/SensenCompileCache.cmake as well, and that file PREPENDS to
+# CMAKE_CXX_COMPILER_LAUNCHER with no "already in the chain" guard. Measured 2026-11-26 without
+# these two lines: 1909 of 4611 compile edges carried the launcher TWICE, each copy with its own
+# cache directory --
+#     sensen_cc_cache --dir <repo>/.git/sensen-cc -- sensen_cc_cache --dir <repo>/.git/modules/backend/sensen/sensen-cc -- clang++
+# which preprocesses every one of those translation units twice and makes the outer cache key on a
+# command line naming the inner tool. A normal variable hides the cache entry for this scope and
+# everything below it, so sensen's include short-circuits on OFF (its own guard) while its targets
+# still INHERIT the single launcher set above. Unset afterwards so the cache entry is visible again.
+set(SENSEN_COMPILE_CACHE OFF)
 add_subdirectory(sensen EXCLUDE_FROM_ALL)
+unset(SENSEN_COMPILE_CACHE)
 
 # ----------------------------------------------------------------------------
 # COMPLETE sensen's export closure for the targets its own list has not caught
