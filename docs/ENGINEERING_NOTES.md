@@ -3670,6 +3670,55 @@ break — every RPC is stateless per request and there is no durable local state
 to split-brain, because there is no volume. The admission-queue fragmentation is
 what the shared inference queue is being built to fix.
 
+### An enforcing gate made the post-deploy probe accuse the engine
+
+Measured 2026-11-26, against production, while verifying the live sites.
+
+`scripts/probe_live_engine.py` is the only thing that can check the DEPLOYED
+engine, and it reported:
+
+    VERDICT: FAILED
+      - field 15 absent — OLD ENGINE
+      - calendar P&L still flat — legs on a single clock
+
+Both lines were false. The engine was correct and current. What actually
+happened is that a calendar spread is TWO legs, multi-leg is Pro, `PRO_GATE_MODE`
+is enforce, and the probe was anonymous — so the call came back grpc-status 7
+with the engine's own message, "Multi-leg strategies are a Pro feature ... This
+position has 2 legs", and NO message frame at all. The probe read only the body,
+found no field 15 in zero bytes, and blamed the build.
+
+Three separate defects let a refusal impersonate a regression, and each is a
+class worth recognising elsewhere:
+
+  1. **grpc-status arrives in the HTTP HEADERS on a trailers-only response.**
+     A gRPC-Web call that fails before producing a message has no trailer frame
+     to read. Anything that parses only the body cannot see why it failed. The
+     probe now reads the status BEFORE it reads any field.
+  2. **In proto3 a double equal to 0.0 is not written to the wire.** "No tag for
+     field 15" and "field 15 == 0" are the same bytes, so "ABSENT" was never
+     evidence of an old build. It now prints the presence set and says
+     "absent OR 0.0".
+  3. **A length-delimited field's length is a varint, not a byte.** The walk
+     read it as one byte. Measured on a live 43,539-byte single-leg response the
+     old walk produced 1 bogus tag out of 1070 and the corrected walk 0 — so
+     this one is LATENT, not the cause here, because every repeated element
+     happens to be under 128 bytes. It is fixed anyway: the first `PnLPoint` or
+     `MatrixCell` that grows past that would desynchronise the whole walk.
+
+The exit codes are now three, because "nothing is wrong" and "I could not look"
+are different claims: 0 LIVE, 1 FAILED, 3 INCOMPLETE. Anonymous runs get 3 and
+name the remedy; `--api-key` runs the calendar checks for real; `--skip-pro` accepts
+the reduced coverage explicitly and returns 0. A bogus key returns 1, which is
+the positive control that the gate can still fail — verified, not assumed.
+
+The general rule, which this repo has now paid for twice: **a gate must report
+the cause it measured, not the cause it was built to look for.** The first
+version of this check could only say OLD ENGINE, so that is what it said about
+an entitlement refusal. A gate that names the wrong cause is worse than no gate:
+it gets deleted after the second false alarm, and it hides the real failure in
+between.
+
 ## SGEE queue cluster (`sgee-queue-1/2/3`)
 
 The N-separate-services topology described just above is no longer hypothetical.
